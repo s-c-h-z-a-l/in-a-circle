@@ -1,0 +1,10 @@
+[package]
+name = "cpu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+common = { version = "0.0.0", path = "../common" }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+wayland-client = "0.31"

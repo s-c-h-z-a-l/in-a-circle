@@ -1,0 +1,12 @@
+[package]
+name = "gles"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+common = { version = "0.0.0", path = "../common", features = ["system"] }
+glow = "0.18"
+khronos-egl = { version = "6", features = ["static"] }
+wayland-client = "0.31"
+wayland-egl = "0.32"

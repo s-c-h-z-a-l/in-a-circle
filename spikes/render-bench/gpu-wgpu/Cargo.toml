@@ -1,0 +1,12 @@
+[package]
+name = "gpu-wgpu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+common = { version = "0.0.0", path = "../common", features = ["system"] }
+pollster = "1"
+raw-window-handle = "0.6"
+wayland-client = "0.31"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
