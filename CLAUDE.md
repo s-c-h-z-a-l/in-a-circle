@@ -60,6 +60,9 @@ it's a bug.
 ## Stack
 
 - Rust. No GUI toolkit; the wheel is custom drawn.
+- **Primary target: niri.** Developed and measured on niri first; it must
+  work there before anything else. The code stays compositor-agnostic so
+  porting is testing, not rewriting.
 - **Compositor-agnostic.** Only standard Wayland protocols (core, stable,
   staging/ext, and wlr where widely implemented), detected at runtime with
   graceful degradation. No compositor IPC, no per-compositor adapters.
