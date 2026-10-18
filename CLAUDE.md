@@ -52,11 +52,6 @@ it's a bug.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
-## System
-
-- **Never run `pacman -Sy`** (partial upgrade breaks the NVIDIA stack).
-  If a package sync is needed, use `pacman -Syu` only.
-
 ## Stack
 
 - Rust. No GUI toolkit; the wheel is custom drawn.

@@ -1,0 +1,80 @@
+# In.A.Circle
+
+> Everything is one gesture away.
+
+A context-aware radial action menu for Linux on Wayland, like the GTA
+weapon wheel. Press a hotkey and a wheel appears at the cursor, offering
+only the actions that apply to what you're working on: the files you're
+dragging, the text you selected, the URL on your clipboard.
+
+Don't look for the app that does the job. Grab the thing and do it in one
+gesture.
+
+## Status
+
+**Research phase. There is nothing to install yet.**
+
+Every architectural decision has been measured first, and the reports are
+public in [`docs/benchmarks/`](docs/benchmarks). Next is the first usable
+version: a **File Circle** on [niri](https://github.com/YaLTeR/niri).
+
+## How it will work
+
+**Files:** grab a file (or several) in your file manager, press the hotkey
+while dragging, and drop it on a slice: convert, compress, resize, share.
+This works over the standard Wayland drag-and-drop protocol, so it works
+with any file manager.
+([measured](docs/benchmarks/drag-into-circle.md) with Nautilus and Thunar.)
+
+**Context decides.** A PNG won't get currency conversion. A URL gets link
+actions, selected text gets text actions. Classification is deterministic,
+so the same input always gives the same wheel, and your muscle memory
+holds.
+
+## Why
+
+[Tangerine](https://tangerineformac.com/) is a radial file converter for
+macOS. One reel about it got around a million likes, and the comments
+kept asking "is there one for Linux?". [Filee](https://github.com/KnifeLemon/Filee) brings one
+to Windows and, as a preview, Linux, but its drag gesture needs X11; on
+Wayland it falls back to a drop zone and the right-click menu.
+
+In.A.Circle is built for Wayland from the start, and not only for files.
+
+## Principles
+
+- **Zero idle footprint.** No resident process: the wheel starts on the
+  hotkey and exits when done. Measured: 3.6 ms from exec to first frame.
+- **Tiny.** Our own Wayland wire protocol and our own rasterizer, with
+  `libc` as the only dependency. The spikes come in around 350 KB.
+- **CPU, not GPU.** On NVIDIA a GPU context costs 70-90 MB of idle RSS for
+  a ~2 ms gain on a static overlay. ([details](docs/benchmarks/render-backends.md))
+- **Standard protocols only.** No compositor IPC and no per-compositor
+  adapters. Developed on niri first; other compositors are a matter of
+  testing, not rewriting.
+
+| | measured |
+|---|---|
+| idle cost | 0 (no process) |
+| CPU per use, exec to exit | ~0.86 ms |
+| wheel on screen after start | 10-19 ms, of which ~1.6 ms is ours (the rest is compositor scheduling) |
+| hover repaint | ~57 µs |
+| peak memory | ~3.3 MB |
+
+## Repository
+
+- [`docs/benchmarks/`](docs/benchmarks): the measurements and the decisions
+  they drove
+- [`spikes/`](spikes): throwaway code that produced those numbers (not the
+  product)
+
+## Contributing
+
+Too early for code contributions. Ideas, questions and "would this work
+on my setup?" are welcome as [issues](https://github.com/s-c-h-z-a-l/in-a-circle/issues). Once the first
+version runs, testing on other compositors and hardware will be the most
+valuable help.
+
+## License
+
+[MIT](LICENSE)
