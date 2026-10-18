@@ -68,6 +68,8 @@ it's a bug.
   Same latency as wayland-client, 1 dependency instead of 18, 344 KB vs
   607 KB binary. Opcodes must be checked against the protocol XMLs.
 - Overlay: wlr-layer-shell.
+- Text: alpha glyph atlas baked offline at the exact sizes used (scale 1
+  and 2), embedded in the binary. No runtime font parsing.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
 - Process model: **spawn-per-use** (measured: a resident daemon presents no
