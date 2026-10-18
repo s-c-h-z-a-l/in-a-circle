@@ -60,8 +60,12 @@ it's a bug.
 - Overlay: wlr-layer-shell.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
-- Process model: TBD. Spawn-per-use is favored (measured cold start
-  3.6 ms exec to first frame), which means zero idle cost.
+- Process model: **spawn-per-use** (measured: a resident daemon presents no
+  faster, and the hotkey spawns a process either way). Zero idle cost.
+- Surface: full-screen layer surface with a 1x1 buffer scaled by
+  wp_viewporter (cursor position + focus), wheel in a subsurface.
+- Context: keyboard focus -> selection/clipboard offers; classify by MIME
+  type, read data lazily.
 
 ## Conventions
 
