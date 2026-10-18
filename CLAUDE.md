@@ -18,8 +18,15 @@ it's a bug.
 1. **Minimal resources by design, not by later optimization.** Before writing
    anything, think through what costs the least (CPU, RAM, VRAM, wakeups,
    dependencies, binary size, latency). We don't build first and trim later.
-2. **Measure everything.** Every function gets grilled: what does it cost, can
-   it cost less, what is the leanest way to do it. Claims need numbers.
+2. **Budgets, measured.** Architecture decisions need numbers (see
+   `docs/benchmarks/`). New code must stay within these budgets; past them,
+   grill and fix. Within them, don't chase invisible microseconds.
+   - our time from exec to wheel commit: <= 2 ms
+   - CPU per invocation: <= 1 ms
+   - idle cost: 0 (no resident process)
+   - peak RSS: <= 5 MB
+   - binary: <= 500 KB
+   - dependencies: `libc` only, unless justified by a measurement
 3. **CPU rendering, damage-only.** Measured: a GPU context costs 70-90 MB RSS
    idle on NVIDIA for a ~2 ms gain on a static overlay. Redraw only what changed.
    (See `spikes/render-bench/`.)
@@ -35,6 +42,8 @@ it's a bug.
 - `notes/` is **private**, gitignored, never committed. Brainstorming, drafts.
 - `docs/` is **public**. Settled design decisions and roadmap. Promote from
   `notes/` once decided.
+- Every benchmark that informs a decision gets a page in `docs/benchmarks/`
+  (method, machine, numbers, verdict, how to reproduce), committed with it.
 
 ## Git
 
