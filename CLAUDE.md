@@ -55,8 +55,9 @@ it's a bug.
   staging/ext, and wlr where widely implemented), detected at runtime with
   graceful degradation. No compositor IPC, no per-compositor adapters.
   The hotkey is the user's compositor keybind running `inacircle`.
-- Wayland client: `smithay-client-toolkit` for now; own wire protocol is
-  being evaluated (latency gain measured negligible, deps/binary gain real).
+- Wayland client: **own wire protocol**, `libc` only (see `spikes/wire/`).
+  Same latency as wayland-client, 1 dependency instead of 18, 344 KB vs
+  607 KB binary. Opcodes must be checked against the protocol XMLs.
 - Overlay: wlr-layer-shell.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
