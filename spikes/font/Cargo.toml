@@ -1,0 +1,13 @@
+[package]
+name = "font"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Offline tool: these never ship in the runtime binary.
+[dependencies]
+fontdue = "0.9"
+png = "0.18"
+
+[profile.release]
+opt-level = 3
