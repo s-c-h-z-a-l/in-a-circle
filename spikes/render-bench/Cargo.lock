@@ -141,6 +141,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpu-sdf"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "tiny-skia",
+ "wayland-client",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

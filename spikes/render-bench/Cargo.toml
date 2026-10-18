@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["common", "cpu", "gles", "gpu-wgpu"]
+members = ["common", "cpu", "cpu-sdf", "gles", "gpu-wgpu"]
 
 [profile.release]
 opt-level = 3
