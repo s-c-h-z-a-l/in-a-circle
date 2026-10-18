@@ -288,19 +288,19 @@ fn main() {
     // Lazy peek (off the critical path): first 4 KB of the clipboard text.
     let t_peek = mono();
     let mut peek = 0usize;
-    if let Some(Some(o)) = &st.clip {
-        if let Some(m) = o.mimes.iter().find(|m| m.starts_with("text/plain")) {
-            let mut fds = [0; 2];
-            // SAFETY: valid 2-element array.
-            assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
-            // SAFETY: fresh descriptors we own.
-            let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-            wl.req(o.id, 1, &[S(m), Fd(w.as_fd())]);
-            wl.flush().unwrap();
-            drop(w);
-            let mut buf = [0u8; 4096];
-            peek = std::fs::File::from(r).read(&mut buf).unwrap_or(0);
-        }
+    if let Some(Some(o)) = &st.clip
+        && let Some(m) = o.mimes.iter().find(|m| m.starts_with("text/plain"))
+    {
+        let mut fds = [0; 2];
+        // SAFETY: valid 2-element array.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: fresh descriptors we own.
+        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        wl.req(o.id, 1, &[S(m), Fd(w.as_fd())]);
+        wl.flush().unwrap();
+        drop(w);
+        let mut buf = [0u8; 4096];
+        peek = std::fs::File::from(r).read(&mut buf).unwrap_or(0);
     }
     let t_end = mono();
 

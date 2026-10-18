@@ -81,13 +81,13 @@ fn main() {
     let get = |r: &[(String, u64)], k: &str| r.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
 
     println!("mode={mode} runs={} noop={noop}", rows.len());
-    if let Some(r) = rows.first() {
-        if let (Some(c), Some(rf)) = (get(r, "clk"), get(r, "refresh")) {
-            println!(
-                "presentation clk_id={c} (1=MONOTONIC) refresh_ns={rf} flags={:?}",
-                get(r, "flags")
-            );
-        }
+    if let Some(r) = rows.first()
+        && let (Some(c), Some(rf)) = (get(r, "clk"), get(r, "refresh"))
+    {
+        println!(
+            "presentation clk_id={c} (1=MONOTONIC) refresh_ns={rf} flags={:?}",
+            get(r, "flags")
+        );
     }
     if !msg_ms.is_empty() {
         println!(

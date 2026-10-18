@@ -120,6 +120,7 @@ fn main() {
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .unwrap();
     // SAFETY: flock on a valid fd we keep open for the process lifetime.
@@ -471,10 +472,10 @@ impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let zwp_primary_selection_offer_v1::Event::Offer { mime_type } = ev {
-            if let Some((_, m)) = st.poffers.iter_mut().find(|(x, _)| x == o) {
-                m.push(mime_type);
-            }
+        if let zwp_primary_selection_offer_v1::Event::Offer { mime_type } = ev
+            && let Some((_, m)) = st.poffers.iter_mut().find(|(x, _)| x == o)
+        {
+            m.push(mime_type);
         }
     }
 }

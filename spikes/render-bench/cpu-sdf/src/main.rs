@@ -188,10 +188,10 @@ impl CpuSdf {
             let row = ((o.1 + y) * w + o.0 + x0) as usize * 4;
             let dst = &mut canvas[row..row + (x1 - x0) as usize * 4];
             let src = &self.mask[(y * BOX + x0) as usize..(y * BOX + x1) as usize];
-            for (px, &m) in dst.chunks_exact_mut(4).zip(src) {
+            for (px, &m) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src) {
                 let idx = (m >> 8) as u8;
                 if only.is_none_or(|o| idx == o[0] || idx == o[1]) {
-                    px.copy_from_slice(&self.color(m, hover).to_le_bytes());
+                    *px = self.color(m, hover).to_le_bytes();
                 }
             }
         }
@@ -388,7 +388,11 @@ mod tests {
             }
         }
         // BGRA -> RGBA
-        canvas.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
+        canvas
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .for_each(|p| p.swap(0, 2));
         canvas
     }
 

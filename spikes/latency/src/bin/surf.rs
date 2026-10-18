@@ -466,10 +466,9 @@ impl Dispatch<WlPointer, ()> for State {
             surface_y,
             ..
         } = ev
+            && st.pointer.is_none()
         {
-            if st.pointer.is_none() {
-                st.pointer = Some((mono(), surface_x, surface_y));
-            }
+            st.pointer = Some((mono(), surface_x, surface_y));
         }
     }
 }
@@ -483,10 +482,10 @@ impl Dispatch<WlKeyboard, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Enter { .. } = ev {
-            if st.kbd == 0 {
-                st.kbd = mono();
-            }
+        if let wl_keyboard::Event::Enter { .. } = ev
+            && st.kbd == 0
+        {
+            st.kbd = mono();
         }
     }
 }

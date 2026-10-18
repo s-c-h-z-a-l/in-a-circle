@@ -16,7 +16,6 @@ pub enum Iface {
     Callback,
     Compositor,
     Surface,
-    Region,
     Shm,
     ShmPool,
     Buffer,
@@ -144,10 +143,6 @@ impl Wl {
             ids: vec![None, Some(Iface::Display)],
             server_ids: Vec::new(),
         })
-    }
-
-    pub fn fd(&self) -> RawFd {
-        self.sock.as_raw_fd()
     }
 
     pub fn new_id(&mut self, iface: Iface) -> u32 {

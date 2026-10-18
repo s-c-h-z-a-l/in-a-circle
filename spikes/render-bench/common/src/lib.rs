@@ -447,10 +447,10 @@ impl<R: Renderer> PointerHandler for App<R> {
             {
                 continue;
             }
-            if let PointerEventKind::Enter { .. } = e.kind {
-                if self.cycle.pointer_enter.is_none() {
-                    self.cycle.pointer_enter = Some((Instant::now(), e.position.0, e.position.1));
-                }
+            if let PointerEventKind::Enter { .. } = e.kind
+                && self.cycle.pointer_enter.is_none()
+            {
+                self.cycle.pointer_enter = Some((Instant::now(), e.position.0, e.position.1));
             }
         }
     }
@@ -479,10 +479,10 @@ impl<R: Renderer> SeatHandler for App<R> {
         _: wl_seat::WlSeat,
         cap: Capability,
     ) {
-        if cap == Capability::Pointer {
-            if let Some(p) = self.pointer.take() {
-                p.release();
-            }
+        if cap == Capability::Pointer
+            && let Some(p) = self.pointer.take()
+        {
+            p.release();
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}

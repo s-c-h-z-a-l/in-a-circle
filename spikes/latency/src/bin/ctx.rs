@@ -254,10 +254,10 @@ impl Dispatch<WlKeyboard, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Enter { .. } = ev {
-            if st.kbd_enter == 0 {
-                st.kbd_enter = mono();
-            }
+        if let wl_keyboard::Event::Enter { .. } = ev
+            && st.kbd_enter == 0
+        {
+            st.kbd_enter = mono();
         }
     }
 }
@@ -298,10 +298,10 @@ impl Dispatch<WlDataOffer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_data_offer::Event::Offer { mime_type } = ev {
-            if let Some((_, m)) = st.clip_mimes.iter_mut().find(|(x, _)| x == o) {
-                m.push(mime_type);
-            }
+        if let wl_data_offer::Event::Offer { mime_type } = ev
+            && let Some((_, m)) = st.clip_mimes.iter_mut().find(|(x, _)| x == o)
+        {
+            m.push(mime_type);
         }
     }
 }
@@ -344,10 +344,10 @@ impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let zwp_primary_selection_offer_v1::Event::Offer { mime_type } = ev {
-            if let Some((_, m)) = st.prim_mimes.iter_mut().find(|(x, _)| x == o) {
-                m.push(mime_type);
-            }
+        if let zwp_primary_selection_offer_v1::Event::Offer { mime_type } = ev
+            && let Some((_, m)) = st.prim_mimes.iter_mut().find(|(x, _)| x == o)
+        {
+            m.push(mime_type);
         }
     }
 }
@@ -387,7 +387,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
             zwlr_foreign_toplevel_handle_v1::Event::State { state } => {
                 // Array of u32 (native endian); 2 = activated.
                 t.activated = state
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == 2);
             }
             _ => {}
