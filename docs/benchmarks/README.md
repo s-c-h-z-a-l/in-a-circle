@@ -18,14 +18,33 @@ Spike code lives in [`spikes/`](../../spikes).
 
 ## Reference machine
 
-All numbers are from one machine unless stated otherwise:
+All numbers are from one machine unless stated otherwise. It is **tuned,
+not stock**, which matters for some results:
 
-- AMD Ryzen 7 5700X (8C/16T), 94 GB RAM, CachyOS (Linux 7.2.9)
-- NVIDIA RTX 3080 Ti, proprietary driver 615.71.09
-- niri 26.04, one output 5120x1440 @ 240 Hz, scale 1, VRR on-demand
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), **all-core OC 4650 MHz @ 1.1 V**, `performance` governor (fixed max clock) |
+| RAM | 96 GB DDR4-3200, dual channel |
+| GPU | NVIDIA RTX 3080 Ti Founders Edition, 12 GB; **`nvidia-open` kernel module 615.71.09**; power limit 280 W (stock 350 W), +75 MHz core, +500 MHz memory |
+| OS | CachyOS (Arch-based), kernel 7.2.9-cachyos: BORE/EEVDF scheduler, `PREEMPT_DYNAMIC`, packages built for x86-64-v3 |
+| Kernel flags | **`mitigations=off`**, `tsc=reliable clocksource=tsc`, `nowatchdog` |
+| Compositor | niri 26.04 |
+| Display | MSI MPG491CX OLED, 5120x1440 @ 240 Hz, scale 1. VRR is on-demand: fixed 240 Hz on the desktop, variable only for fullscreen games |
 
-Compositor-side numbers (presentation time, enter-event latency) are
-niri-specific. Other compositors still need to be measured.
+**How the tuning skews the numbers:**
+
+- `mitigations=off` makes syscalls and context switches cheaper. Our
+  microsecond figures (spawn, wire protocol, AT-SPI round trips) are
+  syscall-heavy, so expect them to be **somewhat higher on a stock
+  kernel**.
+- A fixed, overclocked CPU clock lowers both CPU time and its variance.
+  On a laptop with frequency scaling, the first invocation after idle
+  will be slower.
+- The GPU tuning only affects the GPU backends in
+  [render-backends.md](render-backends.md), which we did not choose.
+- Compositor-side numbers (presentation time, enter-event latency) are
+  niri-specific. Other compositors and machines still need to be
+  measured.
 
 ## Budgets
 

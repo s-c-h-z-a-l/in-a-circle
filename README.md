@@ -53,6 +53,8 @@ In.A.Circle is built for Wayland from the start, and not only for files.
   adapters. Developed on niri first; other compositors are a matter of
   testing, not rewriting.
 
+Measured on a tuned desktop ([reference machine](docs/benchmarks/README.md#reference-machine)); expect somewhat higher numbers on stock systems.
+
 | | measured |
 |---|---|
 | idle cost | 0 (no process) |

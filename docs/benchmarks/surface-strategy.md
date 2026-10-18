@@ -51,8 +51,9 @@ with a static transparent surface mapped. That is within noise.
   for 3.5 MB resident forever.
 - When the input region is restored, niri sends `wl_pointer.enter` without
   any pointer motion.
-- Presentation times come in ~8.4 ms steps. This is niri scheduling,
-  possibly VRR, and still needs to be investigated.
+- Presentation times come in ~8.4 ms steps. This is niri scheduling
+  and still needs to be investigated. (VRR is unlikely to be the cause:
+  on this machine it is on-demand, active only for fullscreen games.)
 
 **Estimated keypress to photons on niri:** ~4 ms spawn + 0.5 ms exec +
 1.6 ms ours + compositor (p10 ~8.6 / p50 ~17 ms) = **~15-23 ms, of which
