@@ -51,10 +51,15 @@ it's a bug.
 ## Stack
 
 - Rust. No GUI toolkit; the wheel is custom drawn.
-- Wayland: `smithay-client-toolkit` + wlr-layer-shell overlay.
+- **Compositor-agnostic.** Only standard Wayland protocols (core, stable,
+  staging/ext, and wlr where widely implemented), detected at runtime with
+  graceful degradation. No compositor IPC, no per-compositor adapters.
+  The hotkey is the user's compositor keybind running `inacircle`.
+- Wayland client: `smithay-client-toolkit` for now; own wire protocol is
+  being evaluated (latency gain measured negligible, deps/binary gain real).
+- Overlay: wlr-layer-shell.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
-- First compositor adapter: niri (`niri-ipc`).
 - Process model: TBD. Spawn-per-use is favored (measured cold start
   3.6 ms exec to first frame), which means zero idle cost.
 

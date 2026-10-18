@@ -1,0 +1,18 @@
+[package]
+name = "latency"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
