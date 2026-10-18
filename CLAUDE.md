@@ -52,7 +52,8 @@ it's a bug.
 
 - Rust. No GUI toolkit; the wheel is custom drawn.
 - Wayland: `smithay-client-toolkit` + wlr-layer-shell overlay.
-- Rendering: `tiny-skia` into `wl_shm` buffers (CPU).
+- Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
+  no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
 - First compositor adapter: niri (`niri-ipc`).
 - Process model: TBD. Spawn-per-use is favored (measured cold start
   3.6 ms exec to first frame), which means zero idle cost.
