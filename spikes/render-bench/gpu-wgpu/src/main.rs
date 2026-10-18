@@ -91,7 +91,10 @@ impl Renderer for Wgpu {
         }))
         .expect("adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: 8192,
+                ..wgpu::Limits::downlevel_defaults()
+            },
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
@@ -223,7 +226,10 @@ impl Renderer for Wgpu {
     fn draw(&mut self, _: &WlSurface, f: &Frame) {
         let (s, cfg) = self.surface.as_ref().unwrap();
         let mut acquired = s.get_current_texture();
-        if matches!(acquired, wgpu::CurrentSurfaceTexture::Outdated) {
+        for _ in 0..3 {
+            if !matches!(acquired, wgpu::CurrentSurfaceTexture::Outdated) {
+                break;
+            }
             println!("M wgpu outdated_reconfigure");
             s.configure(&self.device, cfg);
             acquired = s.get_current_texture();

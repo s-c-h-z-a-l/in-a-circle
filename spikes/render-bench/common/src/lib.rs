@@ -182,7 +182,7 @@ pub fn run<R: Renderer>(name: &str) {
             println!(
                 "M cold first_frame_ms_since_main={:.2} first_frame_realtime_ns={}",
                 (app.cycle.first_done.unwrap() - t_main).as_secs_f64() * 1e3,
-                metrics::realtime_ns()
+                metrics::realtime_ns() - app.cycle.first_done.unwrap().elapsed().as_nanos()
             );
         }
         metrics::report_mem("shown");

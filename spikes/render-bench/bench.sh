@@ -34,11 +34,13 @@ run() {
     exec 3<&-
 }
 
+ONLY=${2:-}
 for i in $(seq 1 "$RUNS"); do
     for size in "" "--full"; do
         echo "=== run=$i cpu $size"
-        run cpu $size
-        for gpu in gles gpu-wgpu; do
+        [[ -z $ONLY || $ONLY == cpu ]] && run cpu $size
+        for gpu in ${ONLY:-gles gpu-wgpu}; do
+            [[ $gpu == cpu ]] && continue
             for mode in "" "--lazy"; do
                 echo "=== run=$i $gpu $size $mode"
                 run "$gpu" $size $mode
