@@ -14,6 +14,7 @@ Spike code lives in [`spikes/`](../../spikes).
 | 6 | wayland-client or our own wire protocol? | Our own: 1 dependency instead of 18, 344 KB vs 607 KB, same latency. | [wire-protocol.md](wire-protocol.md) |
 | 7 | SDF atlas or baked alpha for text? | Baked alpha at exact sizes: reference quality, 19x faster, ~92 KB for 2 sizes x 2 scales. | [text-rendering.md](text-rendering.md) |
 | 8 | How do selected files reach the wheel? | Plain selection is invisible over protocols; Nautilus reports it via its extension API. Native extension + universal Ctrl+C fallback. | [file-manager-input.md](file-manager-input.md) |
+| 9 | Grab a file, press the hotkey, drop it on a slice? | Works over the standard protocol: exact URIs from Nautilus and Thunar, copy-only. | [drag-into-circle.md](drag-into-circle.md) |
 
 ## Reference machine
 

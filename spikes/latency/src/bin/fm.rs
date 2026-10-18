@@ -111,6 +111,21 @@ const FILE_TYPES: [&str; 4] = [
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     let dnd = mode == "dnd";
+    // Single instance: a held hotkey may spawn us repeatedly. Exit at once
+    // if another instance holds the lock (released automatically on exit).
+    let lock_path = format!(
+        "{}/inacircle-fm.lock",
+        std::env::var("XDG_RUNTIME_DIR").unwrap()
+    );
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    // SAFETY: flock on a valid fd we keep open for the process lifetime.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return;
+    }
     let mut st = State {
         t0: mono(),
         ..Default::default()
@@ -374,7 +389,9 @@ impl Dispatch<WlDataDevice, ()> for State {
                 if let Some((o, m)) = &found {
                     let want = m.iter().find(|m| *m == "text/uri-list").cloned();
                     o.accept(serial, want);
-                    o.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
+                    // Copy only: accepting "move" would let the source delete the
+                    // original after the drop.
+                    o.set_actions(DndAction::Copy, DndAction::Copy);
                 }
                 st.dnd_offer = found;
             }
@@ -409,6 +426,9 @@ impl Dispatch<WlDataOffer, ()> for State {
             }
             wl_data_offer::Event::SourceActions { source_actions } => {
                 st.note(format!("source actions: {source_actions:?}"));
+            }
+            wl_data_offer::Event::Action { dnd_action } => {
+                st.note(format!("negotiated action: {dnd_action:?}"));
             }
             _ => {}
         }
