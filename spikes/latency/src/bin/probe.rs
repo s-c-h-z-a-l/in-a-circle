@@ -30,7 +30,10 @@ const W: i32 = 480;
 const H: i32 = 480;
 
 fn mono() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: valid out-pointer.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
@@ -65,7 +68,11 @@ fn main() {
         }
     }
     let write = |line: String| {
-        let mut f = OpenOptions::new().create(true).append(true).open(&out).unwrap();
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out)
+            .unwrap();
         writeln!(f, "{line}").unwrap();
     };
     if noop {
@@ -105,7 +112,10 @@ fn main() {
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // SAFETY: fd valid; size fits.
     unsafe {
-        assert_eq!(libc::ftruncate(fd.as_fd().as_raw_fd_compat(), size as i64), 0);
+        assert_eq!(
+            libc::ftruncate(fd.as_fd().as_raw_fd_compat(), size as i64),
+            0
+        );
     }
     // SAFETY: mapping a memfd we own, of exactly `size` bytes.
     let ptr = unsafe {
@@ -185,11 +195,26 @@ impl RawFdCompat for std::os::fd::BorrowedFd<'_> {
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
-    fn event(_: &mut Self, _: &WlRegistry, _: <WlRegistry as wayland_client::Proxy>::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as wayland_client::Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
-    fn event(st: &mut Self, ls: &ZwlrLayerSurfaceV1, ev: zwlr_layer_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        ls: &ZwlrLayerSurfaceV1,
+        ev: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = ev {
             ls.ack_configure(serial);
             if !st.configured {
@@ -201,13 +226,27 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
 }
 
 impl Dispatch<WlCallback, ()> for State {
-    fn event(st: &mut Self, _: &WlCallback, _: <WlCallback as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &WlCallback,
+        _: <WlCallback as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         st.frame = mono();
     }
 }
 
 impl Dispatch<WpPresentation, ()> for State {
-    fn event(st: &mut Self, _: &WpPresentation, ev: wp_presentation::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &WpPresentation,
+        ev: wp_presentation::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let wp_presentation::Event::ClockId { clk_id } = ev {
             st.clk_id = clk_id;
         }
@@ -215,9 +254,23 @@ impl Dispatch<WpPresentation, ()> for State {
 }
 
 impl Dispatch<WpPresentationFeedback, ()> for State {
-    fn event(st: &mut Self, _: &WpPresentationFeedback, ev: wp_presentation_feedback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &WpPresentationFeedback,
+        ev: wp_presentation_feedback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         match ev {
-            wp_presentation_feedback::Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, flags, .. } => {
+            wp_presentation_feedback::Event::Presented {
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+                refresh,
+                flags,
+                ..
+            } => {
                 let sec = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
                 st.present = sec * 1_000_000_000 + tv_nsec as u64;
                 st.refresh_ns = refresh;

@@ -8,7 +8,10 @@ use std::time::Duration;
 use std::{fs, thread};
 
 fn mono() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: valid out-pointer.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
@@ -80,14 +83,31 @@ fn main() {
     println!("mode={mode} runs={} noop={noop}", rows.len());
     if let Some(r) = rows.first() {
         if let (Some(c), Some(rf)) = (get(r, "clk"), get(r, "refresh")) {
-            println!("presentation clk_id={c} (1=MONOTONIC) refresh_ns={rf} flags={:?}", get(r, "flags"));
+            println!(
+                "presentation clk_id={c} (1=MONOTONIC) refresh_ns={rf} flags={:?}",
+                get(r, "flags")
+            );
         }
     }
     if !msg_ms.is_empty() {
-        println!("{:<22} p50={:7.3} p90={:7.3} ms", "niri msg returned", pct(&mut msg_ms, 0.5), pct(&mut msg_ms, 0.9));
+        println!(
+            "{:<22} p50={:7.3} p90={:7.3} ms",
+            "niri msg returned",
+            pct(&mut msg_ms, 0.5),
+            pct(&mut msg_ms, 0.9)
+        );
     }
     let mut prev = "t0".to_string();
-    for k in ["main", "connect", "registry", "buffer", "configure", "commit", "frame", "present"] {
+    for k in [
+        "main",
+        "connect",
+        "registry",
+        "buffer",
+        "configure",
+        "commit",
+        "frame",
+        "present",
+    ] {
         let mut abs: Vec<f64> = rows
             .iter()
             .filter_map(|r| Some((get(r, k)?.checked_sub(get(r, "t0")?)?) as f64 / 1e6))

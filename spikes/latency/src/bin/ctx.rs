@@ -12,10 +12,18 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_data_device::{self, WlDataDevice},
-        wl_data_device_manager::WlDataDeviceManager, wl_data_offer::{self, WlDataOffer},
-        wl_keyboard::{self, WlKeyboard}, wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm,
-        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_buffer::WlBuffer,
+        wl_compositor::WlCompositor,
+        wl_data_device::{self, WlDataDevice},
+        wl_data_device_manager::WlDataDeviceManager,
+        wl_data_offer::{self, WlDataOffer},
+        wl_keyboard::{self, WlKeyboard},
+        wl_registry::WlRegistry,
+        wl_seat::WlSeat,
+        wl_shm,
+        wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::primary_selection::zv1::client::{
@@ -33,7 +41,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 fn mono() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: valid out-pointer.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
@@ -59,10 +70,18 @@ struct State {
     toplevels: Vec<(ZwlrForeignToplevelHandleV1, Toplevel)>,
 }
 
-const PREFERRED: [&str; 4] = ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+const PREFERRED: [&str; 4] = [
+    "text/uri-list",
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+];
 
 fn pick(mimes: &[String]) -> Option<&str> {
-    PREFERRED.iter().copied().find(|p| mimes.iter().any(|m| m == p))
+    PREFERRED
+        .iter()
+        .copied()
+        .find(|p| mimes.iter().any(|m| m == p))
 }
 
 fn pipe() -> (OwnedFd, OwnedFd) {
@@ -92,8 +111,11 @@ fn main() {
     let seat: WlSeat = globals.bind(&qh, 1..=9, ()).unwrap();
     let ddm: WlDataDeviceManager = globals.bind(&qh, 3..=3, ()).unwrap();
     let psm: Option<ZwpPrimarySelectionDeviceManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
-    let ftm: Option<ZwlrForeignToplevelManagerV1> =
-        if toplevel { globals.bind(&qh, 1..=3, ()).ok() } else { None };
+    let ftm: Option<ZwlrForeignToplevelManagerV1> = if toplevel {
+        globals.bind(&qh, 1..=3, ()).ok()
+    } else {
+        None
+    };
     let _kbd = seat.get_keyboard(&qh, ());
     let _dd = ddm.get_data_device(&seat, &qh, ());
     let _pd = psm.as_ref().map(|m| m.get_device(&seat, &qh, ()));
@@ -116,7 +138,14 @@ fn main() {
 
     // 1x1 transparent surface with exclusive keyboard focus.
     let surface = compositor.create_surface(&qh, ());
-    let layer = layer_shell.get_layer_surface(&surface, None, Layer::Overlay, "inacircle-ctx".into(), &qh, ());
+    let layer = layer_shell.get_layer_surface(
+        &surface,
+        None,
+        Layer::Overlay,
+        "inacircle-ctx".into(),
+        &qh,
+        (),
+    );
     layer.set_size(1, 1);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     surface.commit();
@@ -153,7 +182,10 @@ fn main() {
         drop(w);
         conn.flush().unwrap();
         let n = read_all(r);
-        format!("{name}_mime={m} {name}_bytes={n} {name}_read_us={}", (mono() - t) / 1000)
+        format!(
+            "{name}_mime={m} {name}_bytes={n} {name}_read_us={}",
+            (mono() - t) / 1000
+        )
     };
     let clip = match &st.clip {
         Some((o, mimes, _)) => fetch("clip", &|m, w| o.receive(m.into(), w.as_fd()), mimes),
@@ -165,7 +197,13 @@ fn main() {
     };
     let t_end = mono();
 
-    let us = |a: u64, b: u64| if a == 0 || b == 0 { -1 } else { (b as i64 - a as i64) / 1000 };
+    let us = |a: u64, b: u64| {
+        if a == 0 || b == 0 {
+            -1
+        } else {
+            (b as i64 - a as i64) / 1000
+        }
+    };
     println!(
         "M ctx registry_us={} toplevels={} toplevel_us={} active={active} configure_to_commit_us={} \
          commit_to_kbd_enter_us={} commit_to_offers_us={} {clip} {prim} main_to_end_us={}",
@@ -180,11 +218,26 @@ fn main() {
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
-    fn event(_: &mut Self, _: &WlRegistry, _: <WlRegistry as Proxy>::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
-    fn event(st: &mut Self, ls: &ZwlrLayerSurfaceV1, ev: zwlr_layer_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        ls: &ZwlrLayerSurfaceV1,
+        ev: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = ev {
             ls.ack_configure(serial);
             st.configured = true;
@@ -193,7 +246,14 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
 }
 
 impl Dispatch<WlKeyboard, ()> for State {
-    fn event(st: &mut Self, _: &WlKeyboard, ev: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &WlKeyboard,
+        ev: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let wl_keyboard::Event::Enter { .. } = ev {
             if st.kbd_enter == 0 {
                 st.kbd_enter = mono();
@@ -203,7 +263,14 @@ impl Dispatch<WlKeyboard, ()> for State {
 }
 
 impl Dispatch<WlDataDevice, ()> for State {
-    fn event(st: &mut Self, _: &WlDataDevice, ev: wl_data_device::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &WlDataDevice,
+        ev: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         match ev {
             wl_data_device::Event::DataOffer { id } => st.clip_mimes.push((id, Vec::new())),
             wl_data_device::Event::Selection { id } => {
@@ -223,7 +290,14 @@ impl Dispatch<WlDataDevice, ()> for State {
 }
 
 impl Dispatch<WlDataOffer, ()> for State {
-    fn event(st: &mut Self, o: &WlDataOffer, ev: wl_data_offer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        o: &WlDataOffer,
+        ev: wl_data_offer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let wl_data_offer::Event::Offer { mime_type } = ev {
             if let Some((_, m)) = st.clip_mimes.iter_mut().find(|(x, _)| x == o) {
                 m.push(mime_type);
@@ -233,9 +307,18 @@ impl Dispatch<WlDataOffer, ()> for State {
 }
 
 impl Dispatch<ZwpPrimarySelectionDeviceV1, ()> for State {
-    fn event(st: &mut Self, _: &ZwpPrimarySelectionDeviceV1, ev: zwp_primary_selection_device_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &ZwpPrimarySelectionDeviceV1,
+        ev: zwp_primary_selection_device_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         match ev {
-            zwp_primary_selection_device_v1::Event::DataOffer { offer } => st.prim_mimes.push((offer, Vec::new())),
+            zwp_primary_selection_device_v1::Event::DataOffer { offer } => {
+                st.prim_mimes.push((offer, Vec::new()))
+            }
             zwp_primary_selection_device_v1::Event::Selection { id } => {
                 st.prim_seen = true;
                 st.prim = id.and_then(|o| {
@@ -253,7 +336,14 @@ impl Dispatch<ZwpPrimarySelectionDeviceV1, ()> for State {
 }
 
 impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for State {
-    fn event(st: &mut Self, o: &ZwpPrimarySelectionOfferV1, ev: zwp_primary_selection_offer_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        o: &ZwpPrimarySelectionOfferV1,
+        ev: zwp_primary_selection_offer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let zwp_primary_selection_offer_v1::Event::Offer { mime_type } = ev {
             if let Some((_, m)) = st.prim_mimes.iter_mut().find(|(x, _)| x == o) {
                 m.push(mime_type);
@@ -263,7 +353,14 @@ impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for State {
 }
 
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
-    fn event(st: &mut Self, _: &ZwlrForeignToplevelManagerV1, ev: zwlr_foreign_toplevel_manager_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        st: &mut Self,
+        _: &ZwlrForeignToplevelManagerV1,
+        ev: zwlr_foreign_toplevel_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = ev {
             st.toplevels.push((toplevel, Toplevel::default()));
         }
@@ -274,13 +371,24 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
 }
 
 impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
-    fn event(st: &mut Self, h: &ZwlrForeignToplevelHandleV1, ev: zwlr_foreign_toplevel_handle_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        let Some((_, t)) = st.toplevels.iter_mut().find(|(x, _)| x == h) else { return };
+    fn event(
+        st: &mut Self,
+        h: &ZwlrForeignToplevelHandleV1,
+        ev: zwlr_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some((_, t)) = st.toplevels.iter_mut().find(|(x, _)| x == h) else {
+            return;
+        };
         match ev {
             zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => t.app_id = app_id,
             zwlr_foreign_toplevel_handle_v1::Event::State { state } => {
                 // Array of u32 (native endian); 2 = activated.
-                t.activated = state.chunks_exact(4).any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == 2);
+                t.activated = state
+                    .chunks_exact(4)
+                    .any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == 2);
             }
             _ => {}
         }
