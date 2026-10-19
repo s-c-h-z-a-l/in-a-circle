@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # Members are listed explicitly because cargo rejects globs that match nothing.
-members = []
+members = ["crates/manifest"]
 exclude = ["spikes"]
 
 [workspace.package]
