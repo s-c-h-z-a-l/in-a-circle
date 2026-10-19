@@ -36,6 +36,12 @@ from exec to exit (min 767, max 923), and ~366 minor page faults. About 225
 of those faults come from the 0.9 MB wheel buffer, which can be cut with
 `MAP_POPULATE` or by touching only the ring's rows.
 
+*Later:* this spike fills the whole buffer and launches from a shell. With
+the real wheel (only the ring's pixels are written) and spawned by niri,
+see [latency.md](latency.md#startup-cpu-ours-vs-the-spawners): ~0.47 ms
+CPU from `main` to the wheel commit, plus a spawner-dependent cost before
+`main`. `MAP_POPULATE` turned out no cheaper than the faults it saves.
+
 | opt-level | binary |
 |---|---|
 | 3 | 344 KB |

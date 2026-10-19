@@ -5,8 +5,8 @@
 A context-aware radial action menu (think GTA weapon wheel) for Linux/Wayland.
 Press a hotkey, the wheel appears at the cursor and offers only the actions
 that apply to what you're working on: selected text, a URL on the clipboard,
-selected files, the focused window. Don't look for the app that does the job —
-select the thing and do it in one gesture.
+the files you're dragging, the focused window. Don't look for the app that
+does the job — grab the thing and do it in one gesture.
 
 It is a tool. A dead simple tool. Nothing extra.
 
@@ -25,6 +25,9 @@ it's a bug.
      compositor (configure, pointer enter) and the cost before `main`
      (exec, loader, the spawner's teardown: ~1 ms under niri) are measured
      and reported, not budgeted. Do our work during compositor waits.
+   - our CPU from `main` to exit, excluding per-event work (hover, motion):
+     <= 1 ms. This covers reading the payload, classifying, and starting
+     the action.
    - hover repaint: <= 100 µs per event
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
@@ -87,7 +90,10 @@ it's a bug.
   subsurface position depends on it.
 - File input: **drag into the circle** (`wl_data_device`): grab files,
   press the hotkey, drop on a slice. Accept copy only, never request the
-  `DELETE` target. During a drag the position comes from
+  `DELETE` target. Off a slice, reject both the MIME type and the action
+  (`accept(null)` + `set_actions(none)`); niri still sends `drop` after
+  `accept(null)` alone. Close the wheel and release the lock before a
+  long-running action starts. During a drag the position comes from
   `wl_data_device.enter`/`motion`, not `wl_pointer.enter`.
 - Context: keyboard focus -> selection/clipboard offers; classify by MIME
   type, read data lazily.

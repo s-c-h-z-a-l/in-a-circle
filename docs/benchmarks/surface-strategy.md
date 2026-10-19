@@ -60,8 +60,9 @@ with a static transparent surface mapped. That is within noise.
   budget; not investigated further.
 
 **Estimated keypress to photons on niri:** ~4 ms spawn + 0.5 ms exec +
-1.6 ms ours + compositor (p10 ~8.6 / p50 ~17 ms) = **~15-23 ms, of which
-~2 ms is ours.**
+1.6 ms to the wheel commit + compositor (p10 ~8.6 / p50 ~17 ms) =
+**~15-23 ms.** Of the 1.6 ms, ~1.3 ms is waiting for niri's pointer enter;
+our own CPU is ~0.5 ms (see [latency.md](latency.md#startup-cpu-ours-vs-the-spawners)).
 
 ## Reproduce
 

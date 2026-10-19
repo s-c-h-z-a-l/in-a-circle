@@ -93,14 +93,14 @@ ourselves did not make it fast. Doing less work did: a precomputed mask,
 touching only the pixels that change, and no float-to-int conversion in
 the hot loop.
 
-| | tiny-skia | cpu-sdf v3 |
-|---|---|---|
-| hover repaint | ~1000 µs | **~57 µs** |
-| CPU per animated frame | ~1020 µs | **~68 µs** (wgpu: 125 µs) |
-| full-screen peak RSS | 61 MB | **7.1 MB** (fresh shm pages are never touched) |
-| idle RSS | 4.4 MB | 3.6 MB |
-| crates | 39 | 32 |
-| binary | 848 KB | 663 KB |
+| | tiny-skia | cpu-sdf v3 | v4 (`spikes/wire`) |
+|---|---|---|---|
+| hover repaint | ~1000 µs | **~57 µs** | **~14 µs** |
+| CPU per animated frame | ~1020 µs | **~68 µs** (wgpu: 125 µs) | not measured |
+| full-screen peak RSS | 61 MB | **7.1 MB** (fresh shm pages are never touched) | n/a (480x480 subsurface) |
+| idle RSS | 4.4 MB | 3.6 MB | n/a (no idle: spawn-per-use) |
+| crates | 39 | 32 | 1 (`libc`) |
+| binary | 848 KB | 663 KB | 399 KB (whole drag probe) |
 
 **Correctness:** checked against an independent tiny-skia render. Mean
 absolute difference is 0.033/255. About 20 of 921,600 channels differ by

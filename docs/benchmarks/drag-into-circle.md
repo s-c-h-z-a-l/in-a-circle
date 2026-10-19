@@ -66,14 +66,14 @@ buffer scaled by `wp_viewporter`, the wheel in a subsurface with an
 painting while the compositor works out the cursor. Hover follows motion.
 Over a slice the offer is accepted (copy only); over the hub or outside
 the ring it is rejected, so a drop there cancels. Keyboard interactivity
-is a parameter. 4 rounds by hand, 47 runs, Nautilus 50, niri 26.04.
+is a parameter. 4 rounds by hand, 49 runs, Nautilus 50, niri 26.04.
 
 | | result |
 |---|---|
 | keyboard `exclusive` / `on_demand` / `none` during a drag | **drag continues in all three**; enter, motion and drop all arrive |
 | events land on | the parent surface, every time (the empty input region works) |
 | drop on a slice | exact URIs: 1 file in 117-220 µs, 3 files with accents (`jegyzet%20%C3%A9kezet.txt`) in 122 µs |
-| drop on the hub / outside the ring | offer rejected, nothing read, files untouched |
+| drop on the hub / outside the ring | we reject the MIME type and read nothing; files untouched. **niri still sends `drop`, not a cancel** (see Findings) |
 | Esc during a drag | the key never reaches us: the compositor's drag grab takes it and cancels the drag; we get `leave` and exit |
 | Esc / click without a drag | close the wheel |
 | wheel appears | without a drag: 2.0-2.4 ms after `main`; during a drag: **on the first movement** (see below) |
@@ -87,7 +87,14 @@ is a parameter. 4 rounds by hand, 47 runs, Nautilus 50, niri 26.04.
   in turn, damaging only what changed in the buffer being drawn left stale
   highlights and partial triangles on screen. Damage the previously shown
   and the new segment. A unit test now composites through damage rects.
-- **Outside the ring nothing is selected,** and a drop there is a cancel.
+- **`accept(null)` alone does not cancel the drop on niri.** Off a slice
+  the probe sends `accept(serial, null)` but keeps the copy action from
+  `set_actions`; niri still delivers `drop` (also after an explicit
+  `accept(null)` that followed an accept). The source is never told the
+  drop failed. Next: also `set_actions(none)` off a slice, and send the
+  initial accept state on enter (the probe skips it when the first
+  position is on the hub). (Pointed out in an external review.)
+- **Outside the ring nothing is selected,** and a drop there runs nothing.
   Classic pie menus select by direction even past the rim (faster, more
   forgiving); here the release runs an action on files, so a wrong action
   costs more than a missed one.
@@ -114,6 +121,11 @@ as `wl_pointer.enter` already does; measure other compositors.
   `wl_data_device.enter` arrive (sway, Hyprland, KDE)?
 - Thunar and other toolkits through the integration probe (the first probe
   covered Thunar).
+- **Drag released before any movement.** We then never get a data-device
+  enter; when the drag ends, niri sends `wl_pointer.enter`, and the probe
+  would show the wheel as if no drag had happened. Not tested.
+- **Several outputs:** the layer surface goes to the compositor's chosen
+  output; a drag started on another output is untested.
 
 ## Reproduce
 

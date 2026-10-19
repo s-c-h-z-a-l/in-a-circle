@@ -19,6 +19,9 @@ const R_IN: f32 = 80.0;
 const R_HUB: f32 = 64.0;
 const GAP: f32 = 2.0;
 const C: u32 = BOX / 2;
+// Diagonal pixels (a == b) sit on a segment boundary and are painted with
+// one side's color only. That is invisible only while the gap covers them.
+const _: () = assert!(GAP >= 0.5);
 
 /// Premultiplied RGBA.
 const SEG: [f32; 4] = premul([0.15, 0.15, 0.18], 0.85);
