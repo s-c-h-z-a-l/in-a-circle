@@ -562,9 +562,14 @@ fn run(wl: &mut Wl, st: &mut St, kbd_mode: u32) {
         {
             let t = mono_ns();
             let new = st.hover;
-            let damage = match painted[i] {
+            // The buffer is made right for `new` relative to its own content;
+            // the damage is what differs from the screen (the other buffer).
+            let damage: Vec<_> = match painted[i] {
                 None => vec![wheel.paint_full(canvas(i), new)],
-                Some(old) => wheel.paint_hover(canvas(i), old, new),
+                Some(old) => {
+                    wheel.paint_hover(canvas(i), old, new);
+                    [shown, new].iter().filter_map(|&s| wheel.bbox(s)).collect()
+                }
             };
             for r in damage {
                 wl.req(

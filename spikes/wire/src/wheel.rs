@@ -199,20 +199,25 @@ impl Wheel {
     }
 
     /// Repaint a canvas showing `old` to show `new`; only the two segments'
-    /// pixels change. Returns the damaged rects.
-    pub fn paint_hover(&self, canvas: &mut [u8], old: u32, new: u32) -> Vec<Rect> {
+    /// pixels change.
+    ///
+    /// This is not the damage to report: with more than one buffer, the
+    /// screen shows another buffer's state. Damage what differs from the
+    /// screen, i.e. `bbox(shown)` and `bbox(new)`.
+    pub fn paint_hover(&self, canvas: &mut [u8], old: u32, new: u32) {
         // 254 matches no mask index (segments are 0..8, hub is 255).
         let id = |s: u32| if s == NONE { 254 } else { s as u8 };
         let only = Some([id(old), id(new)]);
-        let mut damage = Vec::with_capacity(2);
         for s in [old, new] {
-            if s != NONE {
-                let r = self.bboxes[s as usize];
+            if let Some(r) = self.bbox(s) {
                 self.paint(canvas, r, new, only);
-                damage.push(r);
             }
         }
-        damage
+    }
+
+    /// Bounding box of segment `s` (padded for AA), or None for NONE.
+    pub fn bbox(&self, s: u32) -> Option<Rect> {
+        self.bboxes.get(s as usize).copied()
     }
 
     fn paint(&self, canvas: &mut [u8], r: Rect, hover: u32, only: Option<[u8; 2]>) {
@@ -233,6 +238,48 @@ impl Wheel {
                     *px = self.color(m, hover).to_le_bytes();
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blit(screen: &mut [u8], buf: &[u8], r: Rect) {
+        for y in r.y..r.y + r.h {
+            let a = ((y * BOX + r.x) * 4) as usize;
+            let b = a + (r.w * 4) as usize;
+            screen[a..b].copy_from_slice(&buf[a..b]);
+        }
+    }
+
+    /// A compositor only updates damaged regions. With two buffers in
+    /// turn, the screen must still match a full paint after every hover.
+    #[test]
+    fn screen_matches_full_paint_with_two_buffers() {
+        let w = Wheel::new();
+        let size = (BOX * BOX * 4) as usize;
+        let mut bufs = [vec![0u8; size], vec![0u8; size]];
+        let mut painted = [NONE; 2];
+        w.paint_full(&mut bufs[0], NONE);
+        w.paint_full(&mut bufs[1], NONE);
+        let mut screen = bufs[0].clone();
+        let mut shown = NONE;
+        let path = [6, 5, 4, NONE, 3, 3, 7, NONE, NONE, 0, 1, 0];
+        for (step, &new) in path.iter().enumerate() {
+            let i = step % 2;
+            w.paint_hover(&mut bufs[i], painted[i], new);
+            painted[i] = new;
+            for s in [shown, new] {
+                if let Some(r) = w.bbox(s) {
+                    blit(&mut screen, &bufs[i], r);
+                }
+            }
+            shown = new;
+            let mut want = vec![0u8; size];
+            w.paint_full(&mut want, new);
+            assert!(screen == want, "step {step}: screen differs (hover {new})");
         }
     }
 }

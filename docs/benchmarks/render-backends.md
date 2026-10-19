@@ -92,6 +92,14 @@ absolute difference is 0.033/255. About 20 of 921,600 channels differ by
 more than 24, all at segment corners (polygon versus analytic AA). A hover
 repaint is bit-identical to a full repaint.
 
+**Damage bug (found later, in the [drag probe](drag-into-circle.md)):**
+the spike damaged the segments that changed *relative to the buffer
+being drawn*. With two buffers in turn, the screen shows the other one,
+so a highlight could stay on screen. The buffer contents were right (that
+is what the test checked); the reported damage was not. Damage must cover
+what differs from the screen: the previously shown and the new segment.
+The timings above are unaffected.
+
 ## Reproduce
 
 ```sh
