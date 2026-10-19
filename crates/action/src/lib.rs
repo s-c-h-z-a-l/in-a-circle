@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use manifest::Line;
@@ -60,12 +60,18 @@ pub fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Command, Strin
             break;
         }
         if a == "--work" {
+            if work.is_some() {
+                return Err("duplicate --work".to_owned());
+            }
             work = Some(PathBuf::from(args.next().ok_or("--work needs a value")?));
         } else if a == "--opt" {
             let kv = utf8(args.next().ok_or("--opt needs a value")?, "--opt")?;
             let (k, v) = kv.split_once('=').ok_or("--opt needs key=value")?;
             opts.push((k.to_owned(), v.to_owned()));
         } else if a == "--inputs-from" {
+            if from_file.is_some() {
+                return Err("duplicate --inputs-from".to_owned());
+            }
             from_file = Some(PathBuf::from(
                 args.next().ok_or("--inputs-from needs a value")?,
             ));
@@ -77,6 +83,12 @@ pub fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Command, Strin
         return Err("missing `--` before input paths".to_owned());
     }
     let work = work.ok_or("missing --work")?;
+    if !work.is_absolute() {
+        return Err(format!(
+            "--work is not absolute: {}",
+            work.to_string_lossy()
+        ));
+    }
     let mut inputs = Vec::new();
     if let Some(f) = from_file {
         let text = fs::read_to_string(&f)
@@ -149,19 +161,18 @@ impl<W: Write> Events<W> {
     }
 }
 
-/// `<work>/<index>/<stem>.<ext>`; creates the directory. A creation error is
-/// ignored here: the action's own write to the returned path will fail and be
-/// reported. A path without a stem uses `output`.
-pub fn output_path(work: &Path, index: usize, input: &Path, ext: &str) -> PathBuf {
+/// `<work>/<index>/<stem>.<ext>`; creates the directory. A path without a
+/// stem uses `output`.
+pub fn output_path(work: &Path, index: usize, input: &Path, ext: &str) -> io::Result<PathBuf> {
     let dir = work.join(index.to_string());
-    let _ = fs::create_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
     let stem = input
         .file_stem()
         .map_or_else(|| "output".into(), |s| s.to_os_string());
     let mut name = stem;
     name.push(".");
     name.push(ext);
-    dir.join(name)
+    Ok(dir.join(name))
 }
 
 #[cfg(test)]
@@ -430,19 +441,52 @@ mod tests {
     #[test]
     fn output_path_per_index() {
         let w = tmp("out");
-        let a = output_path(&w, 0, Path::new("/x/notes.md"), "html");
-        let b = output_path(&w, 1, Path::new("/y/notes.md"), "html");
+        let a = output_path(&w, 0, Path::new("/x/notes.md"), "html").unwrap();
+        let b = output_path(&w, 1, Path::new("/y/notes.md"), "html").unwrap();
         assert_eq!(a, w.join("0/notes.html"));
         assert_eq!(b, w.join("1/notes.html"));
         assert!(w.join("0").is_dir() && w.join("1").is_dir());
         assert_eq!(
-            output_path(&w, 2, Path::new("/"), "txt"),
+            output_path(&w, 2, Path::new("/"), "txt").unwrap(),
             w.join("2/output.txt")
         );
         assert_eq!(
-            output_path(&w, 3, Path::new("/a/b.tar.gz"), "md"),
+            output_path(&w, 3, Path::new("/a/b.tar.gz"), "md").unwrap(),
             w.join("3/b.tar.md")
         );
+    }
+
+    #[test]
+    fn output_path_reports_create_error() {
+        let w = tmp("blocked");
+        fs::write(w.join("0"), "a file where the dir should be").unwrap();
+        assert!(output_path(&w, 0, Path::new("/x/a.md"), "txt").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_duplicates_and_relative_work() {
+        assert!(
+            parse_args(os(&[
+                "run", "a", "--work", "/w", "--work", "/v", "--", "/x"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_args(os(&[
+                "run",
+                "a",
+                "--work",
+                "/w",
+                "--inputs-from",
+                "/f",
+                "--inputs-from",
+                "/g",
+                "--",
+                "/x"
+            ]))
+            .is_err()
+        );
+        assert!(parse_args(os(&["run", "a", "--work", "w", "--", "/x"])).is_err());
     }
 
     #[test]
