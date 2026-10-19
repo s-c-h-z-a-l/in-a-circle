@@ -86,13 +86,13 @@ impl Loss {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadError {
-    NotUtf8,
+    NotText,
 }
 
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadError::NotUtf8 => f.write_str("input is not valid UTF-8"),
+            ReadError::NotText => f.write_str("not text (invalid UTF-8 or a NUL byte)"),
         }
     }
 }

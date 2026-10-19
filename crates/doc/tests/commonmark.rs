@@ -58,6 +58,11 @@ fn spec_examples() {
             );
         }
     }
+    assert_eq!(
+        examples.as_array().unwrap().len(),
+        652,
+        "the spec file must hold exactly 652 examples"
+    );
     for (n, why) in SKIP {
         assert!(!why.is_empty(), "SKIP entry {n} needs a reason");
     }
@@ -73,14 +78,17 @@ fn spec_examples() {
             continue;
         }
         let number = e["example"].as_u64().unwrap();
-        if SKIP.iter().any(|&(n, _)| u64::from(n) == number) {
-            skipped += 1;
-            continue;
-        }
+        let skip = SKIP.iter().any(|&(n, _)| u64::from(n) == number);
         let markdown = e["markdown"].as_str().unwrap();
         let expected = e["html"].as_str().unwrap();
         let actual = html::write(&md::read(markdown.as_bytes()).unwrap());
-        if normalize(&actual) == normalize(expected) {
+        let ok = normalize(&actual) == normalize(expected);
+        if skip {
+            assert!(!ok, "example {number} passes now: remove it from SKIP");
+            skipped += 1;
+            continue;
+        }
+        if ok {
             passed += 1;
         } else {
             if std::env::var_os("COMMONMARK_VERBOSE").is_some() {

@@ -6,9 +6,13 @@ use std::collections::BTreeSet;
 /// Reads plain text. Paragraphs are separated by blank (whitespace-only)
 /// lines; lines inside a paragraph are joined by `HardBreak`. Runs of more
 /// than one blank line between paragraphs are merged and reported.
-/// Linear in the input; no recursion.
+/// Text is valid UTF-8 without NUL bytes; anything else is
+/// `ReadError::NotText`. Linear in the input; no recursion.
 pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
-    let s = std::str::from_utf8(bytes).map_err(|_| ReadError::NotUtf8)?;
+    let s = std::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
+    if s.contains('\0') {
+        return Err(ReadError::NotText);
+    }
     let s = s.strip_prefix('\u{feff}').unwrap_or(s);
     let mut losses = BTreeSet::new();
     let mut blocks = Vec::new();
@@ -245,9 +249,17 @@ mod tests {
 
     #[test]
     fn invalid_utf8_is_error() {
-        assert_eq!(ReadError::NotUtf8.to_string(), "input is not valid UTF-8");
-        assert_eq!(ReadError::NotUtf8.to_string(), "input is not valid UTF-8");
-        assert_eq!(read(b"\xff").unwrap_err(), ReadError::NotUtf8);
+        assert_eq!(
+            ReadError::NotText.to_string(),
+            "not text (invalid UTF-8 or a NUL byte)"
+        );
+        assert_eq!(read(b"\xff").unwrap_err(), ReadError::NotText);
+    }
+
+    #[test]
+    fn nul_byte_is_error() {
+        assert_eq!(read(b"a\0b").unwrap_err(), ReadError::NotText);
+        assert_eq!(read(b"\0").unwrap_err(), ReadError::NotText);
     }
 
     #[test]

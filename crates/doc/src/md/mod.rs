@@ -27,7 +27,7 @@ use std::collections::{BTreeSet, HashMap};
 /// structure and collects link reference definitions, then every
 /// paragraph's and heading's raw text goes through `inlines`.
 pub fn read(bytes: &[u8]) -> Result<Document, ReadError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| ReadError::NotUtf8)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
     let doc = if text.contains('\0') {
         block::parse(&text.replace('\0', "\u{fffd}"))
     } else {
@@ -167,7 +167,8 @@ fn char_ref(s: &[u8], i: usize, out: &mut String) -> Option<usize> {
 /// Writes CommonMark. Text is escaped so that it can never be read as
 /// structure: the characters `\ ` * _ [ ] < > & | ! #` always get a
 /// backslash, line-start `- + = ~` and the `.`/`)` of a line-start `N.`/`N)`
-/// likewise, and leading/trailing whitespace of a line becomes `&#32;`/`&#9;`.
+/// likewise, and any whitespace character at the start or end of a line becomes a
+/// numeric entity (`&#32;`, `&#9;`, `&#xA0;`, ...).
 /// Runs of two or more interior spaces/tabs are kept but reported as
 /// `Loss::Whitespace` (a renderer may collapse them).
 ///
@@ -501,17 +502,27 @@ impl<'a> InlineWriter<'a> {
         let mut rest = t;
         while let Some(c) = rest.chars().next() {
             match c {
-                ' ' | '\t' => {
-                    let n = rest.find(|c| c != ' ' && c != '\t').unwrap_or(rest.len());
+                c if c.is_whitespace() && c != '\n' => {
+                    let n = rest
+                        .find(|c: char| !c.is_whitespace() || c == '\n')
+                        .unwrap_or(rest.len());
                     let (run, after) = rest.split_at(n);
                     let trailing = (after.is_empty() && end_of_line) || after.starts_with('\n');
                     if self.line_start || trailing {
                         // Rendering would strip it; an entity keeps it.
                         for ch in run.chars() {
-                            self.out.push_str(if ch == ' ' { "&#32;" } else { "&#9;" });
+                            match ch {
+                                ' ' => self.out.push_str("&#32;"),
+                                '\t' => self.out.push_str("&#9;"),
+                                _ => self.out.push_str(&format!("&#x{:X};", ch as u32)),
+                            }
                         }
                     } else {
-                        if n >= 2 {
+                        if run
+                            .as_bytes()
+                            .windows(2)
+                            .any(|w| w.iter().all(|&b| b == b' ' || b == b'\t'))
+                        {
                             self.losses.insert(Loss::Whitespace);
                         }
                         self.out.push_str(run);
@@ -572,8 +583,8 @@ mod tests {
     }
     #[test]
     fn read_rejects_invalid_utf8() {
-        assert_eq!(read(b"a\xffb"), Err(ReadError::NotUtf8));
-        assert_eq!(read(b"\xe2\x82"), Err(ReadError::NotUtf8));
+        assert_eq!(read(b"a\xffb"), Err(ReadError::NotText));
+        assert_eq!(read(b"\xe2\x82"), Err(ReadError::NotText));
     }
 
     #[test]
@@ -698,6 +709,18 @@ mod tests {
             t(" b"),
         ])]);
         assert_eq!(write(&d).0, "a\\\n&#32;b\n");
+    }
+
+    #[test]
+    fn unicode_whitespace_at_line_edges_is_entity_encoded() {
+        assert_eq!(md("\u{a0}a"), "&#xA0;a\n");
+        assert_eq!(md("a\u{2003}"), "a&#x2003;\n");
+        assert_eq!(md("\u{3000}\u{3000}x"), "&#x3000;&#x3000;x\n");
+        assert_eq!(md("a \u{a0} b\n\u{85}c"), "a \u{a0} b\n&#x85;c\n");
+        // Interior stays raw and unreported.
+        let (s, l) = write(&doc(vec![para("a\u{a0}\u{a0}b")]));
+        assert_eq!(s, "a\u{a0}\u{a0}b\n");
+        assert!(l.is_empty());
     }
 
     #[test]
