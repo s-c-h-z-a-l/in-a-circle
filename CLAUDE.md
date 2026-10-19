@@ -115,3 +115,23 @@ it's a bug.
 - Run `cargo fmt` and `cargo clippy` after changes.
 - Prefer `cargo check` / narrow tests before the full suite.
 - No `unsafe` without a documented invariant.
+
+## Testing
+
+Test behavior, not lines. Coverage is a signal, never a target.
+
+- Required: every public interface's contract (normal case), every
+  documented edge case (empty input, limits, bad encoding), every error
+  path a user can hit, every safety boundary (sandbox, size limits, never
+  overwrite), and a regression test for every fixed bug (one that fails
+  without the fix).
+- Not required: trivial getters and constructors, or what the compiler
+  already guarantees. Test internals through the public interface.
+- Effort follows risk: parsers get official test suites and edge cases
+  (later fuzzing); engine logic and the action contract get unit and
+  integration tests; Wayland/UI code gets unit tests for its pure logic
+  (geometry, hit testing, damage) plus a manual checklist on niri.
+- Measure line coverage per crate with `cargo llvm-cov` at the end of each
+  plan and report it. Rough signal bands: parsers ~90%, engine and
+  contract ~80%, UI lower. Far below its band is a question to answer
+  ("what isn't tested, and why?"), not an automatic failure.
