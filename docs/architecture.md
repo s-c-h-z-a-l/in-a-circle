@@ -112,6 +112,13 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 - Cancel with `SIGTERM`; the engine removes the temp dir either way. The
   engine sets `RLIMIT_FSIZE` on the action, which caps output size for
   every plugin (archive bombs) without any plugin code.
+- **Every action runs sandboxed** with Landlock, set up in the child
+  between `fork` and `execve`: writes only into the temp dir; reads only
+  the inputs, the action binary and the system paths needed to run it; no
+  network where the kernel supports it. The best available Landlock ABI is
+  used. Where Landlock is missing, actions from the user or plugin
+  directory do not run; built-in actions run, and the history and the
+  notification say they ran unsandboxed.
 
 ## Classifier
 
@@ -154,11 +161,13 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 ## Executor and supervisor
 
 - After the choice the wheel closes and releases the lock; the same
-  process stays as the **supervisor** while the action runs (detached with
-  `posix_spawn` and `setsid`), then exits. It frees the wheel's buffers
+  process stays as the **supervisor** while the action runs (a new session
+  with `setsid`, started through `fork` and `execve` so the sandbox and
+  limits can be applied in between), then exits. It frees the wheel's buffers
   before waiting.
-- **One process per batch** by default; actions declaring `batch=no` run
-  per file, in parallel up to the number of cores.
+- **One process per target folder** of a batch (each folder gets its own
+  temp dir, so the final move stays an atomic `rename`); actions declaring
+  `batch=no` run per file, in parallel up to the number of cores.
 - **A batch never stops to ask.** Unsupported or broken files are skipped,
   one failure does not stop the rest, name conflicts get a new name.
   Skipping is always safe here: actions only copy and never overwrite.
@@ -246,13 +255,20 @@ spikes/   measurements, not product code
 
 Product code is written from these decisions, not copied from the spikes.
 
-## Open risk: file types before the drop
+## File types before the drop
 
 On drag enter, files offer only `text/uri-list`, which says nothing about
-the type. Type-specific slices need the URI list, and the first bytes of
-the files, **before the drop**: `wl_data_offer.receive` during the drag.
-The protocol allows it; whether Nautilus and Thunar serve it is not
-measured yet, and it is the first thing the engine skeleton tests.
-If they do not, the fallback is two steps: drop on the wheel hands the
-files over, then a second wheel (click mode, the drag is over) offers the
-type-specific targets.
+the type; the URI list itself is guaranteed only after the drop.
+
+- **The base path works everywhere:** drop on the wheel hands the files
+  over, then a second wheel (click mode, the drag is over) offers the
+  type-specific targets.
+- **A shortcut on top of it, not a second path:** if the URI list can be
+  read during the drag (`wl_data_offer.receive` before the drop) within a
+  deadline, the wheel shows the type-specific slices already, and the drop
+  is the final choice. If it does not arrive, the same wheel shows a single
+  "drop here" target and the second step follows.
+
+Whether Nautilus and Thunar serve the list before the drop is not measured
+yet; other applications may never do it, which is why the shortcut cannot
+be the only path.
