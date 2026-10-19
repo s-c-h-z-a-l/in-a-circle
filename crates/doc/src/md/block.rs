@@ -1167,14 +1167,23 @@ mod tests {
         let d = parse("  a  \n   b *c*  \n");
         assert_eq!(
             d.blocks,
-            [Block::Paragraph(vec![Inline::Text("a  \nb *c*".into())])]
+            [Block::Paragraph(vec![
+                Inline::Text("a".into()),
+                Inline::HardBreak,
+                Inline::Text("b ".into()),
+                Inline::Emph(vec![Inline::Text("c".into())]),
+            ])]
         );
         let d = parse("Foo\n  bar\n===");
         assert_eq!(
             d.blocks,
             [Block::Heading {
                 level: 1,
-                content: vec![Inline::Text("Foo\nbar".into())]
+                content: vec![
+                    Inline::Text("Foo".into()),
+                    Inline::SoftBreak,
+                    Inline::Text("bar".into())
+                ]
             }]
         );
         let d = parse("# \n");

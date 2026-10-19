@@ -5,30 +5,23 @@
 //!
 //! Reader: CommonMark 0.31.2 in two phases. `block` builds the block tree
 //! and collects link reference definitions (`Refs`); then the raw text of
-//! every paragraph and heading goes through `inlines`, the seam where the
-//! inline parser plugs in. Until it does, that text stays one `Text`.
+//! every paragraph and heading goes through `inlines` (the `inline`
+//! module) with all definitions known.
 
 mod block;
+mod entities;
+mod inline;
+mod punct;
 mod scan;
 
 use crate::{Block, Document, Inline, Loss, ReadError};
 use std::collections::{BTreeSet, HashMap};
 
-/// Writes CommonMark. Text is escaped so that it can never be read as
-/// structure: the characters `\ ` * _ [ ] < > & | ! #` always get a
-/// backslash, line-start `- + = ~` and the `.`/`)` of a line-start `N.`/`N)`
-/// likewise, and leading/trailing whitespace of a line becomes `&#32;`/`&#9;`.
-/// Runs of two or more interior spaces/tabs are kept but reported as
-/// `Loss::Whitespace` (a renderer may collapse them).
-///
-/// Blocks are separated by one blank line (tight list items by a newline
-/// where that cannot change the meaning); non-empty output ends with exactly
-/// one `\n`, empty output is `""`. Adjacent lists alternate `-`/`*` and
-/// `.`/`)` so they stay separate lists. Recurses over nested blocks; the
-/// readers bound nesting depth.
 /// Reads CommonMark 0.31.2. NUL characters become U+FFFD; invalid UTF-8
 /// is an error. Container nesting deeper than 256 block quotes/list items
-/// is not opened: the extra markers stay text.
+/// is not opened: the extra markers stay text. Inline nesting (emphasis,
+/// links, images) deeper than 256 is flattened: the wrappers are dropped,
+/// their content is kept.
 ///
 /// Two phases, as in the spec's parsing strategy: `block` builds the block
 /// structure and collects link reference definitions, then every
@@ -58,11 +51,8 @@ pub(crate) type Refs = HashMap<String, LinkDef>;
 /// content: lines joined with `\n`, each line's leading spaces/tabs and the
 /// block's final whitespace removed; interior trailing spaces are kept (they
 /// decide hard breaks). `refs` holds every definition of the document.
-///
-/// Until the inline parser exists this is the raw text as one `Text`.
 fn inlines(raw: &str, refs: &Refs) -> Vec<Inline> {
-    let _ = refs;
-    vec![Inline::Text(raw.to_string())]
+    inline::parse(raw, refs)
 }
 
 /// Matching form of a link label: Unicode case fold (approximated as
@@ -80,26 +70,112 @@ pub(crate) fn normalize_label(label: &str) -> String {
     out
 }
 
-/// Resolves backslash escapes (`\` before ASCII punctuation), as needed for
-/// link destinations, titles and code info strings. Entity and numeric
-/// character references belong here too; they come with the entity table.
+/// Resolves backslash escapes (`\\` before ASCII punctuation) and character
+/// references, as needed for link destinations, titles and code info
+/// strings.
 fn unescape(s: &str) -> String {
+    decode(s, true)
+}
+
+/// The one place where backslash escapes (if `backslashes`) and character
+/// references are decoded; text inlines use its [`char_ref`] directly.
+fn decode(s: &str, backslashes: bool) -> String {
+    let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\'
-            && let Some(&n) = chars.peek()
-            && n.is_ascii_punctuation()
-        {
-            out.push(n);
-            chars.next();
-        } else {
-            out.push(c);
+    let (mut i, mut start) = (0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'\\' if backslashes && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) => {
+                out.push_str(&s[start..i]);
+                out.push(char::from(b[i + 1]));
+                i += 2;
+                start = i;
+            }
+            b'&' => {
+                out.push_str(&s[start..i]);
+                start = i;
+                i = match char_ref(b, i, &mut out) {
+                    Some(end) => {
+                        start = end;
+                        end
+                    }
+                    None => i + 1,
+                };
+            }
+            _ => i += 1,
         }
     }
+    out.push_str(&s[start..]);
     out
 }
 
+/// Longest HTML5 entity name is 31 characters; this bounds the scan.
+const MAX_ENTITY_NAME: usize = 32;
+
+/// Character reference at `s[i] == b'&'`: an HTML5 named entity (`&amp;`,
+/// only with `;`), decimal (`&#` 1-7 digits `;`) or hexadecimal (`&#x` 1-6
+/// digits `;`), as the spec defines them. Pushes the decoded text and
+/// returns the end, or returns `None` (pushing nothing) if there is no
+/// valid reference here. A numeric reference to 0, a surrogate or past
+/// U+10FFFF becomes U+FFFD.
+fn char_ref(s: &[u8], i: usize, out: &mut String) -> Option<usize> {
+    let mut j = i + 1;
+    if s.get(j) == Some(&b'#') {
+        j += 1;
+        let (radix, max) = match s.get(j) {
+            Some(b'x' | b'X') => {
+                j += 1;
+                (16, 6)
+            }
+            _ => (10, 7),
+        };
+        let n = s[j..]
+            .iter()
+            .take(max + 1)
+            .take_while(|&&c| char::from(c).is_digit(radix))
+            .count();
+        if n == 0 || n > max || s.get(j + n) != Some(&b';') {
+            return None;
+        }
+        // At most 7 decimal or 6 hex digits: no overflow.
+        let v = s[j..j + n].iter().fold(0u32, |v, &c| {
+            v * radix + char::from(c).to_digit(radix).unwrap_or(0)
+        });
+        out.push(
+            char::from_u32(v)
+                .filter(|&c| c != '\0')
+                .unwrap_or('\u{fffd}'),
+        );
+        return Some(j + n + 1);
+    }
+    let n = s[j..]
+        .iter()
+        .take(MAX_ENTITY_NAME + 1)
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .count();
+    if n == 0 || n > MAX_ENTITY_NAME || s.get(j + n) != Some(&b';') {
+        return None;
+    }
+    let name = scan::utf8(&s[j..j + n]);
+    let k = entities::ENTITIES
+        .binary_search_by(|(e, _)| e.cmp(&name))
+        .ok()?;
+    out.push_str(entities::ENTITIES[k].1);
+    Some(j + n + 1)
+}
+
+/// Writes CommonMark. Text is escaped so that it can never be read as
+/// structure: the characters `\ ` * _ [ ] < > & | ! #` always get a
+/// backslash, line-start `- + = ~` and the `.`/`)` of a line-start `N.`/`N)`
+/// likewise, and leading/trailing whitespace of a line becomes `&#32;`/`&#9;`.
+/// Runs of two or more interior spaces/tabs are kept but reported as
+/// `Loss::Whitespace` (a renderer may collapse them).
+///
+/// Blocks are separated by one blank line (tight list items by a newline
+/// where that cannot change the meaning); non-empty output ends with exactly
+/// one `\n`, empty output is `""`. Adjacent lists alternate `-`/`*` and
+/// `.`/`)` so they stay separate lists. Recurses over nested blocks; the
+/// readers bound nesting depth.
 pub fn write(doc: &Document) -> (String, BTreeSet<Loss>) {
     let mut losses = BTreeSet::new();
     let mut out = blocks_to_string(&doc.blocks, true, &mut losses);
@@ -531,6 +607,36 @@ mod tests {
     fn unescape_punctuation_only() {
         assert_eq!(unescape(r"\*a\b\\\"), r"*a\b\\");
         assert_eq!(unescape("\\é"), "\\é");
+    }
+
+    #[test]
+    fn unescape_char_refs() {
+        assert_eq!(unescape("a&amp;b&copy;&ngE;"), "a&b©≧\u{338}");
+        assert_eq!(unescape("&#35;&#x22;&#X41;&#1114111;"), "#\"A\u{10ffff}");
+        assert_eq!(
+            unescape("&#0;&#xD800;&#x110000;&#9999999;"),
+            "\u{fffd}".repeat(4)
+        );
+        // Too many digits, no `;`, unknown or empty names stay literal.
+        let literal = "&#12345678; &#x1234567; &#; &#x; &amp &nosuch; &; & &#a;";
+        assert_eq!(unescape(literal), literal);
+        assert_eq!(unescape(r"\&amp;"), "&amp;");
+        assert_eq!(unescape("&&amp;"), "&&");
+        let long = format!("&{};", "a".repeat(40));
+        assert_eq!(unescape(&long), long);
+        assert_eq!(decode(r"\*&lt;", false), r"\*<");
+    }
+
+    #[test]
+    fn entity_table_is_sorted_and_semicolon_only() {
+        let t = entities::ENTITIES;
+        assert!(t.len() > 2000);
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(t.iter().all(|(n, v)| {
+            n.bytes().all(|c| c.is_ascii_alphanumeric())
+                && n.len() <= MAX_ENTITY_NAME
+                && !v.is_empty()
+        }));
     }
 
     fn md(s: &str) -> String {
