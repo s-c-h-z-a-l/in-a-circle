@@ -67,7 +67,6 @@ struct State {
     clip: Option<Option<(WlDataOffer, Vec<String>)>>,
     prim: Option<Option<(ZwpPrimarySelectionOfferV1, Vec<String>)>>,
     // dnd
-    motions_before_enter: u32,
     pointer_entered: bool,
     dnd_offer: Option<(WlDataOffer, Vec<String>)>,
     dropped: bool,
@@ -383,10 +382,7 @@ impl Dispatch<WlDataDevice, ()> for State {
                     Some(st.offers.swap_remove(i))
                 });
                 let mimes = found.as_ref().map_or(String::new(), |(_, m)| m.join(" | "));
-                let motions = st.motions_before_enter;
-                st.note(format!(
-                    "DND ENTER @{x:.0},{y:.0} after {motions} pointer-motion events; mimes: {mimes}"
-                ));
+                st.note(format!("DND ENTER @{x:.0},{y:.0}; mimes: {mimes}"));
                 if let Some((o, m)) = &found {
                     let want = m.iter().find(|m| *m == "text/uri-list").cloned();
                     o.accept(serial, want);
