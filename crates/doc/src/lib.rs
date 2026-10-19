@@ -86,3 +86,13 @@ impl Loss {
 pub enum ReadError {
     NotUtf8,
 }
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::NotUtf8 => f.write_str("input is not valid UTF-8"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}

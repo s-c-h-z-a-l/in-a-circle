@@ -52,10 +52,16 @@ pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
 }
 
 /// Writes plain text, reporting every piece of structure that was flattened.
-/// Blocks are separated by one blank line; there is no trailing newline.
+/// Blocks are separated by one blank line (blocks that render to nothing are
+/// skipped); non-empty output ends with exactly one `\n`, empty output is `""`.
+/// List nesting: content under a bullet item is indented 2 spaces, under an
+/// ordered item by the marker's width (3 spaces under `1. `).
 pub fn write(doc: &Document) -> (String, BTreeSet<Loss>) {
     let mut losses = BTreeSet::new();
-    let out = blocks_to_string(&doc.blocks, true, &mut losses);
+    let mut out = blocks_to_string(&doc.blocks, true, &mut losses);
+    if !out.is_empty() {
+        out.push('\n');
+    }
     (out, losses)
 }
 
@@ -63,7 +69,9 @@ fn blocks_to_string(blocks: &[Block], loose: bool, losses: &mut BTreeSet<Loss>) 
     let sep = if loose { "\n\n" } else { "\n" };
     let mut parts: Vec<String> = Vec::new();
     for b in blocks {
-        if let Some(s) = block_to_string(b, losses) {
+        if let Some(s) = block_to_string(b, losses)
+            && !s.is_empty()
+        {
             parts.push(s);
         }
     }
@@ -85,6 +93,9 @@ fn block_to_string(b: &Block, losses: &mut BTreeSet<Loss>) -> Option<String> {
         }
         Block::BlockQuote(inner) => {
             let body = blocks_to_string(inner, true, losses);
+            if body.is_empty() {
+                return None;
+            }
             let mut out = String::new();
             for (i, line) in body.split('\n').enumerate() {
                 if i > 0 {
@@ -234,6 +245,8 @@ mod tests {
 
     #[test]
     fn invalid_utf8_is_error() {
+        assert_eq!(ReadError::NotUtf8.to_string(), "input is not valid UTF-8");
+        assert_eq!(ReadError::NotUtf8.to_string(), "input is not valid UTF-8");
         assert_eq!(read(b"\xff").unwrap_err(), ReadError::NotUtf8);
     }
 
@@ -274,7 +287,7 @@ mod tests {
             blocks: vec![Block::Paragraph(vec![Inline::Strong(vec![t("a")])])],
         };
         let (s, l) = write(&d);
-        assert_eq!(s, "a");
+        assert_eq!(s, "a\n");
         assert_eq!(l, BTreeSet::from([Loss::Emphasis]));
     }
 
@@ -289,12 +302,12 @@ mod tests {
             blocks: vec![Block::Paragraph(vec![link("x")])],
         };
         let (s, l) = write(&d);
-        assert_eq!(s, "x (https://x)");
+        assert_eq!(s, "x (https://x)\n");
         assert_eq!(l, BTreeSet::from([Loss::Links]));
         let d = Document {
             blocks: vec![Block::Paragraph(vec![link("https://x")])],
         };
-        assert_eq!(write(&d).0, "https://x");
+        assert_eq!(write(&d).0, "https://x\n");
     }
 
     #[test]
@@ -314,7 +327,7 @@ mod tests {
             ])],
         };
         let (s, l) = write(&d);
-        assert_eq!(s, "alt c\nz");
+        assert_eq!(s, "alt c\nz\n");
         assert_eq!(
             l,
             BTreeSet::from([Loss::Images, Loss::InlineCode, Loss::Html])
@@ -330,7 +343,7 @@ mod tests {
         let (s, l) = write(&Document {
             blocks: vec![h(1), para("p")],
         });
-        assert_eq!(s, "H\n\np");
+        assert_eq!(s, "H\n\np\n");
         assert!(l.is_empty());
         let (_, l) = write(&Document { blocks: vec![h(2)] });
         assert_eq!(l, BTreeSet::from([Loss::HeadingLevels]));
@@ -353,7 +366,7 @@ mod tests {
                 blocks: vec![outer]
             })
             .0,
-            "- a\n  - b\n- c"
+            "- a\n  - b\n- c\n"
         );
     }
 
@@ -364,7 +377,7 @@ mod tests {
             tight: true,
             items: vec![vec![para("a")], vec![para("b")]],
         };
-        assert_eq!(write(&Document { blocks: vec![l] }).0, "3. a\n4. b");
+        assert_eq!(write(&Document { blocks: vec![l] }).0, "3. a\n4. b\n");
     }
 
     #[test]
@@ -374,7 +387,7 @@ mod tests {
             tight: false,
             items: vec![vec![para("a")], vec![para("b")]],
         };
-        assert_eq!(write(&Document { blocks: vec![l] }).0, "- a\n\n- b");
+        assert_eq!(write(&Document { blocks: vec![l] }).0, "- a\n\n- b\n");
     }
 
     #[test]
@@ -391,12 +404,75 @@ mod tests {
             ],
         };
         let (s, l) = write(&d);
-        assert_eq!(s, "    x\n\n    y\n\n> q1\n>\n> q2\n\n----");
+        assert_eq!(s, "    x\n\n    y\n\n> q1\n>\n> q2\n\n----\n");
         assert_eq!(l, BTreeSet::from([Loss::Html]));
     }
 
     #[test]
-    fn loss_messages_are_nonempty() {
-        assert_eq!(Loss::Emphasis.message(), "emphasis removed");
+    fn loss_messages_cover_every_variant() {
+        use Loss::*;
+        for l in [
+            Emphasis,
+            InlineCode,
+            Links,
+            Images,
+            Html,
+            HeadingLevels,
+            BlankLines,
+            Whitespace,
+        ] {
+            assert!(!l.message().is_empty());
+        }
+        assert_eq!(Emphasis.message(), "emphasis removed");
+    }
+
+    #[test]
+    fn writer_trailing_newline_exactly_one() {
+        assert_eq!(write(&Document { blocks: vec![] }).0, "");
+        let html_only = Document {
+            blocks: vec![
+                Block::HtmlBlock("<p>".into()),
+                Block::Paragraph(vec![Inline::Html("<b>".into())]),
+            ],
+        };
+        assert_eq!(write(&html_only).0, "");
+        let s = write(&Document {
+            blocks: vec![para("a"), para("b")],
+        })
+        .0;
+        assert!(s.ends_with('\n') && !s.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn writer_skips_empty_blocks() {
+        let d = Document {
+            blocks: vec![
+                para("a"),
+                Block::Paragraph(vec![Inline::Html("<b>".into())]),
+                Block::BlockQuote(vec![]),
+                Block::List {
+                    start: None,
+                    tight: true,
+                    items: vec![],
+                },
+                para("b"),
+            ],
+        };
+        assert_eq!(write(&d).0, "a\n\nb\n");
+    }
+
+    #[test]
+    fn writer_ordered_list_nesting_uses_marker_width() {
+        let inner = Block::List {
+            start: None,
+            tight: true,
+            items: vec![vec![para("b")]],
+        };
+        let l = Block::List {
+            start: Some(1),
+            tight: true,
+            items: vec![vec![para("a"), inner]],
+        };
+        assert_eq!(write(&Document { blocks: vec![l] }).0, "1. a\n   - b\n");
     }
 }
