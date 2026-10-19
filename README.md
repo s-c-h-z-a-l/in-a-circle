@@ -44,7 +44,7 @@ In.A.Circle is built for Wayland from the start, and not only for files.
 ## Principles
 
 - **Zero idle footprint.** No resident process: the wheel starts on the
-  hotkey and exits when done. Measured: 3.6 ms from exec to first frame.
+  hotkey and exits when done.
 - **Tiny.** Our own Wayland wire protocol and our own rasterizer, with
   `libc` as the only dependency. The spikes come in around 350 KB.
 - **CPU, not GPU.** On NVIDIA a GPU context costs 70-90 MB of idle RSS for
@@ -58,8 +58,8 @@ Measured on a tuned desktop ([reference machine](docs/benchmarks/README.md#refer
 | | measured |
 |---|---|
 | idle cost | 0 (no process) |
-| CPU per use, exec to exit | ~0.86 ms |
-| wheel on screen after start | 10-19 ms, of which ~1.6 ms is ours (the rest is compositor scheduling) |
+| CPU per use, exec to exit | ~0.86 ms (protocol path; drawing adds ~0.3 ms) |
+| wheel on screen after start | 10-19 ms; the wheel is committed at ~1.6 ms, most of it waiting for the compositor's pointer enter. The rest is compositor scheduling |
 | hover repaint | ~57 µs |
 | peak memory | ~3.3 MB |
 
