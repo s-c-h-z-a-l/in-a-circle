@@ -33,17 +33,11 @@ fn escape(out: &mut String, s: &str) {
 
 fn href(out: &mut String, s: &str) {
     let b = s.as_bytes();
-    for (i, &c) in b.iter().enumerate() {
+    for &c in b {
         match c {
             b'&' => out.push_str("&amp;"),
             b'\'' => out.push_str("&#x27;"),
-            b'%' if i + 2 < b.len()
-                && b[i + 1].is_ascii_hexdigit()
-                && b[i + 2].is_ascii_hexdigit() =>
-            {
-                out.push('%')
-            }
-            c if c.is_ascii_alphanumeric() || b"-_.+!*(),#@?=;:/$~".contains(&c) => {
+            c if c.is_ascii_alphanumeric() || b"-_.+!*(),%#@?=;:/$~".contains(&c) => {
                 out.push(c as char)
             }
             c => out.push_str(&format!("%{c:02X}")),
@@ -78,7 +72,11 @@ fn block(out: &mut String, b: &Block, tight: bool) {
         Block::CodeBlock { info, text } => {
             cr(out);
             out.push_str("<pre><code");
-            if let Some(lang) = info.split_whitespace().next() {
+            if !info.is_empty() {
+                let end = info
+                    .find(|c: char| c.is_ascii_whitespace() || c == '\u{b}')
+                    .unwrap_or(info.len());
+                let lang = &info[..end];
                 out.push_str(" class=\"language-");
                 escape(out, lang);
                 out.push('"');
@@ -339,6 +337,21 @@ mod tests {
     }
 
     #[test]
+    fn code_info_splits_on_ascii_whitespace_only() {
+        let c = |info: &str| {
+            doc(vec![Block::CodeBlock {
+                info: info.into(),
+                text: String::new(),
+            }])
+        };
+        assert_eq!(c("a\tb"), "<pre><code class=\"language-a\"></code></pre>\n");
+        assert_eq!(
+            c("a\u{a0}b c"),
+            "<pre><code class=\"language-a\u{a0}b\"></code></pre>\n"
+        );
+    }
+
+    #[test]
     fn html_block_verbatim() {
         let h = Block::HtmlBlock("<div>\n*x*".into());
         assert_eq!(
@@ -362,8 +375,8 @@ mod tests {
             doc(vec![link("foo%20b\u{e4}")]),
             "<p><a href=\"foo%20b%C3%A4\">x</a></p>\n"
         );
-        assert_eq!(doc(vec![link("100%")]), "<p><a href=\"100%25\">x</a></p>\n");
-        assert_eq!(doc(vec![link("%4")]), "<p><a href=\"%254\">x</a></p>\n");
+        assert_eq!(doc(vec![link("100%")]), "<p><a href=\"100%\">x</a></p>\n");
+        assert_eq!(doc(vec![link("%4")]), "<p><a href=\"%4\">x</a></p>\n");
         assert_eq!(
             doc(vec![link("a?x=1&y='2'#f")]),
             "<p><a href=\"a?x=1&amp;y=&#x27;2&#x27;#f\">x</a></p>\n"
@@ -414,5 +427,28 @@ mod tests {
             alt: vec![],
         }]);
         assert_eq!(doc(vec![n]), "<p><img src=\"u\" alt=\"\" /></p>\n");
+    }
+
+    #[test]
+    fn image_alt_plain_branches() {
+        let i = Block::Paragraph(vec![Inline::Image {
+            dest: "u".into(),
+            title: String::new(),
+            alt: vec![
+                Inline::Text("a".into()),
+                Inline::Html("<b>".into()),
+                Inline::SoftBreak,
+                Inline::HardBreak,
+                Inline::Image {
+                    dest: "v".into(),
+                    title: String::new(),
+                    alt: t("in\""),
+                },
+            ],
+        }]);
+        assert_eq!(
+            doc(vec![i]),
+            "<p><img src=\"u\" alt=\"a&lt;b&gt;  in&quot;\" /></p>\n"
+        );
     }
 }
