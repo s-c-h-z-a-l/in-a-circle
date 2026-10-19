@@ -33,7 +33,10 @@ it's a bug.
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
    - binary: <= 500 KB
-   - dependencies: `libc` only, unless justified by a measurement
+   - dependencies of shipped binaries: `libc` only, unless justified by a
+     measurement. Build- and test-time tools may use a few pinned crates
+     (e.g. offline atlas baking, test-suite loaders); a check keeps them
+     out of the shipped binaries' dependency tree.
 3. **CPU rendering, damage-only.** Measured: a GPU context costs 70-90 MB RSS
    idle on NVIDIA for a ~2 ms gain on a static overlay. Redraw only what changed.
    (See `spikes/render-bench/`.)
