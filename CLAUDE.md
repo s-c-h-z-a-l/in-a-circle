@@ -21,8 +21,10 @@ it's a bug.
 2. **Budgets, measured.** Architecture decisions need numbers (see
    `docs/benchmarks/`). New code must stay within these budgets; past them,
    grill and fix. Within them, don't chase invisible microseconds.
-   - our time from exec to wheel commit: <= 2 ms
-   - CPU per invocation: <= 1 ms
+   - our CPU on the critical path (exec to wheel commit): <= 1 ms.
+     Waiting for the compositor (configure, pointer enter) is measured and
+     reported separately, not budgeted; do our work during those waits.
+   - CPU per invocation (exec to exit): <= 1 ms
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
    - binary: <= 500 KB
@@ -65,6 +67,8 @@ it's a bug.
 - Wayland client: **own wire protocol**, `libc` only (see `spikes/wire/`).
   Same latency as wayland-client, 1 dependency instead of 18, 344 KB vs
   607 KB binary. Opcodes must be checked against the protocol XMLs.
+  Events that carry an fd must take it even when ignored; treat
+  `MSG_CTRUNC` as an error.
 - Overlay: wlr-layer-shell.
 - Text: alpha glyph atlas baked offline at the exact sizes used (scale 1
   and 2), embedded in the binary. No runtime font parsing.
@@ -73,9 +77,19 @@ it's a bug.
 - Process model: **spawn-per-use** (measured: a resident daemon presents no
   faster, and the hotkey spawns a process either way). Zero idle cost.
 - Surface: full-screen layer surface with a 1x1 buffer scaled by
-  wp_viewporter (cursor position + focus), wheel in a subsurface.
+  wp_viewporter (cursor position + focus), wheel in a subsurface with an
+  **empty input region**, so all pointer and drag events land on the
+  parent. Paint the wheel while waiting for the cursor position; only the
+  subsurface position depends on it.
+- File input: **drag into the circle** (`wl_data_device`): grab files,
+  press the hotkey, drop on a slice. Accept copy only, never request the
+  `DELETE` target. During a drag the position comes from
+  `wl_data_device.enter`/`motion`, not `wl_pointer.enter`.
 - Context: keyboard focus -> selection/clipboard offers; classify by MIME
   type, read data lazily.
+- Safety: single instance (`flock`), and a hard deadline on every wait,
+  data pipe reads included. A full-screen overlay that hangs locks the
+  user out of the desktop.
 
 ## Conventions
 
