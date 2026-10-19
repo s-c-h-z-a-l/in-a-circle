@@ -43,6 +43,18 @@ fn mono_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+/// CPU time (user + system) this process has used so far, in µs.
+fn cpu_us() -> u64 {
+    // SAFETY: getrusage writes into the zeroed struct.
+    let ru = unsafe {
+        let mut ru: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut ru);
+        ru
+    };
+    let tv = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+    tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
 fn runtime_path(name: &str) -> String {
     format!(
         "{}/{name}",
@@ -554,7 +566,7 @@ fn run(wl: &mut Wl, st: &mut St, kbd_mode: u32) {
             wl.req(ws, 6, &[]);
             wl.req(surface, 6, &[]); // synced subsurface: parent commit applies it
             busy[0] = true;
-            st.note("wheel committed");
+            st.note(format!("wheel committed, cpu so far {} us", cpu_us()));
         }
         if placed
             && st.hover != shown
