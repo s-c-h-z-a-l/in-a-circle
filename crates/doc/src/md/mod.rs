@@ -1,9 +1,17 @@
-//! Markdown (CommonMark) writer. The key property: text and line breaks of
-//! the tree render exactly as written, so plain text converts to Markdown
-//! without changing what the Markdown shows.
+//! Markdown (CommonMark) reader and writer.
+//!
+//! Writer: text and line breaks of the tree render exactly as written, so
+//! plain text converts to Markdown without changing what the Markdown shows.
+//!
+//! Reader: CommonMark 0.31.2 in two phases. `block` builds the block tree
+//! and collects link reference definitions (`Refs`); then the raw text of
+//! every paragraph and heading goes through `inlines`, the seam where the
+//! inline parser plugs in. Until it does, that text stays one `Text`.
 
-use crate::{Block, Document, Inline, Loss};
-use std::collections::BTreeSet;
+mod block;
+
+use crate::{Block, Document, Inline, Loss, ReadError};
+use std::collections::{BTreeSet, HashMap};
 
 /// Writes CommonMark. Text is escaped so that it can never be read as
 /// structure: the characters `\ ` * _ [ ] < > & | ! #` always get a
@@ -17,6 +25,80 @@ use std::collections::BTreeSet;
 /// one `\n`, empty output is `""`. Adjacent lists alternate `-`/`*` and
 /// `.`/`)` so they stay separate lists. Recurses over nested blocks; the
 /// readers bound nesting depth.
+/// Reads CommonMark 0.31.2. NUL characters become U+FFFD; invalid UTF-8
+/// is an error. Container nesting deeper than 256 block quotes/list items
+/// is not opened: the extra markers stay text.
+///
+/// Two phases, as in the spec's parsing strategy: `block` builds the block
+/// structure and collects link reference definitions, then every
+/// paragraph's and heading's raw text goes through `inlines`.
+pub fn read(bytes: &[u8]) -> Result<Document, ReadError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ReadError::NotUtf8)?;
+    let doc = if text.contains('\0') {
+        block::parse(&text.replace('\0', "\u{fffd}"))
+    } else {
+        block::parse(text)
+    };
+    Ok(doc)
+}
+
+/// A link reference definition; `dest` and `title` are unescaped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkDef {
+    pub dest: String,
+    pub title: String,
+}
+
+/// Link reference definitions by [`normalize_label`]ed label; the first
+/// definition of a label wins.
+pub(crate) type Refs = HashMap<String, LinkDef>;
+
+/// Inline seam between the two phases. `raw` is a paragraph's or heading's
+/// content: lines joined with `\n`, each line's leading spaces/tabs and the
+/// block's final whitespace removed; interior trailing spaces are kept (they
+/// decide hard breaks). `refs` holds every definition of the document.
+///
+/// Until the inline parser exists this is the raw text as one `Text`.
+fn inlines(raw: &str, refs: &Refs) -> Vec<Inline> {
+    let _ = refs;
+    vec![Inline::Text(raw.to_string())]
+}
+
+/// Matching form of a link label: Unicode case fold (approximated as
+/// lowercase-then-uppercase, so `ẞ`, `ß` and `SS` match), internal runs of
+/// whitespace collapsed to one space, ends trimmed.
+pub(crate) fn normalize_label(label: &str) -> String {
+    let folded = label.to_lowercase().to_uppercase();
+    let mut out = String::with_capacity(folded.len());
+    for word in folded.split_ascii_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Resolves backslash escapes (`\` before ASCII punctuation), as needed for
+/// link destinations, titles and code info strings. Entity and numeric
+/// character references belong here too; they come with the entity table.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\'
+            && let Some(&n) = chars.peek()
+            && n.is_ascii_punctuation()
+        {
+            out.push(n);
+            chars.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn write(doc: &Document) -> (String, BTreeSet<Loss>) {
     let mut losses = BTreeSet::new();
     let mut out = blocks_to_string(&doc.blocks, true, &mut losses);
@@ -411,6 +493,45 @@ mod tests {
     fn doc(blocks: Vec<Block>) -> Document {
         Document { blocks }
     }
+    #[test]
+    fn read_rejects_invalid_utf8() {
+        assert_eq!(read(b"a\xffb"), Err(ReadError::NotUtf8));
+        assert_eq!(read(b"\xe2\x82"), Err(ReadError::NotUtf8));
+    }
+
+    #[test]
+    fn read_replaces_nul() {
+        assert_eq!(read(b"a\0b").unwrap(), doc(vec![para("a\u{fffd}b")]));
+        let code = Block::CodeBlock {
+            info: String::new(),
+            text: "\u{fffd}\n".into(),
+        };
+        assert_eq!(read(b"    \0").unwrap(), doc(vec![code]));
+    }
+
+    #[test]
+    fn read_empty() {
+        assert_eq!(read(b"").unwrap(), doc(vec![]));
+        assert_eq!(read(b" \n\t\n").unwrap(), doc(vec![]));
+    }
+
+    #[test]
+    fn label_normalization() {
+        assert_eq!(
+            normalize_label("  Foo \t\n BAR "),
+            normalize_label("foo bar")
+        );
+        assert_eq!(normalize_label("ẞ"), normalize_label("ss"));
+        assert_eq!(normalize_label(" \n "), "");
+        assert_ne!(normalize_label("a\\b"), normalize_label("ab"));
+    }
+
+    #[test]
+    fn unescape_punctuation_only() {
+        assert_eq!(unescape(r"\*a\b\\\"), r"*a\b\\");
+        assert_eq!(unescape("\\é"), "\\é");
+    }
+
     fn md(s: &str) -> String {
         write(&doc(vec![para(s)])).0
     }
