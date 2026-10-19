@@ -203,8 +203,10 @@ fn dispatch(wl: &mut Wl, st: &mut St) {
             }
             (Some(DataDevice), 2) => {
                 st.note(format!("DND LEAVE, hover={}", seg(st.hover)));
-                st.dnd = None;
+                // The compositor sends leave right after drop; the offer stays
+                // valid until we finish it.
                 if !st.dropped {
+                    st.dnd = None;
                     st.quit = Some("drag left or was cancelled".into());
                 }
             }
