@@ -1,6 +1,7 @@
 //! Shared document model of the text family: one reader and one writer per
 //! format, all going through this tree.
 
+pub mod html;
 pub mod md;
 pub mod txt;
 
