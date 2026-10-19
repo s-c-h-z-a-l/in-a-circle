@@ -16,6 +16,10 @@
 //! the recursion of the conversion, of every writer and of `Drop`. Every
 //! line costs O(depth + length), so parsing is linear in the input.
 
+use super::scan::{
+    close_tag, is_space_or_tab, link_destination, link_label, link_title, open_tag, peek,
+    skip_spaces, skip_spnl, utf8,
+};
 use super::{LinkDef, Refs, inlines, normalize_label, unescape};
 use crate::{Block, Document};
 
@@ -111,14 +115,6 @@ fn run(text: &str) -> Parser {
         p.current = p.finalize(p.current);
     }
     p
-}
-
-fn peek(b: &[u8], i: usize) -> u8 {
-    b.get(i).copied().unwrap_or(0)
-}
-
-fn is_space_or_tab(c: u8) -> bool {
-    c == b' ' || c == b'\t'
 }
 
 fn is_line_end(c: u8) -> bool {
@@ -997,18 +993,13 @@ fn html_block_start(s: &[u8], in_paragraph: bool) -> Option<u8> {
     if in_paragraph {
         return None;
     }
+    // Like cmark, any complete open or closing tag qualifies, including
+    // `pre`/`script`/`style`/`textarea` forms that type 1 did not take
+    // (such as `<pre/>` or `</pre>`).
     let len = if s.get(1) == Some(&b'/') {
         close_tag(s)?
     } else {
-        let len = open_tag(s)?;
-        let n = rest
-            .iter()
-            .take_while(|c| c.is_ascii_alphanumeric() || **c == b'-')
-            .count();
-        if RAW_TAGS.iter().any(|t| t.eq_ignore_ascii_case(&rest[..n])) {
-            return None;
-        }
-        len
+        open_tag(s)?
     };
     s[len..].iter().all(|&c| is_space_or_tab(c)).then_some(7)
 }
@@ -1025,200 +1016,6 @@ fn html_block_end(t: u8, s: &[u8]) -> bool {
         5 => s.windows(3).any(|w| w == b"]]>"),
         _ => false,
     }
-}
-
-/// Spaces, tabs and up to one line ending (whitespace inside a tag).
-fn skip_tag_space(s: &[u8], mut i: usize) -> usize {
-    while is_space_or_tab(peek(s, i)) {
-        i += 1;
-    }
-    if peek(s, i) == b'\r' {
-        i += 1;
-        if peek(s, i) == b'\n' {
-            i += 1;
-        }
-    } else if peek(s, i) == b'\n' {
-        i += 1;
-    }
-    while is_space_or_tab(peek(s, i)) {
-        i += 1;
-    }
-    i
-}
-
-fn tag_name_end(s: &[u8], i: usize) -> Option<usize> {
-    if !peek(s, i).is_ascii_alphabetic() {
-        return None;
-    }
-    let n = s[i..]
-        .iter()
-        .take_while(|c| c.is_ascii_alphanumeric() || **c == b'-')
-        .count();
-    Some(i + n)
-}
-
-/// A complete HTML open tag at the start of `s` (which begins with `<`):
-/// its length. Shared with raw inline HTML.
-pub(super) fn open_tag(s: &[u8]) -> Option<usize> {
-    let mut i = tag_name_end(s, 1)?;
-    loop {
-        let j = skip_tag_space(s, i);
-        let c = peek(s, j);
-        if j == i || !(c.is_ascii_alphabetic() || c == b'_' || c == b':') {
-            i = j;
-            break;
-        }
-        let k = j + s[j..]
-            .iter()
-            .take_while(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(c))
-            .count();
-        let v = skip_tag_space(s, k);
-        if peek(s, v) != b'=' {
-            i = k;
-            continue;
-        }
-        let w = skip_tag_space(s, v + 1);
-        i = match peek(s, w) {
-            q @ (b'"' | b'\'') => {
-                let close = s[w + 1..].iter().position(|&c| c == q)?;
-                w + 1 + close + 1
-            }
-            _ => {
-                let n = s[w..]
-                    .iter()
-                    .take_while(|c| !b" \t\n\r\"'=<>`".contains(c))
-                    .count();
-                if n == 0 {
-                    return None;
-                }
-                w + n
-            }
-        };
-    }
-    if peek(s, i) == b'/' {
-        i += 1;
-    }
-    (peek(s, i) == b'>').then_some(i + 1)
-}
-
-/// A complete HTML closing tag at the start of `s`: its length.
-pub(super) fn close_tag(s: &[u8]) -> Option<usize> {
-    if !s.starts_with(b"</") {
-        return None;
-    }
-    let i = skip_tag_space(s, tag_name_end(s, 2)?);
-    (peek(s, i) == b'>').then_some(i + 1)
-}
-
-fn skip_spaces(s: &[u8], mut i: usize) -> usize {
-    while is_space_or_tab(peek(s, i)) {
-        i += 1;
-    }
-    i
-}
-
-/// Spaces and tabs with at most one line ending among them.
-fn skip_spnl(s: &[u8], i: usize) -> usize {
-    let mut i = skip_spaces(s, i);
-    if peek(s, i) == b'\n' {
-        i = skip_spaces(s, i + 1);
-    }
-    i
-}
-
-/// Link label `[...]` at `i`: (end after `]`, the text inside). At most 999
-/// characters, no unescaped brackets. Shared with the inline parser.
-pub(super) fn link_label(s: &[u8], i: usize) -> Option<(usize, &[u8])> {
-    if peek(s, i) != b'[' {
-        return None;
-    }
-    let mut j = i + 1;
-    let mut chars = 0;
-    loop {
-        let c = *s.get(j)?;
-        match c {
-            b']' => return Some((j + 1, &s[i + 1..j])),
-            b'[' => return None,
-            b'\\' if s.get(j + 1).is_some_and(u8::is_ascii_punctuation) => {
-                j += 2;
-                chars += 2;
-            }
-            _ => {
-                j += 1;
-                if c & 0xC0 != 0x80 {
-                    chars += 1;
-                }
-            }
-        }
-        if chars > 999 {
-            return None;
-        }
-    }
-}
-
-/// Link destination at `i`: (end, raw text without `<>`). `<...>` may be
-/// empty; a bare destination is non-empty, has no spaces or controls and
-/// balanced parentheses. Shared with the inline parser.
-pub(super) fn link_destination(s: &[u8], i: usize) -> Option<(usize, &[u8])> {
-    if peek(s, i) == b'<' {
-        let mut j = i + 1;
-        loop {
-            match *s.get(j)? {
-                b'>' => return Some((j + 1, &s[i + 1..j])),
-                b'\\' if s.get(j + 1).is_some_and(u8::is_ascii_punctuation) => j += 2,
-                b'\n' | b'\r' | b'<' => return None,
-                _ => j += 1,
-            }
-        }
-    }
-    let mut j = i;
-    let mut depth = 0u32;
-    while let Some(&c) = s.get(j) {
-        match c {
-            b'\\' if s.get(j + 1).is_some_and(u8::is_ascii_punctuation) => j += 2,
-            b'(' => {
-                depth += 1;
-                if depth > 32 {
-                    return None;
-                }
-                j += 1;
-            }
-            b')' if depth == 0 => break,
-            b')' => {
-                depth -= 1;
-                j += 1;
-            }
-            c if c <= b' ' || c == 0x7f => break,
-            _ => j += 1,
-        }
-    }
-    (j > i && depth == 0).then(|| (j, &s[i..j]))
-}
-
-/// Link title (`"..."`, `'...'` or `(...)`) at `i`: (end, raw text inside).
-/// Shared with the inline parser.
-pub(super) fn link_title(s: &[u8], i: usize) -> Option<(usize, &[u8])> {
-    let close = match peek(s, i) {
-        b'"' => b'"',
-        b'\'' => b'\'',
-        b'(' => b')',
-        _ => return None,
-    };
-    let mut j = i + 1;
-    loop {
-        match *s.get(j)? {
-            b'\\' if s.get(j + 1).is_some_and(u8::is_ascii_punctuation) => j += 2,
-            c if c == close => return Some((j + 1, &s[i + 1..j])),
-            b'(' if close == b')' => return None,
-            _ => j += 1,
-        }
-    }
-}
-
-fn utf8(b: &[u8]) -> &str {
-    // Every scanner splits only at ASCII bytes, so slices of valid UTF-8
-    // stay valid.
-    std::str::from_utf8(b).unwrap_or_default()
 }
 
 /// Link reference definition at the start of `s`: (consumed length
@@ -1494,18 +1291,12 @@ mod tests {
     }
 
     #[test]
-    fn tags() {
-        assert_eq!(open_tag(b"<a href='x' b=c d>"), Some(18));
-        assert_eq!(open_tag(b"<a\n b=\"1\"/>z"), Some(11));
-        assert_eq!(open_tag(b"<a b=>"), None);
-        assert_eq!(open_tag(b"<a\n\nb>"), None);
-        assert_eq!(open_tag(b"<1>"), None);
-        assert_eq!(open_tag(b"<a b='x>"), None);
-        assert_eq!(close_tag(b"</a-1 >"), Some(7));
-        assert_eq!(close_tag(b"</a b>"), None);
+    fn html_block_starts() {
         assert_eq!(html_block_start(b"<x-y z>", false), Some(7));
         assert_eq!(html_block_start(b"<x-y z>", true), None);
         assert_eq!(html_block_start(b"</pre>", false), Some(7));
+        assert_eq!(html_block_start(b"<pre/>", false), Some(7));
+        assert_eq!(html_block_start(b"<textarea/>", true), None);
         assert_eq!(html_block_start(b"<pre x>", true), Some(1));
         assert_eq!(html_block_start(b"<DIV/>", true), Some(6));
         assert_eq!(html_block_start(b"<divx>", false), Some(7));

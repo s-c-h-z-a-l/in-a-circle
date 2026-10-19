@@ -9,6 +9,7 @@
 //! inline parser plugs in. Until it does, that text stays one `Text`.
 
 mod block;
+mod scan;
 
 use crate::{Block, Document, Inline, Loss, ReadError};
 use std::collections::{BTreeSet, HashMap};

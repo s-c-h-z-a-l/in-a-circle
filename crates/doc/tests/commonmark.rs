@@ -46,6 +46,18 @@ fn spec_examples() {
     let sections: Option<Vec<String>> = std::env::var("COMMONMARK_SECTIONS")
         .ok()
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
+    if let Some(names) = &sections {
+        for name in names {
+            assert!(
+                examples
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["section"].as_str() == Some(name.as_str())),
+                "COMMONMARK_SECTIONS names an unknown section: {name:?}"
+            );
+        }
+    }
     for (n, why) in SKIP {
         assert!(!why.is_empty(), "SKIP entry {n} needs a reason");
     }
