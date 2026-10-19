@@ -52,6 +52,11 @@ it's a bug.
   action contract; change it only by decision.
 - Every benchmark that informs a decision gets a page in `docs/benchmarks/`
   (method, machine, numbers, verdict, how to reproduce), committed with it.
+- **Process files stay private.** Specs, implementation plans, review
+  notes and other working documents produced by skills or agents go to
+  `notes/` (e.g. `notes/specs/`, `notes/plans/`), never into the repo.
+  The public repo holds code, `README.md`, `CLAUDE.md` and `docs/` only:
+  settled, concise, readable. No long generated text files.
 
 ## Git
 
