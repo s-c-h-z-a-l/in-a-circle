@@ -65,6 +65,8 @@ Measured on a tuned desktop ([reference machine](docs/benchmarks/README.md#refer
 
 ## Repository
 
+- [`docs/architecture.md`](docs/architecture.md): how it is put together,
+  and why
 - [`docs/benchmarks/`](docs/benchmarks): the measurements and the decisions
   they drove
 - [`spikes/`](spikes): throwaway code that produced those numbers (not the

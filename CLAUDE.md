@@ -48,7 +48,8 @@ it's a bug.
 
 - `notes/` is **private**, gitignored, never committed. Brainstorming, drafts.
 - `docs/` is **public**. Settled design decisions and roadmap. Promote from
-  `notes/` once decided.
+  `notes/` once decided. `docs/architecture.md` is the engine and the
+  action contract; change it only by decision.
 - Every benchmark that informs a decision gets a page in `docs/benchmarks/`
   (method, machine, numbers, verdict, how to reproduce), committed with it.
 
