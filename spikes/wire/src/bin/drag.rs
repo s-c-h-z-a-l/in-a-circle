@@ -55,6 +55,15 @@ fn cpu_us() -> u64 {
     tv(ru.ru_utime) + tv(ru.ru_stime)
 }
 
+/// Name of the process that spawned us (niri for a keybind, a shell...).
+fn parent_name() -> String {
+    // SAFETY: getppid(2) cannot fail.
+    let ppid = unsafe { libc::getppid() };
+    std::fs::read_to_string(format!("/proc/{ppid}/comm"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| format!("pid {ppid}"))
+}
+
 fn runtime_path(name: &str) -> String {
     format!(
         "{}/{name}",
@@ -85,7 +94,8 @@ struct St {
 impl St {
     fn note(&mut self, msg: impl AsRef<str>) {
         let ms = (mono_ns() - self.t0) as f64 / 1e6;
-        let _ = writeln!(self.log, "{ms:9.3} ms  {}", msg.as_ref());
+        let cpu = cpu_us();
+        let _ = writeln!(self.log, "{ms:9.3} ms  cpu {cpu:5} us  {}", msg.as_ref());
     }
 
     /// First cursor position wins: it decides where the wheel goes.
@@ -346,7 +356,10 @@ fn main() {
         motions: 0,
         quit: None,
     };
-    st.note(format!("--- drag probe, keyboard={mode}"));
+    st.note(format!(
+        "--- drag probe, keyboard={mode}, parent={}",
+        parent_name()
+    ));
 
     // Single instance: a held hotkey may spawn us many times.
     let lock = std::fs::OpenOptions::new()
@@ -566,7 +579,7 @@ fn run(wl: &mut Wl, st: &mut St, kbd_mode: u32) {
             wl.req(ws, 6, &[]);
             wl.req(surface, 6, &[]); // synced subsurface: parent commit applies it
             busy[0] = true;
-            st.note(format!("wheel committed, cpu so far {} us", cpu_us()));
+            st.note("wheel committed");
         }
         if placed
             && st.hover != shown
