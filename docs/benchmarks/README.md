@@ -13,7 +13,7 @@ Spike code lives in [`spikes/`](../../spikes).
 | 5 | Which surface strategy? Daemon or spawn-per-use? | 1x1 buffer + wp_viewporter + subsurface; spawn-per-use (a daemon presents no faster). | [surface-strategy.md](surface-strategy.md) |
 | 6 | wayland-client or our own wire protocol? | Our own: 1 dependency instead of 18, 344 KB vs 607 KB, same latency. | [wire-protocol.md](wire-protocol.md) |
 | 7 | SDF atlas or baked alpha for text? | Baked alpha at exact sizes: reference quality, 19x faster, ~92 KB for 2 sizes x 2 scales. | [text-rendering.md](text-rendering.md) |
-| 8 | How do selected files reach the wheel? | Plain selection is invisible over protocols; Nautilus reports it via its extension API. Native extension + universal Ctrl+C fallback. | [file-manager-input.md](file-manager-input.md) |
+| 8 | Can the wheel see the file manager's selection? | Not cleanly: invisible over protocols; Ctrl+C, a Nautilus extension or AT-SPI each cost too much. Rejected in favor of #9. | [file-manager-input.md](file-manager-input.md) |
 | 9 | Grab a file, press the hotkey, drop it on a slice? | Works over the standard protocol: exact URIs from Nautilus and Thunar, copy-only. | [drag-into-circle.md](drag-into-circle.md) |
 
 ## Reference machine
