@@ -86,6 +86,8 @@ struct St {
     /// Current drag: offer id, enter serial, whether we accept right now.
     dnd: Option<(u32, u32, bool)>,
     dropped: bool,
+    /// Offer whose URI list we try to read before the drop.
+    early_read: Option<u32>,
     released: Vec<u32>,
     motions: u32,
     quit: Option<String>,
@@ -220,6 +222,7 @@ fn dispatch(wl: &mut Wl, st: &mut St) {
                     // Copy only: with move, the source deletes the original.
                     wl.req(id, 4, &[U(DND_COPY), U(DND_COPY)]);
                     st.dnd = Some((id, serial, false));
+                    st.early_read = Some(id);
                     update_accept(wl, st);
                 }
             }
@@ -285,6 +288,76 @@ fn tag(st: &St, surf: u32) -> &'static str {
 }
 
 /// Read the drop payload with a hard deadline; the source app may hang.
+/// Question for the drop-first design: does the source hand over the URI
+/// list during the drag, before the drop? Read it, then sniff the first
+/// file's first bytes, as a classifier would.
+fn early_read(wl: &mut Wl, st: &mut St, id: u32) {
+    let mut fds = [0; 2];
+    // SAFETY: valid 2-element array.
+    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    // SAFETY: fresh descriptors we own.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    wl.req(id, 1, &[S(URI_LIST), Fd(w.as_fd())]);
+    wl.flush().expect("flush");
+    drop(w);
+    let t = mono_ns();
+    let payload = read_payload(r);
+    let us = (mono_ns() - t) / 1000;
+    match payload {
+        Ok(p) if !p.is_empty() => {
+            let text = String::from_utf8_lossy(&p);
+            let uris: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+            st.note(format!(
+                "EARLY uri-list BEFORE DROP: {} bytes in {us} us, {} URIs",
+                p.len(),
+                uris.len()
+            ));
+            if let Some(first) = uris.first() {
+                st.note(format!("EARLY first file: {}", sniff(first)));
+            }
+        }
+        Ok(_) => st.note(format!("EARLY uri-list: EMPTY after {us} us")),
+        Err(e) => st.note(format!("EARLY uri-list FAILED after {us} us: {e}")),
+    }
+}
+
+/// Decode a file:// URI and report the first bytes of the file.
+fn sniff(uri: &str) -> String {
+    let Some(path) = uri.trim().strip_prefix("file://") else {
+        return format!("not a local file: {uri}");
+    };
+    let b = path.as_bytes();
+    let mut raw = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                b.get(i + 1).and_then(|&c| hex(c)),
+                b.get(i + 2).and_then(|&c| hex(c)),
+            )
+        {
+            raw.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            raw.push(b[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8_lossy(&raw).into_owned();
+    let t = mono_ns();
+    let mut head = [0u8; 8];
+    let n = std::fs::File::open(&path)
+        .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+        .unwrap_or(0);
+    let hex: Vec<String> = head[..n].iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{path} head={} ({} us)",
+        hex.join(" "),
+        (mono_ns() - t) / 1000
+    )
+}
+
 fn read_payload(r: OwnedFd) -> Result<Vec<u8>, String> {
     // SAFETY: fcntl on a valid fd we own.
     unsafe {
@@ -352,6 +425,7 @@ fn main() {
         offers: Vec::new(),
         dnd: None,
         dropped: false,
+        early_read: None,
         released: Vec::new(),
         motions: 0,
         quit: None,
@@ -614,6 +688,11 @@ fn run(wl: &mut Wl, st: &mut St, kbd_mode: u32) {
                 seg(new),
                 (mono_ns() - t) / 1000
             ));
+        }
+        if let Some(id) = st.early_read.take()
+            && !st.dropped
+        {
+            early_read(wl, st, id);
         }
         if st.dropped {
             take_drop(wl, st);
