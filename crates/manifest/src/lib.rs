@@ -27,19 +27,15 @@ impl Line {
         }
     }
 
-    /// Appends a bare value. It must not contain `=`, or it would read back
-    /// as a pair; that is a programming error (debug assertion).
+    /// Appends a bare value (any string; `=` is escaped on write).
     pub fn bare(mut self, v: &str) -> Line {
-        debug_assert!(!v.contains('='), "bare value must not contain '='");
         self.items.push(Item::Bare(v.to_owned()));
         self
     }
 
-    /// Appends a `key=value` pair. The key must not contain `=`: the split
-    /// happens at the first unescaped `=` and keys have no escape for it, so
-    /// such a key is a programming error (debug assertion).
+    /// Appends a `key=value` pair (any strings; `=` in the key is escaped on
+    /// write, in the value it may stay raw).
     pub fn pair(mut self, k: &str, v: &str) -> Line {
-        debug_assert!(!k.contains('='), "key must not contain '='");
         self.items.push(Item::Pair(k.to_owned(), v.to_owned()));
         self
     }
@@ -68,9 +64,13 @@ pub fn header(magic: &str, version: u32) -> String {
     format!("{magic} {version}\n")
 }
 
-fn escape_into(out: &mut String, s: &str) {
-    for c in s.chars() {
+/// Escapes `s`. `eq` also escapes `=` (kinds, keys, bare values; pair values
+/// may keep it raw). `lead` escapes a leading `#` so the line is not a comment.
+fn escape_into(out: &mut String, s: &str, eq: bool, lead: bool) {
+    for (i, c) in s.chars().enumerate() {
         match c {
+            '=' if eq => out.push_str("\\="),
+            '#' if lead && i == 0 => out.push_str("\\#"),
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
             '\n' => out.push_str("\\n"),
@@ -93,6 +93,8 @@ fn unescape(s: &str) -> Result<String, String> {
             Some('t') => out.push('\t'),
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
+            Some('=') => out.push('='),
+            Some('#') => out.push('#'),
             Some(o) => return Err(format!("unknown escape \\{o}")),
             None => return Err("dangling backslash".to_owned()),
         }
@@ -103,20 +105,34 @@ fn unescape(s: &str) -> Result<String, String> {
 /// Serializes one line: tab-separated, escaped, terminated by `\n`.
 pub fn write_line(line: &Line) -> String {
     let mut out = String::new();
-    escape_into(&mut out, &line.kind);
+    escape_into(&mut out, &line.kind, true, true);
     for item in &line.items {
         out.push('\t');
         match item {
-            Item::Bare(v) => escape_into(&mut out, v),
+            Item::Bare(v) => escape_into(&mut out, v, true, false),
             Item::Pair(k, v) => {
-                escape_into(&mut out, k);
+                escape_into(&mut out, k, true, false);
                 out.push('=');
-                escape_into(&mut out, v);
+                escape_into(&mut out, v, false, false);
             }
         }
     }
     out.push('\n');
     out
+}
+
+/// Splits at the first `=` not preceded by an escaping backslash.
+fn split_pair(f: &str) -> Option<(&str, &str)> {
+    let mut esc = false;
+    for (i, c) in f.char_indices() {
+        match c {
+            _ if esc => esc = false,
+            '\\' => esc = true,
+            '=' => return Some((&f[..i], &f[i + 1..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_at(s: &str, no: usize) -> Result<Line, Error> {
@@ -131,8 +147,8 @@ fn parse_at(s: &str, no: usize) -> Result<Line, Error> {
         items: Vec::new(),
     };
     for f in fields {
-        // Split before unescaping: only a raw `=` separates key from value.
-        let item = match f.split_once('=') {
+        // Split before unescaping: only an unescaped `=` separates key from value.
+        let item = match split_pair(f) {
             Some((k, v)) => Item::Pair(unescape(k).map_err(err)?, unescape(v).map_err(err)?),
             None => Item::Bare(unescape(f).map_err(err)?),
         };
@@ -233,6 +249,24 @@ mod tests {
         let e = parse("m 1\nx\ta=\\q\n", "m").unwrap_err();
         assert_eq!(e.line, 2);
         assert!(parse_line("x\tdangling\\").is_err());
+    }
+
+    #[test]
+    fn eq_and_hash_roundtrip_in_bare_key_kind() {
+        let line = Line::new("#k=ind")
+            .bare("/tmp/a=b -> c\td")
+            .pair("we=ird\\", "v=al")
+            .bare("=");
+        let text = write_line(&line);
+        assert_eq!(parse_line(&text).unwrap(), line);
+        let (_, lines) = parse(&format!("m 1\n{text}"), "m").unwrap();
+        assert_eq!(lines, vec![line]);
+    }
+
+    #[test]
+    fn empty_kind_is_error() {
+        assert_eq!(parse_line("\ta=1").unwrap_err().line, 1);
+        assert_eq!(parse("m 1\n\tx\n", "m").unwrap_err().line, 2);
     }
 
     #[test]
