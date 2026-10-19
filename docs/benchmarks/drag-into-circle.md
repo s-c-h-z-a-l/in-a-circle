@@ -19,6 +19,12 @@ negotiated action, the drop, and the payload. It was triggered by a
 temporary niri keybind (`Super+F1 repeat=false`). The tests were done by
 hand on throwaway files.
 
+**What the probe is not:** the drop target was the whole tinted
+full-screen surface, with **no keyboard focus** (`KeyboardInteractivity::None`)
+and **no wheel subsurface**. "Wheel mapped" below means that surface.
+Slice targeting, Esc to cancel, and the real surface layout are untested
+(see Open).
+
 ## Results (niri 26.04)
 
 | file manager | files | wheel mapped | drag enters wheel | drop | payload | action |
@@ -53,6 +59,16 @@ All source files stayed in place.
   KDE)?
 - Slice selection from `wl_data_device.motion` coordinates (hover, drop
   position); not logged yet.
+- **Keyboard focus during a drag.** Esc needs `Exclusive` keyboard
+  interactivity. Does taking focus from the source app cancel or alter
+  its drag?
+- **Cursor position.** During a drag there is no `wl_pointer.enter` (the
+  drag owns the pointer), so the wheel's position must come from
+  `wl_data_device.enter`/`motion`, which arrives with the first movement.
+- **Wheel subsurface needs an empty input region.** Data device enter and
+  leave are per surface, with a new offer on every enter. With an empty
+  input region on the wheel, all pointer and drag events go to the
+  full-screen parent, in one coordinate space, with one offer.
 
 ## Reproduce
 
