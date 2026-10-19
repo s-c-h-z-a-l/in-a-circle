@@ -8,11 +8,27 @@ const MANIFEST: &str = "inacircle-manifest 0\n\
 action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=no\tbatch=yes\n\
 action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
 
-fn tmp(name: &str) -> PathBuf {
+/// A unique temporary directory, removed on drop.
+struct Tmp(PathBuf);
+
+impl std::ops::Deref for Tmp {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn tmp(name: &str) -> Tmp {
     let d = std::env::temp_dir().join(format!("inacircle-text-test-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
-    d
+    Tmp(d)
 }
 
 fn run_raw(id: &str, work: &Path, inputs: &[&Path]) -> Output {
@@ -97,15 +113,31 @@ fn md_to_txt_warns() {
     assert_eq!(o.status.code(), Some(0));
     let out = stdout(&o);
     assert_eq!(lines(&out, "done").len(), 1);
-    let warns: Vec<&str> = lines(&out, "warn").iter().map(|f| f[2]).collect();
-    assert!(warns.contains(&"emphasis removed"), "{warns:?}");
-    assert!(warns.contains(&"links flattened to text"), "{warns:?}");
-    let mut sorted = warns.clone();
-    sorted.dedup();
-    assert_eq!(sorted.len(), warns.len(), "duplicate warns");
-    for f in lines(&out, "warn") {
-        assert_eq!(f[1], a.to_str().unwrap());
-    }
+    let warns: Vec<Vec<&str>> = lines(&out, "warn");
+    let expected: Vec<Vec<&str>> = ["emphasis removed", "links flattened to text"]
+        .iter()
+        .map(|m| vec!["warn", a.to_str().unwrap(), m])
+        .collect();
+    assert_eq!(warns, expected);
+}
+
+#[test]
+fn each_loss_is_warned_once_in_stable_order() {
+    let root = tmp("once");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.txt");
+    fs::write(&a, "one\n\n\n\ntwo  spaced\n\n\n\nthree\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0));
+    let out = stdout(&o);
+    let warns = lines(&out, "warn");
+    let msgs: Vec<&str> = warns.iter().map(|f| f[2]).collect();
+    // Several blank-line runs: still one warn; reader and writer losses both present.
+    assert_eq!(
+        msgs,
+        ["repeated blank lines merged", "whitespace normalized"]
+    );
 }
 
 #[test]
@@ -179,14 +211,50 @@ fn io_errors_fail_per_input() {
 }
 
 #[test]
-fn only_io_failures_exit_0_with_fail_lines() {
+fn all_fail_exit_1() {
     let root = tmp("onlyfail");
     let work = root.join("work");
     fs::create_dir_all(&work).unwrap();
     let missing = root.join("missing.txt");
-    let o = run_raw("text.txt-to-md", &work, &[&missing]);
+    let dir = root.join("adir");
+    fs::create_dir_all(&dir).unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&missing, &dir]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(lines(&stdout(&o), "fail").len(), 2);
+}
+
+#[test]
+fn done_plus_fail_exit_0() {
+    let root = tmp("donefail");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let good = root.join("g.txt");
+    fs::write(&good, "x\n").unwrap();
+    let missing = root.join("missing.txt");
+    let o = run_raw("text.txt-to-md", &work, &[&good, &missing]);
     assert_eq!(o.status.code(), Some(0));
-    assert_eq!(lines(&stdout(&o), "fail").len(), 1);
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "done").len(), 1);
+    assert_eq!(lines(&out, "fail").len(), 1);
+}
+
+#[test]
+fn unsupported_plus_unusable_output_exit_1() {
+    let root = tmp("unsupfail");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    // Output dir "1" cannot be created: a file sits in its place.
+    fs::write(work.join("1"), "block").unwrap();
+    let bad = root.join("bad.txt");
+    fs::write(&bad, b"\xff").unwrap();
+    let good = root.join("g.txt");
+    fs::write(&good, "x\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&bad, &good]);
+    assert_eq!(o.status.code(), Some(1));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "skip").len(), 1);
+    assert_eq!(lines(&out, "fail").len(), 1);
+    assert!(lines(&out, "done").is_empty());
 }
 
 #[test]

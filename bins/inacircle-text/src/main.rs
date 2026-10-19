@@ -40,10 +40,9 @@ impl Conversion {
     fn convert(self, bytes: &[u8]) -> Result<(String, BTreeSet<Loss>), ReadError> {
         match self {
             Conversion::TxtToMd => {
-                let (d, mut losses) = doc::txt::read(bytes)?;
+                let (d, losses) = doc::txt::read(bytes)?;
                 let (text, more) = doc::md::write(&d);
-                losses.extend(more);
-                Ok((text, losses))
+                Ok((text, merge_losses(losses, more)))
             }
             Conversion::MdToTxt => {
                 let d = doc::md::read(bytes)?;
@@ -53,12 +52,17 @@ impl Conversion {
     }
 }
 
+/// Union of the reader's and the writer's losses: a loss both report is one
+/// loss, so it yields one `warn`. `Loss` order keeps the output stable.
+fn merge_losses(mut reader: BTreeSet<Loss>, writer: BTreeSet<Loss>) -> BTreeSet<Loss> {
+    reader.extend(writer);
+    reader
+}
+
 enum Outcome {
     Done,
     Unsupported,
     Failed,
-    /// The output location itself is unusable (as opposed to one bad input).
-    OutputUnusable,
 }
 
 fn process(
@@ -90,12 +94,12 @@ fn process(
         Ok(p) => p,
         Err(e) => {
             ev.fail(input, &format!("cannot create output: {e}"));
-            return Outcome::OutputUnusable;
+            return Outcome::Failed;
         }
     };
     if let Err(e) = fs::write(&out, text) {
         ev.fail(input, &format!("cannot write output: {e}"));
-        return Outcome::OutputUnusable;
+        return Outcome::Failed;
     }
     ev.done(input, out.strip_prefix(&inv.work).unwrap_or(&out));
     for loss in losses {
@@ -111,22 +115,22 @@ fn run(inv: &Invocation, conv: Conversion) -> u8 {
     }
     let mut ev = Events::new(io::stdout().lock());
     let n = inv.inputs.len();
-    let (mut unsupported, mut unusable) = (0, 0);
+    let (mut done, mut failed) = (0, 0);
     for (i, input) in inv.inputs.iter().enumerate() {
         match process(conv, inv, i, input, &mut ev) {
-            Outcome::Unsupported => unsupported += 1,
-            Outcome::OutputUnusable => unusable += 1,
-            Outcome::Done | Outcome::Failed => {}
+            Outcome::Done => done += 1,
+            Outcome::Failed => failed += 1,
+            Outcome::Unsupported => {}
         }
         ev.progress((i + 1) as f32 / n as f32);
     }
-    if unusable == n {
-        eprintln!("cannot write into the work directory");
-        action::EXIT_FAILED as u8
-    } else if unsupported == n {
-        action::EXIT_UNSUPPORTED as u8
-    } else {
+    // Batch rule: any `done` -> 0; else any `fail` -> 1; else all unsupported -> 3.
+    if done > 0 {
         action::EXIT_OK as u8
+    } else if failed > 0 {
+        action::EXIT_FAILED as u8
+    } else {
+        action::EXIT_UNSUPPORTED as u8
     }
 }
 
@@ -147,4 +151,17 @@ fn main() -> ExitCode {
         return ExitCode::from(action::EXIT_USAGE as u8);
     };
     ExitCode::from(run(&inv, conv))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loss_reported_by_reader_and_writer_is_one() {
+        let r = BTreeSet::from([Loss::Whitespace, Loss::BlankLines]);
+        let w = BTreeSet::from([Loss::Whitespace]);
+        let merged: Vec<Loss> = merge_losses(r, w).into_iter().collect();
+        assert_eq!(merged, [Loss::BlankLines, Loss::Whitespace]);
+    }
 }

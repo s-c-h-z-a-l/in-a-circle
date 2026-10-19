@@ -108,7 +108,9 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 
   stderr is free-form; on failure its last lines go into the message.
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
-  the file's), 3 unsupported input.
+  the file's), 3 unsupported input. For a batch: 0 if at least one input
+  produced `done`; otherwise 1 if any input produced `fail`; 3 only when
+  every input was unsupported.
 - Cancel with `SIGTERM`; the engine removes the temp dir either way. The
   engine sets `RLIMIT_FSIZE` on the action, which caps output size for
   every plugin (archive bombs) without any plugin code.
