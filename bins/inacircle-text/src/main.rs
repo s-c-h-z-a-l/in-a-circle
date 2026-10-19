@@ -1,0 +1,150 @@
+//! `inacircle-text`: the text family. txt -> md is lossless, md -> txt is
+//! lossy and reports what it dropped. Contract v0 (docs/architecture.md).
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
+use std::process::ExitCode;
+
+use action::{Command, Events, Invocation, parse_args};
+use doc::{Loss, ReadError};
+
+const MANIFEST: &str = "inacircle-manifest 0\n\
+action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=no\tbatch=yes\n\
+action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
+
+#[derive(Clone, Copy)]
+enum Conversion {
+    TxtToMd,
+    MdToTxt,
+}
+
+impl Conversion {
+    fn from_id(id: &str) -> Option<Conversion> {
+        match id {
+            "text.txt-to-md" => Some(Conversion::TxtToMd),
+            "text.md-to-txt" => Some(Conversion::MdToTxt),
+            _ => None,
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Conversion::TxtToMd => "md",
+            Conversion::MdToTxt => "txt",
+        }
+    }
+
+    /// Converted text plus every loss from the reader and the writer.
+    fn convert(self, bytes: &[u8]) -> Result<(String, BTreeSet<Loss>), ReadError> {
+        match self {
+            Conversion::TxtToMd => {
+                let (d, mut losses) = doc::txt::read(bytes)?;
+                let (text, more) = doc::md::write(&d);
+                losses.extend(more);
+                Ok((text, losses))
+            }
+            Conversion::MdToTxt => {
+                let d = doc::md::read(bytes)?;
+                Ok(doc::txt::write(&d))
+            }
+        }
+    }
+}
+
+enum Outcome {
+    Done,
+    Unsupported,
+    Failed,
+    /// The output location itself is unusable (as opposed to one bad input).
+    OutputUnusable,
+}
+
+fn process(
+    conv: Conversion,
+    inv: &Invocation,
+    i: usize,
+    input: &Path,
+    ev: &mut Events<impl Write>,
+) -> Outcome {
+    if input.to_str().is_none() {
+        ev.skip(input, "non-UTF-8 path");
+        return Outcome::Unsupported;
+    }
+    let bytes = match fs::read(input) {
+        Ok(b) => b,
+        Err(e) => {
+            ev.fail(input, &e.to_string());
+            return Outcome::Failed;
+        }
+    };
+    let (text, losses) = match conv.convert(&bytes) {
+        Ok(r) => r,
+        Err(ReadError::NotText) => {
+            ev.skip(input, "unsupported");
+            return Outcome::Unsupported;
+        }
+    };
+    let out = match action::output_path(&inv.work, i, input, conv.ext()) {
+        Ok(p) => p,
+        Err(e) => {
+            ev.fail(input, &format!("cannot create output: {e}"));
+            return Outcome::OutputUnusable;
+        }
+    };
+    if let Err(e) = fs::write(&out, text) {
+        ev.fail(input, &format!("cannot write output: {e}"));
+        return Outcome::OutputUnusable;
+    }
+    ev.done(input, out.strip_prefix(&inv.work).unwrap_or(&out));
+    for loss in losses {
+        ev.warn(input, loss.message());
+    }
+    Outcome::Done
+}
+
+fn run(inv: &Invocation, conv: Conversion) -> u8 {
+    if !inv.work.is_dir() {
+        eprintln!("work directory does not exist: {}", inv.work.display());
+        return action::EXIT_FAILED as u8;
+    }
+    let mut ev = Events::new(io::stdout().lock());
+    let n = inv.inputs.len();
+    let (mut unsupported, mut unusable) = (0, 0);
+    for (i, input) in inv.inputs.iter().enumerate() {
+        match process(conv, inv, i, input, &mut ev) {
+            Outcome::Unsupported => unsupported += 1,
+            Outcome::OutputUnusable => unusable += 1,
+            Outcome::Done | Outcome::Failed => {}
+        }
+        ev.progress((i + 1) as f32 / n as f32);
+    }
+    if unusable == n {
+        eprintln!("cannot write into the work directory");
+        action::EXIT_FAILED as u8
+    } else if unsupported == n {
+        action::EXIT_UNSUPPORTED as u8
+    } else {
+        action::EXIT_OK as u8
+    }
+}
+
+fn main() -> ExitCode {
+    let inv = match parse_args(std::env::args_os().skip(1)) {
+        Ok(Command::Manifest) => {
+            let _ = io::stdout().write_all(MANIFEST.as_bytes());
+            return ExitCode::SUCCESS;
+        }
+        Ok(Command::Run(inv)) => inv,
+        Err(msg) => {
+            eprintln!("inacircle-text: {msg}");
+            return ExitCode::from(action::EXIT_USAGE as u8);
+        }
+    };
+    let Some(conv) = Conversion::from_id(&inv.action) else {
+        eprintln!("inacircle-text: unknown action {}", inv.action);
+        return ExitCode::from(action::EXIT_USAGE as u8);
+    };
+    ExitCode::from(run(&inv, conv))
+}
