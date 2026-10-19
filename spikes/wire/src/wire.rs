@@ -5,6 +5,9 @@
 //! args are 32-bit words; strings/arrays are length-prefixed and padded to 4;
 //! fds travel out of band in ancillary data, in order.
 
+// Shared by two binaries; each uses a subset.
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -16,6 +19,7 @@ pub enum Iface {
     Callback,
     Compositor,
     Surface,
+    Region,
     Shm,
     ShmPool,
     Buffer,
@@ -42,6 +46,8 @@ pub enum Arg<'a> {
     U(u32),
     I(i32),
     S(&'a str),
+    /// Null string or null object: a zero word.
+    Null,
     Fd(BorrowedFd<'a>),
 }
 
@@ -173,6 +179,7 @@ impl Wl {
         for a in args {
             match a {
                 Arg::U(v) => self.out.extend(v.to_ne_bytes()),
+                Arg::Null => self.out.extend(0u32.to_ne_bytes()),
                 Arg::I(v) => self.out.extend(v.to_ne_bytes()),
                 Arg::S(s) => {
                     let len = s.len() + 1;
@@ -269,6 +276,10 @@ impl Wl {
                 io::ErrorKind::UnexpectedEof,
                 "compositor closed",
             ));
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            // fds were dropped by the kernel; every later fd would be misassigned.
+            return Err(io::Error::other("fd ancillary data truncated"));
         }
         self.inb.extend_from_slice(&buf[..n as usize]);
         // SAFETY: iterating cmsgs the kernel wrote into cbuf.
