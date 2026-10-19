@@ -80,7 +80,8 @@ fn escape_into(out: &mut String, s: &str, eq: bool, lead: bool) {
     }
 }
 
-fn unescape(s: &str) -> Result<String, String> {
+/// Reverses the escapes of `write_line` for a single field (for line-per-value files).
+pub fn unescape(s: &str) -> Result<String, String> {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
     while let Some(c) = it.next() {

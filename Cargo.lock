@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "action"
+version = "0.0.0"
+dependencies = [
+ "manifest",
+]
+
+[[package]]
 name = "doc"
 version = "0.0.0"
 dependencies = [
