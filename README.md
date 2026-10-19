@@ -58,10 +58,10 @@ Measured on a tuned desktop ([reference machine](docs/benchmarks/README.md#refer
 | | measured |
 |---|---|
 | idle cost | 0 (no process) |
-| CPU per use, exec to exit | ~0.86 ms (protocol path; drawing adds ~0.3 ms) |
+| our CPU, start to wheel committed | ~0.5 ms (process start adds 0.3-1.9 ms, depending on what spawns it) |
 | wheel on screen after start | 10-19 ms; the wheel is committed at ~1.6 ms, most of it waiting for the compositor's pointer enter. The rest is compositor scheduling |
-| hover repaint | ~57 µs |
-| peak memory | ~3.3 MB |
+| hover repaint | ~14 µs |
+| peak memory | ~3.5 MB |
 
 ## Repository
 

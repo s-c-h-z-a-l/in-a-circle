@@ -21,10 +21,12 @@ it's a bug.
 2. **Budgets, measured.** Architecture decisions need numbers (see
    `docs/benchmarks/`). New code must stay within these budgets; past them,
    grill and fix. Within them, don't chase invisible microseconds.
-   - our CPU on the critical path (exec to wheel commit): <= 1 ms.
-     Waiting for the compositor (configure, pointer enter) is measured and
-     reported separately, not budgeted; do our work during those waits.
-   - CPU per invocation (exec to exit): <= 1 ms
+   - our CPU from `main` to wheel commit: <= 1 ms. Waiting for the
+     compositor (configure, pointer enter) and the cost before `main`
+     (exec, loader, the spawner's teardown: ~1 ms under niri) are measured
+     and reported, not budgeted. Do our work during compositor waits.
+   - hover repaint: <= 100 µs per event
+   - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
    - binary: <= 500 KB
@@ -73,7 +75,9 @@ it's a bug.
 - Text: alpha glyph atlas baked offline at the exact sizes used (scale 1
   and 2), embedded in the binary. No runtime font parsing.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
-  no rasterizer dependency. Coverage mask + LUT, damage-only repaint.
+  no rasterizer dependency. One-octant coverage table mirrored by the
+  wheel's symmetry + LUT. Damage-only repaint, damaged against what is on
+  screen, not against the buffer being drawn.
 - Process model: **spawn-per-use** (measured: a resident daemon presents no
   faster, and the hotkey spawns a process either way). Zero idle cost.
 - Surface: full-screen layer surface with a 1x1 buffer scaled by

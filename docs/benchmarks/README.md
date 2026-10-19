@@ -7,14 +7,14 @@ Spike code lives in [`spikes/`](../../spikes).
 | # | Question | Verdict | Page |
 |---|---|---|---|
 | 1 | GPU or CPU rendering? | CPU. A GPU context costs 70-90 MB idle for a ~2 ms gain. | [render-backends.md](render-backends.md) |
-| 2 | Rasterizer dependency or our own? | Our own: 17x faster hover repaint than tiny-skia, 7 MB vs 61 MB peak at full screen. | [render-backends.md](render-backends.md#own-rasterizer-cpu-sdf) |
-| 3 | Where does startup latency go? | Our work is ~0.6 ms; the compositor owns the rest. | [latency.md](latency.md) |
+| 2 | Rasterizer dependency or our own? | Our own: one-octant table, ~0.4 ms cold first paint, ~14 µs hover repaint (tiny-skia: ~1 ms each). | [render-backends.md](render-backends.md#own-rasterizer-cpu-sdf) |
+| 3 | Where does startup latency (and CPU) go? | Our work is ~0.5 ms CPU from `main`; the compositor owns the rest, and niri's spawn adds ~1 ms CPU before `main`. | [latency.md](latency.md) |
 | 4 | How expensive is context detection? | ~1.2 ms over pure protocols; MIME types are enough to classify. | [context-detection.md](context-detection.md) |
 | 5 | Which surface strategy? Daemon or spawn-per-use? | 1x1 buffer + wp_viewporter + subsurface; spawn-per-use (a daemon presents no faster). | [surface-strategy.md](surface-strategy.md) |
 | 6 | wayland-client or our own wire protocol? | Our own: 1 dependency instead of 18, 344 KB vs 607 KB, same latency. | [wire-protocol.md](wire-protocol.md) |
 | 7 | SDF atlas or baked alpha for text? | Baked alpha at exact sizes: reference quality, 19x faster, ~92 KB for 2 sizes x 2 scales. | [text-rendering.md](text-rendering.md) |
 | 8 | Can the wheel see the file manager's selection? | Not cleanly: invisible over protocols; Ctrl+C, a Nautilus extension or AT-SPI each cost too much. Rejected in favor of #9. | [file-manager-input.md](file-manager-input.md) |
-| 9 | Grab a file, press the hotkey, drop it on a slice? | Works over the standard protocol: exact URIs from Nautilus and Thunar, copy-only. | [drag-into-circle.md](drag-into-circle.md) |
+| 9 | Grab a file, press the hotkey, drop it on a slice? | Works over the standard protocol, on the real surface layout, with keyboard focus: exact URIs, copy-only, Esc cancels. The wheel appears on the first movement during a drag. | [drag-into-circle.md](drag-into-circle.md) |
 
 ## Reference machine
 

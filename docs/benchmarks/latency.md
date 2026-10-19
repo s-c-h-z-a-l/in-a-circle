@@ -39,6 +39,33 @@ keybind uses, minus input handling). 30 runs each.
 - An own wire protocol could save at most 0.1-0.2 ms here, so it is not a
   latency decision (see [wire-protocol.md](wire-protocol.md)).
 
+## Startup CPU: ours vs the spawner's
+
+Measured later with the [integration probe](drag-into-circle.md#integration-probe-the-real-surface-layout)
+(`getrusage` at each step) and a no-op binary that only reads its CPU
+time at `main`. 5-15 runs each, p50.
+
+| | CPU at `main` | `main` to wheel commit | exec to commit |
+|---|---|---|---|
+| probe, spawned by niri (keybind) | 1.52-1.94 ms | 0.45-0.52 ms | 2.0-2.5 ms |
+| probe, spawned by an interactive zsh | 0.58-0.63 ms | 0.44-0.49 ms | 1.06-1.11 ms |
+| no-op, dynamic, via `niri msg action spawn` | 1.54 ms | | |
+| no-op, static (glibc), via niri | 1.45 ms | | |
+| no-op, dynamic, from a shell | 0.50 ms | | |
+| no-op, static (glibc), from a shell | 0.34 ms | | |
+
+- **Our work is ~0.47 ms CPU** from `main` to the wheel commit, whoever
+  spawns us. ~0.4 ms of it is the first paint (mostly page faults on the
+  fresh buffer), done while the compositor works out the cursor.
+- **Before `main`, the cost depends on the parent.** niri's spawn path adds
+  ~1 ms to any binary, even a no-op. Most likely the child inherits a copy
+  of niri's large address space at fork and tears it down at exec; not
+  verified in niri's source.
+- **Static linking saves ~100-150 µs** before `main`, but a static glibc
+  binary is 1.25 MB, over the 500 KB budget. musl is untested.
+- Hence the budget counts from `main`; the pre-`main` cost is measured and
+  reported, not budgeted.
+
 ## Reproduce
 
 ```sh

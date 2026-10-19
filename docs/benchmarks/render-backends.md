@@ -68,7 +68,22 @@ intermediate pixmap.
 | tiny-skia (reference) | ~1000 µs | ~1000 µs (always full) | 1.2 MB |
 | v1: naive, libm `atan2` | ~5000 µs | 1590 µs | 0.2 MB |
 | v2: fast atan, row spans, no memset | ~2700 µs | 845 µs | 0.2 MB |
-| **v3: coverage mask + color LUT** | **~300 µs** (incl. mask) | **~57 µs** | 0.65 MB* |
+| v3: coverage mask + color LUT | ~1200 µs† (mask ~1000) | ~57 µs | 0.65 MB* |
+| **v4: one-octant table, mirrored, no atan2** | **~400 µs** cold (table ~100, paint ~100, page faults ~180) | **~14 µs** | 58 KB table |
+
+† Originally reported as ~300 µs including the mask. That was wrong: the
+spike double-buffers, and the second buffer's first paint (no mask build)
+overwrote the first one's timing. Measured directly, building the mask
+alone takes ~1 ms.
+
+v4 lives in [`spikes/wire/src/wheel.rs`](../../spikes/wire/src/wheel.rs).
+The 8 segments are 45° each and their boundaries lie on the pixel grid's
+mirror axes, so one octant's coverage (boundaries `v = 0` and `u = v`, no
+atan2; sqrt only in the anti-aliased bands) mirrors onto the rest. It is
+stored as a 58 KB quadrant table and painted row by row into the four
+quadrants, so writes stay contiguous. It matches the per-pixel v3 output
+within 2/255. Breakdown: `cargo run --release --example paintcost` in
+`spikes/wire`.
 
 \* The 460 KB mask is freed on hide; malloc keeps the heap. Irrelevant for
 spawn-per-use, because the process exits.
