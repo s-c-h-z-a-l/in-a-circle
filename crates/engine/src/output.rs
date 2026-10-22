@@ -4,16 +4,18 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::RawFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::xdg;
 
 const WORK_PREFIX: &str = ".inacircle-";
+const PROBE_PREFIX: &str = "probe-";
 const MAX_CONFLICT: u32 = 999;
+const NAME_MAX: usize = 255;
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A hidden 0700 scratch directory inside the target folder, so the final
@@ -28,24 +30,97 @@ impl Drop for WorkDir {
     }
 }
 
-/// Removes `path` and everything under it, including read-only files and
-/// directories. Never follows symlinks, never panics; errors are ignored.
+fn last_err<T>() -> io::Result<T> {
+    Err(io::Error::last_os_error())
+}
+
+/// Closes the fd on drop.
+struct Fd(RawFd);
+impl Drop for Fd {
+    fn drop(&mut self) {
+        // SAFETY: self.0 is an open fd owned exclusively by this guard.
+        unsafe { libc::close(self.0) };
+    }
+}
+
+/// Opens a directory relative to `at` (or the cwd for `None`), refusing to
+/// follow a symlink in the last component.
+fn open_dir_nofollow(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: name is a valid NUL-terminated string that outlives the call;
+    // `at` is an open directory fd or AT_FDCWD.
+    let fd = unsafe { libc::openat(at.unwrap_or(libc::AT_FDCWD), name.as_ptr(), flags) };
+    if fd < 0 { last_err() } else { Ok(Fd(fd)) }
+}
+
+/// Entry names of the directory open as `dir` (without `.` and `..`).
+fn list_dir(dir: &Fd) -> Vec<CString> {
+    // SAFETY: dir.0 is an open fd; dup gives fdopendir its own fd to own.
+    let dup = unsafe { libc::fcntl(dir.0, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Vec::new();
+    }
+    // SAFETY: dup is an open directory fd; on success the DIR owns it.
+    let d = unsafe { libc::fdopendir(dup) };
+    if d.is_null() {
+        // SAFETY: fdopendir failed, so dup is still ours to close.
+        unsafe { libc::close(dup) };
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: d is a valid DIR until closedir below.
+        let ent = unsafe { libc::readdir(d) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: readdir returned a valid dirent whose d_name is
+        // NUL-terminated; we copy it before the next readdir call.
+        let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            names.push(name.to_owned());
+        }
+    }
+    // SAFETY: d is a valid DIR, closed exactly once (this also closes dup).
+    unsafe { libc::closedir(d) };
+    names
+}
+
+/// Removes everything under the open directory `dir`. Symlinks are unlinked,
+/// never followed; every step is relative to an fd, so a concurrent swap of
+/// a path component cannot redirect the deletion. Errors are ignored.
+fn empty_dir(dir: &Fd) {
+    // Without owner rwx the directory cannot be entered or emptied.
+    // SAFETY: dir.0 is an open fd.
+    unsafe { libc::fchmod(dir.0, 0o700) };
+    for name in list_dir(dir) {
+        // SAFETY: st is a valid out-pointer; name is NUL-terminated.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::fstatat(dir.0, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+        if r != 0 {
+            continue;
+        }
+        let is_dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+        if let (true, Ok(child)) = (is_dir, open_dir_nofollow(Some(dir.0), &name)) {
+            empty_dir(&child);
+        }
+        let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
+        // SAFETY: dir.0 is an open dir fd, name is NUL-terminated.
+        unsafe { libc::unlinkat(dir.0, name.as_ptr(), flags) };
+    }
+}
+
+/// Removes the directory `path` and everything under it, including
+/// read-only files and directories. `path` itself must be a real directory
+/// (a symlink is left alone). Never panics; errors are ignored.
 fn remove_tree(path: &Path) {
-    let Ok(meta) = fs::symlink_metadata(path) else {
+    let Ok(c) = cstr(path) else { return };
+    let Ok(dir) = open_dir_nofollow(None, &c) else {
         return;
     };
-    if meta.is_dir() {
-        // A directory without owner rwx cannot be listed or emptied.
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-        if let Ok(entries) = fs::read_dir(path) {
-            for e in entries.flatten() {
-                remove_tree(&e.path());
-            }
-        }
-        let _ = fs::remove_dir(path);
-    } else {
-        let _ = fs::remove_file(path);
-    }
+    empty_dir(&dir);
+    // SAFETY: c is a valid NUL-terminated path; rmdir never follows symlinks.
+    unsafe { libc::rmdir(c.as_ptr()) };
 }
 
 fn cstr(p: &Path) -> io::Result<CString> {
@@ -80,7 +155,7 @@ fn mkdir_mode(path: &Path, mode: libc::mode_t) -> io::Result<()> {
     if unsafe { libc::mkdir(c.as_ptr(), mode) } == 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        last_err()
     }
 }
 
@@ -89,7 +164,11 @@ pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
     for _ in 0..16 {
         let path = target_dir.join(format!("{WORK_PREFIX}{:016x}", random_u64()?));
         match mkdir_mode(&path, 0o700) {
-            Ok(()) => return Ok(WorkDir { path }),
+            Ok(()) => {
+                // Independent of the umask.
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                return Ok(WorkDir { path });
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -100,8 +179,24 @@ pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
     ))
 }
 
-/// Removes our own `.inacircle-*` directories older than a day (left by a
-/// crash). Anything else in the folder is untouched.
+fn is_lower_hex16(b: &[u8]) -> bool {
+    b.len() == 16 && b.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Exactly the names we create: `.inacircle-<16 hex>` and
+/// `.inacircle-probe-<16 hex>`.
+fn is_our_name(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(WORK_PREFIX.as_bytes()) else {
+        return false;
+    };
+    is_lower_hex16(rest)
+        || rest
+            .strip_prefix(PROBE_PREFIX.as_bytes())
+            .is_some_and(is_lower_hex16)
+}
+
+/// Removes our own work and probe directories older than a day (left by a
+/// crash). Anything else in the folder is untouched, symlinks included.
 pub fn clean_stale(target_dir: &Path) {
     let Ok(entries) = fs::read_dir(target_dir) else {
         return;
@@ -110,7 +205,7 @@ pub fn clean_stale(target_dir: &Path) {
     let uid = unsafe { libc::getuid() };
     let now = SystemTime::now();
     for e in entries.flatten() {
-        if !e.file_name().as_bytes().starts_with(WORK_PREFIX.as_bytes()) {
+        if !is_our_name(e.file_name().as_bytes()) {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(e.path()) else {
@@ -121,6 +216,8 @@ pub fn clean_stale(target_dir: &Path) {
             .ok()
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age > STALE_AFTER);
+        // symlink_metadata: a symlink is not a dir here, and remove_tree
+        // refuses to open one anyway.
         if meta.is_dir() && meta.uid() == uid && old {
             remove_tree(&e.path());
         }
@@ -131,19 +228,17 @@ pub fn clean_stale(target_dir: &Path) {
 /// (access(2) alone lies on read-only mounts and ACLs), else the download
 /// folder.
 pub fn writable_target(source_dir: &Path) -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let probe = source_dir.join(format!(
-        "{WORK_PREFIX}probe-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let ok = match mkdir_mode(&probe, 0o700) {
-        Ok(()) => {
-            let _ = fs::remove_dir(&probe);
-            true
+    let ok = random_u64().is_ok_and(|r| {
+        let probe = source_dir.join(format!("{WORK_PREFIX}{PROBE_PREFIX}{r:016x}"));
+        match mkdir_mode(&probe, 0o700) {
+            Ok(()) => {
+                let _ = fs::remove_dir(&probe);
+                true
+            }
+            // The name is taken, so the directory accepts new entries.
+            Err(e) => e.kind() == io::ErrorKind::AlreadyExists,
         }
-        Err(_) => false,
-    };
+    });
     if ok {
         source_dir.to_path_buf()
     } else {
@@ -151,7 +246,28 @@ pub fn writable_target(source_dir: &Path) -> PathBuf {
     }
 }
 
-/// `no-replace` move of `from` to `to`. `AlreadyExists` when `to` is taken.
+/// Fallback for filesystems without `RENAME_NOREPLACE`: `link` fails with
+/// `EEXIST` instead of replacing, then the old name is dropped. If that
+/// unlink fails the output is already complete at `to`, so this still
+/// returns `Ok`; the work directory's removal deals with `from`.
+/// Directories cannot be hard-linked and are rejected before linking.
+fn link_then_unlink(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(from)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem cannot move a directory without replacing",
+        ));
+    }
+    let (f, t) = (cstr(from)?, cstr(to)?);
+    // SAFETY: f and t are valid NUL-terminated paths that outlive the call.
+    if unsafe { libc::link(f.as_ptr(), t.as_ptr()) } != 0 {
+        return last_err();
+    }
+    let _ = fs::remove_file(from);
+    Ok(())
+}
+
+/// No-replace move of `from` to `to`. `AlreadyExists` when `to` is taken.
 fn move_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     let (f, t) = (cstr(from)?, cstr(to)?);
     // SAFETY: f and t are valid NUL-terminated paths that outlive the call;
@@ -170,45 +286,63 @@ fn move_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     }
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
-        // Filesystem or kernel without RENAME_NOREPLACE: link fails with
-        // EEXIST rather than replacing, then drop the old name.
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-            // SAFETY: as above.
-            if unsafe { libc::link(f.as_ptr(), t.as_ptr()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            fs::remove_file(from)
-        }
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => link_then_unlink(from, to),
         _ => Err(err),
     }
 }
 
-fn candidate(dir: &Path, stem: &str, suffix: &str, ext: &str, n: u32) -> PathBuf {
-    let mut name = OsString::from(stem);
-    name.push(suffix);
-    if n > 0 {
-        name.push(format!(" ({n})"));
-    }
-    if !ext.is_empty() {
-        name.push(".");
-        name.push(ext);
-    }
-    dir.join(name)
+fn invalid(msg: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
 }
 
-/// Moves `produced` to `dir/<stem><suffix>.<ext>`; a taken name becomes
-/// `name (1).ext` ... `name (999).ext`. Each candidate is tried with an
-/// atomic no-replace move, so nothing is ever overwritten, even under a race.
-pub fn place(
+/// A name part: no `/`, no NUL, not `.` or `..`.
+fn check_part(part: &[u8]) -> io::Result<()> {
+    if part.iter().any(|&b| b == b'/' || b == 0) || part == b"." || part == b".." {
+        return Err(invalid("invalid output name"));
+    }
+    Ok(())
+}
+
+/// `<stem><suffix> (n).<ext>` as bytes. The stem is cut (on a UTF-8
+/// boundary) so the whole name fits in `NAME_MAX`.
+fn candidate(dir: &Path, stem: &[u8], suffix: &[u8], ext: &[u8], n: u32) -> io::Result<PathBuf> {
+    let mut tail = suffix.to_vec();
+    if n > 0 {
+        tail.extend_from_slice(format!(" ({n})").as_bytes());
+    }
+    if !ext.is_empty() {
+        tail.push(b'.');
+        tail.extend_from_slice(ext);
+    }
+    let budget = NAME_MAX.saturating_sub(tail.len());
+    let mut cut = stem.len().min(budget);
+    // Never end inside a multi-byte character.
+    while cut > 0 && cut < stem.len() && stem[cut] & 0xC0 == 0x80 {
+        cut -= 1;
+    }
+    if cut == 0 {
+        return Err(invalid("output name too long"));
+    }
+    let mut name = stem[..cut].to_vec();
+    name.extend_from_slice(&tail);
+    Ok(dir.join(OsString::from_vec(name)))
+}
+
+fn place_bytes(
     produced: &Path,
     dir: &Path,
-    stem: &str,
-    ext: &str,
-    suffix: Option<&str>,
+    stem: &[u8],
+    ext: &[u8],
+    suffix: &[u8],
 ) -> io::Result<PathBuf> {
-    let suffix = suffix.unwrap_or("");
+    if stem.is_empty() {
+        return Err(invalid("empty output stem"));
+    }
+    check_part(stem)?;
+    check_part(ext)?;
+    check_part(suffix)?;
     for n in 0..=MAX_CONFLICT {
-        let target = candidate(dir, stem, suffix, ext, n);
+        let target = candidate(dir, stem, suffix, ext, n)?;
         match move_noreplace(produced, &target) {
             Ok(()) => return Ok(target),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -221,21 +355,49 @@ pub fn place(
     ))
 }
 
-fn split_name(name: &OsStr) -> (String, String) {
-    let name = name.to_string_lossy();
-    match name.rfind('.') {
-        Some(i) if i > 0 => (name[..i].to_string(), name[i + 1..].to_string()),
-        _ => (name.into_owned(), String::new()),
+/// Moves `produced` to `dir/<stem><suffix>.<ext>`; a taken name becomes
+/// `name (1).ext` ... `name (999).ext`. Each candidate is tried with an
+/// atomic no-replace move, so nothing is ever overwritten, even under a race.
+pub fn place(
+    produced: &Path,
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    suffix: Option<&str>,
+) -> io::Result<PathBuf> {
+    place_bytes(
+        produced,
+        dir,
+        stem.as_bytes(),
+        ext.as_bytes(),
+        suffix.unwrap_or("").as_bytes(),
+    )
+}
+
+/// Splits at the last dot (a leading dot is part of the stem).
+fn split_name(name: &OsStr) -> (&[u8], &[u8]) {
+    let b = name.as_bytes();
+    match b.iter().rposition(|&c| c == b'.') {
+        Some(i) if i > 0 => (&b[..i], &b[i + 1..]),
+        _ => (b, &[]),
     }
 }
 
 /// Several outputs from one input: moves them into a fresh `dir/<stem>/`
 /// (a taken folder name becomes `<stem> (1)/` ...), files keep their names.
+/// If one move fails, the files already moved and the folder are removed.
 pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
+    if produced.is_empty() {
+        return Ok(Vec::new());
+    }
+    if stem.is_empty() {
+        return Err(invalid("empty output stem"));
+    }
+    check_part(stem.as_bytes())?;
     let mut folder = None;
     for n in 0..=MAX_CONFLICT {
-        let cand = candidate(dir, stem, "", "", n);
-        match mkdir_mode(&cand, 0o777 & !current_umask()) {
+        let cand = candidate(dir, stem.as_bytes(), b"", b"", n)?;
+        match mkdir_mode(&cand, 0o777) {
             Ok(()) => {
                 folder = Some(cand);
                 break;
@@ -249,30 +411,32 @@ pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Ve
     })?;
     let mut placed = Vec::with_capacity(produced.len());
     for p in produced {
-        let name = p
-            .file_name()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "output has no name"))?;
-        let (s, e) = split_name(name);
-        placed.push(place(p, &folder, &s, &e, None)?);
+        let moved = match p.file_name() {
+            Some(name) => {
+                let (s, e) = split_name(name);
+                place_bytes(p, &folder, s, e, b"")
+            }
+            None => Err(invalid("output has no name")),
+        };
+        match moved {
+            Ok(t) => placed.push(t),
+            Err(e) => {
+                for t in &placed {
+                    let _ = fs::remove_file(t);
+                }
+                let _ = fs::remove_dir(&folder);
+                return Err(e);
+            }
+        }
     }
     Ok(placed)
-}
-
-/// The process umask, read without changing it for longer than the call.
-fn current_umask() -> libc::mode_t {
-    // SAFETY: umask cannot fail; the original mask is restored immediately.
-    unsafe {
-        let m = libc::umask(0o077);
-        libc::umask(m);
-        m
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::xdg::tests::with_env;
-    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -393,19 +557,117 @@ mod tests {
     }
 
     #[test]
-    fn link_fallback_does_not_overwrite() {
-        let t = Tmp::new("link");
+    fn link_then_unlink_moves_to_free_target() {
+        let t = Tmp::new("link-free");
+        let src = file(&t.0, "p", "mine");
+        let to = t.0.join("a.md");
+        link_then_unlink(&src, &to).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(to).unwrap(), "mine");
+    }
+
+    #[test]
+    fn link_then_unlink_never_overwrites() {
+        let t = Tmp::new("link-taken");
         let src = file(&t.0, "p", "mine");
         let taken = file(&t.0, "a.md", "theirs");
-        let (f, to) = (cstr(&src).unwrap(), cstr(&taken).unwrap());
-        // SAFETY: valid NUL-terminated paths outliving the call.
-        let r = unsafe { libc::link(f.as_ptr(), to.as_ptr()) };
-        assert_eq!(r, -1);
-        assert_eq!(
-            io::Error::last_os_error().kind(),
-            io::ErrorKind::AlreadyExists
-        );
+        let e = link_then_unlink(&src, &taken).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(taken).unwrap(), "theirs");
+        assert_eq!(fs::read_to_string(src).unwrap(), "mine");
+    }
+
+    #[test]
+    fn link_then_unlink_rejects_directories() {
+        let t = Tmp::new("link-dir");
+        let d = t.0.join("d");
+        fs::create_dir(&d).unwrap();
+        assert!(link_then_unlink(&d, &t.0.join("e")).is_err());
+        assert!(d.exists() && !t.0.join("e").exists());
+    }
+
+    #[test]
+    fn invalid_names_rejected() {
+        let t = Tmp::new("names");
+        let s = file(&t.0, "p", "x");
+        for (stem, ext, suf) in [
+            ("", "md", ""),
+            ("a/b", "md", ""),
+            ("a\0b", "md", ""),
+            (".", "md", ""),
+            ("..", "md", ""),
+            ("a", "m/d", ""),
+            ("a", "..", ""),
+            ("a", "md", "/x"),
+        ] {
+            let e = place(&s, &t.0, stem, ext, Some(suf)).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "{stem:?} {ext:?} {suf:?}"
+            );
+        }
+        assert!(s.exists());
+        assert!(place_many(std::slice::from_ref(&s), &t.0, "a/b").is_err());
+        assert!(place_many(std::slice::from_ref(&s), &t.0, "").is_err());
+        assert!(s.exists());
+    }
+
+    #[test]
+    fn long_stem_truncated_to_name_max() {
+        let t = Tmp::new("long");
+        file(&t.0, &format!("{}.md", "a".repeat(250)), "o");
+        let stem = "a".repeat(250);
+        let s1 = file(&t.0, "p1", "1");
+        let out = place(&s1, &t.0, &stem, "md", None).unwrap();
+        assert!(out.file_name().unwrap().len() <= 255);
+        assert_eq!(fs::read_to_string(&out).unwrap(), "1");
+        // Multi-byte stem: cut must land on a character boundary.
+        let wide = "é".repeat(130);
+        let s2 = file(&t.0, "p2", "2");
+        let out = place(&s2, &t.0, &wide, "md", None).unwrap();
+        let name = out.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= 255 && name.ends_with(".md"));
+    }
+
+    #[test]
+    fn place_many_empty_and_rollback() {
+        let t = Tmp::new("rollback");
+        assert!(place_many(&[], &t.0, "doc").unwrap().is_empty());
+        assert!(!t.0.join("doc").exists());
+        let a = file(&t.0, "a.png", "1");
+        let missing = t.0.join("missing.png");
+        assert!(place_many(&[a.clone(), missing], &t.0, "doc").is_err());
+        assert!(!t.0.join("doc").exists(), "folder rolled back");
+        assert!(!t.0.join("doc/a.png").exists());
+        assert!(!a.exists(), "moved file was removed by the rollback");
+    }
+
+    #[test]
+    fn place_many_keeps_non_utf8_names() {
+        let t = Tmp::new("bytes");
+        let name = OsString::from_vec(b"x\xff.png".to_vec());
+        let a = t.0.join(&name);
+        fs::write(&a, "1").unwrap();
+        let out = place_many(&[a], &t.0, "doc").unwrap();
+        assert_eq!(out[0], t.0.join("doc").join(&name));
+        assert!(out[0].exists());
+    }
+
+    #[test]
+    fn numbering_goes_before_last_extension() {
+        let t = Tmp::new("ext");
+        let a = file(&t.0, "x.tar.gz", "1");
+        let b = file(&t.0, "y.tar.gz", "2");
+        let out = place_many(&[a], &t.0, "d").unwrap();
+        assert_eq!(out[0], t.0.join("d/x.tar.gz"));
+        let out2 = place_many(&[b], &t.0, "d").unwrap();
+        assert_eq!(out2[0], t.0.join("d (1)/y.tar.gz"));
+        let c = file(&t.0, "z.tar.gz", "3");
+        file(&t.0.join("d"), "z.tar.gz", "o");
+        // Direct conflict inside an existing folder numbers before ".gz".
+        let r = place(&c, &t.0.join("d"), "z.tar", "gz", None).unwrap();
+        assert_eq!(r, t.0.join("d/z.tar (1).gz"));
     }
 
     #[test]
@@ -494,23 +756,76 @@ mod tests {
     #[test]
     fn stale_cleanup_only_ours_and_old() {
         let t = Tmp::new("stale-clean");
-        let old = t.0.join(".inacircle-0000000000000001");
+        let old = t.0.join(".inacircle-00000000000000a1");
+        let old_probe = t.0.join(".inacircle-probe-00000000000000b2");
         let fresh = t.0.join(".inacircle-0000000000000002");
         let other = t.0.join(".other-dir");
-        let plain_file = t.0.join(".inacircle-file");
-        for d in [&old, &fresh, &other] {
+        let mine = t.0.join(".inacircle-mine");
+        let upper = t.0.join(".inacircle-00000000000000A1");
+        let short = t.0.join(".inacircle-abc");
+        let plain_file = t.0.join(".inacircle-0000000000000003");
+        for d in [&old, &old_probe, &fresh, &other, &mine, &upper, &short] {
             fs::create_dir(d).unwrap();
         }
         fs::write(&plain_file, "x").unwrap();
         fs::write(old.join("junk"), "x").unwrap();
-        for p in [&old, &other, &plain_file] {
+        fs::write(mine.join("precious"), "x").unwrap();
+        for p in [&old, &old_probe, &other, &plain_file, &mine, &upper, &short] {
             set_age(p, 2 * 24 * 3600);
         }
         clean_stale(&t.0);
         assert!(!old.exists());
+        assert!(!old_probe.exists());
         assert!(fresh.exists());
         assert!(other.exists());
         assert!(plain_file.exists());
+        assert!(mine.join("precious").exists(), "user folder survives");
+        assert!(upper.exists() && short.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_ignores_symlink() {
+        let t = Tmp::new("stale-link");
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        file(&outside, "keep", "k");
+        let link = t.0.join(".inacircle-00000000000000c3");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        set_age(&outside, 2 * 24 * 3600);
+        set_age(&link, 2 * 24 * 3600);
+        clean_stale(&t.0);
+        assert!(fs::symlink_metadata(&link).is_ok(), "link left alone");
+        assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn drop_does_not_follow_symlinks() {
+        let t = Tmp::new("drop-link");
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        file(&outside, "keep", "k");
+        let w = make_work_dir(&t.0).unwrap();
+        std::os::unix::fs::symlink(&outside, w.path.join("dirlink")).unwrap();
+        std::os::unix::fs::symlink(outside.join("keep"), w.path.join("filelink")).unwrap();
+        let path = w.path.clone();
+        drop(w);
+        assert!(!path.exists());
+        assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn drop_leaves_a_swapped_in_symlink_alone() {
+        let t = Tmp::new("drop-swap");
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        file(&outside, "keep", "k");
+        let w = make_work_dir(&t.0).unwrap();
+        fs::remove_dir(&w.path).unwrap();
+        std::os::unix::fs::symlink(&outside, &w.path).unwrap();
+        let link = w.path.clone();
+        drop(w);
+        assert!(outside.join("keep").exists());
+        fs::remove_file(link).unwrap();
     }
 
     fn set_age(p: &Path, secs: i64) {
@@ -527,7 +842,14 @@ mod tests {
         };
         let times = [t, t];
         // SAFETY: c is a valid path, times points to two timespecs.
-        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        let r = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
         assert_eq!(r, 0);
     }
 }
