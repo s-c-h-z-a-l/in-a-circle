@@ -44,8 +44,10 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Warnings kept per input; the rest are only counted.
 const MAX_WARNINGS: u32 = 16;
-/// `done` outputs accepted per input of one process.
-const MAX_OUTPUTS: usize = 65_536;
+/// `done` outputs accepted from one action process, over all its inputs.
+const MAX_OUTPUTS: usize = 1024;
+/// Total bytes of `done` output paths accepted from one action process.
+const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// Bytes read from one pipe per poll wakeup, so a flood cannot starve the
 /// cancel signalfd or the exit pidfd.
 const READ_QUOTA: usize = 64 * 1024;
@@ -833,8 +835,11 @@ struct Supervisor<'a> {
     root: &'a Path,
     cancel: &'a CancelToken,
     reported: Vec<Reported>,
-    outputs: Vec<Vec<PathBuf>>,
-    seen_outputs: HashSet<PathBuf>,
+    /// `(input index, output)` in report order; each path stored once.
+    outputs: Vec<(usize, PathBuf)>,
+    /// Hashes of `outputs`' paths, for the duplicate check.
+    output_hashes: HashSet<u64>,
+    output_bytes: usize,
     violation: Option<String>,
     cancelled: bool,
     term_at: Option<Instant>,
@@ -958,8 +963,9 @@ impl<'a> Supervisor<'a> {
             root,
             cancel,
             reported: vec![Reported::Nothing; n],
-            outputs: vec![Vec::new(); n],
-            seen_outputs: HashSet::new(),
+            outputs: Vec::new(),
+            output_hashes: HashSet::new(),
+            output_bytes: 0,
             violation: None,
             cancelled: false,
             term_at: None,
@@ -1148,12 +1154,17 @@ impl<'a> Supervisor<'a> {
             Event::Done { index, rel } => {
                 if self.reported[index] == Reported::Final {
                     self.violate(again(&self.step_in.paths, index));
-                } else if self.outputs[index].len() >= MAX_OUTPUTS {
-                    self.violate(format!("more than {MAX_OUTPUTS} outputs for one input"));
-                } else if !self.seen_outputs.insert(rel.clone()) {
+                } else if self.outputs.len() >= MAX_OUTPUTS {
+                    self.violate(format!("more than {MAX_OUTPUTS} outputs"));
+                } else if self.output_bytes + rel.as_os_str().len() > MAX_OUTPUT_BYTES {
+                    self.violate(format!(
+                        "more than {MAX_OUTPUT_BYTES} bytes of output paths"
+                    ));
+                } else if self.is_duplicate(&rel) {
                     self.violate(format!("duplicate output {}", rel.display()));
                 } else {
-                    self.outputs[index].push(rel);
+                    self.output_bytes += rel.as_os_str().len();
+                    self.outputs.push((index, rel));
                     self.reported[index] = Reported::Done;
                 }
             }
@@ -1173,6 +1184,13 @@ impl<'a> Supervisor<'a> {
             }
             Event::Warn { index, message } => sink.warn(origin[index], message),
         }
+    }
+
+    /// Whether `rel` was reported before; records its hash if not.
+    fn is_duplicate(&mut self, rel: &Path) -> bool {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        let h = BuildHasherDefault::<DefaultHasher>::default().hash_one(rel);
+        !self.output_hashes.insert(h) && self.outputs.iter().any(|(_, p)| p == rel)
     }
 
     /// After the exit (child still unreaped): kills what is left of the
@@ -1224,7 +1242,11 @@ impl<'a> Supervisor<'a> {
                 sink.fail(o, reason.clone());
             }
         }
-        Some(self.outputs)
+        let mut per = vec![Vec::new(); self.reported.len()];
+        for (index, rel) in self.outputs {
+            per[index].push(rel);
+        }
+        Some(per)
     }
 }
 

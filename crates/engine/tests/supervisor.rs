@@ -165,3 +165,53 @@ fn cancel_fails_unfinished_inputs_quickly() {
     assert!(!process_with(&token));
     assert!(t.work_dirs_left().is_empty());
 }
+
+/// A script that reports `n` outputs for its first input, each under
+/// `0/<deep>/f<k>` where `<deep>` makes the relative path about `len` bytes.
+fn many_outputs_script(n: usize, len: usize) -> String {
+    let seg = 200;
+    let depth = len.saturating_sub(12) / (seg + 1);
+    let deep: String = (0..depth)
+        .map(|k| format!("/{k}{}", "x".repeat(seg - 1)))
+        .collect();
+    format!(
+        "in=$(head -n1 \"$6\"); rel=0{deep}; d=\"$4/$rel\"; mkdir -p \"$d\"\n\
+         i=0; while [ $i -lt {n} ]; do : > \"$d/f$i\"; printf 'done\\t%s\\t%s\\n' \"$in\" \"$rel/f$i\"; i=$((i+1)); done"
+    )
+}
+
+#[test]
+fn more_than_1024_outputs_is_a_violation() {
+    let t = Tmp::new("outcap");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    let bin = t.script("many", &many_outputs_script(1025, 10));
+    let act = action(&bin, "md");
+    let (r, _) = run(&[&act], &[a.clone(), b.clone()], None);
+    let f = failed(&r);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].0, b);
+    assert!(f[0].1.contains("outputs"), "{}", f[0].1);
+    let done = r
+        .outcomes
+        .iter()
+        .filter(|o| matches!(o, Outcome::Done { .. }))
+        .count();
+    assert_eq!(done, 1024, "the outputs within the cap are placed");
+    assert!(t.work_dirs_left().is_empty());
+}
+
+#[test]
+fn more_than_1_mib_of_output_paths_is_a_violation() {
+    let t = Tmp::new("bytecap");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    // 1000 paths of about 1200 bytes: under the count cap, over 1 MiB.
+    let bin = t.script("long", &many_outputs_script(1000, 1400));
+    let act = action(&bin, "md");
+    let (r, _) = run(&[&act], &[a.clone(), b.clone()], None);
+    let f = failed(&r);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].0, b);
+    assert!(f[0].1.contains("bytes"), "{}", f[0].1);
+}
