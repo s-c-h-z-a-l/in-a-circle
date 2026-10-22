@@ -25,6 +25,9 @@
 //!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr) and
 //!   FS_IOC_ENABLE_VERITY (makes a file immutable). Every other ioctl is
 //!   allowed.
+//! - `setsid` and `setpgid` are denied (`EPERM`; x86_64 has no `setpgrp`
+//!   syscall): the filter is installed after the child's own `setsid`, so
+//!   the action and every descendant stay in one killable process group.
 //! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
 //!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
@@ -308,12 +311,14 @@ mod seccomp {
     const FS_IOC_FSSETXATTR: u32 = 0x401c_5820; // _IOW('X', 32, struct fsxattr)
     const FS_IOC_ENABLE_VERITY: u32 = 0x4080_6685; // _IOW('f', 133, 128-byte arg)
     /// Denied with EPERM.
-    const DENIED: [u32; 24] = [
+    const DENIED: [u32; 26] = [
         90,  // chmod
         91,  // fchmod
         92,  // chown
         93,  // fchown
         94,  // lchown
+        109, // setpgid
+        112, // setsid
         132, // utime
         188, // setxattr
         189, // lsetxattr
@@ -1681,5 +1686,53 @@ pub(crate) mod tests {
         let c = cpath(&input);
         let r = probe(Sb::On(None), move || enable_verity(&c));
         assert_eq!(errno(r), Some(libc::EPERM));
+    }
+
+    /// Runs `f` in a forked grandchild (not a group or session leader, so
+    /// setsid/setpgid would succeed there) and returns its errno.
+    fn in_grandchild(f: fn() -> libc::c_int) -> io::Result<()> {
+        // SAFETY: fork, waitpid and _exit are async-signal-safe; `st` is a
+        // valid out-pointer on this stack.
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                let r = f();
+                let e = if r < 0 { *libc::__errno_location() } else { 0 };
+                libc::_exit(e);
+            }
+            cvt(pid)?;
+            let mut st = 0;
+            cvt(libc::waitpid(pid, &mut st, 0))?;
+            match libc::WEXITSTATUS(st) {
+                0 => Ok(()),
+                e => Err(io::Error::from_raw_os_error(e)),
+            }
+        }
+    }
+
+    fn setsid_call() -> libc::c_int {
+        // SAFETY: no pointers.
+        unsafe { libc::setsid() }
+    }
+
+    fn setpgid_call() -> libc::c_int {
+        // SAFETY: no pointers.
+        unsafe { libc::setpgid(0, 0) }
+    }
+
+    #[test]
+    fn leaving_the_process_group_denied() {
+        if !seccomp_or_skip("leaving_the_process_group_denied") {
+            return;
+        }
+        for (name, f) in [
+            ("setsid", setsid_call as fn() -> _),
+            ("setpgid", setpgid_call),
+        ] {
+            probe(Sb::Off, move || in_grandchild(f))
+                .unwrap_or_else(|e| panic!("control {name}: {e}"));
+            let r = probe(Sb::On(None), move || in_grandchild(f));
+            assert_eq!(errno(r), Some(libc::EPERM), "{name}");
+        }
     }
 }
