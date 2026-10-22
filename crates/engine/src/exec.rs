@@ -42,6 +42,15 @@ const MAX_LINE: usize = 64 * 1024;
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Work dir mtime refresh period (stale dirs are those older than a day).
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
+/// Warnings kept per input; the rest are only counted.
+const MAX_WARNINGS: u32 = 16;
+/// `done` outputs accepted per input of one process.
+const MAX_OUTPUTS: usize = 65_536;
+/// Bytes read from one pipe per poll wakeup, so a flood cannot starve the
+/// cancel signalfd or the exit pidfd.
+const READ_QUOTA: usize = 64 * 1024;
+/// How long the group may take to be gone after its SIGKILL.
+const GROUP_GONE: Duration = Duration::from_secs(1);
 /// Poll period when the kernel has no pidfd (before Linux 5.3).
 const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
 
@@ -71,8 +80,17 @@ pub trait Observer {
 }
 
 /// SIGTERM and SIGINT, blocked in the calling thread and read through a
-/// signalfd, so the supervisor sees a cancel as a poll event. Dropping it
-/// restores the previous signal mask. Not `Send`: the mask is per thread.
+/// signalfd, so the supervisor sees a cancel as a poll event. Not `Send`:
+/// the mask is per thread.
+///
+/// Install it before any other thread is spawned: threads inherit the
+/// mask, and a process-directed SIGTERM delivered to a thread without it
+/// blocked would kill the process instead of cancelling.
+///
+/// Dropping it restores the previous mask, so a cancel signal still
+/// pending then is delivered and terminates the process. The caller checks
+/// [`CancelToken::is_cancelled`] before dropping it (which also consumes
+/// pending signals) and handles a late cancel itself.
 pub struct CancelToken {
     fd: OwnedFd,
     old: libc::sigset_t,
@@ -110,7 +128,7 @@ impl CancelToken {
         }
     }
 
-    /// Consumes pending cancel signals; true once one has arrived.
+    /// Consumes pending cancel signals; true once one has arrived (sticky).
     pub fn is_cancelled(&self) -> bool {
         loop {
             let mut info = std::mem::MaybeUninit::<libc::signalfd_siginfo>::uninit();
@@ -217,6 +235,8 @@ struct Sink<'a> {
     inputs: &'a [PathBuf],
     outcomes: Vec<Outcome>,
     finished: Vec<bool>,
+    /// Warnings shown per input, and those dropped past `MAX_WARNINGS`.
+    warned: Vec<(u32, u64)>,
     done: usize,
     /// Inputs in the groups before the current one.
     base: usize,
@@ -233,6 +253,7 @@ impl<'a> Sink<'a> {
             inputs,
             outcomes: Vec::new(),
             finished: vec![false; inputs.len()],
+            warned: vec![(0, 0); inputs.len()],
             done: 0,
             base: 0,
             span: 0,
@@ -257,19 +278,33 @@ impl<'a> Sink<'a> {
         }
     }
 
+    /// At most one `Failed`/`Skipped` per input (a two-step fan-out can
+    /// report several parts of one input).
     fn fail(&mut self, i: usize, reason: String) {
+        if self.finished[i] {
+            return;
+        }
         let input = self.input(i);
         self.emit(Outcome::Failed { input, reason });
         self.finish(i);
     }
 
     fn skip(&mut self, i: usize, reason: String) {
+        if self.finished[i] {
+            return;
+        }
         let input = self.input(i);
         self.emit(Outcome::Skipped { input, reason });
         self.finish(i);
     }
 
     fn warn(&mut self, i: usize, message: String) {
+        let w = &mut self.warned[i];
+        if w.0 >= MAX_WARNINGS {
+            w.1 += 1;
+            return;
+        }
+        w.0 += 1;
         let input = self.input(i);
         self.emit(Outcome::Warned { input, message });
     }
@@ -303,7 +338,15 @@ impl<'a> Sink<'a> {
         self.obs.progress(done, total, frac.clamp(0.0, 1.0));
     }
 
-    fn report(self, sandboxed: bool) -> Report {
+    fn report(mut self, sandboxed: bool) -> Report {
+        for i in 0..self.inputs.len() {
+            let dropped = self.warned[i].1;
+            if dropped > 0 {
+                let input = self.input(i);
+                let message = format!("{dropped} more warnings");
+                self.emit(Outcome::Warned { input, message });
+            }
+        }
         Report {
             outcomes: self.outcomes,
             sandboxed,
@@ -762,10 +805,22 @@ fn run_step(
     sup.finish(sink)
 }
 
+/// What one input of a process has reported so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reported {
+    Nothing,
+    /// One or more `done` (several outputs are allowed).
+    Done,
+    /// `skip` or `fail`: nothing may follow.
+    Final,
+}
+
 /// The state of one running process.
 struct Supervisor<'a> {
     child: Child,
-    pgid: libc::pid_t,
+    /// The child's pid, which is also its process group id (it calls
+    /// `setsid` in `apply_in_child`).
+    pid: libc::pid_t,
     pidfd: Option<OwnedFd>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -777,12 +832,16 @@ struct Supervisor<'a> {
     dir: &'a Path,
     root: &'a Path,
     cancel: &'a CancelToken,
-    reported: Vec<bool>,
+    reported: Vec<Reported>,
     outputs: Vec<Vec<PathBuf>>,
+    seen_outputs: HashSet<PathBuf>,
     violation: Option<String>,
     cancelled: bool,
     term_at: Option<Instant>,
     killed: bool,
+    /// The child is reaped: its pid, and so the group id, may now be
+    /// reused by an unrelated process. Nothing is signalled after this.
+    reaped: bool,
 }
 
 fn set_nonblocking(fd: RawFd) {
@@ -795,12 +854,47 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-fn pidfd_open(pid: u32) -> Option<OwnedFd> {
+fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
     // SAFETY: pidfd_open takes a pid and flags 0; the child is not reaped
     // yet, so the pid still names it.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
     // SAFETY: a non-negative result is a new fd that we now own.
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Whether our child `pid` has exited, observed without reaping it (the
+/// fallback for kernels without pidfd).
+fn exited_unreaped(pid: libc::pid_t) -> bool {
+    // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
+    // SAFETY: info is a valid out-pointer; WNOWAIT leaves the child unreaped.
+    let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) };
+    // With WNOHANG and no state change, si_pid stays 0.
+    // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
+    r == 0 && unsafe { info.si_pid() } != 0
+}
+
+/// Waits, with signal 0 (which delivers nothing), until process group
+/// `pgid` has no member left; false if it still has one after
+/// `GROUP_GONE`. Called after the leader is reaped (a zombie leader still
+/// counts as a member). If the id were reused meanwhile, the probe could
+/// only report a false "left behind", never touch the other process.
+fn group_gone(pgid: libc::pid_t) -> bool {
+    let start = Instant::now();
+    let mut nap = Duration::from_millis(1);
+    loop {
+        // SAFETY: kill with signal 0 only checks for existence.
+        let r = unsafe { libc::kill(-pgid, 0) };
+        if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return true;
+        }
+        if start.elapsed() >= GROUP_GONE {
+            return false;
+        }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(Duration::from_millis(50));
+    }
 }
 
 /// Sets the mtime (and atime) of `path` to now.
@@ -811,18 +905,24 @@ fn touch(path: &Path) {
     }
 }
 
-/// Reads what is available; `Ok(false)` at EOF.
-fn read_some(r: &mut impl Read, mut f: impl FnMut(&[u8])) -> bool {
+/// Reads at most `READ_QUOTA` bytes, handing each chunk to `f` at once.
+/// Returns (still open, quota used up).
+fn read_quota(r: &mut impl Read, mut f: impl FnMut(&[u8])) -> (bool, bool) {
     let mut buf = [0u8; 8192];
-    loop {
+    let mut got = 0;
+    while got < READ_QUOTA {
         match r.read(&mut buf) {
-            Ok(0) => return false,
-            Ok(k) => f(&buf[..k]),
+            Ok(0) => return (false, false),
+            Ok(k) => {
+                got += k;
+                f(&buf[..k]);
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
-            Err(_) => return false,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return (true, false),
+            Err(_) => return (false, false),
         }
     }
+    (true, true)
 }
 
 impl<'a> Supervisor<'a> {
@@ -843,9 +943,10 @@ impl<'a> Supervisor<'a> {
             set_nonblocking(s.as_raw_fd());
         }
         let n = step_in.paths.len();
+        let pid = child.id() as libc::pid_t;
         Supervisor {
-            pgid: child.id() as libc::pid_t,
-            pidfd: pidfd_open(child.id()),
+            pid,
+            pidfd: pidfd_open(pid),
             child,
             stdout,
             stderr,
@@ -856,20 +957,28 @@ impl<'a> Supervisor<'a> {
             dir,
             root,
             cancel,
-            reported: vec![false; n],
+            reported: vec![Reported::Nothing; n],
             outputs: vec![Vec::new(); n],
+            seen_outputs: HashSet::new(),
             violation: None,
             cancelled: false,
             term_at: None,
             killed: false,
+            reaped: false,
         }
     }
 
+    /// Signals the child's whole process group.
     fn signal(&self, sig: libc::c_int) {
-        // SAFETY: kill has no memory preconditions. The group is the child's
-        // own session (setsid in apply_in_child); the child is not reaped
-        // yet, so its id cannot have been reused.
-        unsafe { libc::kill(-self.pgid, sig) };
+        debug_assert!(!self.reaped, "signal after reap");
+        if self.reaped {
+            return;
+        }
+        // SAFETY: kill has no memory preconditions. The child is not reaped
+        // (checked above), so its pid, which is its process group id, has
+        // not been reused: the group is the action's. setsid/setpgid are
+        // denied in the sandbox, so every descendant is still in it.
+        unsafe { libc::kill(-self.pid, sig) };
     }
 
     fn terminate(&mut self) {
@@ -886,7 +995,7 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// The poll loop, until the child has exited.
+    /// The poll loop, until the child has exited (it stays unreaped).
     fn run(&mut self, sink: &mut Sink) {
         let mut next_refresh = Instant::now() + REFRESH_EVERY;
         loop {
@@ -920,7 +1029,7 @@ impl<'a> Supervisor<'a> {
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                // Unexpected: stop supervising, kill and reap.
+                // Unexpected: stop supervising; finish kills and reaps.
                 self.signal(libc::SIGKILL);
                 return;
             }
@@ -936,6 +1045,8 @@ impl<'a> Supervisor<'a> {
                 self.signal(libc::SIGKILL);
                 self.killed = true;
             }
+            // At most READ_QUOTA per pipe, then the signalfd and the pidfd
+            // are looked at again: a flood cannot delay a cancel.
             if ready(out_at) {
                 self.read_stdout(sink);
             }
@@ -948,7 +1059,7 @@ impl<'a> Supervisor<'a> {
             }
             let exited = match pid_at {
                 Some(_) => ready(pid_at),
-                None => matches!(self.child.try_wait(), Ok(Some(_))),
+                None => exited_unreaped(self.pid),
             };
             if exited {
                 return;
@@ -956,24 +1067,25 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    fn read_stdout(&mut self, sink: &mut Sink) {
+    /// One quota of stdout, parsed as it is read. True if the quota was hit.
+    fn read_stdout(&mut self, sink: &mut Sink) -> bool {
         let Some(mut out) = self.stdout.take() else {
-            return;
+            return false;
         };
-        let mut chunks = Vec::new();
-        let open = read_some(&mut out, |b| chunks.extend_from_slice(b));
-        self.feed(&chunks, sink);
+        let (open, full) = read_quota(&mut out, |b| self.feed(b, sink));
         if open {
             self.stdout = Some(out);
         }
+        full
     }
 
-    fn read_stderr(&mut self) {
+    /// One quota of stderr into the tail. True if the quota was hit.
+    fn read_stderr(&mut self) -> bool {
         let Some(mut err) = self.stderr.take() else {
-            return;
+            return false;
         };
         let tail = &mut self.tail;
-        let open = read_some(&mut err, |b| {
+        let (open, full) = read_quota(&mut err, |b| {
             tail.extend_from_slice(b);
             if tail.len() > STDERR_TAIL {
                 tail.drain(..tail.len() - STDERR_TAIL);
@@ -982,6 +1094,7 @@ impl<'a> Supervisor<'a> {
         if open {
             self.stderr = Some(err);
         }
+        full
     }
 
     /// Splits stdout bytes into lines and handles each complete one.
@@ -1022,57 +1135,92 @@ impl<'a> Supervisor<'a> {
                 return;
             }
         };
+        let again = |paths: &[PathBuf], index: usize| {
+            format!(
+                "second result for {} after skip or fail",
+                paths[index].display()
+            )
+        };
         let origin = &self.step_in.origin;
         match ev {
             Event::Progress(Some(f)) => sink.progress(f),
             Event::Progress(None) => {}
             Event::Done { index, rel } => {
-                if self.outputs[index].contains(&rel) {
+                if self.reported[index] == Reported::Final {
+                    self.violate(again(&self.step_in.paths, index));
+                } else if self.outputs[index].len() >= MAX_OUTPUTS {
+                    self.violate(format!("more than {MAX_OUTPUTS} outputs for one input"));
+                } else if !self.seen_outputs.insert(rel.clone()) {
                     self.violate(format!("duplicate output {}", rel.display()));
-                    return;
+                } else {
+                    self.outputs[index].push(rel);
+                    self.reported[index] = Reported::Done;
                 }
-                self.outputs[index].push(rel);
-                self.reported[index] = true;
+            }
+            Event::Skip { index, reason } | Event::Fail { index, reason }
+                if self.reported[index] != Reported::Nothing =>
+            {
+                let _ = reason;
+                self.violate(again(&self.step_in.paths, index));
             }
             Event::Skip { index, reason } => {
-                self.reported[index] = true;
+                self.reported[index] = Reported::Final;
                 sink.skip(origin[index], reason);
             }
             Event::Fail { index, reason } => {
-                self.reported[index] = true;
+                self.reported[index] = Reported::Final;
                 sink.fail(origin[index], reason);
             }
             Event::Warn { index, message } => sink.warn(origin[index], message),
         }
     }
 
-    /// After exit: kills what is left of the group, drains the pipes, reaps
-    /// the child and settles every input without a result.
+    /// After the exit (child still unreaped): kills what is left of the
+    /// group while its id is still ours, drains the pipes, reaps, waits for
+    /// the group to be gone, and settles every input without a result.
+    /// Nothing is placed unless the group is confirmed gone.
     fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
         self.signal(libc::SIGKILL);
-        self.read_stdout(sink);
-        self.read_stderr();
+        // Bounded: the writers are dead or dying, the pipes hold what is left.
+        for _ in 0..64 {
+            let out = self.read_stdout(sink);
+            let err = self.read_stderr();
+            if !out && !err {
+                break;
+            }
+        }
         let end = match self.child.wait() {
             Ok(s) => End::from(s),
             Err(_) => End::Exit(-1),
         };
-        // A line cut off by a crash is not an event; after a normal exit
-        // it is a broken one.
-        if !self.line.is_empty() && !self.overlong && matches!(end, End::Exit(_)) {
-            self.violate("unterminated event line".to_owned());
+        self.reaped = true;
+        // A line cut off by a crash is not an event; after a normal exit it
+        // is a broken one. (No signal: the child is reaped.)
+        if !self.line.is_empty()
+            && !self.overlong
+            && matches!(end, End::Exit(_))
+            && self.violation.is_none()
+            && !self.cancelled
+        {
+            self.violation = Some("unterminated event line".to_owned());
         }
+        let gone = group_gone(self.pid);
         let origin = &self.step_in.origin;
         if self.cancelled {
             for &o in origin {
-                if !sink.finished[o] {
-                    sink.fail(o, "cancelled".to_owned());
-                }
+                sink.fail(o, "cancelled".to_owned());
+            }
+            return None;
+        }
+        if !gone {
+            for &o in origin {
+                sink.fail(o, "action left processes behind".to_owned());
             }
             return None;
         }
         let reason = unreported_reason(self.violation.as_deref(), end, &self.tail);
         for (j, &o) in origin.iter().enumerate() {
-            if !self.reported[j] {
+            if self.reported[j] == Reported::Nothing {
                 sink.fail(o, reason.clone());
             }
         }
