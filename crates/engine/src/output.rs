@@ -43,14 +43,41 @@ impl Drop for Fd {
     }
 }
 
-/// Opens a directory relative to `at` (or the cwd for `None`), refusing to
-/// follow a symlink in the last component.
-fn open_dir_nofollow(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
-    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+/// Opens a directory relative to `at` (or the cwd for `None`) for removal,
+/// refusing to follow a symlink in the last component, and gives it owner
+/// rwx first: a 0o000 or 0o300 directory can be neither opened for reading
+/// nor emptied. The chmod goes through an `O_PATH` fd (`/proc/self/fd/<n>`),
+/// so it hits exactly the inode that was opened. Without `/proc` it falls
+/// back to opening directly, which fails for a directory without `r`.
+fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
+    let at = at.unwrap_or(libc::AT_FDCWD);
+    let path_flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: name is a valid NUL-terminated string that outlives the call;
     // `at` is an open directory fd or AT_FDCWD.
-    let fd = unsafe { libc::openat(at.unwrap_or(libc::AT_FDCWD), name.as_ptr(), flags) };
-    if fd < 0 { last_err() } else { Ok(Fd(fd)) }
+    let p = unsafe { libc::openat(at, name.as_ptr(), path_flags) };
+    if p < 0 {
+        return last_err();
+    }
+    let p = Fd(p);
+    let magic = CString::new(format!("/proc/self/fd/{}", p.0)).expect("no NUL in a number");
+    let read_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    // SAFETY: magic is a valid NUL-terminated path naming our O_PATH fd.
+    if unsafe { libc::chmod(magic.as_ptr(), 0o700) } == 0 {
+        // SAFETY: as above; the magic link resolves to the opened inode.
+        let fd = unsafe { libc::openat(libc::AT_FDCWD, magic.as_ptr(), read_flags) };
+        if fd >= 0 {
+            return Ok(Fd(fd));
+        }
+    }
+    // SAFETY: as for the O_PATH open.
+    let fd = unsafe { libc::openat(at, name.as_ptr(), read_flags | libc::O_NOFOLLOW) };
+    if fd < 0 {
+        return last_err();
+    }
+    let fd = Fd(fd);
+    // SAFETY: fd.0 is an open fd.
+    unsafe { libc::fchmod(fd.0, 0o700) };
+    Ok(fd)
 }
 
 /// Entry names of the directory open as `dir` (without `.` and `..`).
@@ -90,9 +117,6 @@ fn list_dir(dir: &Fd) -> Vec<CString> {
 /// never followed; every step is relative to an fd, so a concurrent swap of
 /// a path component cannot redirect the deletion. Errors are ignored.
 fn empty_dir(dir: &Fd) {
-    // Without owner rwx the directory cannot be entered or emptied.
-    // SAFETY: dir.0 is an open fd.
-    unsafe { libc::fchmod(dir.0, 0o700) };
     for name in list_dir(dir) {
         // SAFETY: st is a valid out-pointer; name is NUL-terminated.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -101,7 +125,7 @@ fn empty_dir(dir: &Fd) {
             continue;
         }
         let is_dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
-        if let (true, Ok(child)) = (is_dir, open_dir_nofollow(Some(dir.0), &name)) {
+        if is_dir && let Ok(child) = open_dir_for_removal(Some(dir.0), &name) {
             empty_dir(&child);
         }
         let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
@@ -115,7 +139,7 @@ fn empty_dir(dir: &Fd) {
 /// (a symlink is left alone). Never panics; errors are ignored.
 fn remove_tree(path: &Path) {
     let Ok(c) = cstr(path) else { return };
-    let Ok(dir) = open_dir_nofollow(None, &c) else {
+    let Ok(dir) = open_dir_for_removal(None, &c) else {
         return;
     };
     empty_dir(&dir);
@@ -165,9 +189,11 @@ pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
         let path = target_dir.join(format!("{WORK_PREFIX}{:016x}", random_u64()?));
         match mkdir_mode(&path, 0o700) {
             Ok(()) => {
-                // Independent of the umask.
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-                return Ok(WorkDir { path });
+                // Independent of the umask. The WorkDir guard removes the
+                // directory again if this fails.
+                let dir = WorkDir { path };
+                fs::set_permissions(&dir.path, fs::Permissions::from_mode(0o700))?;
+                return Ok(dir);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -751,6 +777,68 @@ mod tests {
         drop(w);
         assert!(!path.exists());
         assert!(w2.path.exists());
+    }
+
+    #[test]
+    fn drop_removes_unreadable_and_unlistable_subdirs() {
+        let t = Tmp::new("work-modes");
+        let w = make_work_dir(&t.0).unwrap();
+        let path = w.path.clone();
+        for (name, mode) in [("none", 0o000), ("wx", 0o300), ("x", 0o100)] {
+            let sub = path.join(name);
+            fs::create_dir(&sub).unwrap();
+            let deeper = sub.join("deeper");
+            fs::create_dir(&deeper).unwrap();
+            file(&deeper, "f", "x");
+            file(&sub, "g", "y");
+            fs::set_permissions(&deeper, fs::Permissions::from_mode(mode)).unwrap();
+            fs::set_permissions(&sub, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        drop(w);
+        assert!(!path.exists(), "work dir left behind");
+    }
+
+    /// Runs one test of this binary in a child under the seccomp filter
+    /// (which denies chmod), with `INACIRCLE_HELPER` set.
+    fn run_helper_under_seccomp(name: &str, dir: &Path) {
+        use std::os::unix::process::CommandExt;
+        let limits = crate::sandbox::limits_for(0);
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("INACIRCLE_HELPER", dir)
+            .stdin(std::process::Stdio::null());
+        // SAFETY: apply_in_child only makes async-signal-safe calls; no
+        // ruleset fd is passed.
+        unsafe {
+            cmd.pre_exec(move || crate::sandbox::apply_in_child(None, &limits));
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "helper failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn work_dir_removed_when_chmod_fails() {
+        if !crate::sandbox::tests::seccomp_or_skip("work_dir_removed_when_chmod_fails") {
+            return;
+        }
+        let t = Tmp::new("chmod-fail");
+        run_helper_under_seccomp("output::tests::helper_make_work_dir_chmod_denied", &t.0);
+        let left: Vec<_> = fs::read_dir(&t.0).unwrap().flatten().collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    /// Child side of `work_dir_removed_when_chmod_fails`; a no-op otherwise.
+    #[test]
+    fn helper_make_work_dir_chmod_denied() {
+        let Some(dir) = std::env::var_os("INACIRCLE_HELPER") else {
+            return;
+        };
+        assert!(make_work_dir(Path::new(&dir)).is_err(), "chmod not denied");
     }
 
     #[test]

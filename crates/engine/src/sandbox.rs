@@ -22,8 +22,9 @@
 //!   utime, utimes, futimesat, utimensat (so futimens); setxattr,
 //!   lsetxattr, fsetxattr, setxattrat, removexattr, lremovexattr,
 //!   fremovexattr, removexattrat; file_setattr; and the ioctls
-//!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr). Every
-//!   other ioctl is allowed.
+//!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr) and
+//!   FS_IOC_ENABLE_VERITY (makes a file immutable). Every other ioctl is
+//!   allowed.
 //! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
 //!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
@@ -299,11 +300,13 @@ mod seccomp {
     const SYS_SOCKET: u32 = 41;
     const SYS_SOCKETPAIR: u32 = 53;
     const SYS_IOCTL: u32 = 16;
-    /// ioctl commands denied with EPERM (include/uapi/linux/fs.h): the
-    /// inode flag setters, which work through a read-only fd.
+    /// ioctl commands denied with EPERM: the inode flag setters
+    /// (include/uapi/linux/fs.h) and fs-verity enabling
+    /// (include/uapi/linux/fsverity.h), which all work through a read-only fd.
     const FS_IOC_SETFLAGS: u32 = 0x4008_6602; // _IOW('f', 2, long)
     const FS_IOC32_SETFLAGS: u32 = 0x4004_6602; // _IOW('f', 2, int)
     const FS_IOC_FSSETXATTR: u32 = 0x401c_5820; // _IOW('X', 32, struct fsxattr)
+    const FS_IOC_ENABLE_VERITY: u32 = 0x4080_6685; // _IOW('f', 133, 128-byte arg)
     /// Denied with EPERM.
     const DENIED: [u32; 24] = [
         90,  // chmod
@@ -334,13 +337,13 @@ mod seccomp {
 
     // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
     // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
-    // [ioctl: load arg1, 3 x cmd?, ALLOW, EPERM].
+    // [ioctl: load arg1, 4 x cmd?, ALLOW, EPERM].
     const FIRST_DENIED: usize = 8;
     const ALLOW: usize = FIRST_DENIED + DENIED.len();
     const EPERM: usize = ALLOW + 1;
     const SOCKET: usize = EPERM + 1;
     const IOCTL: usize = SOCKET + 4;
-    const IOCTL_EPERM: usize = IOCTL + 5;
+    const IOCTL_EPERM: usize = IOCTL + 6;
     const LEN: usize = IOCTL_EPERM + 1;
 
     const fn stmt(code: u32, k: u32) -> sock_filter {
@@ -398,7 +401,8 @@ mod seccomp {
         p[IOCTL + 1] = jump(IOCTL + 1, BPF_JEQ, FS_IOC_SETFLAGS, IOCTL_EPERM);
         p[IOCTL + 2] = jump(IOCTL + 2, BPF_JEQ, FS_IOC32_SETFLAGS, IOCTL_EPERM);
         p[IOCTL + 3] = jump(IOCTL + 3, BPF_JEQ, FS_IOC_FSSETXATTR, IOCTL_EPERM);
-        p[IOCTL + 4] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+        p[IOCTL + 4] = jump(IOCTL + 4, BPF_JEQ, FS_IOC_ENABLE_VERITY, IOCTL_EPERM);
+        p[IOCTL + 5] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
         p[IOCTL_EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
         p
     }
@@ -473,7 +477,7 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::net::{TcpListener, UdpSocket};
@@ -520,7 +524,7 @@ mod tests {
     }
 
     /// Whether this target has the seccomp filter; says the test is skipped if not.
-    fn seccomp_or_skip(test: &str) -> bool {
+    pub(crate) fn seccomp_or_skip(test: &str) -> bool {
         let has = seccomp_filter().is_some();
         if !has {
             eprintln!("SKIPPED {test}: no seccomp filter for this architecture");
@@ -1631,5 +1635,51 @@ mod tests {
             cvt(unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS, &mut f) })
         })
         .unwrap();
+    }
+
+    /// `_IOW('f', 133, struct fsverity_enable_arg)`, 128-byte argument
+    /// (include/uapi/linux/fsverity.h).
+    const FS_IOC_ENABLE_VERITY: libc::c_ulong = 0x4080_6685;
+
+    /// Tries to enable fs-verity on `p`, opened read-only as an input is.
+    fn enable_verity(p: &std::ffi::CStr) -> io::Result<()> {
+        // struct fsverity_enable_arg: version 1, FS_VERITY_HASH_ALG_SHA256,
+        // block size 4096, everything else zero.
+        let mut arg = [0u32; 32];
+        arg[0] = 1;
+        arg[1] = 1;
+        arg[2] = 4096;
+        // SAFETY: open reads the NUL-terminated path; the ioctl reads the
+        // 128-byte `arg` on our stack.
+        unsafe {
+            let fd = libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            cvt(fd)?;
+            cvt(libc::ioctl(fd, FS_IOC_ENABLE_VERITY, arg.as_ptr()))
+        }
+    }
+
+    #[test]
+    fn enable_verity_on_input_fd_denied() {
+        if !seccomp_or_skip("enable_verity_on_input_fd_denied") {
+            return;
+        }
+        let other = Tmp::new("verity");
+        let (scratch, input) = (other.0.join("scratch"), other.0.join("input"));
+        fs::write(&scratch, "s").unwrap();
+        fs::write(&input, "i").unwrap();
+        let c = cpath(&scratch);
+        match errno(probe(Sb::Off, move || enable_verity(&c))) {
+            None => {}
+            Some(e) => {
+                assert_ne!(e, libc::EPERM, "control already denied");
+                eprintln!(
+                    "NOTE enable_verity_on_input_fd_denied: fs-verity unsupported here \
+                     (errno {e}); only the filter's EPERM is checked"
+                );
+            }
+        }
+        let c = cpath(&input);
+        let r = probe(Sb::On(None), move || enable_verity(&c));
+        assert_eq!(errno(r), Some(libc::EPERM));
     }
 }
