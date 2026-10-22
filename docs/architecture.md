@@ -67,9 +67,10 @@ are in `CLAUDE.md`.
   rebuilds it only when an action binary changed (a few `stat` calls per
   start). The binary is the single source of truth; the same pattern as
   fontconfig's or gdk-pixbuf's caches.
-- Per action: id and family; input and output as **MIME types**; one or
-  many inputs (`batch=no` for one at a time); label and group; cost and
-  whether it loses information; required external tool (`requires=`,
+- Per action: id and family; input and output as **MIME types** plus the
+  output extension (`ext=`); one or many inputs (`batch=no` for one at a
+  time); label and group; cost and whether it loses information (`lossy=` describes the text content, text
+  and line breaks, not how it renders); required external tool (`requires=`,
   checked on `PATH` at start; missing means a greyed-out slice that says
   what to install).
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
@@ -77,15 +78,15 @@ are in `CLAUDE.md`.
   our own, no JSON dependency.
 
 ```
-inacircle-manifest 1
-action	text.md-to-html	in=text/markdown	out=text/html	label=HTML	group=document	cost=10
-action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=document	cost=10
+inacircle-manifest 0
+action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=no	batch=yes
+action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
 
 ```
-<family> run <action-id> --work <temp dir> [--opt key=value] -- <absolute paths>
+<family> run <action-id> --work <temp dir> [--opt key=value] [--inputs-from <file>] -- <absolute paths>
 ```
 
 - argv only, never a shell. The engine decodes `file://` URIs and passes
@@ -99,19 +100,38 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 - stdout, one event per line:
 
   ```
-  progress 0.42
-  done notes.md -> notes.html
-  skip blob.bin unsupported
-  fail broken.md read error at line 12
-  warn tables dropped (Markdown has no merged cells)
+  progress<TAB>0.42
+  done<TAB>/abs/notes.md<TAB>0/notes.html
+  skip<TAB>/abs/blob.bin<TAB>unsupported
+  fail<TAB>/abs/broken.md<TAB>read error at line 12
+  warn<TAB>/abs/tables.md<TAB>tables dropped (Markdown has no merged cells)
   ```
+
+  `<TAB>` is a real tab. `done` carries the input and the output path
+  relative to `--work`; every field uses the manifest escapes
+  (`\\ \t \n \r \=`, plus `\#` for a leading `#`; `=` is always escaped
+  in event fields). An action writes its output to
+  `<work>/<index>/<stem>.<ext>`, where `<index>` is the input's
+  position in the batch. The contract is version 0 and unstable until a complex action has run on it. `--inputs-from` is one
+  escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
+  paths are out of scope for v0.
 
   stderr is free-form; on failure its last lines go into the message.
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
-  the file's), 3 unsupported input.
+  the file's), 3 unsupported input. For a batch: 0 if at least one input
+  produced `done`; otherwise 1 if any input produced `fail`; 3 only when
+  every input was unsupported. Exit 1 also covers a batch that cannot run
+  at all (`--work` missing or not writable).
 - Cancel with `SIGTERM`; the engine removes the temp dir either way. The
   engine sets `RLIMIT_FSIZE` on the action, which caps output size for
   every plugin (archive bombs) without any plugin code.
+- **Every action runs sandboxed** with Landlock, set up in the child
+  between `fork` and `execve`: writes only into the temp dir; reads only
+  the inputs, the action binary and the system paths needed to run it; no
+  network where the kernel supports it. The best available Landlock ABI is
+  used. Where Landlock is missing, actions from the user or plugin
+  directory do not run; built-in actions run, and the history and the
+  notification say they ran unsandboxed.
 
 ## Classifier
 
@@ -154,11 +174,13 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 ## Executor and supervisor
 
 - After the choice the wheel closes and releases the lock; the same
-  process stays as the **supervisor** while the action runs (detached with
-  `posix_spawn` and `setsid`), then exits. It frees the wheel's buffers
+  process stays as the **supervisor** while the action runs (a new session
+  with `setsid`, started through `fork` and `execve` so the sandbox and
+  limits can be applied in between), then exits. It frees the wheel's buffers
   before waiting.
-- **One process per batch** by default; actions declaring `batch=no` run
-  per file, in parallel up to the number of cores.
+- **One process per target folder** of a batch (each folder gets its own
+  temp dir, so the final move stays an atomic `rename`); actions declaring
+  `batch=no` run per file, in parallel up to the number of cores.
 - **A batch never stops to ask.** Unsupported or broken files are skipped,
   one failure does not stop the rest, name conflicts get a new name.
   Skipping is always safe here: actions only copy and never overwrite.
@@ -239,20 +261,29 @@ server: that is a resident process, and any web page can reach `localhost`.
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, toml, doc
-bins/     inacircle, inacircle-text
+crates/   wire, dbus, ui, engine, manifest, action, toml, doc
+bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
+tools/    gen-entities (dev tool)
+scripts/  checks and helpers
 spikes/   measurements, not product code
 ```
 
 Product code is written from these decisions, not copied from the spikes.
 
-## Open risk: file types before the drop
+## File types before the drop
 
 On drag enter, files offer only `text/uri-list`, which says nothing about
-the type. Type-specific slices need the URI list, and the first bytes of
-the files, **before the drop**: `wl_data_offer.receive` during the drag.
-The protocol allows it; whether Nautilus and Thunar serve it is not
-measured yet, and it is the first thing the engine skeleton tests.
-If they do not, the fallback is two steps: drop on the wheel hands the
-files over, then a second wheel (click mode, the drag is over) offers the
-type-specific targets.
+the type; the URI list itself is guaranteed only after the drop.
+
+- **The base path works everywhere:** drop on the wheel hands the files
+  over, then a second wheel (click mode, the drag is over) offers the
+  type-specific targets.
+- **A shortcut on top of it, not a second path:** if the URI list can be
+  read during the drag (`wl_data_offer.receive` before the drop) within a
+  deadline, the wheel shows the type-specific slices already, and the drop
+  is the final choice. If it does not arrive, the same wheel shows a single
+  "drop here" target and the second step follows.
+
+Whether Nautilus and Thunar serve the list before the drop is not measured
+yet; other applications may never do it, which is why the shortcut cannot
+be the only path.

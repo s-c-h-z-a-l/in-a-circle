@@ -115,12 +115,37 @@ is usually moving anyway. **Next:** ask niri upstream whether a newly
 mapped surface under a drag could receive `wl_data_device.enter` at once,
 as `wl_pointer.enter` already does; measure other compositors.
 
+## File types before the drop
+
+Question for the drop-first wheel (see [architecture](../architecture.md#file-types-before-the-drop)):
+can the URI list be read while the drag is still going on, so the wheel
+can show type-specific slices before the drop?
+
+Method: the integration probe calls `wl_data_offer.receive("text/uri-list")`
+as soon as the drag enters, with a 500 ms deadline, then opens the first
+file and reads 8 bytes, as the classifier would. One drag per source,
+niri 26.04.
+
+| source | toolkit | list before the drop | time after enter | first bytes |
+|---|---|---|---|---|
+| Nautilus 50 | GTK 4 | yes | 0.75 ms | PNG `89 50 4e 47` |
+| Thunar 4.20 | GTK 3 | yes | 1.7 ms | PNG |
+| Nemo 6.6 | GTK 3 | yes | 0.29 ms | PNG |
+| Firefox (downloads list) | own | yes | 0.28 ms | JPEG `ff d8 ff e0` |
+
+Opening the file and reading its first bytes took 4-8 µs.
+
+**Verdict:** all four sources serve the list before the drop, within
+2 ms of the enter, faster than the wheel reaches the screen. The shortcut
+works for them; the drop-then-choose path stays the base for sources that
+do not (Qt file managers are untested).
+
 ## Open
 
 - Other compositors: does the hotkey fire during a drag, and when does
   `wl_data_device.enter` arrive (sway, Hyprland, KDE)?
-- Thunar and other toolkits through the integration probe (the first probe
-  covered Thunar).
+- Qt file managers (Dolphin, PCManFM-Qt): do they serve the list before
+  the drop?
 - **Drag released before any movement.** We then never get a data-device
   enter; when the drag ends, niri sends `wl_pointer.enter`, and the probe
   would show the wheel as if no drag had happened. Not tested.

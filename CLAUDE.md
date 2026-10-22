@@ -33,7 +33,10 @@ it's a bug.
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
    - binary: <= 500 KB
-   - dependencies: `libc` only, unless justified by a measurement
+   - dependencies of shipped binaries: `libc` only, unless justified by a
+     measurement. Build- and test-time tools may use a few pinned crates
+     (e.g. offline atlas baking, test-suite loaders); a check keeps them
+     out of the shipped binaries' dependency tree.
 3. **CPU rendering, damage-only.** Measured: a GPU context costs 70-90 MB RSS
    idle on NVIDIA for a ~2 ms gain on a static overlay. Redraw only what changed.
    (See `spikes/render-bench/`.)
@@ -52,11 +55,21 @@ it's a bug.
   action contract; change it only by decision.
 - Every benchmark that informs a decision gets a page in `docs/benchmarks/`
   (method, machine, numbers, verdict, how to reproduce), committed with it.
+- **Process files stay private.** Specs, implementation plans, review
+  notes and other working documents produced by skills or agents go to
+  `notes/` (e.g. `notes/specs/`, `notes/plans/`), never into the repo.
+  The public repo holds code, `README.md`, `CLAUDE.md` and `docs/` only:
+  settled, concise, readable. No long generated text files.
 
 ## Git
 
 - Commit often, without asking.
-- Branch, push, and merge into `main` **only when the user says so**.
+- **One branch per plan (stage).** Every implementation plan runs on its
+  own branch off `main`. Merge it into `main` only at the very end, after
+  the plan's closing review, and only if every success criterion holds
+  (all tests, fmt, clippy, dependency check, budgets). Otherwise it stays
+  on its branch.
+- Push only when the user says so.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
@@ -107,3 +120,23 @@ it's a bug.
 - Run `cargo fmt` and `cargo clippy` after changes.
 - Prefer `cargo check` / narrow tests before the full suite.
 - No `unsafe` without a documented invariant.
+
+## Testing
+
+Test behavior, not lines. Coverage is a signal, never a target.
+
+- Required: every public interface's contract (normal case), every
+  documented edge case (empty input, limits, bad encoding), every error
+  path a user can hit, every safety boundary (sandbox, size limits, never
+  overwrite), and a regression test for every fixed bug (one that fails
+  without the fix).
+- Not required: trivial getters and constructors, or what the compiler
+  already guarantees. Test internals through the public interface.
+- Effort follows risk: parsers get official test suites and edge cases
+  (later fuzzing); engine logic and the action contract get unit and
+  integration tests; Wayland/UI code gets unit tests for its pure logic
+  (geometry, hit testing, damage) plus a manual checklist on niri.
+- Measure line coverage per crate with `cargo llvm-cov` at the end of each
+  plan and report it. Rough signal bands: parsers ~90%, engine and
+  contract ~80%, UI lower. Far below its band is a question to answer
+  ("what isn't tested, and why?"), not an automatic failure.
