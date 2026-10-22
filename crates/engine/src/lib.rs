@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod classify;
 pub mod exec;
+pub mod journal;
 pub mod menu;
 pub mod output;
 pub mod sandbox;
