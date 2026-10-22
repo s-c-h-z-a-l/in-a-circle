@@ -459,19 +459,31 @@ fn split_name(name: &OsStr) -> (&[u8], &[u8]) {
 /// (a taken folder name becomes `<stem> (1)/` ...), files keep their names.
 /// If one move fails, the files already moved and the folder are removed.
 pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
-    let mut srcs = Vec::with_capacity(produced.len());
-    for p in produced {
+    place_many_with(produced.len(), dir, stem, false, |i, folder, _| {
+        let p = &produced[i];
         let name = p.file_name().ok_or_else(|| invalid("output has no name"))?;
-        srcs.push((None, cstr(p)?, name.to_os_string()));
-    }
-    place_many_from(&srcs, dir, stem)
+        let (s, e) = split_name(name);
+        let from = cstr(p)?;
+        let from = At {
+            dir: libc::AT_FDCWD,
+            name: &from,
+        };
+        place_bytes(from, folder, None, s, e, b"")
+    })
 }
 
-/// `(parent fd or None for a full path, name for the move, file name)`.
-type Src = (Option<Fd>, CString, OsString);
-
-fn place_many_from(srcs: &[Src], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
-    if srcs.is_empty() {
+/// Creates the fresh `dir/<stem>/` folder for `count` outputs and calls
+/// `one(i, folder, folder fd)` for each in turn (the fd is opened only with
+/// `with_fd`). If one fails, the files already moved and the folder are
+/// removed.
+fn place_many_with(
+    count: usize,
+    dir: &Path,
+    stem: &str,
+    with_fd: bool,
+    mut one: impl FnMut(usize, &Path, Option<RawFd>) -> io::Result<PathBuf>,
+) -> io::Result<Vec<PathBuf>> {
+    if count == 0 {
         return Ok(Vec::new());
     }
     if stem.is_empty() {
@@ -493,25 +505,20 @@ fn place_many_from(srcs: &[Src], dir: &Path, stem: &str) -> io::Result<Vec<PathB
     let folder = folder.ok_or_else(|| {
         io::Error::new(io::ErrorKind::AlreadyExists, "no free output folder name")
     })?;
-    let folder_fd = match srcs[0].0 {
-        Some(_) => match open_path(libc::AT_FDCWD, &cstr(&folder)?, libc::O_NOFOLLOW) {
+    let folder_fd = if with_fd {
+        match cstr(&folder).and_then(|c| open_path(libc::AT_FDCWD, &c, libc::O_NOFOLLOW)) {
             Ok(fd) => Some(fd),
             Err(e) => {
                 let _ = fs::remove_dir(&folder);
                 return Err(e);
             }
-        },
-        None => None,
+        }
+    } else {
+        None
     };
-    let mut placed = Vec::with_capacity(srcs.len());
-    for (parent, from, name) in srcs {
-        let (s, e) = split_name(name);
-        let from = At {
-            dir: parent.as_ref().map_or(libc::AT_FDCWD, |f| f.0),
-            name: from,
-        };
-        let moved = place_bytes(from, &folder, folder_fd.as_ref().map(|f| f.0), s, e, b"");
-        match moved {
+    let mut placed = Vec::with_capacity(count);
+    for i in 0..count {
+        match one(i, &folder, folder_fd.as_ref().map(|f| f.0)) {
             Ok(t) => placed.push(t),
             Err(e) => {
                 for t in &placed {
@@ -566,17 +573,17 @@ fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
 /// The placed name must still be the regular file we moved (a leaf swapped
 /// for a symlink between the check and the rename would land as a link):
 /// otherwise it is removed again.
-fn check_placed(dir_fd: &Fd, placed: &Path) -> io::Result<()> {
+fn check_placed(dir_fd: RawFd, placed: &Path) -> io::Result<()> {
     let name = cstr(Path::new(placed.file_name().unwrap_or_default()))?;
     let at = At {
-        dir: dir_fd.0,
+        dir: dir_fd,
         name: &name,
     };
     if stat_at(at).is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG) {
         return Ok(());
     }
     // SAFETY: name is NUL-terminated, dir_fd open.
-    unsafe { libc::unlinkat(dir_fd.0, name.as_ptr(), 0) };
+    unsafe { libc::unlinkat(dir_fd, name.as_ptr(), 0) };
     Err(invalid("output changed while being placed"))
 }
 
@@ -606,36 +613,31 @@ pub fn place_beneath(
         ext.as_bytes(),
         suffix.unwrap_or("").as_bytes(),
     )?;
-    check_placed(&dir_fd, &placed)?;
+    check_placed(dir_fd.0, &placed)?;
     Ok(placed)
 }
 
 /// Like [`place_many`], for files beneath `root`, resolved as in
-/// [`place_beneath`]. Every file is resolved before anything moves.
+/// [`place_beneath`]. One file at a time is resolved, checked and moved,
+/// so at most a few fds are open whatever the number of outputs.
 pub fn place_many_beneath(
     root: &Path,
     rels: &[PathBuf],
     dir: &Path,
     stem: &str,
 ) -> io::Result<Vec<PathBuf>> {
-    let mut srcs = Vec::with_capacity(rels.len());
-    for r in rels {
-        let (parent, leaf) = resolve_beneath(root, r)?;
-        let name = OsString::from_vec(leaf.as_bytes().to_vec());
-        srcs.push((Some(parent), leaf, name));
-    }
-    let placed = place_many_from(&srcs, dir, stem)?;
-    if let Some(folder) = placed.first().and_then(|p| p.parent()) {
-        let fd = open_path(libc::AT_FDCWD, &cstr(folder)?, libc::O_NOFOLLOW)?;
-        if let Some(e) = placed.iter().find_map(|p| check_placed(&fd, p).err()) {
-            for p in &placed {
-                let _ = fs::remove_file(p);
-            }
-            let _ = fs::remove_dir(folder);
-            return Err(e);
-        }
-    }
-    Ok(placed)
+    place_many_with(rels.len(), dir, stem, true, |i, folder, folder_fd| {
+        let folder_fd = folder_fd.expect("opened with_fd");
+        let (parent, leaf) = resolve_beneath(root, &rels[i])?;
+        let (s, e) = split_name(OsStr::from_bytes(leaf.as_bytes()));
+        let from = At {
+            dir: parent.0,
+            name: &leaf,
+        };
+        let placed = place_bytes(from, folder, Some(folder_fd), s, e, b"")?;
+        check_placed(folder_fd, &placed)?;
+        Ok(placed)
+    })
 }
 
 #[cfg(test)]
@@ -987,19 +989,78 @@ mod tests {
             outs,
             [target.join("doc/p-1.png"), target.join("doc/p-2.png")]
         );
-        // One bad entry: nothing is moved, no folder is left.
+        // One bad entry: what was moved is removed again, no folder is left.
         fs::create_dir(w.path.join("2")).unwrap();
         file(&w.path.join("2"), "ok.png", "1");
         let rels = [PathBuf::from("2/ok.png"), PathBuf::from("2/missing.png")];
         assert!(place_many_beneath(&w.path, &rels, &target, "two").is_err());
         assert!(!target.join("two").exists());
-        assert!(w.path.join("2/ok.png").exists());
         for bad in ["", "/abs", "0/../0/sub/a.md", "./0", "0/sub"] {
             assert!(
                 place_beneath(&w.path, Path::new(bad), &target, "x", "md", None).is_err(),
                 "{bad}"
             );
         }
+    }
+
+    /// Runs one test of this binary in a child with RLIMIT_NOFILE `n`,
+    /// with `INACIRCLE_HELPER` set to `dir`.
+    fn run_helper_with_nofile(name: &str, dir: &Path, n: u64) {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("INACIRCLE_HELPER", dir)
+            .stdin(std::process::Stdio::null());
+        // SAFETY: setrlimit is async-signal-safe; `lim` is on the stack.
+        unsafe {
+            cmd.pre_exec(move || {
+                let lim = libc::rlimit {
+                    rlim_cur: n,
+                    rlim_max: n,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "helper failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn place_many_beneath_needs_few_fds() {
+        let t = Tmp::new("nofile");
+        run_helper_with_nofile("output::tests::helper_place_many_beneath_2000", &t.0, 256);
+        let n = fs::read_dir(t.0.join("target/doc")).unwrap().count();
+        assert_eq!(n, 2000);
+    }
+
+    /// Child side of `place_many_beneath_needs_few_fds`; a no-op otherwise.
+    #[test]
+    fn helper_place_many_beneath_2000() {
+        let Some(dir) = std::env::var_os("INACIRCLE_HELPER") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let w = make_work_dir(&dir).unwrap();
+        fs::create_dir(w.path.join("0")).unwrap();
+        let rels: Vec<PathBuf> = (0..2000)
+            .map(|k| {
+                let rel = PathBuf::from(format!("0/p-{k:04}.png"));
+                fs::write(w.path.join(&rel), "x").unwrap();
+                rel
+            })
+            .collect();
+        let target = dir.join("target");
+        fs::create_dir(&target).unwrap();
+        let placed = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
+        assert_eq!(placed.len(), 2000);
     }
 
     #[test]
