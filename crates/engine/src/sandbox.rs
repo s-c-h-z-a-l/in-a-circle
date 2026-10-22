@@ -1,9 +1,43 @@
-//! The sandbox every action runs in: Landlock (filesystem, network, scope)
-//! plus resource limits.
+//! The sandbox every action runs in: Landlock (filesystem, network, scope),
+//! a seccomp filter (sockets, metadata) and resource limits.
 //!
 //! The parent builds the ruleset before spawning ([`build`]); the child
-//! applies it between fork and exec ([`apply_in_child`], from
+//! applies everything between fork and exec ([`apply_in_child`], from
 //! `std::process::Command::pre_exec`).
+//!
+//! # What is covered
+//!
+//! - Filesystem (Landlock): read + execute the exec paths, read the read
+//!   paths, everything inside the write path; nothing else. Covers write,
+//!   create, remove, rename/link out of place (REFER), truncate.
+//! - Network: seccomp lets `socket`/`socketpair` create only `AF_UNIX`
+//!   sockets (`EACCES` otherwise), which shuts out TCP, UDP, MPTCP, SCTP,
+//!   ICMP, raw, netlink, packet. Landlock additionally denies TCP (ABI 4)
+//!   and UDP (ABI 10) bind/connect/send on sockets that already exist.
+//! - Unix sockets: pathname sockets outside the write path (ABI 9) and
+//!   abstract sockets outside the sandbox (ABI 6) are denied.
+//! - Signals to processes outside the sandbox (ABI 6) are denied.
+//! - Metadata: seccomp denies (`EPERM`) chmod, chown, utime* and xattr
+//!   writes everywhere, by path or by fd.
+//! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
+//!   the seccomp filter.
+//! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
+//!   opened before the sandbox reaches the action.
+//! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`.
+//!
+//! # What is not covered
+//!
+//! - Per Landlock ABI: below 3, truncate of any DAC-writable file; below
+//!   4, Landlock does not restrict the network (seccomp still blocks
+//!   non-unix sockets); below 5, device ioctls; below 6, abstract unix
+//!   sockets and signals; below 9, pathname unix sockets (e.g. D-Bus).
+//! - Without Landlock only seccomp, the fd sweep and the limits apply.
+//! - File names outside the sandbox can still be probed (`stat`, path
+//!   lookup are not restricted).
+//! - `RLIMIT_FSIZE` caps each file, not their sum: many files can still
+//!   fill a disk.
+//! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
+//!   installs none (sockets and metadata are then not restricted).
 
 use std::fs::OpenOptions;
 use std::io;
@@ -235,8 +269,128 @@ pub fn limits_for(inputs_total: u64) -> Limits {
     }
 }
 
+/// The seccomp filter: deny non-unix sockets, metadata writes and io_uring.
+/// Syscall numbers from arch/x86/entry/syscalls/syscall_64.tbl, the
+/// `seccomp_data` layout from include/uapi/linux/seccomp.h.
+#[cfg(target_arch = "x86_64")]
+mod seccomp {
+    use libc::{
+        BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
+        SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, sock_filter,
+    };
+
+    /// EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE (not in libc).
+    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+    // Offsets in struct seccomp_data.
+    const NR: u32 = 0;
+    const ARCH: u32 = 4;
+    const ARG0_LOW: u32 = 16; // little endian
+    const SYS_SOCKET: u32 = 41;
+    const SYS_SOCKETPAIR: u32 = 53;
+    /// Denied with EPERM.
+    const DENIED: [u32; 23] = [
+        90,  // chmod
+        91,  // fchmod
+        92,  // chown
+        93,  // fchown
+        94,  // lchown
+        132, // utime
+        188, // setxattr
+        189, // lsetxattr
+        190, // fsetxattr
+        197, // removexattr
+        198, // lremovexattr
+        199, // fremovexattr
+        235, // utimes
+        260, // fchownat
+        261, // futimesat
+        268, // fchmodat
+        280, // utimensat
+        425, // io_uring_setup
+        426, // io_uring_enter
+        427, // io_uring_register
+        452, // fchmodat2 (not in every libc)
+        463, // setxattrat (not in libc)
+        466, // removexattrat (not in libc)
+    ];
+
+    // Layout: [arch check: 3] [nr load, x32, socket, socketpair: 4]
+    // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES].
+    const FIRST_DENIED: usize = 7;
+    const ALLOW: usize = FIRST_DENIED + DENIED.len();
+    const EPERM: usize = ALLOW + 1;
+    const SOCKET: usize = EPERM + 1;
+    const LEN: usize = SOCKET + 4;
+
+    const fn stmt(code: u32, k: u32) -> sock_filter {
+        sock_filter {
+            code: code as u16,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// A conditional jump at `at` to `to` when true, to the next when false.
+    const fn jump(at: usize, code: u32, k: u32, to: usize) -> sock_filter {
+        sock_filter {
+            code: (BPF_JMP | code | BPF_K) as u16,
+            jt: (to - at - 1) as u8,
+            jf: 0,
+            k,
+        }
+    }
+
+    const fn program() -> [sock_filter; LEN] {
+        let mut p = [stmt(0, 0); LEN];
+        p[0] = stmt(BPF_LD | BPF_W | BPF_ABS, ARCH);
+        p[1] = sock_filter {
+            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+            jt: 1,
+            jf: 0,
+            k: AUDIT_ARCH_X86_64,
+        };
+        p[2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+        p[3] = stmt(BPF_LD | BPF_W | BPF_ABS, NR);
+        p[4] = jump(4, BPF_JGE, X32_SYSCALL_BIT, EPERM);
+        p[5] = jump(5, BPF_JEQ, SYS_SOCKET, SOCKET);
+        p[6] = jump(6, BPF_JEQ, SYS_SOCKETPAIR, SOCKET);
+        let mut i = 0;
+        while i < DENIED.len() {
+            let at = FIRST_DENIED + i;
+            p[at] = jump(at, BPF_JEQ, DENIED[i], EPERM);
+            i += 1;
+        }
+        p[ALLOW] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+        p[EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
+        p[SOCKET] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG0_LOW);
+        p[SOCKET + 1] = sock_filter {
+            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: libc::AF_UNIX as u32,
+        };
+        p[SOCKET + 2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+        p[SOCKET + 3] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EACCES as u32);
+        p
+    }
+
+    pub static FILTER: [sock_filter; LEN] = program();
+}
+
+/// The seccomp filter for this architecture; `None` where there is none yet
+/// (only x86_64 has one).
+fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
+    #[cfg(target_arch = "x86_64")]
+    return Some(&seccomp::FILTER);
+    #[cfg(not(target_arch = "x86_64"))]
+    return None;
+}
+
 /// Puts the calling process in its own session, applies `limits`, sets
-/// `no_new_privs` and, given a ruleset, enforces it.
+/// `no_new_privs`, enforces the ruleset if given, installs the seccomp
+/// filter (even without a ruleset) and marks every fd >= 3 close-on-exec.
 ///
 /// # Safety
 ///
@@ -261,8 +415,9 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
         rlim_cur: 0,
         rlim_max: 0,
     };
-    // SAFETY: setsid, setrlimit, prctl and the Landlock syscall are
-    // async-signal-safe; the rlimit structs live on this stack frame and
+    // SAFETY: setsid, setrlimit, prctl and the raw syscalls are
+    // async-signal-safe; the rlimit structs and `prog` live on this stack
+    // frame, `prog` points at a static program of `len` instructions, and
     // the caller guarantees `fd` is an open ruleset.
     unsafe {
         check(libc::setsid().into())?;
@@ -272,6 +427,20 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
         if let Some(fd) = ruleset {
             check(libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32))?;
         }
+        if let Some(filter) = seccomp_filter() {
+            let prog = libc::sock_fprog {
+                len: filter.len() as libc::c_ushort,
+                // The kernel only reads the program.
+                filter: filter.as_ptr().cast_mut(),
+            };
+            check(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog).into())?;
+        }
+        check(libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        ))?;
     }
     Ok(())
 }
@@ -313,10 +482,23 @@ mod tests {
                 None
             }
             None => {
+                assert!(
+                    std::env::var_os("INACIRCLE_REQUIRE_LANDLOCK").is_none_or(|v| v != "1"),
+                    "{test}: Landlock unavailable but INACIRCLE_REQUIRE_LANDLOCK=1"
+                );
                 eprintln!("SKIPPED {test}: Landlock unavailable on this kernel");
                 None
             }
         }
+    }
+
+    /// Whether this target has the seccomp filter; says the test is skipped if not.
+    fn seccomp_or_skip(test: &str) -> bool {
+        let has = seccomp_filter().is_some();
+        if !has {
+            eprintln!("SKIPPED {test}: no seccomp filter for this architecture");
+        }
+        has
     }
 
     fn system_exec() -> Vec<PathBuf> {
@@ -353,27 +535,50 @@ mod tests {
         cmd.output().unwrap()
     }
 
-    /// Spawns `/bin/true` with the sandbox applied, then runs `probe` in the
-    /// child before exec; the probe's error comes back from the spawn.
-    /// `probe` must be async-signal-safe.
-    fn probe<F>(ruleset: Option<&Ruleset>, probe: F) -> io::Result<()>
+    /// How a probe runs: unsandboxed (the control), or through
+    /// `apply_in_child` with an optional ruleset.
+    #[derive(Clone, Copy)]
+    enum Sb<'a> {
+        Off,
+        On(Option<&'a Ruleset>),
+    }
+
+    /// Spawns `/bin/true`; in the child, runs `before`, applies the sandbox
+    /// (per `sb`), then runs `after` on what `before` returned. An error
+    /// comes back from the spawn. Both must be async-signal-safe.
+    fn probe_with<S, B, A>(sb: Sb, before: B, after: A) -> io::Result<()>
     where
-        F: Fn() -> io::Result<()> + Send + Sync + 'static,
+        B: Fn() -> io::Result<S> + Send + Sync + 'static,
+        A: Fn(S) -> io::Result<()> + Send + Sync + 'static,
     {
-        let fd = ruleset.map(|r| r.as_raw_fd());
+        let sandbox = match sb {
+            Sb::Off => None,
+            Sb::On(rs) => Some(rs.map(|r| r.as_raw_fd())),
+        };
         let mut cmd = Command::new("/bin/true");
         cmd.stdin(Stdio::null());
         // SAFETY: apply_in_child and every probe below only make
-        // async-signal-safe calls (raw syscalls on stack data).
+        // async-signal-safe calls (raw syscalls on stack data); the ruleset
+        // is borrowed for this whole function.
         unsafe {
             cmd.pre_exec(move || {
-                apply_in_child(fd, &NO_LIMIT)?;
-                probe()
+                let state = before()?;
+                if let Some(fd) = sandbox {
+                    apply_in_child(fd, &NO_LIMIT)?;
+                }
+                after(state)
             });
         }
         let mut child = cmd.spawn()?;
         assert!(child.wait()?.success());
         Ok(())
+    }
+
+    fn probe<F>(sb: Sb, f: F) -> io::Result<()>
+    where
+        F: Fn() -> io::Result<()> + Send + Sync + 'static,
+    {
+        probe_with(sb, || Ok(()), move |()| f())
     }
 
     fn errno(r: io::Result<()>) -> Option<i32> {
@@ -617,7 +822,7 @@ mod tests {
 
     #[test]
     fn child_is_session_leader_with_no_new_privs() {
-        let r = probe(None, || {
+        let r = probe(Sb::On(None), || {
             // SAFETY: getsid, getpid and prctl are async-signal-safe and
             // take no pointers.
             let (sid, pid, nnp) = unsafe {
@@ -649,22 +854,54 @@ mod tests {
         }
     }
 
-    /// socket + connect, async-signal-safe.
-    fn connect<T: Copy>(domain: i32, ty: i32, addr: &T) -> io::Result<()> {
-        // SAFETY: socket takes no pointers; connect reads exactly
-        // size_of::<T>() bytes from `addr`, a valid sockaddr_* on our stack.
-        unsafe {
-            let s = libc::socket(domain, ty | libc::SOCK_CLOEXEC, 0);
-            cvt(s)?;
-            let r = libc::connect(
+    fn sockaddr_in6(port: u16) -> libc::sockaddr_in6 {
+        // SAFETY: sockaddr_in6 is plain data; all zeroes is a valid value.
+        let mut a: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+        a.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        a.sin6_port = port.to_be();
+        a.sin6_addr.s6_addr = std::net::Ipv6Addr::LOCALHOST.octets();
+        a
+    }
+
+    /// socket(2), async-signal-safe. The fd is left open: the probe child
+    /// execs right after (and everything >= 3 is close-on-exec).
+    fn socket(domain: i32, ty: i32, proto: i32) -> io::Result<RawFd> {
+        // SAFETY: socket takes no pointers.
+        let s = unsafe { libc::socket(domain, ty | libc::SOCK_CLOEXEC, proto) };
+        cvt(s)?;
+        Ok(s)
+    }
+
+    type AddrCall =
+        unsafe extern "C" fn(libc::c_int, *const libc::sockaddr, libc::socklen_t) -> libc::c_int;
+
+    /// bind(2) or connect(2) on `s` with `addr`, async-signal-safe.
+    fn addr_call<T: Copy>(f: AddrCall, s: RawFd, addr: &T) -> io::Result<()> {
+        // SAFETY: `f` reads exactly size_of::<T>() bytes from `addr`, a
+        // valid sockaddr_* on our stack.
+        cvt(unsafe {
+            f(
                 s,
                 (addr as *const T).cast(),
                 size_of::<T>() as libc::socklen_t,
-            );
-            let err = io::Error::last_os_error();
-            libc::close(s);
-            if r == -1 { Err(err) } else { Ok(()) }
+            )
+        })
+    }
+
+    /// socket + connect, async-signal-safe.
+    fn connect<T: Copy>(domain: i32, ty: i32, addr: &T) -> io::Result<()> {
+        let s = socket(domain, ty, 0)?;
+        addr_call(libc::connect, s, addr)
+    }
+
+    /// A socket created before the sandbox (so seccomp does not stop it),
+    /// bound to 127.0.0.1:0 first when `prebind`.
+    fn early_socket(domain: i32, ty: i32, prebind: bool) -> io::Result<RawFd> {
+        let s = socket(domain, ty, 0)?;
+        if prebind {
+            addr_call(libc::bind, s, &sockaddr_in(0))?;
         }
+        Ok(s)
     }
 
     #[test]
@@ -676,11 +913,62 @@ mod tests {
         let rs = ruleset(&[], &work.0);
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = sockaddr_in(l.local_addr().unwrap().port());
-        let attempt = move || connect(libc::AF_INET, libc::SOCK_STREAM, &addr);
-        probe(None, attempt).unwrap();
-        assert_eq!(errno(probe(Some(&rs), attempt)), Some(libc::EACCES));
+        let before = || early_socket(libc::AF_INET, libc::SOCK_STREAM, false);
+        let after = move |s| addr_call(libc::connect, s, &addr);
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
     }
 
+    #[test]
+    fn tcp6_connect_denied() {
+        if abi_or_skip("tcp6_connect_denied", 4).is_none() {
+            return;
+        }
+        let Ok(l) = TcpListener::bind("[::1]:0") else {
+            eprintln!("SKIPPED tcp6_connect_denied: no IPv6 loopback");
+            return;
+        };
+        let work = Tmp::new("work");
+        let rs = ruleset(&[], &work.0);
+        let addr = sockaddr_in6(l.local_addr().unwrap().port());
+        let before = || early_socket(libc::AF_INET6, libc::SOCK_STREAM, false);
+        let after = move |s| addr_call(libc::connect, s, &addr);
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn tcp_bind_denied() {
+        if abi_or_skip("tcp_bind_denied", 4).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let rs = ruleset(&[], &work.0);
+        let before = || early_socket(libc::AF_INET, libc::SOCK_STREAM, false);
+        let after = |s| addr_call(libc::bind, s, &sockaddr_in(0));
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn udp_bind_denied() {
+        if abi_or_skip("udp_bind_denied", 10).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let rs = ruleset(&[], &work.0);
+        let before = || early_socket(libc::AF_INET, libc::SOCK_DGRAM, false);
+        let after = |s| addr_call(libc::bind, s, &sockaddr_in(0));
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
+    }
+
+    /// The socket is bound before the sandbox, so connect cannot trip the
+    /// auto-bind (BIND_UDP) check: the denial is CONNECT_SEND_UDP's.
     #[test]
     fn udp_connect_denied() {
         if abi_or_skip("udp_connect_denied", 10).is_none() {
@@ -690,9 +978,115 @@ mod tests {
         let rs = ruleset(&[], &work.0);
         let u = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = sockaddr_in(u.local_addr().unwrap().port());
-        let attempt = move || connect(libc::AF_INET, libc::SOCK_DGRAM, &addr);
-        probe(None, attempt).unwrap();
-        assert_eq!(errno(probe(Some(&rs), attempt)), Some(libc::EACCES));
+        let before = || early_socket(libc::AF_INET, libc::SOCK_DGRAM, true);
+        let after = move |s| addr_call(libc::connect, s, &addr);
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn udp_sendto_denied() {
+        if abi_or_skip("udp_sendto_denied", 10).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let rs = ruleset(&[], &work.0);
+        let u = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sockaddr_in(u.local_addr().unwrap().port());
+        let before = || early_socket(libc::AF_INET, libc::SOCK_DGRAM, true);
+        let after = move |s| {
+            // SAFETY: sendto reads 1 byte from a static and the sockaddr
+            // from our stack, with their exact sizes.
+            let r = unsafe {
+                libc::sendto(
+                    s,
+                    b"x".as_ptr().cast(),
+                    1,
+                    0,
+                    (&addr as *const libc::sockaddr_in).cast(),
+                    size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            if r == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
+    }
+
+    /// Seccomp: only AF_UNIX sockets can be created, with or without Landlock.
+    fn assert_socket_denied(test: &str, domain: i32, ty: i32, proto: i32, needs_support: bool) {
+        if !seccomp_or_skip(test) {
+            return;
+        }
+        let attempt = move || socket(domain, ty, proto).map(drop);
+        if let Err(e) = probe(Sb::Off, attempt) {
+            if needs_support {
+                eprintln!("SKIPPED {test}: not available on this host ({e})");
+                return;
+            }
+            eprintln!("{test}: control fails unsandboxed too ({e})");
+        }
+        assert_eq!(
+            errno(probe(Sb::On(None), attempt)),
+            Some(libc::EACCES),
+            "{test}"
+        );
+    }
+
+    #[test]
+    fn inet_sockets_denied() {
+        for (domain, ty) in [
+            (libc::AF_INET, libc::SOCK_STREAM),
+            (libc::AF_INET, libc::SOCK_DGRAM),
+            (libc::AF_INET6, libc::SOCK_STREAM),
+            (libc::AF_INET6, libc::SOCK_DGRAM),
+            (libc::AF_NETLINK, libc::SOCK_RAW),
+        ] {
+            assert_socket_denied("inet_sockets_denied", domain, ty, 0, false);
+        }
+    }
+
+    #[test]
+    fn mptcp_socket_denied() {
+        let (d, t, p) = (libc::AF_INET, libc::SOCK_STREAM, libc::IPPROTO_MPTCP);
+        assert_socket_denied("mptcp_socket_denied", d, t, p, true);
+    }
+
+    #[test]
+    fn sctp_socket_denied() {
+        let (d, t, p) = (libc::AF_INET, libc::SOCK_STREAM, libc::IPPROTO_SCTP);
+        assert_socket_denied("sctp_socket_denied", d, t, p, true);
+    }
+
+    #[test]
+    fn icmp_datagram_socket_denied() {
+        let (d, t, p) = (libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP);
+        assert_socket_denied("icmp_datagram_socket_denied", d, t, p, false);
+    }
+
+    /// Unsandboxed this is EPERM (no CAP_NET_RAW); EACCES proves the filter.
+    #[test]
+    fn raw_socket_denied() {
+        let (d, t, p) = (libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+        assert_socket_denied("raw_socket_denied", d, t, p, false);
+    }
+
+    #[test]
+    fn unix_sockets_allowed() {
+        probe(Sb::On(None), || {
+            socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)?;
+            socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0)?;
+            let mut fds = [0; 2];
+            // SAFETY: socketpair writes two ints into `fds`.
+            cvt(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) })
+        })
+        .unwrap();
     }
 
     fn sockaddr_un(path: &[u8]) -> libc::sockaddr_un {
@@ -736,8 +1130,8 @@ mod tests {
                 if r == -1 { Err(err) } else { Ok(()) }
             }
         };
-        probe(None, attempt).unwrap();
-        assert_eq!(errno(probe(Some(&rs), attempt)), Some(libc::EPERM));
+        probe(Sb::Off, attempt).unwrap();
+        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EPERM));
     }
 
     #[test]
@@ -755,8 +1149,8 @@ mod tests {
         bytes.push(0);
         let addr = sockaddr_un(&bytes);
         let attempt = move || connect(libc::AF_UNIX, libc::SOCK_STREAM, &addr);
-        probe(None, attempt).unwrap();
-        assert_eq!(errno(probe(Some(&rs), attempt)), Some(libc::EACCES));
+        probe(Sb::Off, attempt).unwrap();
+        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EACCES));
     }
 
     #[test]
@@ -772,10 +1166,302 @@ mod tests {
             // SAFETY: kill is async-signal-safe and takes no pointers.
             cvt(unsafe { libc::kill(pid, libc::SIGCONT) })
         };
-        probe(None, attempt).unwrap();
-        let denied = errno(probe(Some(&rs), attempt));
+        probe(Sb::Off, attempt).unwrap();
+        let denied = errno(probe(Sb::On(Some(&rs)), attempt));
         victim.kill().unwrap();
         victim.wait().unwrap();
         assert_eq!(denied, Some(libc::EPERM));
+    }
+
+    fn cpath(p: &Path) -> std::ffi::CString {
+        std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap()
+    }
+
+    #[test]
+    fn io_uring_denied() {
+        if !seccomp_or_skip("io_uring_denied") {
+            return;
+        }
+        let attempt = || {
+            let mut params = [0u32; 30]; // struct io_uring_params, 120 bytes
+            // SAFETY: io_uring_setup writes at most 120 bytes into `params`.
+            let r = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+            if r < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(e) = probe(Sb::Off, attempt) {
+            eprintln!("io_uring_denied: control fails unsandboxed too ({e})");
+        }
+        assert_eq!(errno(probe(Sb::On(None), attempt)), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn x32_syscall_denied() {
+        if !seccomp_or_skip("x32_syscall_denied") {
+            return;
+        }
+        // SAFETY: x32 getpid takes no arguments.
+        let attempt = || {
+            let r = unsafe { libc::syscall(0x4000_0000 | libc::SYS_getpid) };
+            if r < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        // Unsandboxed: works, or ENOSYS without x32 support; never EPERM.
+        assert_ne!(errno(probe(Sb::Off, attempt)), Some(libc::EPERM));
+        assert_eq!(errno(probe(Sb::On(None), attempt)), Some(libc::EPERM));
+    }
+
+    /// A 32-bit syscall (int 0x80) has another audit arch: the filter kills.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn foreign_arch_syscall_kills_the_process() {
+        use std::os::unix::process::ExitStatusExt;
+        fn run(sandboxed: bool) -> std::process::ExitStatus {
+            let mut cmd = Command::new("/bin/true");
+            // SAFETY: int 0x80 with eax = 20 is the i386 getpid: no memory
+            // access; r8-r11 are declared clobbered. apply_in_child is
+            // async-signal-safe.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if sandboxed {
+                        apply_in_child(None, &NO_LIMIT)?;
+                    }
+                    let r: i32;
+                    std::arch::asm!(
+                        "int 0x80",
+                        inlateout("eax") 20 => r,
+                        out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                        options(nostack),
+                    );
+                    if r > 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::from_raw_os_error(-r))
+                    }
+                });
+            }
+            cmd.status().unwrap()
+        }
+        if !run(false).success() {
+            eprintln!("SKIPPED foreign_arch_syscall_kills_the_process: no ia32 emulation");
+            return;
+        }
+        assert_eq!(run(true).signal(), Some(libc::SIGSYS));
+    }
+
+    /// The metadata syscalls the filter denies, one per `which`, on `p`.
+    fn metadata_call(which: usize, p: &std::ffi::CStr) -> io::Result<()> {
+        let p = p.as_ptr();
+        let name = c"user.inacircle".as_ptr();
+        // SAFETY: every call reads only `p` and `name` (NUL-terminated,
+        // alive for the call) and one static byte of value; NULL times
+        // mean "now".
+        let r = unsafe {
+            match which {
+                0 => libc::chmod(p, 0o600),
+                1 => libc::chown(p, u32::MAX, u32::MAX),
+                2 => libc::lchown(p, u32::MAX, u32::MAX),
+                3 => libc::utimensat(libc::AT_FDCWD, p, std::ptr::null(), 0),
+                4 => libc::utimes(p, std::ptr::null()),
+                5 => libc::setxattr(p, name, b"1".as_ptr().cast(), 1, 0),
+                6 => libc::removexattr(p, name),
+                7 => libc::fchmodat(libc::AT_FDCWD, p, 0o600, 0),
+                8 => libc::fchownat(libc::AT_FDCWD, p, u32::MAX, u32::MAX, 0),
+                _ => unreachable!(),
+            }
+        };
+        cvt(r)
+    }
+
+    #[test]
+    fn metadata_changes_outside_denied() {
+        if !seccomp_or_skip("metadata_changes_outside_denied") {
+            return;
+        }
+        let other = Tmp::new("other");
+        let f = other.0.join("victim");
+        fs::write(&f, "v").unwrap();
+        let before = fs::metadata(&f).unwrap();
+        let c = cpath(&f);
+        for which in 0..9 {
+            let c = c.clone();
+            let r = probe(Sb::On(None), move || metadata_call(which, &c));
+            assert_eq!(errno(r), Some(libc::EPERM), "metadata call {which}");
+        }
+        let after = fs::metadata(&f).unwrap();
+        assert_eq!(after.permissions(), before.permissions());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        // Control: chmod works unsandboxed.
+        let c2 = c.clone();
+        probe(Sb::Off, move || metadata_call(0, &c2)).unwrap();
+    }
+
+    /// The fd variants, on a read-only fd of an input the action opens.
+    #[test]
+    fn metadata_changes_via_input_fd_denied() {
+        if !seccomp_or_skip("metadata_changes_via_input_fd_denied") {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let input = other.0.join("input");
+        fs::write(&input, "i").unwrap();
+        let rs = landlock_abi().map(|_| ruleset(std::slice::from_ref(&input), &work.0));
+        let before = fs::metadata(&input).unwrap();
+        let c = cpath(&input);
+        for which in 0..4 {
+            let c = c.clone();
+            let r = probe(Sb::On(rs.as_ref()), move || {
+                // SAFETY: open reads the NUL-terminated path; the f* calls
+                // take the fd we just opened, a static name and one byte.
+                let r = unsafe {
+                    let fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                    cvt(fd)?;
+                    match which {
+                        0 => libc::fchmod(fd, 0o600),
+                        1 => libc::fchown(fd, u32::MAX, u32::MAX),
+                        2 => libc::futimens(fd, std::ptr::null()),
+                        3 => libc::fsetxattr(
+                            fd,
+                            c"user.inacircle".as_ptr(),
+                            b"1".as_ptr().cast(),
+                            1,
+                            0,
+                        ),
+                        _ => unreachable!(),
+                    }
+                };
+                cvt(r)
+            });
+            assert_eq!(errno(r), Some(libc::EPERM), "fd metadata call {which}");
+        }
+        let after = fs::metadata(&input).unwrap();
+        assert_eq!(after.permissions(), before.permissions());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    }
+
+    /// Regression: an fd the parent opened without O_CLOEXEC reached the
+    /// action and let it write outside the sandbox.
+    #[test]
+    fn inherited_fd_closed_at_exec() {
+        let other = Tmp::new("other");
+        let victim = other.0.join("victim");
+        fs::write(&victim, "victim\n").unwrap();
+        let c = cpath(&victim);
+        // SAFETY: open reads the NUL-terminated path; we close the fd below.
+        let leak = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_APPEND) };
+        assert!(leak >= 3);
+        let script = format!("echo LEAKED >&{leak}");
+        let o = sh(None, NO_LIMIT, &script);
+        let sandboxed = fs::read(&victim).unwrap();
+        // Control: without apply_in_child the fd is inherited.
+        let control = Command::new("/bin/sh").arg("-c").arg(&script).status();
+        // SAFETY: `leak` is ours and still open.
+        unsafe { libc::close(leak) };
+        assert!(!o.status.success());
+        assert_eq!(sandboxed, b"victim\n");
+        assert!(control.unwrap().success());
+        assert_eq!(fs::read(&victim).unwrap(), b"victim\nLEAKED\n");
+    }
+
+    #[test]
+    fn truncate_of_input_denied() {
+        if abi_or_skip("truncate_of_input_denied", 3).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let input = other.0.join("input");
+        fs::write(&input, "input\n").unwrap();
+        let rs = ruleset(std::slice::from_ref(&input), &work.0);
+        let c = cpath(&input);
+        let c1 = c.clone();
+        let r = probe(Sb::On(Some(&rs)), move || {
+            // SAFETY: truncate reads the NUL-terminated path.
+            cvt(unsafe { libc::truncate(c1.as_ptr(), 0) })
+        });
+        assert_eq!(errno(r), Some(libc::EACCES), "truncate(2)");
+        let r = probe(Sb::On(Some(&rs)), move || {
+            // SAFETY: open reads the NUL-terminated path.
+            cvt(unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_TRUNC) })
+        });
+        assert_eq!(errno(r), Some(libc::EACCES), "O_RDONLY | O_TRUNC");
+        assert_eq!(fs::read(&input).unwrap(), b"input\n");
+    }
+
+    #[test]
+    fn link_or_rename_of_input_into_work_denied() {
+        if abi_or_skip("link_or_rename_of_input_into_work_denied", 2).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let input = other.0.join("input");
+        fs::write(&input, "input\n").unwrap();
+        let rs = ruleset(std::slice::from_ref(&input), &work.0);
+        let (src, hl, mv) = (
+            cpath(&input),
+            cpath(&work.0.join("hl")),
+            cpath(&work.0.join("mv")),
+        );
+        let (s1, s2) = (src.clone(), src);
+        let r = probe(Sb::On(Some(&rs)), move || {
+            // SAFETY: link reads two NUL-terminated paths.
+            cvt(unsafe { libc::link(s1.as_ptr(), hl.as_ptr()) })
+        });
+        assert_eq!(errno(r), Some(libc::EXDEV), "link");
+        let r = probe(Sb::On(Some(&rs)), move || {
+            // SAFETY: rename reads two NUL-terminated paths.
+            cvt(unsafe { libc::rename(s2.as_ptr(), mv.as_ptr()) })
+        });
+        // Removing the source needs REMOVE_FILE there: EACCES before REFER.
+        assert_eq!(errno(r), Some(libc::EACCES), "rename");
+        assert!(input.exists());
+        assert!(!work.0.join("hl").exists() && !work.0.join("mv").exists());
+    }
+
+    #[test]
+    fn create_or_remove_outside_denied() {
+        if abi_or_skip("create_or_remove_outside_denied", 1).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let victim = other.0.join("victim");
+        fs::write(&victim, "v").unwrap();
+        let rs = ruleset(&[], &work.0);
+        let (d, l, f, v) = (
+            cpath(&other.0.join("d")),
+            cpath(&other.0.join("l")),
+            cpath(&other.0.join("f")),
+            cpath(&victim),
+        );
+        for which in 0..4 {
+            let (d, l, f, v) = (d.clone(), l.clone(), f.clone(), v.clone());
+            let r = probe(Sb::On(Some(&rs)), move || {
+                // SAFETY: each call reads NUL-terminated paths only.
+                cvt(unsafe {
+                    match which {
+                        0 => libc::mkdir(d.as_ptr(), 0o700),
+                        1 => libc::symlink(c"target".as_ptr(), l.as_ptr()),
+                        2 => libc::mkfifo(f.as_ptr(), 0o600),
+                        3 => libc::unlink(v.as_ptr()),
+                        _ => unreachable!(),
+                    }
+                })
+            });
+            assert_eq!(errno(r), Some(libc::EACCES), "call {which}");
+        }
+        let names: Vec<_> = fs::read_dir(&other.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["victim"]);
     }
 }
