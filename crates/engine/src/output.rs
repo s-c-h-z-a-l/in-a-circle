@@ -1,7 +1,7 @@
 //! Output policy: where results go and how they are moved into place
 //! without ever overwriting anything.
 
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::RawFd;
@@ -272,38 +272,65 @@ pub fn writable_target(source_dir: &Path) -> PathBuf {
     }
 }
 
-/// Fallback for filesystems without `RENAME_NOREPLACE`: `link` fails with
+/// A move source or destination: a name relative to a directory fd
+/// (`AT_FDCWD` for a plain path).
+#[derive(Clone, Copy)]
+struct At<'a> {
+    dir: RawFd,
+    name: &'a CStr,
+}
+
+fn stat_at(at: At) -> io::Result<libc::stat> {
+    // SAFETY: zeroed stat is valid storage; at.name is NUL-terminated and
+    // at.dir an open directory fd or AT_FDCWD.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::fstatat(at.dir, at.name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    if r == 0 { Ok(st) } else { last_err() }
+}
+
+/// Fallback for filesystems without `RENAME_NOREPLACE`: `linkat` fails with
 /// `EEXIST` instead of replacing, then the old name is dropped. If that
 /// unlink fails the output is already complete at `to`, so this still
 /// returns `Ok`; the work directory's removal deals with `from`.
 /// Directories cannot be hard-linked and are rejected before linking.
-fn link_then_unlink(from: &Path, to: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(from)?.is_dir() {
+fn link_then_unlink_at(from: At, to: At) -> io::Result<()> {
+    if stat_at(from)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "filesystem cannot move a directory without replacing",
         ));
     }
-    let (f, t) = (cstr(from)?, cstr(to)?);
-    // SAFETY: f and t are valid NUL-terminated paths that outlive the call.
-    if unsafe { libc::link(f.as_ptr(), t.as_ptr()) } != 0 {
+    // SAFETY: both names are NUL-terminated, both dirs open fds or
+    // AT_FDCWD; flags 0 never follows a symlink.
+    if unsafe { libc::linkat(from.dir, from.name.as_ptr(), to.dir, to.name.as_ptr(), 0) } != 0 {
         return last_err();
     }
-    let _ = fs::remove_file(from);
+    // SAFETY: as above.
+    unsafe { libc::unlinkat(from.dir, from.name.as_ptr(), 0) };
     Ok(())
 }
 
-/// No-replace move of `from` to `to`. `AlreadyExists` when `to` is taken.
-fn move_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+#[cfg(test)]
+fn link_then_unlink(from: &Path, to: &Path) -> io::Result<()> {
     let (f, t) = (cstr(from)?, cstr(to)?);
-    // SAFETY: f and t are valid NUL-terminated paths that outlive the call;
-    // AT_FDCWD makes both relative to the cwd (they are normally absolute).
+    let cwd = |name| At {
+        dir: libc::AT_FDCWD,
+        name,
+    };
+    link_then_unlink_at(cwd(&f), cwd(&t))
+}
+
+/// No-replace move of `from` to `to`. `AlreadyExists` when `to` is taken.
+/// Neither name's last component is followed if it is a symlink.
+fn move_noreplace(from: At, to: At) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and outlive the call; both dirs
+    // are open directory fds or AT_FDCWD.
     let r = unsafe {
         libc::renameat2(
-            libc::AT_FDCWD,
-            f.as_ptr(),
-            libc::AT_FDCWD,
-            t.as_ptr(),
+            from.dir,
+            from.name.as_ptr(),
+            to.dir,
+            to.name.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
     };
@@ -312,7 +339,7 @@ fn move_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     }
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => link_then_unlink(from, to),
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => link_then_unlink_at(from, to),
         _ => Err(err),
     }
 }
@@ -354,9 +381,13 @@ fn candidate(dir: &Path, stem: &[u8], suffix: &[u8], ext: &[u8], n: u32) -> io::
     Ok(dir.join(OsString::from_vec(name)))
 }
 
+/// Moves `from` to `dir/<stem><suffix>.<ext>` (numbered on conflict).
+/// With `dir_fd`, the destination is named relative to that fd (which must
+/// be `dir`), else by its full path.
 fn place_bytes(
-    produced: &Path,
+    from: At,
     dir: &Path,
+    dir_fd: Option<RawFd>,
     stem: &[u8],
     ext: &[u8],
     suffix: &[u8],
@@ -369,7 +400,16 @@ fn place_bytes(
     check_part(suffix)?;
     for n in 0..=MAX_CONFLICT {
         let target = candidate(dir, stem, suffix, ext, n)?;
-        match move_noreplace(produced, &target) {
+        let to = match dir_fd {
+            Some(_) => CString::new(target.file_name().unwrap_or_default().as_bytes())
+                .map_err(|_| invalid("invalid output name"))?,
+            None => cstr(&target)?,
+        };
+        let to_at = At {
+            dir: dir_fd.unwrap_or(libc::AT_FDCWD),
+            name: &to,
+        };
+        match move_noreplace(from, to_at) {
             Ok(()) => return Ok(target),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -391,9 +431,15 @@ pub fn place(
     ext: &str,
     suffix: Option<&str>,
 ) -> io::Result<PathBuf> {
+    let from = cstr(produced)?;
+    let from = At {
+        dir: libc::AT_FDCWD,
+        name: &from,
+    };
     place_bytes(
-        produced,
+        from,
         dir,
+        None,
         stem.as_bytes(),
         ext.as_bytes(),
         suffix.unwrap_or("").as_bytes(),
@@ -413,7 +459,19 @@ fn split_name(name: &OsStr) -> (&[u8], &[u8]) {
 /// (a taken folder name becomes `<stem> (1)/` ...), files keep their names.
 /// If one move fails, the files already moved and the folder are removed.
 pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
-    if produced.is_empty() {
+    let mut srcs = Vec::with_capacity(produced.len());
+    for p in produced {
+        let name = p.file_name().ok_or_else(|| invalid("output has no name"))?;
+        srcs.push((None, cstr(p)?, name.to_os_string()));
+    }
+    place_many_from(&srcs, dir, stem)
+}
+
+/// `(parent fd or None for a full path, name for the move, file name)`.
+type Src = (Option<Fd>, CString, OsString);
+
+fn place_many_from(srcs: &[Src], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
+    if srcs.is_empty() {
         return Ok(Vec::new());
     }
     if stem.is_empty() {
@@ -435,15 +493,24 @@ pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Ve
     let folder = folder.ok_or_else(|| {
         io::Error::new(io::ErrorKind::AlreadyExists, "no free output folder name")
     })?;
-    let mut placed = Vec::with_capacity(produced.len());
-    for p in produced {
-        let moved = match p.file_name() {
-            Some(name) => {
-                let (s, e) = split_name(name);
-                place_bytes(p, &folder, s, e, b"")
+    let folder_fd = match srcs[0].0 {
+        Some(_) => match open_path(libc::AT_FDCWD, &cstr(&folder)?, libc::O_NOFOLLOW) {
+            Ok(fd) => Some(fd),
+            Err(e) => {
+                let _ = fs::remove_dir(&folder);
+                return Err(e);
             }
-            None => Err(invalid("output has no name")),
+        },
+        None => None,
+    };
+    let mut placed = Vec::with_capacity(srcs.len());
+    for (parent, from, name) in srcs {
+        let (s, e) = split_name(name);
+        let from = At {
+            dir: parent.as_ref().map_or(libc::AT_FDCWD, |f| f.0),
+            name: from,
         };
+        let moved = place_bytes(from, &folder, folder_fd.as_ref().map(|f| f.0), s, e, b"");
         match moved {
             Ok(t) => placed.push(t),
             Err(e) => {
@@ -453,6 +520,119 @@ pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Ve
                 let _ = fs::remove_dir(&folder);
                 return Err(e);
             }
+        }
+    }
+    Ok(placed)
+}
+
+/// `openat(at, name, O_PATH | O_DIRECTORY | extra)`.
+fn open_path(at: RawFd, name: &CStr, extra: libc::c_int) -> io::Result<Fd> {
+    let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | extra;
+    // SAFETY: name is NUL-terminated; at is an open dir fd or AT_FDCWD.
+    let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
+    if fd < 0 { last_err() } else { Ok(Fd(fd)) }
+}
+
+/// Resolves `rel` beneath `root` without following any symlink: each
+/// directory is opened (`O_PATH | O_NOFOLLOW`) from the previous one and
+/// the leaf must be a regular file. Returns the parent fd and leaf name.
+fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
+    let mut parts = Vec::new();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(p) => parts.push(p),
+            _ => return Err(invalid("output path is not a plain relative path")),
+        }
+    }
+    let Some((leaf, dirs)) = parts.split_last() else {
+        return Err(invalid("empty output path"));
+    };
+    let mut dir = open_path(libc::AT_FDCWD, &cstr(root)?, libc::O_NOFOLLOW)?;
+    for d in dirs {
+        let name = cstr(Path::new(d))?;
+        dir = open_path(dir.0, &name, libc::O_NOFOLLOW)?;
+    }
+    let leaf = cstr(Path::new(leaf))?;
+    let st = stat_at(At {
+        dir: dir.0,
+        name: &leaf,
+    })?;
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(invalid("output is not a regular file"));
+    }
+    Ok((dir, leaf))
+}
+
+/// The placed name must still be the regular file we moved (a leaf swapped
+/// for a symlink between the check and the rename would land as a link):
+/// otherwise it is removed again.
+fn check_placed(dir_fd: &Fd, placed: &Path) -> io::Result<()> {
+    let name = cstr(Path::new(placed.file_name().unwrap_or_default()))?;
+    let at = At {
+        dir: dir_fd.0,
+        name: &name,
+    };
+    if stat_at(at).is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG) {
+        return Ok(());
+    }
+    // SAFETY: name is NUL-terminated, dir_fd open.
+    unsafe { libc::unlinkat(dir_fd.0, name.as_ptr(), 0) };
+    Err(invalid("output changed while being placed"))
+}
+
+/// Like [`place`], for the file `rel` beneath `root` (a work dir), found
+/// without following any symlink: every directory on the way is opened
+/// with `O_NOFOLLOW` from the one before, the leaf must be a regular file,
+/// and the move is relative to those fds.
+pub fn place_beneath(
+    root: &Path,
+    rel: &Path,
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    suffix: Option<&str>,
+) -> io::Result<PathBuf> {
+    let (parent, leaf) = resolve_beneath(root, rel)?;
+    let dir_fd = open_path(libc::AT_FDCWD, &cstr(dir)?, 0)?;
+    let from = At {
+        dir: parent.0,
+        name: &leaf,
+    };
+    let placed = place_bytes(
+        from,
+        dir,
+        Some(dir_fd.0),
+        stem.as_bytes(),
+        ext.as_bytes(),
+        suffix.unwrap_or("").as_bytes(),
+    )?;
+    check_placed(&dir_fd, &placed)?;
+    Ok(placed)
+}
+
+/// Like [`place_many`], for files beneath `root`, resolved as in
+/// [`place_beneath`]. Every file is resolved before anything moves.
+pub fn place_many_beneath(
+    root: &Path,
+    rels: &[PathBuf],
+    dir: &Path,
+    stem: &str,
+) -> io::Result<Vec<PathBuf>> {
+    let mut srcs = Vec::with_capacity(rels.len());
+    for r in rels {
+        let (parent, leaf) = resolve_beneath(root, r)?;
+        let name = OsString::from_vec(leaf.as_bytes().to_vec());
+        srcs.push((Some(parent), leaf, name));
+    }
+    let placed = place_many_from(&srcs, dir, stem)?;
+    if let Some(folder) = placed.first().and_then(|p| p.parent()) {
+        let fd = open_path(libc::AT_FDCWD, &cstr(folder)?, libc::O_NOFOLLOW)?;
+        if let Some(e) = placed.iter().find_map(|p| check_placed(&fd, p).err()) {
+            for p in &placed {
+                let _ = fs::remove_file(p);
+            }
+            let _ = fs::remove_dir(folder);
+            return Err(e);
         }
     }
     Ok(placed)
@@ -576,7 +756,12 @@ mod tests {
         let src = file(&t.0, "p", "mine");
         let target = t.0.join("a.md");
         file(&t.0, "a.md", "theirs");
-        let e = move_noreplace(&src, &target).unwrap_err();
+        let (f, t2) = (cstr(&src).unwrap(), cstr(&target).unwrap());
+        let cwd = |name| At {
+            dir: libc::AT_FDCWD,
+            name,
+        };
+        let e = move_noreplace(cwd(&f), cwd(&t2)).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(target).unwrap(), "theirs");
         assert!(src.exists());
@@ -777,6 +962,78 @@ mod tests {
         drop(w);
         assert!(!path.exists());
         assert!(w2.path.exists());
+    }
+
+    #[test]
+    fn place_beneath_moves_regular_files() {
+        let t = Tmp::new("beneath");
+        let w = make_work_dir(&t.0).unwrap();
+        let target = t.0.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir_all(w.path.join("0/sub")).unwrap();
+        file(&w.path.join("0/sub"), "a.md", "a");
+        file(&target, "a.md", "taken");
+        let out =
+            place_beneath(&w.path, Path::new("0/sub/a.md"), &target, "a", "md", None).unwrap();
+        assert_eq!(out, target.join("a (1).md"));
+        assert_eq!(fs::read_to_string(&out).unwrap(), "a");
+        assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "taken");
+        fs::create_dir(w.path.join("1")).unwrap();
+        file(&w.path.join("1"), "p-1.png", "1");
+        file(&w.path.join("1"), "p-2.png", "2");
+        let rels = [PathBuf::from("1/p-1.png"), PathBuf::from("1/p-2.png")];
+        let outs = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
+        assert_eq!(
+            outs,
+            [target.join("doc/p-1.png"), target.join("doc/p-2.png")]
+        );
+        // One bad entry: nothing is moved, no folder is left.
+        fs::create_dir(w.path.join("2")).unwrap();
+        file(&w.path.join("2"), "ok.png", "1");
+        let rels = [PathBuf::from("2/ok.png"), PathBuf::from("2/missing.png")];
+        assert!(place_many_beneath(&w.path, &rels, &target, "two").is_err());
+        assert!(!target.join("two").exists());
+        assert!(w.path.join("2/ok.png").exists());
+        for bad in ["", "/abs", "0/../0/sub/a.md", "./0", "0/sub"] {
+            assert!(
+                place_beneath(&w.path, Path::new(bad), &target, "x", "md", None).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn place_beneath_never_follows_a_swapped_in_symlink() {
+        let t = Tmp::new("swap");
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        file(&outside, "victim.md", "secret");
+        let target = t.0.join("target");
+        fs::create_dir(&target).unwrap();
+        let w = make_work_dir(&t.0).unwrap();
+        fs::create_dir(w.path.join("0")).unwrap();
+        file(&w.path.join("0"), "victim.md", "fake");
+        // Validated by path here; then a directory on the way is swapped.
+        assert!(
+            fs::symlink_metadata(w.path.join("0/victim.md"))
+                .unwrap()
+                .is_file()
+        );
+        fs::rename(w.path.join("0"), w.path.join("0x")).unwrap();
+        std::os::unix::fs::symlink(&outside, w.path.join("0")).unwrap();
+        let r = place_beneath(&w.path, Path::new("0/victim.md"), &target, "v", "md", None);
+        assert!(r.is_err(), "followed the symlinked directory: {r:?}");
+        let r = place_many_beneath(&w.path, &[PathBuf::from("0/victim.md")], &target, "v");
+        assert!(r.is_err(), "place_many followed the symlinked directory");
+        // The leaf itself swapped for a symlink.
+        fs::create_dir(w.path.join("1")).unwrap();
+        std::os::unix::fs::symlink(outside.join("victim.md"), w.path.join("1/l.md")).unwrap();
+        assert!(place_beneath(&w.path, Path::new("1/l.md"), &target, "l", "md", None).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("victim.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0, "nothing placed");
     }
 
     #[test]

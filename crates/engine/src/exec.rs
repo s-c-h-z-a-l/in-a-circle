@@ -410,8 +410,9 @@ fn run_group(
 }
 
 /// Moves the last step's outputs to `target`: one output per input with
-/// `place`, several with `place_many`. Each output is checked again first:
-/// the action is gone by now, so nothing can swap it after the check.
+/// `place_beneath`, several with `place_many_beneath`. Both resolve the
+/// output from the work dir fd without following symlinks, so even a file
+/// swapped after validation can only be one from inside the work dir.
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
@@ -437,21 +438,16 @@ fn place_outputs(
         per[at].1.extend(outs.iter().cloned());
     }
     for (o, rels) in per {
-        if let Some(e) = rels.iter().find_map(|r| regular_beneath(dir, r).err()) {
-            sink.fail(o, format!("contract violation: {e}"));
-            continue;
-        }
-        let produced: Vec<PathBuf> = rels.iter().map(|r| dir.join(r)).collect();
         let src = &sink.inputs[o];
         let stem = src
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "output".to_owned());
-        let placed = if produced.len() == 1 {
-            output::place(&produced[0], target, &stem, &action.ext, None).map(|p| vec![p])
+        let placed = if rels.len() == 1 {
+            output::place_beneath(dir, &rels[0], target, &stem, &action.ext, None).map(|p| vec![p])
         } else {
-            output::place_many(&produced, target, &stem)
+            output::place_many_beneath(dir, &rels, target, &stem)
         };
         match placed {
             Ok(paths) => {
