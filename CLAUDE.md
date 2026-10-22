@@ -64,7 +64,12 @@ it's a bug.
 ## Git
 
 - Commit often, without asking.
-- Branch, push, and merge into `main` **only when the user says so**.
+- **One branch per plan (stage).** Every implementation plan runs on its
+  own branch off `main`. Merge it into `main` only at the very end, after
+  the plan's closing review, and only if every success criterion holds
+  (all tests, fmt, clippy, dependency check, budgets). Otherwise it stays
+  on its branch.
+- Push only when the user says so.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
