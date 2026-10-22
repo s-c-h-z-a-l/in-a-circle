@@ -17,8 +17,13 @@
 //! - Unix sockets: pathname sockets outside the write path (ABI 9) and
 //!   abstract sockets outside the sandbox (ABI 6) are denied.
 //! - Signals to processes outside the sandbox (ABI 6) are denied.
-//! - Metadata: seccomp denies (`EPERM`) chmod, chown, utime* and xattr
-//!   writes everywhere, by path or by fd.
+//! - Metadata: seccomp denies (`EPERM`), everywhere and by path or fd:
+//!   chmod, fchmod, fchmodat, fchmodat2; chown, fchown, lchown, fchownat;
+//!   utime, utimes, futimesat, utimensat (so futimens); setxattr,
+//!   lsetxattr, fsetxattr, setxattrat, removexattr, lremovexattr,
+//!   fremovexattr, removexattrat; file_setattr; and the ioctls
+//!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr). Every
+//!   other ioctl is allowed.
 //! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
 //!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
@@ -30,7 +35,11 @@
 //! - Per Landlock ABI: below 3, truncate of any DAC-writable file; below
 //!   4, Landlock does not restrict the network (seccomp still blocks
 //!   non-unix sockets); below 5, device ioctls; below 6, abstract unix
-//!   sockets and signals; below 9, pathname unix sockets (e.g. D-Bus).
+//!   sockets and signals; below 9, pathname unix sockets (e.g. D-Bus),
+//!   whose peer could also pass in a network socket via SCM_RIGHTS.
+//! - Without Landlock, protection from ptrace-family access (ptrace,
+//!   process_vm_*, pidfd_getfd) to the user's other processes depends on
+//!   Yama (`kernel.yama.ptrace_scope`).
 //! - Without Landlock only seccomp, the fd sweep and the limits apply.
 //! - File names outside the sandbox can still be probed (`stat`, path
 //!   lookup are not restricted).
@@ -286,10 +295,17 @@ mod seccomp {
     const NR: u32 = 0;
     const ARCH: u32 = 4;
     const ARG0_LOW: u32 = 16; // little endian
+    const ARG1_LOW: u32 = 24; // ioctl's cmd is an unsigned int
     const SYS_SOCKET: u32 = 41;
     const SYS_SOCKETPAIR: u32 = 53;
+    const SYS_IOCTL: u32 = 16;
+    /// ioctl commands denied with EPERM (include/uapi/linux/fs.h): the
+    /// inode flag setters, which work through a read-only fd.
+    const FS_IOC_SETFLAGS: u32 = 0x4008_6602; // _IOW('f', 2, long)
+    const FS_IOC32_SETFLAGS: u32 = 0x4004_6602; // _IOW('f', 2, int)
+    const FS_IOC_FSSETXATTR: u32 = 0x401c_5820; // _IOW('X', 32, struct fsxattr)
     /// Denied with EPERM.
-    const DENIED: [u32; 23] = [
+    const DENIED: [u32; 24] = [
         90,  // chmod
         91,  // fchmod
         92,  // chown
@@ -313,15 +329,19 @@ mod seccomp {
         452, // fchmodat2 (not in every libc)
         463, // setxattrat (not in libc)
         466, // removexattrat (not in libc)
+        469, // file_setattr (not in libc)
     ];
 
-    // Layout: [arch check: 3] [nr load, x32, socket, socketpair: 4]
-    // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES].
-    const FIRST_DENIED: usize = 7;
+    // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
+    // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
+    // [ioctl: load arg1, 3 x cmd?, ALLOW, EPERM].
+    const FIRST_DENIED: usize = 8;
     const ALLOW: usize = FIRST_DENIED + DENIED.len();
     const EPERM: usize = ALLOW + 1;
     const SOCKET: usize = EPERM + 1;
-    const LEN: usize = SOCKET + 4;
+    const IOCTL: usize = SOCKET + 4;
+    const IOCTL_EPERM: usize = IOCTL + 5;
+    const LEN: usize = IOCTL_EPERM + 1;
 
     const fn stmt(code: u32, k: u32) -> sock_filter {
         sock_filter {
@@ -356,6 +376,7 @@ mod seccomp {
         p[4] = jump(4, BPF_JGE, X32_SYSCALL_BIT, EPERM);
         p[5] = jump(5, BPF_JEQ, SYS_SOCKET, SOCKET);
         p[6] = jump(6, BPF_JEQ, SYS_SOCKETPAIR, SOCKET);
+        p[7] = jump(7, BPF_JEQ, SYS_IOCTL, IOCTL);
         let mut i = 0;
         while i < DENIED.len() {
             let at = FIRST_DENIED + i;
@@ -373,6 +394,12 @@ mod seccomp {
         };
         p[SOCKET + 2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
         p[SOCKET + 3] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EACCES as u32);
+        p[IOCTL] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG1_LOW);
+        p[IOCTL + 1] = jump(IOCTL + 1, BPF_JEQ, FS_IOC_SETFLAGS, IOCTL_EPERM);
+        p[IOCTL + 2] = jump(IOCTL + 2, BPF_JEQ, FS_IOC32_SETFLAGS, IOCTL_EPERM);
+        p[IOCTL + 3] = jump(IOCTL + 3, BPF_JEQ, FS_IOC_FSSETXATTR, IOCTL_EPERM);
+        p[IOCTL + 4] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+        p[IOCTL_EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
         p
     }
 
@@ -1463,5 +1490,146 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["victim"]);
+    }
+
+    const FS_XFLAG_NODUMP: u32 = 0x80;
+    const FS_NODUMP_FL: libc::c_long = 0x40;
+
+    /// file_setattr(2) (x86_64 469, Linux 6.17+) setting FS_XFLAG_NODUMP on `p`.
+    fn file_setattr_nodump(p: &std::ffi::CStr) -> io::Result<()> {
+        // struct file_attr (FILE_ATTR_SIZE_VER0): u64 fa_xflags, u32 x4.
+        let attr: [u64; 3] = [FS_XFLAG_NODUMP as u64, 0, 0];
+        // SAFETY: the kernel reads the NUL-terminated path and 24 bytes of
+        // `attr`, both alive for the call.
+        let r = unsafe {
+            libc::syscall(
+                469,
+                libc::AT_FDCWD,
+                p.as_ptr(),
+                attr.as_ptr(),
+                24usize,
+                0u32,
+            )
+        };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_setattr_outside_denied() {
+        if !seccomp_or_skip("file_setattr_outside_denied") {
+            return;
+        }
+        let other = Tmp::new("other");
+        let (scratch, victim) = (other.0.join("scratch"), other.0.join("victim"));
+        fs::write(&scratch, "s").unwrap();
+        fs::write(&victim, "v").unwrap();
+        let c = cpath(&scratch);
+        if let Err(e) = probe(Sb::Off, move || file_setattr_nodump(&c)) {
+            eprintln!("SKIPPED file_setattr_outside_denied: unsupported here ({e})");
+            return;
+        }
+        let c = cpath(&victim);
+        let r = probe(Sb::On(None), move || file_setattr_nodump(&c));
+        assert_eq!(errno(r), Some(libc::EPERM));
+    }
+
+    const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
+    const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
+    const FS_IOC32_SETFLAGS: libc::c_ulong = 0x4004_6602;
+    const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c_581f;
+    const FS_IOC_FSSETXATTR: libc::c_ulong = 0x401c_5820;
+
+    /// Sets the nodump flag on `fd` with one of the flag ioctls.
+    fn flag_ioctl(which: usize, fd: RawFd) -> io::Result<()> {
+        // SAFETY: each ioctl reads or writes exactly the type its number
+        // encodes (long, int, struct fsxattr = 28 bytes), all on our stack.
+        unsafe {
+            match which {
+                0 => {
+                    let mut f: libc::c_long = 0;
+                    cvt(libc::ioctl(fd, FS_IOC_GETFLAGS, &mut f))?;
+                    f |= FS_NODUMP_FL;
+                    cvt(libc::ioctl(fd, FS_IOC_SETFLAGS, &f))
+                }
+                1 => {
+                    let f: libc::c_int = FS_NODUMP_FL as libc::c_int;
+                    cvt(libc::ioctl(fd, FS_IOC32_SETFLAGS, &f))
+                }
+                2 => {
+                    let mut x = [0u32; 7];
+                    cvt(libc::ioctl(fd, FS_IOC_FSGETXATTR, x.as_mut_ptr()))?;
+                    x[0] |= FS_XFLAG_NODUMP;
+                    cvt(libc::ioctl(fd, FS_IOC_FSSETXATTR, x.as_ptr()))
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Opens `p` read-only (as an action opens an input) and runs `flag_ioctl`.
+    fn flag_ioctl_on(which: usize, p: &std::ffi::CStr) -> io::Result<()> {
+        // SAFETY: open reads the NUL-terminated path.
+        let fd = unsafe { libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        cvt(fd)?;
+        flag_ioctl(which, fd)
+    }
+
+    fn nodump_set(p: &Path) -> bool {
+        let f = fs::File::open(p).unwrap();
+        let mut flags: libc::c_long = 0;
+        // SAFETY: FS_IOC_GETFLAGS writes one long into `flags`.
+        let r = unsafe { libc::ioctl(f.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
+        r == 0 && flags & FS_NODUMP_FL != 0
+    }
+
+    #[test]
+    fn flag_ioctls_on_input_fd_denied() {
+        if !seccomp_or_skip("flag_ioctls_on_input_fd_denied") {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let (scratch, input) = (other.0.join("scratch"), other.0.join("input"));
+        fs::write(&scratch, "s").unwrap();
+        fs::write(&input, "i").unwrap();
+        let rs = landlock_abi().map(|_| ruleset(std::slice::from_ref(&input), &work.0));
+        // Controls: the native ioctls work unsandboxed (the 32-bit compat
+        // number is not a native ioctl, so it has no working control).
+        for which in [0, 2] {
+            let c = cpath(&scratch);
+            if let Err(e) = probe(Sb::Off, move || flag_ioctl_on(which, &c)) {
+                eprintln!(
+                    "SKIPPED flag_ioctls_on_input_fd_denied: ioctl {which} unsupported ({e})"
+                );
+                return;
+            }
+        }
+        assert!(nodump_set(&scratch));
+        let c = cpath(&input);
+        let control32 = {
+            let c = c.clone();
+            errno(probe(Sb::Off, move || flag_ioctl_on(1, &c)))
+        };
+        assert_ne!(control32, Some(libc::EPERM));
+        for which in 0..3 {
+            let c = c.clone();
+            let r = probe(Sb::On(rs.as_ref()), move || flag_ioctl_on(which, &c));
+            assert_eq!(errno(r), Some(libc::EPERM), "flag ioctl {which}");
+        }
+        assert!(!nodump_set(&input));
+        // Other ioctls stay allowed.
+        probe(Sb::On(rs.as_ref()), move || {
+            // SAFETY: open reads the NUL-terminated path.
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            cvt(fd)?;
+            let mut f: libc::c_long = 0;
+            // SAFETY: FS_IOC_GETFLAGS writes one long into `f`.
+            cvt(unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS, &mut f) })
+        })
+        .unwrap();
     }
 }
