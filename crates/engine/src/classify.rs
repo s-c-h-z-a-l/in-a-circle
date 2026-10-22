@@ -1,7 +1,8 @@
 //! Content classifier: what is this file, as far as the engine can tell.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,13 +44,24 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => {}
         Ok(_) => return Ok(Classified::NotRegular),
+        // A broken link or a symlink loop is not a regular file.
         Err(e) if e.kind() == io::ErrorKind::NotFound && path.is_symlink() => {
             return Ok(Classified::NotRegular);
         }
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(Classified::NotRegular),
         Err(e) => return Err(e),
     }
+    // The path may have been swapped for a FIFO since the stat: never block
+    // in open, and re-check the type on the handle itself.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(Classified::NotRegular);
+    }
     let mut head = Vec::with_capacity(HEAD);
-    File::open(path)?.take(HEAD as u64).read_to_end(&mut head)?;
+    file.take(HEAD as u64).read_to_end(&mut head)?;
 
     for (prefix, mime, label) in MAGIC {
         if head.starts_with(prefix) {
@@ -60,7 +72,11 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
         }
     }
 
-    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+    // "foo." has an empty extension, which counts as none.
+    let ext = path
+        .extension()
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_string_lossy().to_lowercase());
     let kind = if is_text(&head) {
         match ext.as_deref() {
             None | Some("txt" | "text" | "log" | "1st" | "me" | "readme" | "diz" | "nfo") => Kind {
@@ -267,5 +283,57 @@ mod tests {
         let l2 = d.0.join("alias.md");
         std::os::unix::fs::symlink(&t, &l2).unwrap();
         assert_eq!(kind(&l2), is(Some("text/markdown"), "Markdown"));
+    }
+
+    #[test]
+    fn nul_beyond_the_head_is_still_text() {
+        let d = Dir::new("far-nul");
+        let mut b = vec![b'a'; 5000];
+        b[4500] = 0;
+        let p = d.file("x.txt", &b);
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+    }
+
+    #[test]
+    fn cut_sequence_at_end_of_short_file_is_not_text() {
+        let d = Dir::new("short-cut");
+        let mut b = b"abc".to_vec();
+        b.extend_from_slice(&"€".as_bytes()[..2]);
+        let p = d.file("x.txt", &b);
+        assert_eq!(kind(&p), is(None, ".txt file"));
+    }
+
+    #[test]
+    fn hidden_file_and_trailing_dot_have_no_extension() {
+        let d = Dir::new("hidden");
+        let p = d.file(".bashrc", b"export A=1\n");
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+        let p = d.file("foo.", b"text\n");
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+        let p = d.file("bar.", b"\x01\0");
+        assert_eq!(kind(&p), is(None, "file"));
+    }
+
+    #[test]
+    fn symlink_loop_is_not_regular() {
+        let d = Dir::new("loop");
+        let (a, b) = (d.0.join("a"), d.0.join("b"));
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert!(matches!(classify(&a).unwrap(), Classified::NotRegular));
+    }
+
+    #[test]
+    fn unreadable_regular_file_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: getuid cannot fail.
+        if unsafe { libc::getuid() } == 0 {
+            return; // root reads anything
+        }
+        let d = Dir::new("perm");
+        let p = d.file("secret.txt", b"x");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = classify(&p).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
     }
 }
