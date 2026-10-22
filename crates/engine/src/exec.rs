@@ -17,6 +17,7 @@
 //! taken for a stale one) and, after a SIGTERM, the 5 s grace before
 //! SIGKILL.
 
+pub use crate::output::FileId;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -60,15 +61,32 @@ const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
 /// several outputs).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Done { input: PathBuf, output: PathBuf },
-    Skipped { input: PathBuf, reason: String },
-    Failed { input: PathBuf, reason: String },
-    Warned { input: PathBuf, message: String },
+    Done {
+        input: PathBuf,
+        output: PathBuf,
+        /// The file's identity right after placement.
+        id: FileId,
+    },
+    Skipped {
+        input: PathBuf,
+        reason: String,
+    },
+    Failed {
+        input: PathBuf,
+        reason: String,
+    },
+    Warned {
+        input: PathBuf,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub outcomes: Vec<Outcome>,
+    /// Folders created for several outputs of one input (undo may remove
+    /// them if empty).
+    pub dirs: Vec<PathBuf>,
     /// Whether Landlock confined the actions (seccomp and limits always apply).
     pub sandboxed: bool,
 }
@@ -236,6 +254,7 @@ struct Sink<'a> {
     obs: &'a mut dyn Observer,
     inputs: &'a [PathBuf],
     outcomes: Vec<Outcome>,
+    dirs: Vec<PathBuf>,
     finished: Vec<bool>,
     /// Warnings shown per input, and those dropped past `MAX_WARNINGS`.
     warned: Vec<(u32, u64)>,
@@ -254,6 +273,7 @@ impl<'a> Sink<'a> {
             obs,
             inputs,
             outcomes: Vec::new(),
+            dirs: Vec::new(),
             finished: vec![false; inputs.len()],
             warned: vec![(0, 0); inputs.len()],
             done: 0,
@@ -311,9 +331,9 @@ impl<'a> Sink<'a> {
         self.emit(Outcome::Warned { input, message });
     }
 
-    fn placed(&mut self, i: usize, output: PathBuf) {
+    fn placed(&mut self, i: usize, output: PathBuf, id: FileId) {
         let input = self.input(i);
-        self.emit(Outcome::Done { input, output });
+        self.emit(Outcome::Done { input, output, id });
         self.finish(i);
     }
 
@@ -351,6 +371,7 @@ impl<'a> Sink<'a> {
         }
         Report {
             outcomes: self.outcomes,
+            dirs: self.dirs,
             sandboxed,
         }
     }
@@ -490,14 +511,22 @@ fn place_outputs(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "output".to_owned());
         let placed = if rels.len() == 1 {
-            output::place_beneath(dir, &rels[0], target, &stem, &action.ext, None).map(|p| vec![p])
+            output::place_beneath(dir, &rels[0], target, &stem, &action.ext, None).map(|f| {
+                output::ManyPlaced {
+                    folder: PathBuf::new(),
+                    files: vec![f],
+                }
+            })
         } else {
             output::place_many_beneath(dir, &rels, target, &stem)
         };
         match placed {
-            Ok(paths) => {
-                for p in paths {
-                    sink.placed(o, p);
+            Ok(many) => {
+                if !many.folder.as_os_str().is_empty() {
+                    sink.dirs.push(many.folder);
+                }
+                for (p, id) in many.files {
+                    sink.placed(o, p, id);
                 }
             }
             Err(e) => sink.fail(o, format!("cannot place output: {e}")),

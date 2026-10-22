@@ -280,6 +280,39 @@ struct At<'a> {
     name: &'a CStr,
 }
 
+/// The identity of a file at the moment it was placed. Undo deletes a file
+/// only if all of it still matches; `ctime` cannot be set from user space,
+/// so it also catches an edit followed by an mtime restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
+}
+
+impl FileId {
+    // st_dev/st_ino/st_size widths differ between targets.
+    #[allow(clippy::unnecessary_cast)]
+    pub fn from_stat(st: &libc::stat) -> FileId {
+        FileId {
+            dev: st.st_dev as u64,
+            ino: st.st_ino as u64,
+            size: st.st_size as u64,
+            mtime_ns: i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec),
+            ctime_ns: i128::from(st.st_ctime) * 1_000_000_000 + i128::from(st.st_ctime_nsec),
+        }
+    }
+}
+
+/// What `place_many_beneath` made: the fresh folder and the files in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManyPlaced {
+    pub folder: PathBuf,
+    pub files: Vec<(PathBuf, FileId)>,
+}
+
 fn stat_at(at: At) -> io::Result<libc::stat> {
     // SAFETY: zeroed stat is valid storage; at.name is NUL-terminated and
     // at.dir an open directory fd or AT_FDCWD.
@@ -459,7 +492,7 @@ fn split_name(name: &OsStr) -> (&[u8], &[u8]) {
 /// (a taken folder name becomes `<stem> (1)/` ...), files keep their names.
 /// If one move fails, the files already moved and the folder are removed.
 pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
-    place_many_with(produced.len(), dir, stem, false, |i, folder, _| {
+    let placed = place_many_with(produced.len(), dir, stem, false, |i, folder, _| {
         let p = &produced[i];
         let name = p.file_name().ok_or_else(|| invalid("output has no name"))?;
         let (s, e) = split_name(name);
@@ -468,8 +501,15 @@ pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Ve
             dir: libc::AT_FDCWD,
             name: &from,
         };
-        place_bytes(from, folder, None, s, e, b"")
-    })
+        let path = place_bytes(from, folder, None, s, e, b"")?;
+        let name = cstr(&path)?;
+        let st = stat_at(At {
+            dir: libc::AT_FDCWD,
+            name: &name,
+        })?;
+        Ok((path, FileId::from_stat(&st)))
+    })?;
+    Ok(placed.files.into_iter().map(|(p, _)| p).collect())
 }
 
 /// Creates the fresh `dir/<stem>/` folder for `count` outputs and calls
@@ -481,10 +521,13 @@ fn place_many_with(
     dir: &Path,
     stem: &str,
     with_fd: bool,
-    mut one: impl FnMut(usize, &Path, Option<RawFd>) -> io::Result<PathBuf>,
-) -> io::Result<Vec<PathBuf>> {
+    mut one: impl FnMut(usize, &Path, Option<RawFd>) -> io::Result<(PathBuf, FileId)>,
+) -> io::Result<ManyPlaced> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(ManyPlaced {
+            folder: PathBuf::new(),
+            files: Vec::new(),
+        });
     }
     if stem.is_empty() {
         return Err(invalid("empty output stem"));
@@ -521,7 +564,7 @@ fn place_many_with(
         match one(i, &folder, folder_fd.as_ref().map(|f| f.0)) {
             Ok(t) => placed.push(t),
             Err(e) => {
-                for t in &placed {
+                for (t, _) in &placed {
                     let _ = fs::remove_file(t);
                 }
                 let _ = fs::remove_dir(&folder);
@@ -529,7 +572,10 @@ fn place_many_with(
             }
         }
     }
-    Ok(placed)
+    Ok(ManyPlaced {
+        folder,
+        files: placed,
+    })
 }
 
 /// `openat(at, name, O_PATH | O_DIRECTORY | extra)`.
@@ -573,14 +619,16 @@ fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
 /// The placed name must still be the regular file we moved (a leaf swapped
 /// for a symlink between the check and the rename would land as a link):
 /// otherwise it is removed again.
-fn check_placed(dir_fd: RawFd, placed: &Path) -> io::Result<()> {
+fn check_placed(dir_fd: RawFd, placed: &Path) -> io::Result<FileId> {
     let name = cstr(Path::new(placed.file_name().unwrap_or_default()))?;
     let at = At {
         dir: dir_fd,
         name: &name,
     };
-    if stat_at(at).is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG) {
-        return Ok(());
+    if let Ok(st) = stat_at(at)
+        && st.st_mode & libc::S_IFMT == libc::S_IFREG
+    {
+        return Ok(FileId::from_stat(&st));
     }
     // SAFETY: name is NUL-terminated, dir_fd open.
     unsafe { libc::unlinkat(dir_fd, name.as_ptr(), 0) };
@@ -598,7 +646,7 @@ pub fn place_beneath(
     stem: &str,
     ext: &str,
     suffix: Option<&str>,
-) -> io::Result<PathBuf> {
+) -> io::Result<(PathBuf, FileId)> {
     let (parent, leaf) = resolve_beneath(root, rel)?;
     let dir_fd = open_path(libc::AT_FDCWD, &cstr(dir)?, 0)?;
     let from = At {
@@ -613,8 +661,8 @@ pub fn place_beneath(
         ext.as_bytes(),
         suffix.unwrap_or("").as_bytes(),
     )?;
-    check_placed(dir_fd.0, &placed)?;
-    Ok(placed)
+    let id = check_placed(dir_fd.0, &placed)?;
+    Ok((placed, id))
 }
 
 /// Like [`place_many`], for files beneath `root`, resolved as in
@@ -625,7 +673,7 @@ pub fn place_many_beneath(
     rels: &[PathBuf],
     dir: &Path,
     stem: &str,
-) -> io::Result<Vec<PathBuf>> {
+) -> io::Result<ManyPlaced> {
     place_many_with(rels.len(), dir, stem, true, |i, folder, folder_fd| {
         let folder_fd = folder_fd.expect("opened with_fd");
         let (parent, leaf) = resolve_beneath(root, &rels[i])?;
@@ -635,8 +683,8 @@ pub fn place_many_beneath(
             name: &leaf,
         };
         let placed = place_bytes(from, folder, Some(folder_fd), s, e, b"")?;
-        check_placed(folder_fd, &placed)?;
-        Ok(placed)
+        let id = check_placed(folder_fd, &placed)?;
+        Ok((placed, id))
     })
 }
 
@@ -975,9 +1023,16 @@ mod tests {
         fs::create_dir_all(w.path.join("0/sub")).unwrap();
         file(&w.path.join("0/sub"), "a.md", "a");
         file(&target, "a.md", "taken");
-        let out =
+        let (out, id) =
             place_beneath(&w.path, Path::new("0/sub/a.md"), &target, "a", "md", None).unwrap();
         assert_eq!(out, target.join("a (1).md"));
+        let st = stat_at(At {
+            dir: libc::AT_FDCWD,
+            name: &cstr(&out).unwrap(),
+        })
+        .unwrap();
+        assert_eq!(id, FileId::from_stat(&st));
+        assert_eq!(id.size, 1);
         assert_eq!(fs::read_to_string(&out).unwrap(), "a");
         assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "taken");
         fs::create_dir(w.path.join("1")).unwrap();
@@ -985,8 +1040,10 @@ mod tests {
         file(&w.path.join("1"), "p-2.png", "2");
         let rels = [PathBuf::from("1/p-1.png"), PathBuf::from("1/p-2.png")];
         let outs = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
+        assert_eq!(outs.folder, target.join("doc"));
+        let names: Vec<_> = outs.files.iter().map(|(p, _)| p.clone()).collect();
         assert_eq!(
-            outs,
+            names,
             [target.join("doc/p-1.png"), target.join("doc/p-2.png")]
         );
         // One bad entry: what was moved is removed again, no folder is left.
@@ -1060,7 +1117,7 @@ mod tests {
         let target = dir.join("target");
         fs::create_dir(&target).unwrap();
         let placed = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
-        assert_eq!(placed.len(), 2000);
+        assert_eq!(placed.files.len(), 2000);
     }
 
     #[test]
