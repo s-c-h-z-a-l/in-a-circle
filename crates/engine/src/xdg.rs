@@ -81,14 +81,14 @@ pub fn download_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
     /// Tests that touch the environment take this lock and restore it.
     static ENV: Mutex<()> = Mutex::new(());
 
-    fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
+    pub(crate) fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
         let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let saved: Vec<_> = vars
             .iter()
