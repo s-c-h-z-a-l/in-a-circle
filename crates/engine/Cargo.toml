@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
+manifest = { path = "../manifest" }
