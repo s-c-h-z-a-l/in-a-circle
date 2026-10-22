@@ -69,25 +69,37 @@ impl Catalog {
     /// Testable core. `dirs` is in priority order; the bool marks built-in.
     pub fn load_from(dirs: &[(PathBuf, bool)], cache: &Path) -> Catalog {
         let bins = scan(dirs);
-        let entries = match read_cache(cache) {
-            Some(cached) if cached.iter().map(|e| &e.bin).eq(bins.iter()) => cached,
-            _ => {
-                let entries: Vec<Entry> = bins
-                    .into_iter()
-                    .map(|bin| {
-                        let lines = run_manifest(&bin.path);
-                        Entry { bin, lines }
-                    })
-                    .collect();
-                write_cache(cache, &entries);
-                entries
-            }
+        let cached = read_cache(cache).unwrap_or_default();
+        let hit = cached.iter().map(|e| &e.bin).eq(bins.iter());
+        let entries: Vec<Entry> = if hit {
+            cached
+        } else {
+            // Rerun only binaries that are new or changed; a transient
+            // failure leaves the binary out, so the next start retries it.
+            let mut cached = cached;
+            let entries: Vec<Entry> = bins
+                .into_iter()
+                .filter_map(|bin| {
+                    if let Some(i) = cached.iter().position(|e| e.bin == bin) {
+                        return Some(cached.swap_remove(i));
+                    }
+                    let lines = run_manifest(&bin.path)?;
+                    Some(Entry { bin, lines })
+                })
+                .collect();
+            write_cache(cache, &entries);
+            entries
         };
         let mut actions: Vec<Action> = Vec::new();
         for e in &entries {
             for l in &e.lines {
-                let Some(a) = to_action(l, &e.bin) else {
+                let Some(a) = parse_action(l) else {
                     continue;
+                };
+                let a = Action {
+                    bin: e.bin.path.clone(),
+                    builtin: e.bin.builtin,
+                    ..a
                 };
                 if actions.iter().any(|x| x.id == a.id) {
                     eprintln!(
@@ -123,7 +135,16 @@ pub fn missing_tools(a: &Action) -> Vec<String> {
 }
 
 fn default_dirs() -> Vec<(PathBuf, bool)> {
-    if let Some(v) = std::env::var_os("INACIRCLE_ACTIONS_DIR") {
+    dirs_from(
+        std::env::var_os("INACIRCLE_ACTIONS_DIR"),
+        crate::xdg::data_home(),
+    )
+}
+
+/// Action directories: the override (colon-separated, all built-in; empty
+/// segments dropped, relative ones made absolute) or the standard three.
+fn dirs_from(over: Option<std::ffi::OsString>, data_home: PathBuf) -> Vec<(PathBuf, bool)> {
+    if let Some(v) = over {
         return std::env::split_paths(&v)
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| (std::path::absolute(&p).unwrap_or(p), true))
@@ -132,7 +153,7 @@ fn default_dirs() -> Vec<(PathBuf, bool)> {
     vec![
         (PathBuf::from("/usr/lib/inacircle/actions"), true),
         (PathBuf::from("/usr/local/lib/inacircle/actions"), true),
-        (crate::xdg::data_home().join("inacircle/actions"), false),
+        (data_home.join("inacircle/actions"), false),
     ]
 }
 
@@ -146,6 +167,9 @@ fn scan(dirs: &[(PathBuf, bool)]) -> Vec<Bin> {
         let mut found: Vec<Bin> = rd
             .flatten()
             .filter_map(|e| {
+                if e.file_name().as_encoded_bytes().first() == Some(&b'.') {
+                    return None;
+                }
                 let m = std::fs::metadata(e.path()).ok()?;
                 if !m.is_file() || m.mode() & 0o111 == 0 {
                     return None;
@@ -164,7 +188,8 @@ fn scan(dirs: &[(PathBuf, bool)]) -> Vec<Bin> {
     out
 }
 
-fn to_action(l: &Line, bin: &Bin) -> Option<Action> {
+/// A valid `action` line as an `Action` (with `bin` and `builtin` unset).
+fn parse_action(l: &Line) -> Option<Action> {
     if l.kind != "action" {
         return None;
     }
@@ -177,7 +202,7 @@ fn to_action(l: &Line, bin: &Bin) -> Option<Action> {
     Some(Action {
         id: l.bare_at(0).filter(|v| !v.is_empty())?.to_owned(),
         family: text("family")?,
-        bin: bin.path.clone(),
+        bin: PathBuf::new(),
         input: text("in")?,
         output: text("out")?,
         ext: text("ext")?,
@@ -195,82 +220,99 @@ fn to_action(l: &Line, bin: &Bin) -> Option<Action> {
                     .collect()
             })
             .unwrap_or_default(),
-        builtin: bin.builtin,
+        builtin: false,
     })
 }
 
-/// Runs `<bin> --manifest` and returns its valid `action` lines; a broken
-/// binary yields none (and a message on stderr).
-fn run_manifest(bin: &Path) -> Vec<Line> {
-    let skip = |why: &str| {
-        eprintln!("inacircle: {}: {why}; skipped", bin.display());
-        Vec::new()
-    };
-    let out = match capture(bin) {
-        Ok(o) => o,
-        Err(e) => return skip(&e),
-    };
-    let Ok(text) = String::from_utf8(out) else {
-        return skip("manifest is not UTF-8");
-    };
-    match manifest::parse(&text, MANIFEST_MAGIC) {
-        Ok((0, lines)) => lines
-            .into_iter()
-            .filter(|l| {
-                let ok = to_action(
-                    l,
-                    &Bin {
-                        path: PathBuf::new(),
-                        mtime: 0,
-                        size: 0,
-                        builtin: false,
-                    },
-                )
-                .is_some();
-                if !ok {
-                    eprintln!("inacircle: {}: invalid action line ignored", bin.display());
-                }
-                ok
-            })
-            .collect(),
-        Ok((v, _)) => skip(&format!("unknown manifest version {v}")),
-        Err(e) => skip(&format!("bad manifest: line {}: {}", e.line, e.msg)),
+/// Why a manifest run failed. Transient failures (the binary may work next
+/// time) are not cached; deterministic ones are.
+enum Fail {
+    Transient(String),
+    Deterministic(String),
+}
+
+/// Runs `<bin> --manifest` and returns its valid `action` lines. A broken
+/// binary yields no lines (message on stderr); `None` means a transient
+/// failure that must not be cached.
+fn run_manifest(bin: &Path) -> Option<Vec<Line>> {
+    match manifest_lines(bin) {
+        Ok(lines) => Some(lines),
+        Err(Fail::Deterministic(why)) => {
+            eprintln!("inacircle: {}: {why}; skipped", bin.display());
+            Some(Vec::new())
+        }
+        Err(Fail::Transient(why)) => {
+            eprintln!("inacircle: {}: {why}; skipped, will retry", bin.display());
+            None
+        }
     }
 }
 
-/// Stdout of `<bin> --manifest` within the deadline and size limit; the child
-/// is killed and reaped on any failure.
-fn capture(bin: &Path) -> Result<Vec<u8>, String> {
+fn manifest_lines(bin: &Path) -> Result<Vec<Line>, Fail> {
+    let out = capture(bin)?;
+    let bad = |why: String| Fail::Deterministic(why);
+    let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
+    match manifest::parse(&text, MANIFEST_MAGIC) {
+        Ok((0, lines)) => Ok(lines
+            .into_iter()
+            .filter(|l| {
+                // Other kinds are ignored silently (forward compatibility).
+                if l.kind != "action" || parse_action(l).is_some() {
+                    return l.kind == "action";
+                }
+                eprintln!("inacircle: {}: invalid action line ignored", bin.display());
+                false
+            })
+            .collect()),
+        Ok((v, _)) => Err(bad(format!("unknown manifest version {v}"))),
+        Err(e) => Err(bad(format!("bad manifest: line {}: {}", e.line, e.msg))),
+    }
+}
+
+/// Stdout of `<bin> --manifest` within one shared deadline and the size
+/// limit. The child's whole process group is killed and reaped on failure.
+fn capture(bin: &Path) -> Result<Vec<u8>, Fail> {
+    use std::os::unix::process::CommandExt;
     let mut child = Command::new(bin)
         .arg("--manifest")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
-        .map_err(|e| format!("cannot run: {e}"))?;
-    let result = read_limited(&mut child);
+        .map_err(|e| Fail::Transient(format!("cannot run: {e}")))?;
+    let deadline = Instant::now() + DEADLINE;
+    let result = read_limited(&mut child, deadline);
     if result.is_err() {
-        let _ = child.kill();
+        kill_group(&child);
     }
-    let status = wait_until(&mut child, Instant::now() + DEADLINE);
+    let status = wait_until(&mut child, deadline);
     let out = result?;
     match status {
         Some(s) if s.success() => Ok(out),
-        Some(s) => Err(format!("exited with {s}")),
-        None => Err("did not exit in time".to_owned()),
+        Some(s) => Err(Fail::Transient(format!("exited with {s}"))),
+        None => Err(Fail::Transient("did not exit in time".to_owned())),
     }
 }
 
-fn read_limited(child: &mut std::process::Child) -> Result<Vec<u8>, String> {
-    let deadline = Instant::now() + DEADLINE;
-    let stdout = child.stdout.as_ref().ok_or("no stdout")?;
+fn kill_group(child: &std::process::Child) {
+    // SAFETY: kill has no memory-safety preconditions. The child leads its own
+    // process group (process_group(0)), so -pid addresses only its group.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+}
+
+fn read_limited(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>, Fail> {
+    let t = |s: &str| Fail::Transient(s.to_owned());
+    let stdout = child.stdout.as_ref().ok_or_else(|| t("no stdout"))?;
     let fd = stdout.as_raw_fd();
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err("timed out".to_owned());
+            return Err(t("timed out"));
         }
         let mut p = libc::pollfd {
             fd,
@@ -284,7 +326,7 @@ fn read_limited(child: &mut std::process::Child) -> Result<Vec<u8>, String> {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return Err("poll failed".to_owned());
+            return Err(t("poll failed"));
         }
         if r == 0 {
             continue; // re-check the deadline
@@ -296,19 +338,19 @@ fn read_limited(child: &mut std::process::Child) -> Result<Vec<u8>, String> {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return Err("read failed".to_owned());
+            return Err(t("read failed"));
         }
         if n == 0 {
             return Ok(out);
         }
         out.extend_from_slice(&buf[..n as usize]);
         if out.len() > MAX_OUTPUT {
-            return Err("manifest larger than 64 KB".to_owned());
+            return Err(Fail::Deterministic("manifest larger than 64 KB".to_owned()));
         }
     }
 }
 
-/// Waits for exit until `deadline`, then kills; always reaps.
+/// Waits for exit until `deadline`, then kills the group; always reaps.
 fn wait_until(
     child: &mut std::process::Child,
     deadline: Instant,
@@ -318,7 +360,7 @@ fn wait_until(
             Ok(Some(s)) => return Some(s),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
             _ => {
-                let _ = child.kill();
+                kill_group(child);
                 let _ = child.wait();
                 return None;
             }
@@ -596,6 +638,65 @@ mod tests {
         assert_eq!(c.actions.len(), 2);
         assert_eq!(c.get("x.a").unwrap().label, "first");
         assert!(c.get("x.b").is_some());
+    }
+
+    #[test]
+    fn transient_failure_retried_deterministic_cached() {
+        let f = Fix::new("transient");
+        let d = f.dir("a");
+        let (m1, m2) = (f.root.join("m1"), f.root.join("m2"));
+        script(
+            &d.join("a-fails"),
+            &format!("echo run >> {}\nexit 1", m1.display()),
+        );
+        script(
+            &d.join("b-garbage"),
+            &format!("echo run >> {}\necho nonsense", m2.display()),
+        );
+        manifest_script(&d.join("c-good"), &[act("x.a", "A")]);
+        for _ in 0..2 {
+            let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+            assert_eq!(c.actions.len(), 1);
+        }
+        assert_eq!(std::fs::read_to_string(&m1).unwrap(), "run\nrun\n");
+        assert_eq!(std::fs::read_to_string(&m2).unwrap(), "run\n");
+    }
+
+    #[test]
+    fn symlink_dotfile_unknown_kind_and_builtin_on_hit() {
+        let f = Fix::new("misc");
+        let (d, real) = (f.dir("a"), f.dir("real"));
+        let extra = "future\tthing=1".to_owned();
+        manifest_script(&real.join("tool"), &[act("x.a", "A"), extra]);
+        std::os::unix::fs::symlink(real.join("tool"), d.join("link")).unwrap();
+        manifest_script(&d.join(".hidden"), &[act("x.h", "H")]);
+        for _ in 0..2 {
+            let c = Catalog::load_from(&[(d.clone(), false)], &f.cache());
+            assert_eq!(c.actions.len(), 1);
+            assert_eq!(c.actions[0].bin, d.join("link"));
+            assert!(!c.actions[0].builtin);
+        }
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert!(c.actions[0].builtin);
+    }
+
+    #[test]
+    fn dirs_from_override_and_defaults() {
+        let o = |s: &str| Some(std::ffi::OsString::from(s));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            dirs_from(o("/a::rel:/b"), "/d".into()),
+            [
+                ("/a".into(), true),
+                (cwd.join("rel"), true),
+                ("/b".into(), true)
+            ]
+        );
+        assert!(dirs_from(o(""), "/d".into()).is_empty());
+        let d = dirs_from(None, "/d".into());
+        assert_eq!(d.len(), 3);
+        assert_eq!(d[2], (PathBuf::from("/d/inacircle/actions"), false));
+        assert!(d[0].1 && d[1].1);
     }
 
     #[test]
