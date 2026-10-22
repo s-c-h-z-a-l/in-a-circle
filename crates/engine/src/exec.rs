@@ -1,0 +1,1310 @@
+//! The executor and supervisor: runs an action route (one or two actions)
+//! over a batch of input files, sandboxed, speaking contract v0
+//! (docs/architecture.md, "Invocation"), and moves the results into place
+//! with the output policy.
+//!
+//! Inputs are grouped by their final target folder; each group gets one
+//! work dir inside that folder (so placement is a same-filesystem rename)
+//! and one process per route step (`batch=no`: one group per input, run in
+//! turn). Step `k` runs with `--work <work>/step<k>` and reads its inputs
+//! from `<work>/step<k>.inputs`; step 2's inputs are step 1's outputs, so
+//! intermediate files never leave the work dir. Only the last step's
+//! outputs are placed.
+//!
+//! The supervisor is a single-threaded `poll` loop over the child's stdout
+//! and stderr, the cancel signalfd and the child's pidfd; its only timer is
+//! the hourly refresh of the work dir's mtime (so a long job's dir is never
+//! taken for a stale one) and, after a SIGTERM, the 5 s grace before
+//! SIGKILL.
+
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
+use std::fs;
+use std::io::{self, Read};
+use std::marker::PhantomData;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::catalog::Action;
+use crate::output;
+use crate::sandbox::{self, Policy};
+
+/// How much of the child's stderr is kept (its tail).
+const STDERR_TAIL: usize = 4096;
+/// Longest accepted event line; longer is a contract violation.
+const MAX_LINE: usize = 64 * 1024;
+/// Time between SIGTERM and SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+/// Work dir mtime refresh period (stale dirs are those older than a day).
+const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
+/// Poll period when the kernel has no pidfd (before Linux 5.3).
+const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
+
+/// What became of one input. One input can have several (warnings, or
+/// several outputs).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    Done { input: PathBuf, output: PathBuf },
+    Skipped { input: PathBuf, reason: String },
+    Failed { input: PathBuf, reason: String },
+    Warned { input: PathBuf, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report {
+    pub outcomes: Vec<Outcome>,
+    /// Whether Landlock confined the actions (seccomp and limits always apply).
+    pub sandboxed: bool,
+}
+
+/// Live feedback while a route runs.
+pub trait Observer {
+    /// Every outcome, as it happens (`Done` once the output is in place).
+    fn event(&mut self, o: &Outcome);
+    /// `done` of `total` inputs finished; `fraction` of the whole run.
+    fn progress(&mut self, done: usize, total: usize, fraction: f32);
+}
+
+/// SIGTERM and SIGINT, blocked in the calling thread and read through a
+/// signalfd, so the supervisor sees a cancel as a poll event. Dropping it
+/// restores the previous signal mask. Not `Send`: the mask is per thread.
+pub struct CancelToken {
+    fd: OwnedFd,
+    old: libc::sigset_t,
+    cancelled: Cell<bool>,
+    _thread: PhantomData<*const ()>,
+}
+
+impl CancelToken {
+    pub fn install() -> io::Result<CancelToken> {
+        // SAFETY: zeroed sigset_t is valid storage; sigemptyset/sigaddset
+        // initialize it; pthread_sigmask and signalfd read `set` and write
+        // `old`, both on this stack frame.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::sigaddset(&mut set, libc::SIGINT);
+            let r = libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+            if r != 0 {
+                return Err(io::Error::from_raw_os_error(r));
+            }
+            let fd = libc::signalfd(-1, &set, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC);
+            if fd < 0 {
+                let e = io::Error::last_os_error();
+                libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                return Err(e);
+            }
+            Ok(CancelToken {
+                fd: OwnedFd::from_raw_fd(fd),
+                old,
+                cancelled: Cell::new(false),
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    /// Consumes pending cancel signals; true once one has arrived.
+    pub fn is_cancelled(&self) -> bool {
+        loop {
+            let mut info = std::mem::MaybeUninit::<libc::signalfd_siginfo>::uninit();
+            let size = std::mem::size_of::<libc::signalfd_siginfo>();
+            // SAFETY: the fd is our signalfd; the buffer holds one siginfo.
+            let n = unsafe { libc::read(self.fd.as_raw_fd(), info.as_mut_ptr().cast(), size) };
+            if n == size as isize {
+                self.cancelled.set(true);
+                continue;
+            }
+            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return self.cancelled.get();
+        }
+    }
+}
+
+impl Drop for CancelToken {
+    fn drop(&mut self) {
+        // SAFETY: restores the mask saved by install, on the same thread
+        // (the token is not Send).
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) };
+    }
+}
+
+/// Runs `route` over `inputs` and places the results. Never panics on a
+/// misbehaving action; every input ends with at least one outcome.
+pub fn run(
+    route: &[&Action],
+    inputs: &[PathBuf],
+    obs: &mut dyn Observer,
+    cancel: &CancelToken,
+) -> Report {
+    let abi = sandbox::landlock_abi();
+    let mut seen = HashSet::new();
+    let uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
+    let mut sink = Sink::new(obs, &uniq);
+    let all = |sink: &mut Sink, reason: &str| {
+        for i in 0..sink.inputs.len() {
+            sink.fail(i, reason.to_owned());
+        }
+    };
+    if route.is_empty() || route.len() > 2 {
+        all(&mut sink, "invalid route");
+        return sink.report(false);
+    }
+    if abi.is_none() && route.iter().any(|a| !a.builtin) {
+        all(&mut sink, "sandbox unavailable");
+        return sink.report(false);
+    }
+    let mut ok = Vec::new();
+    for (i, p) in uniq.iter().enumerate() {
+        if !p.is_absolute() {
+            sink.fail(i, "input path is not absolute".to_owned());
+        } else if p.to_str().is_none() {
+            sink.skip(i, "non-UTF-8 path".to_owned());
+        } else {
+            match fs::metadata(p) {
+                Ok(m) if m.is_file() => ok.push(i),
+                Ok(_) => sink.fail(i, "not a regular file".to_owned()),
+                Err(e) => sink.fail(i, format!("cannot read input: {e}")),
+            }
+        }
+    }
+    if abi.is_none() {
+        for &i in &ok {
+            sink.warn(i, "ran without sandbox".to_owned());
+        }
+    }
+    let batch = route.iter().all(|a| a.batch);
+    let ok_paths: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
+    let mut targets: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let groups = group_by_target(&ok_paths, batch, |dir| {
+        targets
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| output::writable_target(dir))
+            .clone()
+    });
+    let mut cleaned = HashSet::new();
+    for g in groups {
+        let members: Vec<usize> = g.members.iter().map(|&j| ok[j]).collect();
+        sink.begin_group(members.len());
+        if cancel.is_cancelled() {
+            for &i in &members {
+                sink.fail(i, "cancelled".to_owned());
+            }
+        } else {
+            if cleaned.insert(g.target.clone()) {
+                // The download fallback may not exist yet.
+                let _ = fs::create_dir_all(&g.target);
+                output::clean_stale(&g.target);
+            }
+            run_group(route, &members, &g.target, abi.is_some(), cancel, &mut sink);
+        }
+        sink.end_group();
+    }
+    sink.report(abi.is_some())
+}
+
+/// Collects outcomes, forwards them to the observer, tracks progress.
+struct Sink<'a> {
+    obs: &'a mut dyn Observer,
+    inputs: &'a [PathBuf],
+    outcomes: Vec<Outcome>,
+    finished: Vec<bool>,
+    done: usize,
+    /// Inputs in the groups before the current one.
+    base: usize,
+    /// Inputs in the current group.
+    span: usize,
+    steps: usize,
+    step: usize,
+}
+
+impl<'a> Sink<'a> {
+    fn new(obs: &'a mut dyn Observer, inputs: &'a [PathBuf]) -> Sink<'a> {
+        Sink {
+            obs,
+            inputs,
+            outcomes: Vec::new(),
+            finished: vec![false; inputs.len()],
+            done: 0,
+            base: 0,
+            span: 0,
+            steps: 1,
+            step: 0,
+        }
+    }
+
+    fn emit(&mut self, o: Outcome) {
+        self.obs.event(&o);
+        self.outcomes.push(o);
+    }
+
+    fn input(&self, i: usize) -> PathBuf {
+        self.inputs[i].clone()
+    }
+
+    fn finish(&mut self, i: usize) {
+        if !self.finished[i] {
+            self.finished[i] = true;
+            self.done += 1;
+        }
+    }
+
+    fn fail(&mut self, i: usize, reason: String) {
+        let input = self.input(i);
+        self.emit(Outcome::Failed { input, reason });
+        self.finish(i);
+    }
+
+    fn skip(&mut self, i: usize, reason: String) {
+        let input = self.input(i);
+        self.emit(Outcome::Skipped { input, reason });
+        self.finish(i);
+    }
+
+    fn warn(&mut self, i: usize, message: String) {
+        let input = self.input(i);
+        self.emit(Outcome::Warned { input, message });
+    }
+
+    fn placed(&mut self, i: usize, output: PathBuf) {
+        let input = self.input(i);
+        self.emit(Outcome::Done { input, output });
+        self.finish(i);
+    }
+
+    fn begin_group(&mut self, span: usize) {
+        self.span = span;
+        self.step = 0;
+    }
+
+    fn end_group(&mut self) {
+        self.base += self.span;
+        self.span = 0;
+        self.progress(0.0);
+    }
+
+    /// `f`: the current process's own fraction.
+    fn progress(&mut self, f: f32) {
+        let total = self.inputs.len();
+        if total == 0 {
+            return;
+        }
+        let within = (self.step as f32 + f) / self.steps as f32;
+        let frac = (self.base as f32 + self.span as f32 * within) / total as f32;
+        let done = self.done;
+        self.obs.progress(done, total, frac.clamp(0.0, 1.0));
+    }
+
+    fn report(self, sandboxed: bool) -> Report {
+        Report {
+            outcomes: self.outcomes,
+            sandboxed,
+        }
+    }
+}
+
+/// Inputs sharing a target folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Group {
+    target: PathBuf,
+    /// Indices into the grouped slice, in input order.
+    members: Vec<usize>,
+}
+
+/// Groups `inputs` by `target_of(parent folder)`, in order of first
+/// appearance; with `batch == false` every input is its own group.
+fn group_by_target(
+    inputs: &[PathBuf],
+    batch: bool,
+    mut target_of: impl FnMut(&Path) -> PathBuf,
+) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (i, p) in inputs.iter().enumerate() {
+        let target = target_of(p.parent().unwrap_or(Path::new("/")));
+        match groups.iter_mut().find(|g| batch && g.target == target) {
+            Some(g) => g.members.push(i),
+            None => groups.push(Group {
+                target,
+                members: vec![i],
+            }),
+        }
+    }
+    groups
+}
+
+/// One step's process: its inputs and which original input each came from.
+struct StepIn {
+    paths: Vec<PathBuf>,
+    origin: Vec<usize>,
+}
+
+fn run_group(
+    route: &[&Action],
+    members: &[usize],
+    target: &Path,
+    landlock: bool,
+    cancel: &CancelToken,
+    sink: &mut Sink,
+) {
+    let work = match output::make_work_dir(target) {
+        Ok(w) => w,
+        Err(e) => {
+            for &i in members {
+                sink.fail(i, format!("cannot create work directory: {e}"));
+            }
+            return;
+        }
+    };
+    sink.steps = route.len();
+    let mut step_in = StepIn {
+        paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
+        origin: members.to_vec(),
+    };
+    for (s, action) in route.iter().enumerate() {
+        sink.step = s;
+        let last = s + 1 == route.len();
+        let dir = work.path.join(format!("step{}", s + 1));
+        let list = work.path.join(format!("step{}.inputs", s + 1));
+        let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
+        let result = match ran {
+            Ok(()) => run_step(
+                action, &step_in, &dir, &list, &work.path, landlock, cancel, sink,
+            ),
+            Err(reason) => {
+                for &o in &step_in.origin {
+                    sink.fail(o, reason.clone());
+                }
+                return;
+            }
+        };
+        let Some(outputs) = result else {
+            return; // cancelled
+        };
+        if last {
+            place_outputs(action, &step_in, &outputs, &dir, target, sink);
+            return;
+        }
+        let mut next = StepIn {
+            paths: Vec::new(),
+            origin: Vec::new(),
+        };
+        for (j, outs) in outputs.iter().enumerate() {
+            for rel in outs {
+                next.paths.push(dir.join(rel));
+                next.origin.push(step_in.origin[j]);
+            }
+        }
+        if next.paths.is_empty() {
+            return;
+        }
+        step_in = next;
+    }
+}
+
+/// Moves the last step's outputs to `target`: one output per input with
+/// `place`, several with `place_many`. Each output is checked again first:
+/// the action is gone by now, so nothing can swap it after the check.
+fn place_outputs(
+    action: &Action,
+    step_in: &StepIn,
+    outputs: &[Vec<PathBuf>],
+    dir: &Path,
+    target: &Path,
+    sink: &mut Sink,
+) {
+    // Outputs per original input, in order.
+    let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
+    for (j, outs) in outputs.iter().enumerate() {
+        if outs.is_empty() {
+            continue;
+        }
+        let o = step_in.origin[j];
+        let at = match per.iter().position(|(x, _)| *x == o) {
+            Some(at) => at,
+            None => {
+                per.push((o, Vec::new()));
+                per.len() - 1
+            }
+        };
+        per[at].1.extend(outs.iter().cloned());
+    }
+    for (o, rels) in per {
+        if let Some(e) = rels.iter().find_map(|r| regular_beneath(dir, r).err()) {
+            sink.fail(o, format!("contract violation: {e}"));
+            continue;
+        }
+        let produced: Vec<PathBuf> = rels.iter().map(|r| dir.join(r)).collect();
+        let src = &sink.inputs[o];
+        let stem = src
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "output".to_owned());
+        let placed = if produced.len() == 1 {
+            output::place(&produced[0], target, &stem, &action.ext, None).map(|p| vec![p])
+        } else {
+            output::place_many(&produced, target, &stem)
+        };
+        match placed {
+            Ok(paths) => {
+                for p in paths {
+                    sink.placed(o, p);
+                }
+            }
+            Err(e) => sink.fail(o, format!("cannot place output: {e}")),
+        }
+    }
+}
+
+/// One parsed, validated event line. Indices are into the process's inputs.
+#[derive(Debug, Clone, PartialEq)]
+enum Event {
+    /// `None`: NaN, dropped.
+    Progress(Option<f32>),
+    Done {
+        index: usize,
+        rel: PathBuf,
+    },
+    Skip {
+        index: usize,
+        reason: String,
+    },
+    Fail {
+        index: usize,
+        reason: String,
+    },
+    Warn {
+        index: usize,
+        message: String,
+    },
+}
+
+/// Parses and validates one stdout line (without its newline). `Err` is a
+/// contract violation, described.
+fn parse_event(line: &str, inputs: &[PathBuf], work: &Path) -> Result<Event, String> {
+    let l = manifest::parse_line(line).map_err(|e| format!("bad event line: {}", e.msg))?;
+    let mut fields = Vec::with_capacity(l.items.len());
+    for item in &l.items {
+        match item {
+            manifest::Item::Bare(v) => fields.push(v.as_str()),
+            manifest::Item::Pair(..) => {
+                return Err(format!("unescaped `=` in a {} event", l.kind));
+            }
+        }
+    }
+    let want = if l.kind == "progress" { 1 } else { 2 };
+    let known = matches!(
+        l.kind.as_str(),
+        "progress" | "done" | "skip" | "fail" | "warn"
+    );
+    if !known {
+        return Err(format!("unknown event kind {}", l.kind));
+    }
+    if fields.len() != want {
+        return Err(format!(
+            "{} event with {} fields, expected {want}",
+            l.kind,
+            fields.len()
+        ));
+    }
+    let index_of = |input: &str| {
+        inputs
+            .iter()
+            .position(|p| p.to_str() == Some(input))
+            .ok_or_else(|| format!("{} event for unknown input {input}", l.kind))
+    };
+    Ok(match l.kind.as_str() {
+        "progress" => {
+            let f: f32 = fields[0]
+                .parse()
+                .map_err(|_| format!("bad progress value {}", fields[0]))?;
+            Event::Progress((!f.is_nan()).then(|| f.clamp(0.0, 1.0)))
+        }
+        "done" => {
+            let (input, rel) = (fields[0], fields[1]);
+            let index = done_index(rel, inputs.len())?;
+            if inputs[index].to_str() != Some(input) {
+                return Err(format!(
+                    "done output {rel} is not under the index of {input}"
+                ));
+            }
+            regular_beneath(work, Path::new(rel))?;
+            Event::Done {
+                index,
+                rel: PathBuf::from(rel),
+            }
+        }
+        "skip" => Event::Skip {
+            index: index_of(fields[0])?,
+            reason: fields[1].to_owned(),
+        },
+        "fail" => Event::Fail {
+            index: index_of(fields[0])?,
+            reason: fields[1].to_owned(),
+        },
+        _ => Event::Warn {
+            index: index_of(fields[0])?,
+            message: fields[1].to_owned(),
+        },
+    })
+}
+
+/// The `<index>` of a `done` output path `<index>/<name>...`: relative,
+/// every component a plain name (no empty, `.` or `..`), the first one a
+/// canonical decimal below `n`.
+fn done_index(rel: &str, n: usize) -> Result<usize, String> {
+    if rel.starts_with('/') {
+        return Err(format!("absolute done output {rel}"));
+    }
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err(format!("done output {rel:?} is not a plain relative path"));
+    }
+    if parts.len() < 2 {
+        return Err(format!(
+            "done output {rel} is not under an <index>/ directory"
+        ));
+    }
+    let first = parts[0];
+    let canonical =
+        first.bytes().all(|b| b.is_ascii_digit()) && (first == "0" || !first.starts_with('0'));
+    match first.parse::<usize>() {
+        Ok(i) if canonical && i < n => Ok(i),
+        _ => Err(format!("done output {rel} has a bad index (batch of {n})")),
+    }
+}
+
+/// `rel` names a regular file beneath `work`, reached through real
+/// directories only (no symlink anywhere on the way).
+fn regular_beneath(work: &Path, rel: &Path) -> Result<(), String> {
+    let mut at = work.to_path_buf();
+    let mut parts = rel.components().peekable();
+    while let Some(c) = parts.next() {
+        at.push(c);
+        let meta =
+            fs::symlink_metadata(&at).map_err(|e| format!("done output {}: {e}", rel.display()))?;
+        let ok = if parts.peek().is_some() {
+            meta.is_dir()
+        } else {
+            meta.is_file()
+        };
+        if !ok {
+            return Err(format!(
+                "done output {} is not a regular file in the work directory",
+                rel.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How a process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    Exit(i32),
+    Signal(i32),
+}
+
+impl From<ExitStatus> for End {
+    fn from(s: ExitStatus) -> End {
+        match (s.code(), s.signal()) {
+            (Some(c), _) => End::Exit(c),
+            (None, Some(n)) => End::Signal(n),
+            (None, None) => End::Exit(-1),
+        }
+    }
+}
+
+/// The failure reason for an input the process reported nothing about.
+fn unreported_reason(violation: Option<&str>, end: End, stderr_tail: &[u8]) -> String {
+    if let Some(v) = violation {
+        return format!("contract violation: {v}");
+    }
+    match end {
+        End::Signal(libc::SIGXFSZ) => "output too large".to_owned(),
+        End::Signal(n) => format!("killed by signal {n}"),
+        End::Exit(action::EXIT_USAGE) => match last_line(stderr_tail) {
+            l if l.is_empty() => "action invocation error".to_owned(),
+            l => format!("action invocation error: {l}"),
+        },
+        End::Exit(_) => "no result reported".to_owned(),
+    }
+}
+
+/// The last non-empty line of `tail`, trimmed.
+fn last_line(tail: &[u8]) -> String {
+    let s = String::from_utf8_lossy(tail);
+    s.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Runs one step's process to its end. Returns the validated outputs
+/// (relative to `dir`) per input, or `None` when cancelled (every
+/// unfinished input is then failed as cancelled).
+#[allow(clippy::too_many_arguments)]
+fn run_step(
+    action: &Action,
+    step_in: &StepIn,
+    dir: &Path,
+    list: &Path,
+    root: &Path,
+    landlock: bool,
+    cancel: &CancelToken,
+    sink: &mut Sink,
+) -> Option<Vec<Vec<PathBuf>>> {
+    let n = step_in.paths.len();
+    let fail_all = |sink: &mut Sink, reason: &str| {
+        for &o in &step_in.origin {
+            sink.fail(o, reason.to_owned());
+        }
+        Some(vec![Vec::new(); n])
+    };
+    // The engine never hands an action a path inside its own --work.
+    if step_in.paths.iter().any(|p| p.starts_with(dir)) {
+        return fail_all(sink, "input inside the work directory");
+    }
+    let mut text = String::new();
+    for p in &step_in.paths {
+        let Some(s) = p.to_str() else {
+            return fail_all(sink, "non-UTF-8 path");
+        };
+        text.push_str(&manifest::escape(s));
+        text.push('\n');
+    }
+    if let Err(e) = fs::write(list, text) {
+        return fail_all(sink, &format!("cannot write input list: {e}"));
+    }
+    let mut exec: Vec<PathBuf> = sandbox::SYSTEM_EXEC_PATHS
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    exec.push(action.bin.clone());
+    let mut read = step_in.paths.clone();
+    read.push(list.to_path_buf());
+    let policy = Policy {
+        exec: &exec,
+        read: &read,
+        write: dir,
+    };
+    let ruleset = if landlock {
+        match sandbox::build(&policy) {
+            Ok(r) => r,
+            Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
+        }
+    } else {
+        None
+    };
+    if ruleset.is_none() && !action.builtin {
+        return fail_all(sink, "sandbox unavailable");
+    }
+    let total: u64 = step_in
+        .paths
+        .iter()
+        .filter_map(|p| fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let limits = sandbox::limits_for(total);
+    let fd = ruleset.as_ref().map(|r| r.as_raw_fd());
+    let mut cmd = Command::new(&action.bin);
+    cmd.arg("run")
+        .arg(&action.id)
+        .arg("--work")
+        .arg(dir)
+        .arg("--inputs-from")
+        .arg(list)
+        .arg("--")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // No `process_group(0)`: std applies it before pre_exec, and the
+    // child's `setsid` (which also makes it a group leader) would then fail.
+    // SAFETY: the closure makes only async-signal-safe calls (sigemptyset,
+    // sigprocmask, and apply_in_child's documented ones) on stack data; the
+    // ruleset fd stays open until spawn returns (`ruleset` lives to the end
+    // of this function).
+    unsafe {
+        cmd.pre_exec(move || {
+            // The child inherits the supervisor's blocked SIGTERM/SIGINT.
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            if libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            sandbox::apply_in_child(fd, &limits)
+        });
+    }
+    if cancel.is_cancelled() {
+        for &o in &step_in.origin {
+            sink.fail(o, "cancelled".to_owned());
+        }
+        return None;
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return fail_all(sink, &format!("cannot start action: {e}")),
+    };
+    drop(ruleset);
+    let mut sup = Supervisor::new(child, step_in, dir, root, cancel);
+    sup.run(sink);
+    sup.finish(sink)
+}
+
+/// The state of one running process.
+struct Supervisor<'a> {
+    child: Child,
+    pgid: libc::pid_t,
+    pidfd: Option<OwnedFd>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    line: Vec<u8>,
+    /// The current line ran past MAX_LINE (already a violation).
+    overlong: bool,
+    tail: Vec<u8>,
+    step_in: &'a StepIn,
+    dir: &'a Path,
+    root: &'a Path,
+    cancel: &'a CancelToken,
+    reported: Vec<bool>,
+    outputs: Vec<Vec<PathBuf>>,
+    violation: Option<String>,
+    cancelled: bool,
+    term_at: Option<Instant>,
+    killed: bool,
+}
+
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: fd is an open pipe fd owned by the Child handles.
+    unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        if fl >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        }
+    }
+}
+
+fn pidfd_open(pid: u32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open takes a pid and flags 0; the child is not reaped
+    // yet, so the pid still names it.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+    // SAFETY: a non-negative result is a new fd that we now own.
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Sets the mtime (and atime) of `path` to now.
+fn touch(path: &Path) {
+    if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
+        // SAFETY: c is a valid NUL-terminated path; NULL times means now.
+        unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), std::ptr::null(), 0) };
+    }
+}
+
+/// Reads what is available; `Ok(false)` at EOF.
+fn read_some(r: &mut impl Read, mut f: impl FnMut(&[u8])) -> bool {
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => return false,
+            Ok(k) => f(&buf[..k]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
+            Err(_) => return false,
+        }
+    }
+}
+
+impl<'a> Supervisor<'a> {
+    fn new(
+        child: Child,
+        step_in: &'a StepIn,
+        dir: &'a Path,
+        root: &'a Path,
+        cancel: &'a CancelToken,
+    ) -> Supervisor<'a> {
+        let mut child = child;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        if let Some(s) = &stdout {
+            set_nonblocking(s.as_raw_fd());
+        }
+        if let Some(s) = &stderr {
+            set_nonblocking(s.as_raw_fd());
+        }
+        let n = step_in.paths.len();
+        Supervisor {
+            pgid: child.id() as libc::pid_t,
+            pidfd: pidfd_open(child.id()),
+            child,
+            stdout,
+            stderr,
+            line: Vec::new(),
+            overlong: false,
+            tail: Vec::new(),
+            step_in,
+            dir,
+            root,
+            cancel,
+            reported: vec![false; n],
+            outputs: vec![Vec::new(); n],
+            violation: None,
+            cancelled: false,
+            term_at: None,
+            killed: false,
+        }
+    }
+
+    fn signal(&self, sig: libc::c_int) {
+        // SAFETY: kill has no memory preconditions. The group is the child's
+        // own session (setsid in apply_in_child); the child is not reaped
+        // yet, so its id cannot have been reused.
+        unsafe { libc::kill(-self.pgid, sig) };
+    }
+
+    fn terminate(&mut self) {
+        if self.term_at.is_none() {
+            self.signal(libc::SIGTERM);
+            self.term_at = Some(Instant::now());
+        }
+    }
+
+    fn violate(&mut self, what: String) {
+        if self.violation.is_none() && !self.cancelled {
+            self.violation = Some(what);
+            self.terminate();
+        }
+    }
+
+    /// The poll loop, until the child has exited.
+    fn run(&mut self, sink: &mut Sink) {
+        let mut next_refresh = Instant::now() + REFRESH_EVERY;
+        loop {
+            let now = Instant::now();
+            let mut deadline = next_refresh;
+            if let (Some(t), false) = (self.term_at, self.killed) {
+                deadline = deadline.min(t + TERM_GRACE);
+            }
+            if self.pidfd.is_none() {
+                deadline = deadline.min(now + NO_PIDFD_POLL);
+            }
+            let wait = deadline.saturating_duration_since(now);
+            // Round up so the deadline has passed when poll returns.
+            let ms = wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            let mut fds = Vec::with_capacity(4);
+            let mut push = |fd: RawFd| {
+                fds.push(libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                fds.len() - 1
+            };
+            let out_at = self.stdout.as_ref().map(|s| push(s.as_raw_fd()));
+            let err_at = self.stderr.as_ref().map(|s| push(s.as_raw_fd()));
+            let sig_at = (!self.cancelled).then(|| push(self.cancel.fd.as_raw_fd()));
+            let pid_at = self.pidfd.as_ref().map(|p| push(p.as_raw_fd()));
+            // SAFETY: fds is a valid array of fds.len() pollfds.
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+            if r < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                // Unexpected: stop supervising, kill and reap.
+                self.signal(libc::SIGKILL);
+                return;
+            }
+            let ready = |at: Option<usize>| at.is_some_and(|i| fds[i].revents != 0);
+            let now = Instant::now();
+            if now >= next_refresh {
+                touch(self.root);
+                next_refresh = now + REFRESH_EVERY;
+            }
+            if let (Some(t), false) = (self.term_at, self.killed)
+                && now >= t + TERM_GRACE
+            {
+                self.signal(libc::SIGKILL);
+                self.killed = true;
+            }
+            if ready(out_at) {
+                self.read_stdout(sink);
+            }
+            if ready(err_at) {
+                self.read_stderr();
+            }
+            if ready(sig_at) && self.cancel.is_cancelled() {
+                self.cancelled = true;
+                self.terminate();
+            }
+            let exited = match pid_at {
+                Some(_) => ready(pid_at),
+                None => matches!(self.child.try_wait(), Ok(Some(_))),
+            };
+            if exited {
+                return;
+            }
+        }
+    }
+
+    fn read_stdout(&mut self, sink: &mut Sink) {
+        let Some(mut out) = self.stdout.take() else {
+            return;
+        };
+        let mut chunks = Vec::new();
+        let open = read_some(&mut out, |b| chunks.extend_from_slice(b));
+        self.feed(&chunks, sink);
+        if open {
+            self.stdout = Some(out);
+        }
+    }
+
+    fn read_stderr(&mut self) {
+        let Some(mut err) = self.stderr.take() else {
+            return;
+        };
+        let tail = &mut self.tail;
+        let open = read_some(&mut err, |b| {
+            tail.extend_from_slice(b);
+            if tail.len() > STDERR_TAIL {
+                tail.drain(..tail.len() - STDERR_TAIL);
+            }
+        });
+        if open {
+            self.stderr = Some(err);
+        }
+    }
+
+    /// Splits stdout bytes into lines and handles each complete one.
+    fn feed(&mut self, bytes: &[u8], sink: &mut Sink) {
+        let mut rest = bytes;
+        while let Some(nl) = rest.iter().position(|&b| b == b'\n') {
+            if !self.overlong {
+                self.line.extend_from_slice(&rest[..nl]);
+                let line = std::mem::take(&mut self.line);
+                self.handle_line(&line, sink);
+            }
+            self.overlong = false;
+            self.line.clear();
+            rest = &rest[nl + 1..];
+        }
+        if !self.overlong {
+            self.line.extend_from_slice(rest);
+            if self.line.len() > MAX_LINE {
+                self.overlong = true;
+                self.line.clear();
+                self.violate("event line too long".to_owned());
+            }
+        }
+    }
+
+    fn handle_line(&mut self, line: &[u8], sink: &mut Sink) {
+        if self.violation.is_some() || self.cancelled {
+            return;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            self.violate("event line is not UTF-8".to_owned());
+            return;
+        };
+        let ev = match parse_event(line, &self.step_in.paths, self.dir) {
+            Ok(ev) => ev,
+            Err(what) => {
+                self.violate(what);
+                return;
+            }
+        };
+        let origin = &self.step_in.origin;
+        match ev {
+            Event::Progress(Some(f)) => sink.progress(f),
+            Event::Progress(None) => {}
+            Event::Done { index, rel } => {
+                if self.outputs[index].contains(&rel) {
+                    self.violate(format!("duplicate output {}", rel.display()));
+                    return;
+                }
+                self.outputs[index].push(rel);
+                self.reported[index] = true;
+            }
+            Event::Skip { index, reason } => {
+                self.reported[index] = true;
+                sink.skip(origin[index], reason);
+            }
+            Event::Fail { index, reason } => {
+                self.reported[index] = true;
+                sink.fail(origin[index], reason);
+            }
+            Event::Warn { index, message } => sink.warn(origin[index], message),
+        }
+    }
+
+    /// After exit: kills what is left of the group, drains the pipes, reaps
+    /// the child and settles every input without a result.
+    fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
+        self.signal(libc::SIGKILL);
+        self.read_stdout(sink);
+        self.read_stderr();
+        let end = match self.child.wait() {
+            Ok(s) => End::from(s),
+            Err(_) => End::Exit(-1),
+        };
+        // A line cut off by a crash is not an event; after a normal exit
+        // it is a broken one.
+        if !self.line.is_empty() && !self.overlong && matches!(end, End::Exit(_)) {
+            self.violate("unterminated event line".to_owned());
+        }
+        let origin = &self.step_in.origin;
+        if self.cancelled {
+            for &o in origin {
+                if !sink.finished[o] {
+                    sink.fail(o, "cancelled".to_owned());
+                }
+            }
+            return None;
+        }
+        let reason = unreported_reason(self.violation.as_deref(), end, &self.tail);
+        for (j, &o) in origin.iter().enumerate() {
+            if !self.reported[j] {
+                sink.fail(o, reason.clone());
+            }
+        }
+        Some(self.outputs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(tag: &str) -> Tmp {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "inacircle-exec-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&p).unwrap();
+            Tmp(p)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn done_line(input: &str, rel: &str) -> String {
+        manifest::write_line(&manifest::Line::new("done").bare(input).bare(rel))
+            .trim_end_matches('\n')
+            .to_owned()
+    }
+
+    fn violation(r: Result<Event, String>) -> String {
+        r.expect_err("expected a contract violation")
+    }
+
+    #[test]
+    fn validates_done_path() {
+        let t = Tmp::new("done");
+        let work = t.0.join("work");
+        fs::create_dir_all(work.join("0")).unwrap();
+        fs::create_dir_all(work.join("1/sub")).unwrap();
+        fs::write(work.join("0/a.md"), "x").unwrap();
+        fs::write(work.join("1/sub/b.md"), "x").unwrap();
+        fs::create_dir(work.join("0/dir.md")).unwrap();
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), work.join("0/link.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, work.join("1/up")).unwrap();
+        let inputs = [PathBuf::from("/in/a.txt"), PathBuf::from("/in/b.txt")];
+        let parse = |l: &str| parse_event(l, &inputs, &work);
+
+        assert_eq!(
+            parse(&done_line("/in/a.txt", "0/a.md")),
+            Ok(Event::Done {
+                index: 0,
+                rel: PathBuf::from("0/a.md")
+            })
+        );
+        assert_eq!(
+            parse(&done_line("/in/b.txt", "1/sub/b.md")),
+            Ok(Event::Done {
+                index: 1,
+                rel: PathBuf::from("1/sub/b.md")
+            })
+        );
+        let bad = [
+            ("/in/a.txt", "/etc/passwd"),  // absolute
+            ("/in/a.txt", "0/../0/a.md"),  // ..
+            ("/in/a.txt", "0/./a.md"),     // .
+            ("/in/a.txt", "./0/a.md"),     // leading .
+            ("/in/a.txt", "0//a.md"),      // empty component
+            ("/in/a.txt", "0/a.md/"),      // trailing slash
+            ("/in/a.txt", "a.md"),         // no index dir
+            ("/in/a.txt", "00/a.md"),      // non-canonical index
+            ("/in/a.txt", "+0/a.md"),      // not digits
+            ("/in/a.txt", "2/a.md"),       // index out of range
+            ("/in/a.txt", "1/sub/b.md"),   // index of another input
+            ("/in/b.txt", "0/a.md"),       // input does not match index
+            ("/in/a.txt", "0/missing.md"), // does not exist
+            ("/in/a.txt", "0/dir.md"),     // not a regular file
+            ("/in/a.txt", "0/link.md"),    // symlink
+            ("/in/b.txt", "1/up/secret"),  // through a symlinked dir
+            ("/in/a.txt", ""),             // empty
+        ];
+        for (input, rel) in bad {
+            let e = violation(parse(&done_line(input, rel)));
+            assert!(!e.is_empty(), "{rel}");
+        }
+        // Wrong field counts, unescaped `=` (a pair), unknown kinds.
+        for l in [
+            "done\t/in/a.txt",
+            "done\t/in/a.txt\t0/a.md\textra",
+            "done\t/in/a.txt\tk=0/a.md",
+            "skip\t/in/a.txt",
+            "fail",
+            "warn\t/in/a.txt\tm\tn",
+            "bogus\t/in/a.txt\tx",
+            "",
+            "#comment",
+        ] {
+            violation(parse(l));
+        }
+        // skip/fail/warn must name an input of this process.
+        violation(parse("skip\t/in/other.txt\tunsupported"));
+        assert_eq!(
+            parse("skip\t/in/b.txt\tunsupported"),
+            Ok(Event::Skip {
+                index: 1,
+                reason: "unsupported".into()
+            })
+        );
+        assert_eq!(
+            parse("warn\t/in/a.txt\ttables dropped"),
+            Ok(Event::Warn {
+                index: 0,
+                message: "tables dropped".into()
+            })
+        );
+        assert_eq!(
+            parse("fail\t/in/a.txt\tread error"),
+            Ok(Event::Fail {
+                index: 0,
+                reason: "read error".into()
+            })
+        );
+    }
+
+    #[test]
+    fn progress_clamped_and_nan_dropped() {
+        let inputs = [PathBuf::from("/in/a.txt")];
+        let work = Path::new("/nonexistent");
+        let p = |l: &str| parse_event(l, &inputs, work);
+        assert_eq!(p("progress\t0.42"), Ok(Event::Progress(Some(0.42))));
+        assert_eq!(p("progress\tNaN"), Ok(Event::Progress(None)));
+        assert_eq!(p("progress\t-3"), Ok(Event::Progress(Some(0.0))));
+        assert_eq!(p("progress\t7.5"), Ok(Event::Progress(Some(1.0))));
+        assert_eq!(p("progress\tinf"), Ok(Event::Progress(Some(1.0))));
+        assert_eq!(p("progress\t-inf"), Ok(Event::Progress(Some(0.0))));
+        violation(p("progress\tlots"));
+        violation(p("progress"));
+        violation(p("progress\t0.5\t0.6"));
+    }
+
+    #[test]
+    fn groups_by_target_dir() {
+        let inputs: Vec<PathBuf> = ["/a/1.txt", "/b/2.txt", "/a/3.txt", "/ro/4.txt", "/c/5.txt"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let mut probed = Vec::new();
+        // /ro is not writable and falls back to /dl, which /c also maps to.
+        let mut target = |d: &Path| {
+            probed.push(d.to_path_buf());
+            match d.to_str().unwrap() {
+                "/ro" | "/c" => PathBuf::from("/dl"),
+                d => PathBuf::from(d),
+            }
+        };
+        let g = group_by_target(&inputs, true, &mut target);
+        let want = [("/a", vec![0, 2]), ("/b", vec![1]), ("/dl", vec![3, 4])];
+        assert_eq!(g.len(), want.len());
+        for (g, (t, m)) in g.iter().zip(want) {
+            assert_eq!(g.target, PathBuf::from(t));
+            assert_eq!(g.members, m);
+        }
+        let g = group_by_target(&inputs, false, &mut target);
+        assert_eq!(g.len(), 5);
+        assert!(g.iter().enumerate().all(|(i, g)| g.members == [i]));
+        assert_eq!(g[3].target, PathBuf::from("/dl"));
+        assert!(group_by_target(&[], true, &mut target).is_empty());
+    }
+
+    #[test]
+    fn reason_for_unreported_inputs() {
+        let tail = b"warming up\nerror: bad option --frob\n\n";
+        assert_eq!(
+            unreported_reason(
+                Some("unknown event kind bogus"),
+                End::Signal(libc::SIGTERM),
+                tail
+            ),
+            "contract violation: unknown event kind bogus"
+        );
+        assert_eq!(
+            unreported_reason(None, End::Signal(libc::SIGXFSZ), tail),
+            "output too large"
+        );
+        assert_eq!(
+            unreported_reason(None, End::Signal(libc::SIGSEGV), tail),
+            format!("killed by signal {}", libc::SIGSEGV)
+        );
+        assert_eq!(
+            unreported_reason(None, End::Exit(2), tail),
+            "action invocation error: error: bad option --frob"
+        );
+        assert_eq!(
+            unreported_reason(None, End::Exit(2), b""),
+            "action invocation error"
+        );
+        for code in [0, 1, 3] {
+            assert_eq!(
+                unreported_reason(None, End::Exit(code), tail),
+                "no result reported"
+            );
+        }
+    }
+
+    #[test]
+    fn stderr_tail_last_line() {
+        assert_eq!(last_line(b"a\n  b  \n\n"), "b");
+        assert_eq!(last_line(b""), "");
+        assert_eq!(last_line(b"\xff\xfeoops"), "\u{fffd}\u{fffd}oops");
+    }
+
+    #[test]
+    fn cancel_token_sees_sigterm_to_this_thread() {
+        let t = CancelToken::install().unwrap();
+        assert!(!t.is_cancelled());
+        // SAFETY: signals this thread, which has SIGTERM blocked.
+        unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        assert!(t.is_cancelled());
+        assert!(t.is_cancelled(), "stays cancelled");
+    }
+}
