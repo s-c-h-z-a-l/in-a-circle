@@ -77,7 +77,7 @@ are in `CLAUDE.md`.
   our own, no JSON dependency.
 
 ```
-inacircle-manifest 1
+inacircle-manifest 0
 action	text.md-to-html	in=text/markdown	out=text/html	label=HTML	group=document	cost=10
 action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=document	cost=10
 ```
@@ -99,12 +99,20 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 - stdout, one event per line:
 
   ```
-  progress 0.42
-  done notes.md -> notes.html
-  skip blob.bin unsupported
-  fail broken.md read error at line 12
-  warn tables dropped (Markdown has no merged cells)
+  progress<TAB>0.42
+  done<TAB>/abs/notes.md<TAB>0/notes.html
+  skip<TAB>/abs/blob.bin<TAB>unsupported
+  fail<TAB>/abs/broken.md<TAB>read error at line 12
+  warn<TAB>/abs/tables.md<TAB>tables dropped (Markdown has no merged cells)
   ```
+
+  `<TAB>` is a real tab. `done` carries the input and the output path
+  relative to `--work`; every field uses the manifest escapes (`\\ \t \n
+  \r`). An action writes its output to `<work>/<index>/<stem>.<ext>`, where
+  `<index>` is the input's position in the batch. The contract is version 0
+  and unstable until a complex action has run on it. `--inputs-from` is one
+  escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
+  paths are out of scope for v0.
 
   stderr is free-form; on failure its last lines go into the message.
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
