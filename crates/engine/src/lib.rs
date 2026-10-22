@@ -5,4 +5,5 @@ pub mod catalog;
 pub mod classify;
 pub mod menu;
 pub mod output;
+pub mod sandbox;
 pub mod xdg;
