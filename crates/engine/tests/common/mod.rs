@@ -34,13 +34,26 @@ impl Tmp {
         p
     }
 
-    /// A `#!/bin/sh` fake action in `<tmp>/bin`.
+    /// A `#!/bin/sh` fake action in `<tmp>/bin`. This process never holds
+    /// a writable fd on it: other tests fork at any time, and a child that
+    /// inherited one until its own exec would make the action's exec fail
+    /// with ETXTBSY. `cp` (its own process) writes a temporary name, which
+    /// is then renamed into place.
     pub fn script(&self, name: &str, body: &str) -> PathBuf {
         let d = self.0.join("bin");
         fs::create_dir_all(&d).unwrap();
+        let src = self.0.join(format!("{name}.src"));
+        fs::write(&src, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let tmp = d.join(format!(".{name}.tmp"));
+        let ok = std::process::Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
         let p = d.join(name);
-        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&tmp, &p).unwrap();
         p
     }
 

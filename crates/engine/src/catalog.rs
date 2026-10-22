@@ -432,8 +432,8 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    /// Serializes tests: writing then exec'ing scripts from parallel threads
-    /// races with fork (ETXTBSY).
+    /// Serializes the catalog tests (they share nothing else, but keep
+    /// timing-sensitive cache checks apart).
     static LOCK: Mutex<()> = Mutex::new(());
 
     struct Fix {
@@ -466,9 +466,36 @@ mod tests {
         }
     }
 
+    /// Installs an executable script without this process ever holding a
+    /// writable fd on it. Other tests fork at any time; a child that
+    /// inherited such an fd until its own exec would make our exec of the
+    /// script fail with ETXTBSY. So `cp` (its own process) writes the file
+    /// under a temporary name, which is then renamed into place.
     fn script(path: &Path, body: &str) {
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let src = std::env::temp_dir().join(format!("engine-cat-src-{}-{n}", std::process::id()));
+        std::fs::write(&src, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy();
+        let tmp = path.with_file_name(format!(".{name}.tmp"));
+        let ok = Command::new("cp").arg(&src).arg(&tmp).status().unwrap();
+        assert!(ok.success());
+        std::fs::remove_file(&src).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    /// Sets the mtime by path (no writable fd on an executable, see `script`).
+    fn set_mtime(path: &Path, t: std::time::SystemTime) {
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: d.subsec_nanos() as libc::c_long,
+        };
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c is a valid path; times points to two timespecs.
+        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), [ts, ts].as_ptr(), 0) };
+        assert_eq!(r, 0);
     }
 
     fn act(id: &str, label: &str) -> String {
@@ -563,12 +590,7 @@ mod tests {
             .modified()
             .unwrap()
             + Duration::from_secs(5);
-        std::fs::File::options()
-            .write(true)
-            .open(d.join("one"))
-            .unwrap()
-            .set_modified(t)
-            .unwrap();
+        set_mtime(&d.join("one"), t);
         let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
         assert_eq!(c.get("x.a").unwrap().label, "B");
         manifest_script(&d.join("two"), &[act("y.a", "Y")]);
