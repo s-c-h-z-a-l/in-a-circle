@@ -67,9 +67,10 @@ are in `CLAUDE.md`.
   rebuilds it only when an action binary changed (a few `stat` calls per
   start). The binary is the single source of truth; the same pattern as
   fontconfig's or gdk-pixbuf's caches.
-- Per action: id and family; input and output as **MIME types**; one or
-  many inputs (`batch=no` for one at a time); label and group; cost and
-  whether it loses information; required external tool (`requires=`,
+- Per action: id and family; input and output as **MIME types** plus the
+  output extension (`ext=`); one or many inputs (`batch=no` for one at a
+  time); label and group; cost and whether it loses information (`lossy=` describes the text content, text
+  and line breaks, not how it renders); required external tool (`requires=`,
   checked on `PATH` at start; missing means a greyed-out slice that says
   what to install).
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
@@ -78,14 +79,14 @@ are in `CLAUDE.md`.
 
 ```
 inacircle-manifest 0
-action	text.md-to-html	in=text/markdown	out=text/html	label=HTML	group=document	cost=10
-action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=document	cost=10
+action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=no	batch=yes
+action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
 
 ```
-<family> run <action-id> --work <temp dir> [--opt key=value] -- <absolute paths>
+<family> run <action-id> --work <temp dir> [--opt key=value] [--inputs-from <file>] -- <absolute paths>
 ```
 
 - argv only, never a shell. The engine decodes `file://` URIs and passes
@@ -107,10 +108,11 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
   ```
 
   `<TAB>` is a real tab. `done` carries the input and the output path
-  relative to `--work`; every field uses the manifest escapes (`\\ \t \n
-  \r \=`, plus `\#` for a leading `#`; `=` is always escaped in event fields). An action writes its output to `<work>/<index>/<stem>.<ext>`, where
-  `<index>` is the input's position in the batch. The contract is version 0
-  and unstable until a complex action has run on it. `--inputs-from` is one
+  relative to `--work`; every field uses the manifest escapes
+  (`\\ \t \n \r \=`, plus `\#` for a leading `#`; `=` is always escaped
+  in event fields). An action writes its output to
+  `<work>/<index>/<stem>.<ext>`, where `<index>` is the input's
+  position in the batch. The contract is version 0 and unstable until a complex action has run on it. `--inputs-from` is one
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
   paths are out of scope for v0.
 
@@ -118,7 +120,8 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
   the file's), 3 unsupported input. For a batch: 0 if at least one input
   produced `done`; otherwise 1 if any input produced `fail`; 3 only when
-  every input was unsupported.
+  every input was unsupported. Exit 1 also covers a batch that cannot run
+  at all (`--work` missing or not writable).
 - Cancel with `SIGTERM`; the engine removes the temp dir either way. The
   engine sets `RLIMIT_FSIZE` on the action, which caps output size for
   every plugin (archive bombs) without any plugin code.
@@ -258,8 +261,10 @@ server: that is a resident process, and any web page can reach `localhost`.
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, toml, doc
-bins/     inacircle, inacircle-text
+crates/   wire, dbus, ui, engine, manifest, action, toml, doc
+bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
+tools/    gen-entities (dev tool)
+scripts/  checks and helpers
 spikes/   measurements, not product code
 ```
 

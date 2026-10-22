@@ -80,6 +80,14 @@ fn escape_into(out: &mut String, s: &str, eq: bool, lead: bool) {
     }
 }
 
+/// Escapes `s` the way a bare item is written by `write_line`, for
+/// line-per-value files (`unescape` is the inverse).
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    escape_into(&mut out, s, true, true);
+    out
+}
+
 /// Reverses the escapes of `write_line` for a single field (for line-per-value files).
 pub fn unescape(s: &str) -> Result<String, String> {
     let mut out = String::with_capacity(s.len());
@@ -198,6 +206,19 @@ pub fn parse_line(s: &str) -> Result<Line, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn escape_round_trips_through_unescape() {
+        for v in [
+            "a\tb", "a\nb", "a=b", "#lead", "a\\b", "x -> y", "a#b", "\r",
+        ] {
+            let e = escape(v);
+            assert!(!e.contains(['\t', '\n', '\r']), "{e:?}");
+            assert!(!e.starts_with('#'), "{e:?}");
+            assert_eq!(unescape(&e).unwrap(), v, "{e:?}");
+        }
+        assert_eq!(escape("#a=b\tc"), "\\#a\\=b\\tc");
+    }
+
     use super::*;
 
     #[test]

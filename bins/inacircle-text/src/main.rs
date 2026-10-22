@@ -10,9 +10,41 @@ use std::process::ExitCode;
 use action::{Command, Events, Invocation, parse_args};
 use doc::{Loss, ReadError};
 
-const MANIFEST: &str = "inacircle-manifest 0\n\
-action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=no\tbatch=yes\n\
-action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
+fn manifest_text() -> String {
+    let action = |id: &str, input: &str, out: &str, ext: &str, label: &str, lossy: &str| {
+        manifest::write_line(
+            &manifest::Line::new("action")
+                .bare(id)
+                .pair("family", "text")
+                .pair("in", input)
+                .pair("out", out)
+                .pair("ext", ext)
+                .pair("label", label)
+                .pair("group", "document")
+                .pair("cost", "10")
+                .pair("lossy", lossy)
+                .pair("batch", "yes"),
+        )
+    };
+    let mut s = manifest::header("inacircle-manifest", 0);
+    s.push_str(&action(
+        "text.txt-to-md",
+        "text/plain",
+        "text/markdown",
+        "md",
+        "Markdown",
+        "no",
+    ));
+    s.push_str(&action(
+        "text.md-to-txt",
+        "text/markdown",
+        "text/plain",
+        "txt",
+        "Plain text",
+        "yes",
+    ));
+    s
+}
 
 #[derive(Clone, Copy)]
 enum Conversion {
@@ -137,7 +169,7 @@ fn run(inv: &Invocation, conv: Conversion) -> u8 {
 fn main() -> ExitCode {
     let inv = match parse_args(std::env::args_os().skip(1)) {
         Ok(Command::Manifest) => {
-            let _ = io::stdout().write_all(MANIFEST.as_bytes());
+            let _ = io::stdout().write_all(manifest_text().as_bytes());
             return ExitCode::SUCCESS;
         }
         Ok(Command::Run(inv)) => inv,

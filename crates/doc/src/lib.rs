@@ -78,8 +78,8 @@ impl Loss {
             Loss::Images => "images replaced by their alt text",
             Loss::Html => "HTML dropped",
             Loss::HeadingLevels => "heading levels lost",
-            Loss::BlankLines => "repeated blank lines merged",
-            Loss::Whitespace => "whitespace normalized",
+            Loss::BlankLines => "repeated blank lines merged into one paragraph break",
+            Loss::Whitespace => "runs of spaces or tabs may collapse when rendered",
         }
     }
 }

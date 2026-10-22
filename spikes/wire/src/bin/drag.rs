@@ -287,7 +287,6 @@ fn tag(st: &St, surf: u32) -> &'static str {
     }
 }
 
-/// Read the drop payload with a hard deadline; the source app may hang.
 /// Question for the drop-first design: does the source hand over the URI
 /// list during the drag, before the drop? Read it, then sniff the first
 /// file's first bytes, as a classifier would.
@@ -358,6 +357,7 @@ fn sniff(uri: &str) -> String {
     )
 }
 
+/// Read the drop payload with a hard deadline; the source app may hang.
 fn read_payload(r: OwnedFd) -> Result<Vec<u8>, String> {
     // SAFETY: fcntl on a valid fd we own.
     unsafe {

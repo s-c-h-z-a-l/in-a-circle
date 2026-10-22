@@ -8,7 +8,9 @@
 //! effects). Events are always reported for the first input.
 //!
 //! A step that fails (a `fail` event from an I/O error, not `events=fail`)
-//! ends the run at once with exit 1, regardless of a later `exit=`.
+//! ends the run at once with exit 1, regardless of a later `exit=`. The one
+//! exception is `write_outside`: it emits `fail` and the run continues (exit
+//! 0 or the `exit=` value), so a sandbox test can observe the denial.
 //!
 //! - `events=<list>`: comma-separated `progress:<f>`, `done`, `skip`,
 //!   `fail`, `warn`. `done` writes the output via `output_path` first.

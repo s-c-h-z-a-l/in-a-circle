@@ -136,7 +136,10 @@ fn each_loss_is_warned_once_in_stable_order() {
     // Several blank-line runs: still one warn; reader and writer losses both present.
     assert_eq!(
         msgs,
-        ["repeated blank lines merged", "whitespace normalized"]
+        [
+            "repeated blank lines merged into one paragraph break",
+            "runs of spaces or tabs may collapse when rendered"
+        ]
     );
 }
 
@@ -314,5 +317,44 @@ fn usage_errors_exit_2() {
         let o = Command::new(bin).args(args).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{args:?}");
         assert!(!o.stderr.is_empty());
+    }
+}
+
+#[test]
+fn inputs_from_file_with_tab_and_newline_in_paths() {
+    let root = tmp("inputsfrom");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a\tb.txt");
+    let b = root.join("c\nd.txt");
+    fs::write(&a, "one\n").unwrap();
+    fs::write(&b, "two\n").unwrap();
+    let list = root.join("list.txt");
+    let mut body = String::new();
+    for p in [&a, &b] {
+        body.push_str(&manifest::escape(p.to_str().unwrap()));
+        body.push('\n');
+    }
+    fs::write(&list, body).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
+        .args(["run", "text.txt-to-md", "--work"])
+        .arg(&work)
+        .arg("--inputs-from")
+        .arg(&list)
+        .arg("--")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let done: Vec<_> = out
+        .lines()
+        .filter(|l| l.starts_with("done\t"))
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .collect();
+    assert_eq!(done.len(), 2, "{out:?}");
+    for (d, p) in done.iter().zip([&a, &b]) {
+        assert_eq!(manifest::unescape(d[1]).unwrap(), p.to_str().unwrap());
+        let rel = manifest::unescape(d[2]).unwrap();
+        assert!(work.join(rel).is_file());
     }
 }

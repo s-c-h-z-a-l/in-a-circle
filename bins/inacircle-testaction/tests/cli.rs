@@ -223,6 +223,7 @@ fn write_outside_reports() {
 
     let bad = "/nonexistent-dir-xyz/f";
     let o = run(&w, &[&format!("write_outside={bad}")]);
+    assert_eq!(o.status.code(), Some(0));
     let l = out_lines(&o);
     assert_eq!(l.len(), 1, "{l:?}");
     assert!(l[0].starts_with("fail\t/in/a.bin\t"), "{}", l[0]);
