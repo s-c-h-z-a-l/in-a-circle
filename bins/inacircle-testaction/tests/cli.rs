@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -125,24 +126,49 @@ fn unknown_key_is_usage_error() {
 #[test]
 fn bad_value_is_usage_error() {
     let w = tmp("badvalue");
-    for opt in ["exit=abc", "sleep_ms=-1", "events=nope", "on_sigterm=maybe"] {
+    for opt in [
+        "exit=abc",
+        "sleep_ms=-1",
+        "big_output=abc",
+        "outputs=-1",
+        "events=nope",
+        "on_sigterm=maybe",
+    ] {
         assert_eq!(run(&w, &[opt]).status.code(), Some(2), "{opt}");
     }
 }
 
-fn wait_started(child: &mut std::process::Child) {
-    // Give the process time to install its signal disposition and sleep.
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(child.try_wait().unwrap().is_none());
+/// Spawns the action with `opts`, then `events=progress:0` and a long sleep,
+/// and returns once the first event line has arrived: every option before it
+/// (e.g. the signal disposition) has been applied by then.
+fn spawn_ready(
+    work: &Path,
+    opts: &[&str],
+) -> (std::process::Child, BufReader<std::process::ChildStdout>) {
+    let mut all = opts.to_vec();
+    all.extend(["events=progress:0", "sleep_ms=5000"]);
+    let mut c = command(work, &all).stdout(Stdio::piped()).spawn().unwrap();
+    let mut r = BufReader::new(c.stdout.take().unwrap());
+    let mut line = String::new();
+    r.read_line(&mut line).unwrap();
+    assert_eq!(line, "progress\t0\n");
+    (c, r)
+}
+
+fn sigterm(c: &std::process::Child) {
+    let pid = i32::try_from(c.id()).unwrap();
+    // SAFETY: `kill` only takes integers; `pid` is the id of our own live,
+    // not yet reaped child, so it cannot name an unrelated process.
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    assert_eq!(rc, 0);
 }
 
 #[test]
 fn sigterm_exits() {
     let w = tmp("sigterm");
-    let mut c = command(&w, &["sleep_ms=5000"]).spawn().unwrap();
-    wait_started(&mut c);
+    let (mut c, _r) = spawn_ready(&w, &[]);
     let t = Instant::now();
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    sigterm(&c);
     let st = c.wait().unwrap();
     assert!(t.elapsed() < Duration::from_secs(1));
     assert_eq!(st.signal(), Some(libc::SIGTERM));
@@ -151,13 +177,38 @@ fn sigterm_exits() {
 #[test]
 fn sigterm_ignored_on_request() {
     let w = tmp("sigign");
-    let mut c = command(&w, &["on_sigterm=ignore", "sleep_ms=1500"])
-        .spawn()
-        .unwrap();
-    wait_started(&mut c);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
-    let st = c.wait().unwrap();
-    assert_eq!(st.code(), Some(0), "{st:?}");
+    let (mut c, _r) = spawn_ready(&w, &["on_sigterm=ignore"]);
+    sigterm(&c);
+    // Still alive after the signal; stop it for real.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(c.try_wait().unwrap().is_none());
+    c.kill().unwrap();
+    assert_eq!(c.wait().unwrap().signal(), Some(libc::SIGKILL));
+}
+
+#[test]
+fn sigterm_exit_resets_ignore() {
+    let w = tmp("sigreset");
+    let (mut c, _r) = spawn_ready(&w, &["on_sigterm=ignore", "on_sigterm=exit"]);
+    sigterm(&c);
+    assert_eq!(c.wait().unwrap().signal(), Some(libc::SIGTERM));
+}
+
+#[test]
+fn bad_options_are_validated_before_side_effects() {
+    let w = tmp("validate");
+    let o = run(&w, &["events=done", "bogus=1"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(o.stdout.is_empty());
+    assert_eq!(fs::read_dir(&*w).unwrap().count(), 0);
+}
+
+#[test]
+fn relative_write_outside_is_usage_error() {
+    let w = tmp("reloutside");
+    let o = run(&w, &["write_outside=rel/file"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!Path::new("rel/file").exists());
 }
 
 #[test]

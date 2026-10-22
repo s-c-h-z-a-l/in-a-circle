@@ -7,6 +7,9 @@
 //! order (all options are validated first, so a usage error has no side
 //! effects). Events are always reported for the first input.
 //!
+//! A step that fails (a `fail` event from an I/O error, not `events=fail`)
+//! ends the run at once with exit 1, regardless of a later `exit=`.
+//!
 //! - `events=<list>`: comma-separated `progress:<f>`, `done`, `skip`,
 //!   `fail`, `warn`. `done` writes the output via `output_path` first.
 //! - `outputs=<n>`: `n` outputs from the first input, `<work>/0/out-<k>.bin`.
