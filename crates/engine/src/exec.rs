@@ -683,6 +683,20 @@ fn unreported_reason(violation: Option<&str>, end: End, stderr_tail: &[u8]) -> S
     }
 }
 
+/// The failure reason of an input that went over an output cap.
+const TOO_MANY: &str = "too many outputs";
+
+/// The input a malformed event line is about, if its first field names
+/// one of `inputs` (for `done`, `skip`, `fail` and `warn` lines).
+fn offender_of(line: &str, inputs: &[PathBuf]) -> Option<usize> {
+    let l = manifest::parse_line(line).ok()?;
+    if !matches!(l.kind.as_str(), "done" | "skip" | "fail" | "warn") {
+        return None;
+    }
+    let first = l.bare_at(0)?;
+    inputs.iter().position(|p| p.to_str() == Some(first))
+}
+
 /// The last non-empty line of `tail`, trimmed.
 fn last_line(tail: &[u8]) -> String {
     let s = String::from_utf8_lossy(tail);
@@ -841,6 +855,9 @@ struct Supervisor<'a> {
     output_hashes: HashSet<u64>,
     output_bytes: usize,
     violation: Option<String>,
+    /// The input whose event caused the violation, and its failure reason:
+    /// it fails and nothing of it is placed.
+    offender: Option<(usize, String)>,
     cancelled: bool,
     term_at: Option<Instant>,
     killed: bool,
@@ -967,6 +984,7 @@ impl<'a> Supervisor<'a> {
             output_hashes: HashSet::new(),
             output_bytes: 0,
             violation: None,
+            offender: None,
             cancelled: false,
             term_at: None,
             killed: false,
@@ -998,6 +1016,20 @@ impl<'a> Supervisor<'a> {
         if self.violation.is_none() && !self.cancelled {
             self.violation = Some(what);
             self.terminate();
+        }
+    }
+
+    /// A violation caused by an event about input `index`; that input
+    /// fails with `reason` (default: the violation) and nothing of it is
+    /// placed.
+    fn violate_by(&mut self, index: Option<usize>, what: String, reason: Option<&str>) {
+        if self.violation.is_none() && !self.cancelled {
+            if let Some(i) = index {
+                let why =
+                    reason.map_or_else(|| format!("contract violation: {what}"), str::to_owned);
+                self.offender = Some((i, why));
+            }
+            self.violate(what);
         }
     }
 
@@ -1137,7 +1169,8 @@ impl<'a> Supervisor<'a> {
         let ev = match parse_event(line, &self.step_in.paths, self.dir) {
             Ok(ev) => ev,
             Err(what) => {
-                self.violate(what);
+                let index = offender_of(line, &self.step_in.paths);
+                self.violate_by(index, what, None);
                 return;
             }
         };
@@ -1152,16 +1185,18 @@ impl<'a> Supervisor<'a> {
             Event::Progress(Some(f)) => sink.progress(f),
             Event::Progress(None) => {}
             Event::Done { index, rel } => {
+                let at = Some(index);
                 if self.reported[index] == Reported::Final {
-                    self.violate(again(&self.step_in.paths, index));
+                    self.violate_by(at, again(&self.step_in.paths, index), None);
                 } else if self.outputs.len() >= MAX_OUTPUTS {
-                    self.violate(format!("more than {MAX_OUTPUTS} outputs"));
+                    let what = format!("more than {MAX_OUTPUTS} outputs");
+                    self.violate_by(at, what, Some(TOO_MANY));
                 } else if self.output_bytes + rel.as_os_str().len() > MAX_OUTPUT_BYTES {
-                    self.violate(format!(
-                        "more than {MAX_OUTPUT_BYTES} bytes of output paths"
-                    ));
+                    let what = format!("more than {MAX_OUTPUT_BYTES} bytes of output paths");
+                    self.violate_by(at, what, Some(TOO_MANY));
                 } else if self.is_duplicate(&rel) {
-                    self.violate(format!("duplicate output {}", rel.display()));
+                    let what = format!("duplicate output {}", rel.display());
+                    self.violate_by(at, what, None);
                 } else {
                     self.output_bytes += rel.as_os_str().len();
                     self.outputs.push((index, rel));
@@ -1172,7 +1207,7 @@ impl<'a> Supervisor<'a> {
                 if self.reported[index] != Reported::Nothing =>
             {
                 let _ = reason;
-                self.violate(again(&self.step_in.paths, index));
+                self.violate_by(Some(index), again(&self.step_in.paths, index), None);
             }
             Event::Skip { index, reason } => {
                 self.reported[index] = Reported::Final;
@@ -1235,6 +1270,18 @@ impl<'a> Supervisor<'a> {
                 sink.fail(o, "action left processes behind".to_owned());
             }
             return None;
+        }
+        // The offending input fails, and none of its outputs (nor those of
+        // other fan-out parts of the same original input) is placed.
+        if let Some((j, why)) = self.offender.take() {
+            let o = origin[j];
+            self.outputs.retain(|&(i, _)| origin[i] != o);
+            for (k, &ok) in origin.iter().enumerate() {
+                if ok == o {
+                    self.reported[k] = Reported::Final;
+                }
+            }
+            sink.fail(o, why);
         }
         let reason = unreported_reason(self.violation.as_deref(), end, &self.tail);
         for (j, &o) in origin.iter().enumerate() {
@@ -1455,6 +1502,19 @@ mod tests {
                 "no result reported"
             );
         }
+    }
+
+    #[test]
+    fn malformed_event_blames_the_input_it_names() {
+        let inputs = [PathBuf::from("/in/a.txt"), PathBuf::from("/in/b.txt")];
+        assert_eq!(
+            offender_of("done\t/in/b.txt\t/etc/passwd", &inputs),
+            Some(1)
+        );
+        assert_eq!(offender_of("skip\t/in/a.txt", &inputs), Some(0));
+        assert_eq!(offender_of("done\t/in/other.txt\t0/x", &inputs), None);
+        assert_eq!(offender_of("bogus\t/in/a.txt\tx", &inputs), None);
+        assert_eq!(offender_of("progress\tlots", &inputs), None);
     }
 
     #[test]

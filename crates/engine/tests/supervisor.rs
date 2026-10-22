@@ -189,15 +189,70 @@ fn more_than_1024_outputs_is_a_violation() {
     let act = action(&bin, "md");
     let (r, _) = run(&[&act], &[a.clone(), b.clone()], None);
     let f = failed(&r);
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert_eq!(f[0].0, b);
-    assert!(f[0].1.contains("outputs"), "{}", f[0].1);
-    let done = r
-        .outcomes
+    assert_eq!(f.len(), 2, "{f:?}");
+    // The offender fails as such, nothing of it placed; b had no result.
+    assert_eq!(f[0], (a, "too many outputs".to_owned()));
+    assert_eq!(f[1].0, b);
+    assert!(f[1].1.starts_with("contract violation: "), "{}", f[1].1);
+    assert_eq!(dones(&r), 0);
+    assert_eq!(placed_files(&t), 0);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+fn dones(r: &engine::exec::Report) -> usize {
+    r.outcomes
         .iter()
         .filter(|o| matches!(o, Outcome::Done { .. }))
-        .count();
-    assert_eq!(done, 1024, "the outputs within the cap are placed");
+        .count()
+}
+
+/// Entries in `<tmp>/docs` other than the inputs (`*.txt`).
+fn placed_files(t: &Tmp) -> usize {
+    std::fs::read_dir(t.0.join("docs"))
+        .unwrap()
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().ends_with(".txt"))
+        .count()
+}
+
+#[test]
+fn single_input_over_the_output_cap_fails_and_places_nothing() {
+    let t = Tmp::new("outcap1");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("many", &many_outputs_script(1025, 10));
+    let act = action(&bin, "md");
+    let (r, _) = run(&[&act], std::slice::from_ref(&a), None);
+    assert_eq!(failed(&r), [(a, "too many outputs".to_owned())]);
+    assert_eq!(
+        r.outcomes.len(),
+        1,
+        "{:?}",
+        &r.outcomes[..r.outcomes.len().min(3)]
+    );
+    assert_eq!(placed_files(&t), 0);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+#[test]
+fn second_input_over_the_cap_fails_first_keeps_its_result() {
+    let t = Tmp::new("outcap2");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    let bin = t.script(
+        "many2",
+        "in0=$(sed -n 1p \"$6\"); in1=$(sed -n 2p \"$6\"); mkdir -p \"$4/0\" \"$4/1\"\n\
+         : > \"$4/0/a.md\"; printf 'done\\t%s\\t0/a.md\\n' \"$in0\"\n\
+         i=0; while [ $i -lt 1024 ]; do : > \"$4/1/f$i\"; printf 'done\\t%s\\t1/f%s\\n' \"$in1\" $i; i=$((i+1)); done",
+    );
+    let act = action(&bin, "md");
+    let (r, _) = run(&[&act], &[a.clone(), b.clone()], None);
+    assert_eq!(failed(&r), [(b, "too many outputs".to_owned())]);
+    assert!(
+        matches!(&r.outcomes[..], [Outcome::Failed { .. }, Outcome::Done { input, .. }] if *input == a),
+        "{:?}",
+        &r.outcomes[..r.outcomes.len().min(3)]
+    );
+    assert_eq!(placed_files(&t), 1);
     assert!(t.work_dirs_left().is_empty());
 }
 
@@ -211,7 +266,10 @@ fn more_than_1_mib_of_output_paths_is_a_violation() {
     let act = action(&bin, "md");
     let (r, _) = run(&[&act], &[a.clone(), b.clone()], None);
     let f = failed(&r);
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert_eq!(f[0].0, b);
-    assert!(f[0].1.contains("bytes"), "{}", f[0].1);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert_eq!(f[0], (a, "too many outputs".to_owned()));
+    assert_eq!(f[1].0, b);
+    assert!(f[1].1.contains("bytes"), "{}", f[1].1);
+    assert_eq!(dones(&r), 0);
+    assert_eq!(placed_files(&t), 0);
 }
