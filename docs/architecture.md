@@ -108,7 +108,7 @@ action	text.txt-to-md	in=text/plain	out=text/markdown	label=Markdown	group=docum
 
   `<TAB>` is a real tab. `done` carries the input and the output path
   relative to `--work`; every field uses the manifest escapes (`\\ \t \n
-  \r`). An action writes its output to `<work>/<index>/<stem>.<ext>`, where
+  \r \=`, plus `\#` for a leading `#`; `=` is always escaped in event fields). An action writes its output to `<work>/<index>/<stem>.<ext>`, where
   `<index>` is the input's position in the batch. The contract is version 0
   and unstable until a complex action has run on it. `--inputs-from` is one
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
