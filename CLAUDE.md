@@ -69,7 +69,8 @@ it's a bug.
   the plan's closing review, and only if every success criterion holds
   (all tests, fmt, clippy, dependency check, budgets). Otherwise it stays
   on its branch.
-- Push only when the user says so.
+- Plan branches may always be pushed. `main` gets a plan only by the merge
+  above, never by a direct push.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
