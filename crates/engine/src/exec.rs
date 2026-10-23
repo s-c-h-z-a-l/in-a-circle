@@ -1746,7 +1746,9 @@ mod tests {
     thread_local! {
         /// Runs in `run_group` after the intermediate outputs' check (and
         /// their rules), before the next step's ruleset is finished, with
-        /// the checked step's dir.
+        /// the checked step's dir. The check and its rule share one fd, so
+        /// no window exists between them; the hook emulates a race between
+        /// the rule and the next step's spawn.
         pub(super) static AFTER_CHECK: std::cell::RefCell<Hook> =
             const { std::cell::RefCell::new(None) };
     }

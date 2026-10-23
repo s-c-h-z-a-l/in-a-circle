@@ -631,6 +631,7 @@ pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedF
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // SAFETY: zeroed stat is valid storage; fd is open.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is the open descriptor owned above; st is valid storage.
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
         return last_err();
     }
