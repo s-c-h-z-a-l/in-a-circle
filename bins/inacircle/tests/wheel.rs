@@ -57,3 +57,69 @@ fn second_instance_exits_at_once() {
     let lock = fs::File::open(rt.join("inacircle/wheel.lock")).unwrap();
     assert!(try_lock(&lock), "lock left held");
 }
+
+/// A signal mask from `/proc/<pid>/status` (`SigIgn`, `SigBlk`, ...).
+fn sig_field(pid: u32, name: &str) -> u64 {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let v = status
+        .lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
+        .unwrap_or_else(|| panic!("no {name} in {status}"));
+    u64::from_str_radix(v.trim(), 16).unwrap()
+}
+
+/// The alarm is the backstop for hangs outside the event loop, so it must
+/// not depend on the parent: a SIGALRM ignored or blocked by whoever
+/// started us is reset before the alarm is armed.
+#[test]
+fn alarm_works_even_if_the_parent_disabled_sigalrm() {
+    use std::os::unix::net::UnixListener;
+    use std::os::unix::process::CommandExt;
+    const ALRM_BIT: u64 = 1 << (libc::SIGALRM - 1);
+
+    let rt = runtime_dir("alarm");
+    // A compositor that accepts and never answers.
+    let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
+    let mut cmd = Command::new(BIN);
+    cmd.env("XDG_RUNTIME_DIR", &rt)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: the closure runs in the forked child before exec and calls
+    // only async-signal-safe functions on its own stack.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGALRM, libc::SIG_IGN);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGALRM);
+            libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            Ok(())
+        });
+    }
+    let t = Instant::now();
+    let mut child = cmd.spawn().unwrap();
+    // Connected: past the lock and the alarm, now waiting on us.
+    let (_conn, _) = listener.accept().unwrap();
+    let pid = child.id();
+    assert_eq!(
+        sig_field(pid, "SigIgn") & ALRM_BIT,
+        0,
+        "SIGALRM still ignored"
+    );
+    assert_eq!(
+        sig_field(pid, "SigBlk") & ALRM_BIT,
+        0,
+        "SIGALRM still blocked"
+    );
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(11),
+            "wheel outlived its stage"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -28,7 +28,9 @@
 //!
 //! Without arguments: the wheel. One instance at a time (a held lock makes
 //! a second one exit 0 at once, before touching Wayland), and SIGALRM kills
-//! it if a stage outlives its deadline. Closed without a choice: exit 0.
+//! it if a stage outlives its deadline. SIGALRM is reset to its default
+//! action and unblocked before the alarm is armed, whatever the parent
+//! left us. Closed without a choice: exit 0.
 //! A choice tears the wheel down, releases the lock, then runs the preset
 //! as `run --notify` does, exit code included.
 
@@ -561,6 +563,10 @@ fn cmd_wheel() -> u8 {
             return EXIT_FAILED;
         }
     };
+    if let Err(e) = default_sigalrm() {
+        eprintln!("inacircle: cannot arm the deadline: {e}");
+        return EXIT_FAILED;
+    }
     // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
     // kills the process: the backstop if anything below hangs.
     unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
@@ -584,6 +590,36 @@ fn cmd_wheel() -> u8 {
             EXIT_FAILED
         }
     }
+}
+
+/// SIGALRM back to its default action (terminate) and unblocked: an
+/// ignored disposition and a blocked mask both survive `execve`, so
+/// whoever started us could have disabled the alarm.
+fn default_sigalrm() -> io::Result<()> {
+    // SAFETY: a zeroed sigaction is valid storage; sa_sigaction = SIG_DFL
+    // with an empty mask installs no handler code; sigaction reads `act`,
+    // which lives on this frame.
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut act.sa_mask);
+        if libc::sigaction(libc::SIGALRM, &act, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: a zeroed sigset_t is valid storage, initialized by
+    // sigemptyset/sigaddset; pthread_sigmask reads it from this frame. One
+    // thread: this is the process mask.
+    let r = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGALRM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut())
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r));
+    }
+    Ok(())
 }
 
 /// `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, held: `None` if another

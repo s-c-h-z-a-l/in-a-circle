@@ -10,6 +10,14 @@
 //! 1 after the map while the pointer position is on its way; only the
 //! subsurface position waits for it.
 //!
+//! Globals are bound at the version our requests need, or treated as
+//! absent: a `wl_data_device_manager` older than v3 (no `set_actions`)
+//! means no drop target, and the wheel says `Nothing to do`; the others are
+//! required. What the compositor makes us keep is capped (globals, live
+//! data offers, MIME types per offer); past a cap it is broken. Every data
+//! offer is destroyed once we are done with it, except the dropped one
+//! until its data is read.
+//!
 //! Every error ends the wheel: nothing here retries. Returning drops the
 //! connection, which removes the surface; the caller then frees the lock.
 
@@ -155,12 +163,13 @@ struct Surface {
     shm: Option<Shm>,
     /// Soft deadline of the current stage.
     deadline: Instant,
-    globals: Vec<(u32, String, u32)>,
+    globals: Globals,
     synced: bool,
     /// Size from the last configure; the first one maps the surface.
     size: Option<(u32, u32)>,
-    /// Server-created data offers and their MIME types.
-    offers: Vec<(u32, Vec<String>)>,
+    offers: Offers,
+    /// The offer of the drop, kept alive until its data is read.
+    dropped: Option<u32>,
     /// The drag over us: offer id (0: none offered) and enter serial.
     dnd: Option<(u32, u32)>,
     /// The action last negotiated for the drag's offer.
@@ -185,10 +194,11 @@ impl Surface {
             id: Ids::default(),
             shm: None,
             deadline: Instant::now() + STAGE.saturating_sub(SOFT_MARGIN),
-            globals: Vec::new(),
+            globals: Globals::default(),
             synced: false,
             size: None,
-            offers: Vec::new(),
+            offers: Offers::default(),
+            dropped: None,
             dnd: None,
             dnd_action: 0,
             reading: None,
@@ -229,21 +239,23 @@ impl Surface {
         Ok(())
     }
 
-    fn bind(&mut self, name: &str, iface: Iface, max: u32) -> Option<u32> {
-        let &(gname, _, ver) = self.globals.iter().find(|g| g.1 == name)?;
+    /// Binds global `name` at version `min..=max`; `None` if it is absent
+    /// or older than `min` (the requests we send need `min`).
+    fn bind(&mut self, name: &str, iface: Iface, min: u32, max: u32) -> Option<u32> {
+        let (gname, ver) = self.globals.find(name, min, max)?;
         let id = self.conn.new_id(iface);
         let reg = self.id.registry;
         self.conn.req(
             reg,
             op::wl_registry::BIND,
-            &[U(gname), S(name), U(ver.min(max)), U(id)],
+            &[U(gname), S(name), U(ver), U(id)],
         );
         Some(id)
     }
 
-    fn need(&mut self, name: &str, iface: Iface, max: u32) -> io::Result<u32> {
-        self.bind(name, iface, max)
-            .ok_or_else(|| other(format!("the compositor lacks {name}")))
+    fn need(&mut self, name: &str, iface: Iface, min: u32, max: u32) -> io::Result<u32> {
+        self.bind(name, iface, min, max)
+            .ok_or_else(|| other(format!("the compositor lacks {name} v{min}")))
     }
 
     fn setup(&mut self, m: &mut Machine) -> io::Result<()> {
@@ -258,17 +270,20 @@ impl Surface {
         c.req(DISPLAY, op::wl_display::SYNC, &[U(cb)]);
         self.wait(m, |s| s.synced)?;
 
-        self.id.compositor = self.need("wl_compositor", Iface::Compositor, 4)?;
-        self.id.shm = self.need("wl_shm", Iface::Shm, 1)?;
-        self.id.seat = self.need("wl_seat", Iface::Seat, 7)?;
-        self.id.subcompositor = self.need("wl_subcompositor", Iface::Subcompositor, 1)?;
-        self.id.viewporter = self.need("wp_viewporter", Iface::Viewporter, 1)?;
-        self.id.layer_shell = self.need("zwlr_layer_shell_v1", Iface::LayerShell, 4)?;
-        // Without a data device there is no drop: the wheel says so.
+        // Minimum versions: what our requests need. wl_surface.damage_buffer
+        // is v4; everything else we send on these is v1.
+        self.id.compositor = self.need("wl_compositor", Iface::Compositor, 4, 4)?;
+        self.id.shm = self.need("wl_shm", Iface::Shm, 1, 1)?;
+        self.id.seat = self.need("wl_seat", Iface::Seat, 1, 7)?;
+        self.id.subcompositor = self.need("wl_subcompositor", Iface::Subcompositor, 1, 1)?;
+        self.id.viewporter = self.need("wp_viewporter", Iface::Viewporter, 1, 1)?;
+        self.id.layer_shell = self.need("zwlr_layer_shell_v1", Iface::LayerShell, 1, 4)?;
+        // wl_data_offer.set_actions/finish/action are v3. Older or absent:
+        // no drop target, and the wheel says `Nothing to do`.
         self.id.ddm = self
-            .bind("wl_data_device_manager", Iface::DataDeviceManager, 3)
+            .bind("wl_data_device_manager", Iface::DataDeviceManager, 3, 3)
             .unwrap_or(0);
-        self.globals = Vec::new();
+        self.globals = Globals::default();
         let (id, c) = (&mut self.id, &mut self.conn);
         if id.ddm != 0 {
             id.data_device = c.new_id(Iface::DataDevice);
@@ -415,7 +430,7 @@ impl Surface {
             (Iface::Registry, op::wl_registry::GLOBAL) => {
                 let (name, iface, ver) = (e.u32()?, e.string()?, e.u32()?);
                 if !self.synced {
-                    self.globals.push((name, iface, ver));
+                    self.globals.add(name, iface, ver)?;
                 }
                 None
             }
@@ -479,14 +494,12 @@ impl Surface {
             (Iface::DataDevice, op::wl_data_device::DATA_OFFER) => {
                 let id = e.u32()?;
                 self.conn.register_server_id(id, Iface::DataOffer);
-                self.offers.push((id, Vec::new()));
+                self.offers.add(id)?;
                 None
             }
             (Iface::DataOffer, op::wl_data_offer::OFFER) => {
                 let mime = e.string()?;
-                if let Some(o) = self.offers.iter_mut().find(|o| o.0 == e.obj) {
-                    o.1.push(mime);
-                }
+                self.offers.mime(e.obj, mime)?;
                 None
             }
             (Iface::DataOffer, op::wl_data_offer::ACTION) => {
@@ -500,27 +513,39 @@ impl Surface {
                 let (serial, _surface) = (e.u32()?, e.u32()?);
                 let (x, y) = (e.fixed()?, e.fixed()?);
                 let offer = e.u32()?;
+                if let Some((old, _)) = self.dnd
+                    && old != offer
+                {
+                    self.retire(old);
+                }
                 self.dnd = Some((offer, serial));
                 self.dnd_action = 0;
-                let mimes = self
-                    .offers
-                    .iter()
-                    .find(|o| o.0 == offer && offer != 0)
-                    .map_or_else(Vec::new, |o| o.1.clone());
+                let mimes = self.offers.mimes(offer);
                 Some(Input::DragEnter { x, y, mimes })
             }
             (Iface::DataDevice, op::wl_data_device::MOTION) => {
                 let _time = e.u32()?;
                 Some(Input::DragMotion(e.fixed()?, e.fixed()?))
             }
-            (Iface::DataDevice, op::wl_data_device::LEAVE) => Some(Input::DragLeave),
-            (Iface::DataDevice, op::wl_data_device::DROP) => Some(Input::Drop),
+            (Iface::DataDevice, op::wl_data_device::LEAVE) => {
+                // After a drop the offer stays until its data is read.
+                if let Some((offer, _)) = self.dnd
+                    && self.dropped != Some(offer)
+                {
+                    self.retire(offer);
+                    self.dnd = None;
+                }
+                Some(Input::DragLeave)
+            }
+            (Iface::DataDevice, op::wl_data_device::DROP) => {
+                self.dropped = self.dnd.map(|d| d.0);
+                Some(Input::Drop)
+            }
             (Iface::DataDevice, op::wl_data_device::SELECTION) => {
                 // Not ours to keep: the clipboard is a later context source.
                 let id = e.u32()?;
-                if id != 0 && self.dnd.is_none_or(|d| d.0 != id) {
-                    self.conn.req(id, op::wl_data_offer::DESTROY, &[]);
-                    self.offers.retain(|o| o.0 != id);
+                if self.dnd.is_none_or(|d| d.0 != id) {
+                    self.retire(id);
                 }
                 None
             }
@@ -619,6 +644,14 @@ impl Surface {
         }
     }
 
+    /// Destroys offer `offer` if still alive, unless it is the dropped one
+    /// (its data is still to be read).
+    fn retire(&mut self, offer: u32) {
+        if self.offers.retire(offer, self.dropped) {
+            self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
+        }
+    }
+
     fn start_read(&mut self) -> io::Result<()> {
         let offer = match self.dnd {
             Some((offer, _)) if offer != 0 => offer,
@@ -696,8 +729,9 @@ impl Surface {
             if r.is_ok() && self.dnd_action == DND_COPY && self.dnd.is_some_and(|d| d.0 == offer) {
                 self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
             }
-            self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
-            self.offers.retain(|o| o.0 != offer);
+            if self.offers.retire(offer, None) {
+                self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
+            }
             self.inputs.push(Input::DropData(r));
         }
     }
@@ -822,5 +856,143 @@ fn pollfd(fd: RawFd) -> libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
+    }
+}
+
+/// Most globals kept from the registry; past it the compositor is broken.
+const MAX_GLOBALS: usize = 256;
+/// Most MIME types kept per data offer.
+const MAX_MIMES: usize = 64;
+/// Most data offers alive at once (we destroy every one we are done with).
+const MAX_OFFERS: usize = 16;
+
+/// The registry's globals until the first sync: name, interface, version.
+#[derive(Default)]
+struct Globals(Vec<(u32, String, u32)>);
+
+impl Globals {
+    fn add(&mut self, name: u32, iface: String, version: u32) -> io::Result<()> {
+        if self.0.len() >= MAX_GLOBALS {
+            return Err(other(format!("over {MAX_GLOBALS} Wayland globals")));
+        }
+        self.0.push((name, iface, version));
+        Ok(())
+    }
+
+    /// The global `iface` if it has at least version `min`: its name and
+    /// the version to bind (at most `max`).
+    fn find(&self, iface: &str, min: u32, max: u32) -> Option<(u32, u32)> {
+        self.0
+            .iter()
+            .find(|g| g.1 == iface && g.2 >= min)
+            .map(|g| (g.0, g.2.min(max)))
+    }
+}
+
+/// Live server-created data offers and their MIME types.
+#[derive(Default)]
+struct Offers(Vec<(u32, Vec<String>)>);
+
+impl Offers {
+    fn add(&mut self, id: u32) -> io::Result<()> {
+        if self.0.len() >= MAX_OFFERS {
+            return Err(other(format!("over {MAX_OFFERS} live data offers")));
+        }
+        self.0.push((id, Vec::new()));
+        Ok(())
+    }
+
+    /// A MIME type for offer `id`; ignored for an offer not alive.
+    fn mime(&mut self, id: u32, mime: String) -> io::Result<()> {
+        let Some((_, mimes)) = self.0.iter_mut().find(|o| o.0 == id) else {
+            return Ok(());
+        };
+        if mimes.len() >= MAX_MIMES {
+            return Err(other(format!(
+                "over {MAX_MIMES} MIME types in a data offer"
+            )));
+        }
+        mimes.push(mime);
+        Ok(())
+    }
+
+    fn mimes(&self, id: u32) -> Vec<String> {
+        self.0
+            .iter()
+            .find(|o| o.0 == id)
+            .map_or_else(Vec::new, |o| o.1.clone())
+    }
+
+    /// Forgets offer `id` unless it is `keep`; true if it was alive and
+    /// must now be destroyed (so it is destroyed exactly once).
+    fn retire(&mut self, id: u32, keep: Option<u32>) -> bool {
+        if keep == Some(id) {
+            return false;
+        }
+        let before = self.0.len();
+        self.0.retain(|o| o.0 != id);
+        self.0.len() != before
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn globals_are_capped_and_versions_checked() {
+        let mut g = Globals::default();
+        g.add(1, "wl_compositor".into(), 3).unwrap();
+        g.add(2, "wl_data_device_manager".into(), 3).unwrap();
+        g.add(3, "wl_seat".into(), 9).unwrap();
+        // Too old is as good as absent.
+        assert_eq!(g.find("wl_compositor", 4, 4), None);
+        assert_eq!(g.find("wl_compositor", 1, 4), Some((1, 3)));
+        assert_eq!(g.find("wl_data_device_manager", 3, 3), Some((2, 3)));
+        // Bound at most at the version we speak.
+        assert_eq!(g.find("wl_seat", 1, 7), Some((3, 7)));
+        assert_eq!(g.find("wp_viewporter", 1, 1), None);
+        for i in 3..MAX_GLOBALS as u32 {
+            g.add(10 + i, "x".into(), 1).unwrap();
+        }
+        assert!(g.add(9999, "y".into(), 1).is_err(), "past the cap");
+        assert!(g.0.len() <= MAX_GLOBALS);
+    }
+
+    #[test]
+    fn offers_are_capped() {
+        let mut o = Offers::default();
+        for id in 0..MAX_OFFERS as u32 {
+            o.add(0xff00_0000 + id).unwrap();
+        }
+        assert!(o.add(0xff00_1000).is_err(), "too many live offers");
+        let id = 0xff00_0000;
+        for k in 0..MAX_MIMES {
+            o.mime(id, format!("type/{k}")).unwrap();
+        }
+        assert!(
+            o.mime(id, "one/more".into()).is_err(),
+            "too many MIME types"
+        );
+        assert_eq!(o.mimes(id).len(), MAX_MIMES);
+        // A retired offer frees its slot; MIME types for it are ignored.
+        assert!(o.retire(id, None));
+        o.mime(id, "late/type".into()).unwrap();
+        assert!(o.mimes(id).is_empty());
+        o.add(0xff00_1000).unwrap();
+    }
+
+    #[test]
+    fn offers_are_retired_once_and_never_the_one_kept() {
+        let mut o = Offers::default();
+        o.add(7).unwrap();
+        o.mime(7, URI_LIST.into()).unwrap();
+        assert_eq!(o.mimes(7), [URI_LIST]);
+        // The offer being read stays.
+        assert!(!o.retire(7, Some(7)));
+        assert_eq!(o.mimes(7), [URI_LIST]);
+        assert!(o.retire(7, Some(8)));
+        assert!(!o.retire(7, None), "destroyed once");
+        assert!(!o.retire(0, None), "no offer");
     }
 }
