@@ -138,7 +138,8 @@ impl Notifications {
         ];
         let r = self.conn.call(call("Notify", body), deadline)?;
         match r.body.first() {
-            Some(Value::U32(id)) => Ok(*id),
+            // 0 is never a notification's id.
+            Some(Value::U32(id)) if *id != 0 => Ok(*id),
             _ => Err(Error::Malformed("Notify reply")),
         }
     }

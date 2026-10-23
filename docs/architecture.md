@@ -261,17 +261,23 @@ Every action runs sandboxed, set up in the child between `fork` and
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
   so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`
-  (the first `unix:` path or abstract address that works) or
+  (the first well-formed `unix:` path or abstract entry) or
   `$XDG_RUNTIME_DIR/bus`; the server is D-Bus activated if it is not
   running. At the end, connect, authenticate and `Hello` have 300 ms
   together and every call 500 ms (activation may start the server). While
   the run goes on the supervisor waits for each call, so the whole open has
   500 ms and a progress update 100 ms. One wake reads at most 256 frames.
   More than 64 events about our notification in one wake, or four wakes in
-  a row that spend all 256 frames, mean a broken server. Any error or
-  timeout turns notifications off for the rest of the run with one line on
-  stderr (`inacircle: notifications unavailable: …`); the result, the
-  history and the exit code never depend on them.
+  a row that spend all 256 frames, mean a broken server, as does a
+  malformed reply (a `Notify` id of 0 included) or an error reply. A
+  timeout, I/O error or hangup during the run only drops the connection:
+  no more updates, and the end opens once more (with the end's deadlines)
+  so the result still replaces the "running" notification and its Cancel.
+  A broken server, or any failure at the end, turns notifications off for
+  the rest of the run with one line on stderr
+  (`inacircle: notifications unavailable: …`); the result, the history and
+  the exit code never depend on them. No update is sent once every input
+  is done: the result follows.
 - Cancel arrives on the supervisor's wake point, in the same `poll` as the
   signalfd and the pidfd: no thread. A click after the last action exited
   is ignored. Signals count only from the server's unique name, on its
@@ -279,9 +285,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   bus is ignored.
 - After the Undo window, the result is sent again (same id) without the
   button, so no dead button stays in the notification centre. A closed
-  notification ends the window at once. An Undo click undoes the job and
-  shows `Undone` with `<n> removed[, <k> kept (<reason>)]`, or
-  `Undo failed` with the cause.
+  notification ends the window at once, and so does SIGTERM or SIGINT
+  (still blocked and read through the signalfd): the result is sent again
+  without the button and `run` exits with its own code. An Undo click
+  undoes the job and replaces the result with `Undone` and
+  `<n> removed[, <k> kept (<reason>)]`, or `Undo failed` with the cause.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 

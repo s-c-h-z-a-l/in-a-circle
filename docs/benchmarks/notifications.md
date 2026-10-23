@@ -5,7 +5,7 @@ notification path (connect, authenticate, `Hello`, `GetCapabilities`,
 `Notify`), peak memory, and binary growth from the `libc`-only D-Bus client?
 
 **Verdict:** within every target. The final notice costs about 75 µs of our
-CPU (target ≤ 300 µs), peak RSS stays at about 2.9 MB with or without
+CPU (plan 3's target ≤ 300 µs), peak RSS stays at about 2.9 MB with or without
 `--notify` (budget 5 MB), and the D-Bus client adds 86 KB to the binary
 (allowance +100 KB per plan).
 
@@ -55,7 +55,6 @@ server named above.
 cargo build --release
 R=$PWD/target/release
 M=$(mktemp -d); mkdir -p $M/{actions,cache,state,home,config,files}
-mkdir -m 700 $M/runtime
 ln -s $R/inacircle-text $M/actions/
 export INACIRCLE_ACTIONS_DIR=$M/actions XDG_CACHE_HOME=$M/cache \
   XDG_STATE_HOME=$M/state XDG_CONFIG_HOME=$M/config HOME=$M/home

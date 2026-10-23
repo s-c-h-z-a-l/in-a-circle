@@ -331,20 +331,21 @@ fn cmd_run(args: &[OsString]) -> u8 {
         .pair("skipped", &skipped.to_string())
         .pair("failed", &failed.to_string()));
     let _ = io::stdout().flush();
-    // A cancel that arrived after the run must be consumed here: dropping
-    // the token with it pending would kill the process. Inputs it stopped
-    // are already failed, so the batch rule covers a cancelled run too.
-    let _ = cancel.is_cancelled();
-    drop(cancel);
     // Before the notifications: their cost is measured on its own.
     if measuring() {
         measure();
     }
     // The job is closed in the history and gone from the registry, so an
-    // Undo click can undo it.
+    // Undo click can undo it. The token stays: a signal in the Undo window
+    // ends the window, not the process.
     if let Some(n) = notifier {
-        n.finish(&job, sandboxed, (done, skipped, failed), cancelled);
+        n.finish(&job, sandboxed, (done, skipped, failed), cancelled, &cancel);
     }
+    // A cancel that arrived after the run must be consumed here: dropping
+    // the token with it pending would kill the process. Inputs it stopped
+    // are already failed, so the batch rule covers a cancelled run too.
+    let _ = cancel.is_cancelled();
+    drop(cancel);
     if done > 0 {
         EXIT_DONE
     } else if failed > 0 {

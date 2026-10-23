@@ -488,3 +488,26 @@ fn open_within_shares_one_deadline() {
     assert!(took < Duration::from_millis(650), "{took:?}");
     fake.join();
 }
+
+#[test]
+fn notify_reply_id_0_is_malformed() {
+    let fake = Fake::start(|p| {
+        serve_open(p, &["actions"]);
+        let m = expect_notify(p);
+        p.reply(&m, vec![Value::U32(0)]);
+        p.drain();
+    });
+    let mut n = Notifications::open(&fake.address(), after(300)).unwrap();
+    let notice = Notice {
+        replaces: 0,
+        summary: "s",
+        body: "",
+        actions: &[],
+        progress: None,
+    };
+    // The spec never hands out 0: it would read as "no notification yet".
+    let r = n.notify(&notice, after(500));
+    assert!(matches!(r, Err(dbus::Error::Malformed(_))), "{r:?}");
+    drop(n);
+    fake.join();
+}

@@ -6,8 +6,9 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use dbus::Error;
 use dbus::notifications::{Event, Notice, Notifications};
-use engine::exec::{Observer, Outcome, Wake};
+use engine::exec::{CancelToken, Observer, Outcome, Wake};
 use engine::journal::{self, JobId, UndoResult};
 
 /// A run that takes longer than this gets a "running" notification.
@@ -233,7 +234,10 @@ enum Bus {
     /// Not connected yet: the first notification connects.
     Idle,
     On(Notifications),
-    /// Failed once: no notifications for the rest of the run.
+    /// The connection failed during the run: nothing more until the end,
+    /// which opens once more for the result.
+    Lost,
+    /// Failed for good: no notifications for the rest of the run.
     Off,
 }
 
@@ -241,8 +245,11 @@ enum Bus {
 /// "running" notification with progress and Cancel once the run takes
 /// longer than [`RUNNING_AFTER`]; [`Notifier::finish`] shows the result
 /// and waits for Undo. Connects to the bus only when it first has
-/// something to show. Any bus error turns it off for the rest of the run
-/// with one line on stderr; it never changes the run's result.
+/// something to show. A connection that fails during the run is dropped
+/// and opened once more at the end, so the result still replaces the
+/// "running" notification; a failure at the end, or a broken server
+/// (malformed replies, floods), turns it off for the rest of the run with
+/// one line on stderr. It never changes the run's result.
 pub struct Notifier {
     label: String,
     total: usize,
@@ -265,6 +272,8 @@ pub struct Notifier {
     cancelled: bool,
     /// Drains in a row that spent all of `WAKE_FRAMES`.
     spent: u32,
+    /// `finish` has begun: a failure now is final.
+    ending: bool,
 }
 
 impl Notifier {
@@ -288,16 +297,20 @@ impl Notifier {
             cancel_seen: false,
             cancelled: false,
             spent: 0,
+            ending: false,
         }
     }
 
-    /// Connects if not tried yet. During the run (`quick`) the whole open
-    /// has `QUICK_OPEN`: the supervisor waits for it. At the end, connect
-    /// has `CONNECT_WAIT` and every call its own time (a D-Bus activated
+    /// Connects if not tried yet, or (at the end) once more after the
+    /// connection was lost. During the run (`quick`) the whole open has
+    /// `QUICK_OPEN`: the supervisor waits for it. At the end, connect has
+    /// `CONNECT_WAIT` and every call its own time (a D-Bus activated
     /// server may need it to start).
     fn connect(&mut self, quick: bool) {
-        if !matches!(self.bus, Bus::Idle) {
-            return;
+        match self.bus {
+            Bus::Idle => {}
+            Bus::Lost if !quick => {}
+            _ => return,
         }
         let Some(addr) = dbus::session_address() else {
             return self.off(&"no unix session bus address");
@@ -310,7 +323,22 @@ impl Notifier {
         };
         match opened {
             Ok(n) => self.bus = Bus::On(n),
-            Err(e) => self.off(&e),
+            Err(e) => self.fail(&e),
+        }
+    }
+
+    /// A bus error. During the run a transport failure (timeout, I/O,
+    /// hangup) only drops the connection; a broken server, or any failure
+    /// at the end, is final.
+    fn fail(&mut self, e: &Error) {
+        let transport = matches!(
+            e,
+            Error::Timeout | Error::Io(_) | Error::Closed | Error::Auth
+        );
+        if transport && !self.ending {
+            self.bus = Bus::Lost;
+        } else {
+            self.off(e);
         }
     }
 
@@ -327,7 +355,7 @@ impl Notifier {
         match bus.notify(n, Instant::now() + wait) {
             Ok(id) => Some(id),
             Err(e) => {
-                self.off(&e);
+                self.fail(&e);
                 None
             }
         }
@@ -335,6 +363,11 @@ impl Notifier {
 
     fn value(&self) -> u8 {
         running_text("", self.done, self.total, self.fraction).2
+    }
+
+    /// The running notification is out of date and worth updating.
+    fn wants_update(&self) -> bool {
+        !self.closed && self.done < self.total && (self.done, self.value()) != self.shown
     }
 
     /// Shows or updates the "running" notification.
@@ -360,15 +393,13 @@ impl Notifier {
     }
 
     /// Due work: the first "running" notification, or a progress update
-    /// held back by the rate limit.
+    /// held back by the rate limit. None once every input is done: the
+    /// result follows.
     fn tick(&mut self) {
         let now = Instant::now();
         let first = self.id == 0 && now >= self.start + RUNNING_AFTER;
-        let update = self.id != 0
-            && !self.closed
-            && (self.done, self.value()) != self.shown
-            && now >= self.sent + PROGRESS_EVERY;
-        if matches!(self.bus, Bus::Off) || !(first || update) {
+        let update = self.id != 0 && self.wants_update() && now >= self.sent + PROGRESS_EVERY;
+        if !matches!(self.bus, Bus::Idle | Bus::On(_)) || !(first || update) {
             return;
         }
         self.running();
@@ -401,7 +432,7 @@ impl Notifier {
                     return cancel;
                 }
                 Err(e) => {
-                    self.off(&e);
+                    self.fail(&e);
                     return cancel;
                 }
             };
@@ -422,14 +453,16 @@ impl Notifier {
     /// undoes `job` and says how it went; at the end of the window the
     /// notification is sent again without the button. `counts` are the
     /// run's `(done, skipped, failed)` inputs; `cancelled`: a cancel signal
-    /// stopped the run (a Cancel click seen here counts too). The run's
-    /// history and job registry entry must be closed before this is called.
+    /// stopped the run (a Cancel click seen here counts too). A signal on
+    /// `stop` during the window ends it. The run's history and job registry
+    /// entry must be closed before this is called.
     pub fn finish(
         mut self,
         job: &JobId,
         sandboxed: bool,
         counts: (usize, usize, usize),
         cancelled: bool,
+        stop: &CancelToken,
     ) {
         // Own CPU of the final notice (open + Notify), for the measurement.
         let t0 = crate::measuring().then(|| crate::cpu_us(libc::RUSAGE_SELF));
@@ -439,6 +472,7 @@ impl Notifier {
                 eprintln!("inacircle: measure notify_cpu_us={t}");
             }
         };
+        self.ending = true;
         self.connect(false);
         let Bus::On(bus) = &self.bus else {
             return lap();
@@ -474,11 +508,12 @@ impl Notifier {
         }
         let deadline = Instant::now() + undo_wait();
         loop {
-            match bus.next_event(id, deadline) {
+            match window_event(bus, id, deadline, stop) {
                 Ok(Event::Action(key)) if key == "undo" => break,
                 // A Cancel click that came too late, after the run.
                 Ok(Event::Action(_)) => {}
                 Ok(Event::Closed(_)) => return,
+                // The window is over, or a cancel signal ended it.
                 Ok(Event::Timeout) => {
                     // No dead button left in the notification centre.
                     n.replaces = id;
@@ -494,9 +529,10 @@ impl Notifier {
             Err(e) => ("Undo failed".to_owned(), e.to_string()),
         };
         let body = body_of(&[body], markup);
+        // In place of the result: its Undo button is spent.
         self.show(
             &Notice {
-                replaces: 0,
+                replaces: id,
                 summary: &summary,
                 body: &body,
                 actions: &[],
@@ -504,6 +540,52 @@ impl Notifier {
             },
             CALL_WAIT,
         );
+    }
+}
+
+/// The next signal about `id` like `next_event`, but `Event::Timeout` also
+/// as soon as a cancel signal is pending on `stop`.
+fn window_event(
+    bus: &mut Notifications,
+    id: u32,
+    deadline: Instant,
+    stop: &CancelToken,
+) -> Result<Event, Error> {
+    loop {
+        if bus.pending() {
+            if let Some(e) = bus.poll_event(id)? {
+                return Ok(e);
+            }
+            continue;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(Event::Timeout);
+        }
+        let mut fds = [bus.as_raw_fd(), stop.as_raw_fd()].map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        // Round up so the deadline has passed when poll returns.
+        let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+        // SAFETY: fds is a valid array of two pollfds.
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Error::Io(e));
+        }
+        if fds[1].revents != 0 && stop.is_cancelled() {
+            return Ok(Event::Timeout);
+        }
+        if fds[0].revents != 0
+            && let Some(e) = bus.poll_event(id)?
+        {
+            return Ok(e);
+        }
     }
 }
 
@@ -541,12 +623,10 @@ impl Observer for Notifier {
             // the bus failed right after), signals queued during a call or
             // left by a spent budget.
             _ if self.cancel_seen => Some(Instant::now()),
-            Bus::Off => None,
+            Bus::Off | Bus::Lost => None,
             Bus::On(n) if n.pending() => Some(Instant::now()),
             _ if self.id == 0 => Some(self.start + RUNNING_AFTER),
-            _ if !self.closed && (self.done, self.value()) != self.shown => {
-                Some(self.sent + PROGRESS_EVERY)
-            }
+            _ if self.wants_update() => Some(self.sent + PROGRESS_EVERY),
             _ => None,
         }
     }

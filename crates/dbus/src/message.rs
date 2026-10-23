@@ -448,7 +448,7 @@ mod tests {
     fn oversized_frame_is_too_large() {
         let mut head = [0u8; 16];
         head[0] = b'l';
-        head[4..8].copy_from_slice(&(1u32 << 20).to_le_bytes()); // body alone + 16 > 1 MiB
+        head[4..8].copy_from_slice(&(1u32 << 20).to_le_bytes()); // body alone + 16 > 64 KiB
         assert!(matches!(frame_len(&head), Err(Error::TooLarge)));
         head[4..8].copy_from_slice(&0u32.to_le_bytes());
         head[12..16].copy_from_slice(&u32::MAX.to_le_bytes());

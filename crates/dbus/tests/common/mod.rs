@@ -37,11 +37,21 @@ fn unique() -> String {
 impl Fake {
     /// Listens on a socket file in a fresh temporary directory.
     pub fn start(scenario: impl FnOnce(&mut Peer) + Send + 'static) -> Fake {
+        let mut once = Some(scenario);
+        Fake::start_clients(1, move |p, _| once.take().unwrap()(p))
+    }
+
+    /// `start` for `n` clients one after the other: `scenario` runs for
+    /// each with its index.
+    pub fn start_clients(
+        n: usize,
+        scenario: impl FnMut(&mut Peer, usize) + Send + 'static,
+    ) -> Fake {
         let dir = std::env::temp_dir().join(unique());
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("bus");
         let listener = UnixListener::bind(&path).unwrap();
-        Fake::spawn(listener, Address::Path(path), Some(dir), scenario)
+        Fake::spawn(listener, Address::Path(path), Some(dir), n, scenario)
     }
 
     /// Listens on a fresh abstract socket name.
@@ -49,36 +59,42 @@ impl Fake {
         let name = unique().into_bytes();
         let sa = SocketAddr::from_abstract_name(&name).unwrap();
         let listener = UnixListener::bind_addr(&sa).unwrap();
-        Fake::spawn(listener, Address::Abstract(name), None, scenario)
+        let mut once = Some(scenario);
+        Fake::spawn(listener, Address::Abstract(name), None, 1, move |p, _| {
+            once.take().unwrap()(p)
+        })
     }
 
     fn spawn(
         listener: UnixListener,
         addr: Address,
         dir: Option<PathBuf>,
-        scenario: impl FnOnce(&mut Peer) + Send + 'static,
+        clients: usize,
+        mut scenario: impl FnMut(&mut Peer, usize) + Send + 'static,
     ) -> Fake {
         listener.set_nonblocking(true).unwrap();
         let thread = std::thread::spawn(move || {
-            let start = Instant::now();
-            let stream = loop {
-                match listener.accept() {
-                    Ok((s, _)) => break s,
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        assert!(start.elapsed() < PATIENCE, "no client connected");
-                        std::thread::sleep(Duration::from_millis(1));
+            for i in 0..clients {
+                let start = Instant::now();
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            assert!(start.elapsed() < PATIENCE, "client {i} did not connect");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(e) => panic!("accept: {e}"),
                     }
-                    Err(e) => panic!("accept: {e}"),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
-            let mut peer = Peer {
-                stream,
-                buf: Vec::new(),
-                serial: 0,
-            };
-            scenario(&mut peer);
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(PATIENCE)).unwrap();
+                let mut peer = Peer {
+                    stream,
+                    buf: Vec::new(),
+                    serial: 0,
+                };
+                scenario(&mut peer, i);
+            }
             listener
         });
         Fake {

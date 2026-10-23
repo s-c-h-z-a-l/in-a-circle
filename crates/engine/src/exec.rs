@@ -145,9 +145,9 @@ pub trait Observer {
         None
     }
     /// The wake point: `wake_fd` is readable or `wake_at` has passed.
-    /// Called on the supervisor's thread between polls: must not block
-    /// (read what is there, queue writes); the action's pipes go unread
-    /// meanwhile. The observer drains its fd: one left readable wakes it
+    /// Called on the supervisor's thread between polls: may block only
+    /// briefly, under a hard deadline (read what is there, queue writes);
+    /// the action's pipes go unread meanwhile. The observer drains its fd: one left readable wakes it
     /// again at once.
     fn wake(&mut self) -> Wake {
         Wake::Continue
@@ -227,6 +227,14 @@ impl CancelToken {
             }
             return self.cancelled.get();
         }
+    }
+}
+
+/// The signalfd: readable while a cancel signal is pending, for a caller
+/// that waits on other fds too (then [`CancelToken::is_cancelled`]).
+impl AsRawFd for CancelToken {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 

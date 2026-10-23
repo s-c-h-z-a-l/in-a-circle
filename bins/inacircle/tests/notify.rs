@@ -248,6 +248,8 @@ struct Got {
     body: String,
     actions: Vec<String>,
     hints: Value,
+    /// Which connection it came on (0: the first).
+    conn: usize,
 }
 
 fn strings(v: &[&str]) -> Value {
@@ -279,6 +281,7 @@ fn got(m: &Message, id: u32) -> Got {
         body: text(&m.body[4]),
         actions: actions.iter().map(text).collect(),
         hints: m.body[6].clone(),
+        conn: 0,
     }
 }
 
@@ -322,13 +325,23 @@ fn server(react: impl FnMut(&mut Peer, &Got) + Send + 'static) -> (Fake, Receive
 
 /// `server` that also lets `before` act on a `Notify` before its reply.
 fn server_hooked(
+    before: impl FnMut(&mut Peer, &Got) + Send + 'static,
+    react: impl FnMut(&mut Peer, &Got) + Send + 'static,
+) -> (Fake, Receiver<Got>) {
+    servers(1, before, react)
+}
+
+/// `server_hooked` for `clients` connections one after the other (a client
+/// that reconnects); ids go on across them, `Got::conn` says which.
+fn servers(
+    clients: usize,
     mut before: impl FnMut(&mut Peer, &Got) + Send + 'static,
     mut react: impl FnMut(&mut Peer, &Got) + Send + 'static,
 ) -> (Fake, Receiver<Got>) {
     let (tx, rx): (Sender<Got>, _) = mpsc::channel();
-    let fake = Fake::start(move |p| {
+    let mut next = FIRST_ID;
+    let fake = Fake::start_clients(clients, move |p, conn| {
         serve_open(p);
-        let mut next = FIRST_ID;
         while let Some(m) = p.try_recv() {
             match m.member.as_deref() {
                 Some("Notify") => {
@@ -340,7 +353,10 @@ fn server_hooked(
                         Value::U32(r) => r,
                         _ => panic!("{:?}", m.body),
                     };
-                    let g = got(&m, id);
+                    let g = Got {
+                        conn,
+                        ..got(&m, id)
+                    };
                     before(p, &g);
                     // A client that gave up (a test of that) is gone.
                     if p.try_send(Peer::reply_msg(&m, vec![Value::U32(id)])) {
@@ -441,6 +457,8 @@ fn undo_button_removes_the_output() {
         ("Undone", "1 removed")
     );
     assert!(n[1].actions.is_empty());
+    // It replaces the result, whose Undo button is spent.
+    assert_eq!(n[1].replaces, n[0].id);
 }
 
 #[test]
@@ -869,11 +887,213 @@ fn slow_server_stalls_the_run_once_briefly() {
             p.try_send(Peer::reply_msg(&m, body));
         }
     });
-    let plain = plain_run(test_script(&e, None, false, &[&a]));
-    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
-    fake.join();
+    // The supervisor's stall shows in when the output is placed; the end
+    // of the run adds the one reopen (300 ms here: nobody answers).
+    let (plain, plain_done) = run_until_done(test_script(&e, None, false, &[&a]));
+    let (r, done) = run_until_done(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    assert_eq!(fake.join_counting(), 1, "no reopen at the end");
+    assert_eq!(plain.code, Some(0));
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
     assert_eq!(r.unavailable(), 1, "{}", r.stderr);
-    let late = r.elapsed.saturating_sub(plain.elapsed);
+    let late = done.saturating_sub(plain_done);
     assert!(late < Duration::from_millis(600), "{late:?}");
+}
+
+/// `run`, and how long after the start the `done` line came.
+fn run_until_done(c: Command) -> (Run, Duration) {
+    let seen = Arc::new(Mutex::new(String::new()));
+    let at = Arc::new(Mutex::new(None));
+    let (seen2, at2) = (seen.clone(), at.clone());
+    let start = Instant::now();
+    let r = run_then(c, &seen, move |_| {
+        std::thread::spawn(move || {
+            while start.elapsed() < WATCHDOG {
+                if seen2
+                    .lock()
+                    .unwrap()
+                    .lines()
+                    .any(|l| l.starts_with("done\t"))
+                {
+                    *at2.lock().unwrap() = Some(start.elapsed());
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+    });
+    // The poller may lag the end of the run by a tick.
+    std::thread::sleep(Duration::from_millis(10));
+    let at = at.lock().unwrap().expect("no done line");
+    (r, at)
+}
+
+/// The server goes away: the client sees a hangup.
+fn hang_up(p: &mut Peer) {
+    let _ = p.stream.shutdown(std::net::Shutdown::Both);
+}
+
+#[test]
+fn sigterm_in_the_undo_window_keeps_the_exit_code() {
+    let e = Env::new("term-window");
+    e.file("a.txt", "hello\n");
+    let (fake, rx) = server(|_, _| {});
+    let seen = Arc::new(Mutex::new(String::new()));
+    let signalled = Arc::new(Mutex::new(None));
+    let (seen2, signalled2) = (seen.clone(), signalled.clone());
+    let c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "a.txt"],
+    );
+    let r = run_then(c, &seen, move |pid| {
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while !seen2.lock().unwrap().contains("summary\t") {
+                assert!(start.elapsed() < Duration::from_secs(10), "no summary");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            *signalled2.lock().unwrap() = Some(Instant::now());
+            kill(pid, "-TERM");
+        });
+    });
+    let ended = Instant::now();
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    // The work was done: the signal ends the window, not the run.
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    let after = ended - signalled.lock().unwrap().expect("no signal sent");
+    assert!(after < Duration::from_millis(600), "{after:?}");
+    assert_eq!(n.len(), 2);
+    assert_eq!(n[0].actions, ["undo", "Undo"]);
+    assert_eq!(n[1].replaces, n[0].id);
+    assert!(n[1].actions.is_empty());
+    assert!(e.files().join("a.md").exists());
+}
+
+#[test]
+fn slow_update_still_ends_with_a_result() {
+    let e = Env::new("slow-update");
+    let a = e.test_input(
+        "a.test",
+        &[
+            "sleep_ms=1300",
+            "events=progress:0.5",
+            "sleep_ms=500",
+            "events=done",
+        ],
+    );
+    // The first progress update is answered late: the client gives up on
+    // that connection, and reconnects for the result.
+    let (fake, rx) = servers(
+        2,
+        |_, g| {
+            if g.conn == 0 && g.replaces != 0 {
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        },
+        |p, g| {
+            if g.has_button("undo") {
+                close(p, g.id);
+            }
+        },
+    );
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.unavailable(), 0, "{}", r.stderr);
+    let last = n.last().unwrap();
+    assert_eq!((last.conn, last.summary.as_str()), (1, "a.bin"));
+    // It replaces the running notice, whose Cancel is dead now.
+    assert_eq!(last.replaces, n[0].id);
+    assert!(n[0].has_button("cancel"));
+}
+
+#[test]
+fn server_back_at_the_end_gets_the_result() {
+    let e = Env::new("server-back");
+    let a = e.test_input("a.test", &["sleep_ms=1500", "events=done"]);
+    let (fake, rx) = servers(
+        2,
+        |_, _| {},
+        |p, g| {
+            if g.conn == 0 {
+                hang_up(p);
+            } else if g.has_button("undo") {
+                close(p, g.id);
+            }
+        },
+    );
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.unavailable(), 0, "{}", r.stderr);
+    assert_eq!(n.len(), 2);
+    assert!(n[0].has_button("cancel"));
+    assert_eq!((n[1].conn, n[1].replaces), (1, n[0].id));
+    assert_eq!(n[1].summary, "a.bin");
+}
+
+#[test]
+fn dead_server_at_the_end_is_one_line() {
+    let e = Env::new("server-dead");
+    let a = e.test_input("a.test", &["sleep_ms=1500", "events=done"]);
+    // Gone mid-run and never back: the reopen finds nobody answering.
+    let (fake, rx) = server(|p, _| hang_up(p));
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    assert_eq!(fake.join_counting(), 1, "no reopen at the end");
+    assert_eq!(rx.try_iter().count(), 1);
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+    assert_eq!(r.unavailable(), 1, "{}", r.stderr);
+}
+
+#[test]
+fn notify_id_0_turns_notifications_off() {
+    let e = Env::new("id-0");
+    let mut opts = vec!["sleep_ms=1100".to_owned()];
+    let p: Vec<String> = (1..10).map(|i| format!("progress:0.{i}")).collect();
+    opts.push(format!("events={}", p.join(",")));
+    opts.push("events=done".to_owned());
+    let opts: Vec<&str> = opts.iter().map(String::as_str).collect();
+    let a = e.test_input("a.test", &opts);
+    let (tx, rx) = mpsc::channel();
+    let fake = Fake::start(move |p| {
+        serve_open(p);
+        while let Some(m) = p.try_recv() {
+            tx.send(m.member.clone()).unwrap();
+            p.try_send(Peer::reply_msg(&m, vec![Value::U32(0)]));
+        }
+    });
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    let calls: Vec<_> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    // One answer of 0 is enough: no new notification per progress event.
+    assert_eq!(calls, [Some("Notify".to_owned())]);
+    assert_eq!(r.unavailable(), 1, "{}", r.stderr);
+}
+
+#[test]
+fn no_update_once_all_inputs_are_done() {
+    let e = Env::new("no-last-update");
+    let a = e.test_input("a.test", &["sleep_ms=1300", "events=done"]);
+    let (fake, rx) = server(|p, g| {
+        if g.has_button("undo") {
+            close(p, g.id);
+        }
+    });
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    // The running notice, then the result: no "1 / 1 files" in between.
+    assert_eq!(
+        n.len(),
+        2,
+        "{:?}",
+        n.iter().map(|g| &g.body).collect::<Vec<_>>()
+    );
+    assert!(n[0].has_button("cancel") && n[1].has_button("undo"));
 }
