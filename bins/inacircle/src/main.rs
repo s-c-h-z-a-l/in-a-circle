@@ -597,7 +597,11 @@ fn cmd_wheel() -> u8 {
     // The surface is gone (its connection closed); free the hotkey.
     drop(lock);
     if let Some(meter) = meter {
-        eprintln!("inacircle: {}", meter.report(measure::vm_hwm_kb()));
+        let exit_cpu = cpu_us(libc::RUSAGE_SELF);
+        eprintln!(
+            "inacircle: {}",
+            meter.report(measure::vm_hwm_kb(), exit_cpu)
+        );
     }
     // SAFETY: as above; 0 cancels the pending alarm.
     unsafe { libc::alarm(0) };
