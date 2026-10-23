@@ -123,3 +123,65 @@ fn alarm_works_even_if_the_parent_disabled_sigalrm() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// Runs the wheel with `wheel.lock` replaced by `plant`, against a fake
+/// compositor: it must exit 1 within `limit` without ever connecting.
+fn bad_lock(name: &str, plant: impl FnOnce(&Path), limit: Duration) {
+    use std::os::unix::net::UnixListener;
+    let rt = runtime_dir(name);
+    plant(&rt.join("inacircle/wheel.lock"));
+    let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let t = Instant::now();
+    let mut child = Command::new(BIN)
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if t.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{name}: still running after {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert_eq!(status.code(), Some(1), "{name}: {stderr}");
+    assert!(stderr.contains("lock"), "{name}: {stderr}");
+    assert!(listener.accept().is_err(), "{name}: it went on to Wayland");
+}
+
+/// A FIFO at the lock path must not hang the wheel in `open`.
+#[test]
+fn a_fifo_at_the_lock_path_fails_at_once() {
+    bad_lock(
+        "fifo",
+        |p| {
+            let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: mkfifo reads the NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        },
+        Duration::from_secs(1),
+    );
+}
+
+/// The lock is never taken through a symlink.
+#[test]
+fn a_symlink_at_the_lock_path_fails() {
+    bad_lock(
+        "symlink",
+        |p| {
+            let target = p.with_file_name("elsewhere");
+            fs::write(&target, "").unwrap();
+            std::os::unix::fs::symlink(&target, p).unwrap();
+        },
+        Duration::from_secs(2),
+    );
+}

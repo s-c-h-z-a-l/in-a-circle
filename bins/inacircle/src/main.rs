@@ -26,11 +26,14 @@
 //! second, the result with Undo at the end. The stdout lines are written
 //! before the Undo window starts; the exit code does not depend on them.
 //!
-//! Without arguments: the wheel. One instance at a time (a held lock makes
-//! a second one exit 0 at once, before touching Wayland), and SIGALRM kills
-//! it if a stage outlives its deadline. SIGALRM is reset to its default
-//! action and unblocked before the alarm is armed, whatever the parent
-//! left us. Closed without a choice: exit 0.
+//! Without arguments: the wheel. SIGALRM is reset to its default action
+//! and unblocked, whatever the parent left us, and `alarm` armed first: it
+//! kills the process if a stage (the lock included) outlives its deadline.
+//! Then one instance at a time: a held lock makes a second one exit 0 at
+//! once, before touching Wayland. The lock file is opened with
+//! `O_NOFOLLOW | O_NONBLOCK` and must be a regular file; anything else
+//! (a symlink, a FIFO) is an error, exit 1. Closed without a choice:
+//! exit 0.
 //! A choice tears the wheel down, releases the lock, then runs the preset
 //! as `run --notify` does, exit code included.
 
@@ -554,6 +557,14 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
 
 /// The wheel: lock, deadline, surface; then the chosen preset, if any.
 fn cmd_wheel() -> u8 {
+    // The deadline first: it covers the lock too (a slow runtime dir).
+    if let Err(e) = default_sigalrm() {
+        eprintln!("inacircle: cannot arm the deadline: {e}");
+        return EXIT_FAILED;
+    }
+    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
+    // kills the process: the backstop if anything below hangs.
+    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
     // The lock comes before Wayland: a second instance must not draw.
     let lock = match lock_wheel() {
         Ok(Some(l)) => l,
@@ -563,13 +574,6 @@ fn cmd_wheel() -> u8 {
             return EXIT_FAILED;
         }
     };
-    if let Err(e) = default_sigalrm() {
-        eprintln!("inacircle: cannot arm the deadline: {e}");
-        return EXIT_FAILED;
-    }
-    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
-    // kills the process: the backstop if anything below hangs.
-    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
     let mut machine = wheel::Machine::new();
     let chosen = surface::run(&mut machine);
     // The surface is gone (its connection closed); free the hotkey.
@@ -623,7 +627,9 @@ fn default_sigalrm() -> io::Result<()> {
 }
 
 /// `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, held: `None` if another
-/// instance holds it.
+/// instance holds it. Opened without following a symlink and without
+/// blocking (a FIFO planted there would hang `open`), and refused unless it
+/// is a regular file.
 fn lock_wheel() -> io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -634,12 +640,23 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
         _ => {}
     }
+    let path = dir.join("wheel.lock");
+    // std adds O_CLOEXEC; create(true) is O_CREAT.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .mode(0o600)
-        .open(dir.join("wheel.lock"))?;
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    // fstat of what we opened, not of the path.
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}: not a regular file", path.display()),
+        ));
+    }
     // SAFETY: flock on an fd we own; the lock lives as long as `file`.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));

@@ -168,8 +168,6 @@ struct Surface {
     /// Size from the last configure; the first one maps the surface.
     size: Option<(u32, u32)>,
     offers: Offers,
-    /// The offer of the drop, kept alive until its data is read.
-    dropped: Option<u32>,
     /// The drag over us: offer id (0: none offered) and enter serial.
     dnd: Option<(u32, u32)>,
     /// The action last negotiated for the drag's offer.
@@ -198,7 +196,6 @@ impl Surface {
             synced: false,
             size: None,
             offers: Offers::default(),
-            dropped: None,
             dnd: None,
             dnd_action: 0,
             reading: None,
@@ -530,7 +527,7 @@ impl Surface {
             (Iface::DataDevice, op::wl_data_device::LEAVE) => {
                 // After a drop the offer stays until its data is read.
                 if let Some((offer, _)) = self.dnd
-                    && self.dropped != Some(offer)
+                    && self.offers.kept() != Some(offer)
                 {
                     self.retire(offer);
                     self.dnd = None;
@@ -538,7 +535,9 @@ impl Surface {
                 Some(Input::DragLeave)
             }
             (Iface::DataDevice, op::wl_data_device::DROP) => {
-                self.dropped = self.dnd.map(|d| d.0);
+                if let Some((offer, _)) = self.dnd {
+                    self.offers.keep(offer);
+                }
                 Some(Input::Drop)
             }
             (Iface::DataDevice, op::wl_data_device::SELECTION) => {
@@ -647,7 +646,7 @@ impl Surface {
     /// Destroys offer `offer` if still alive, unless it is the dropped one
     /// (its data is still to be read).
     fn retire(&mut self, offer: u32) {
-        if self.offers.retire(offer, self.dropped) {
+        if self.offers.retire(offer) {
             self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
         }
     }
@@ -656,6 +655,9 @@ impl Surface {
         let offer = match self.dnd {
             Some((offer, _)) if offer != 0 => offer,
             _ => {
+                if let Some(offer) = self.offers.release() {
+                    self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
+                }
                 self.inputs.push(Input::DropData(Err("no offer".into())));
                 return Ok(());
             }
@@ -729,7 +731,8 @@ impl Surface {
             if r.is_ok() && self.dnd_action == DND_COPY && self.dnd.is_some_and(|d| d.0 == offer) {
                 self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
             }
-            if self.offers.retire(offer, None) {
+            // The keep ends with the read, so a reused id is destroyed later.
+            if self.offers.release() == Some(offer) {
                 self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
             }
             self.inputs.push(Input::DropData(r));
@@ -889,9 +892,10 @@ impl Globals {
     }
 }
 
-/// Live server-created data offers and their MIME types.
+/// Live server-created data offers and their MIME types, and the one kept
+/// alive whatever happens (the dropped offer, until its data is read).
 #[derive(Default)]
-struct Offers(Vec<(u32, Vec<String>)>);
+struct Offers(Vec<(u32, Vec<String>)>, Option<u32>);
 
 impl Offers {
     fn add(&mut self, id: u32) -> io::Result<()> {
@@ -923,10 +927,26 @@ impl Offers {
             .map_or_else(Vec::new, |o| o.1.clone())
     }
 
-    /// Forgets offer `id` unless it is `keep`; true if it was alive and
-    /// must now be destroyed (so it is destroyed exactly once).
-    fn retire(&mut self, id: u32, keep: Option<u32>) -> bool {
-        if keep == Some(id) {
+    /// Keeps offer `id` through `retire` until `release`.
+    fn keep(&mut self, id: u32) {
+        self.1 = Some(id);
+    }
+
+    fn kept(&self) -> Option<u32> {
+        self.1
+    }
+
+    /// Ends the keep and retires the kept offer: its id if it must now be
+    /// destroyed. A later offer with the same (reused) id is not kept.
+    fn release(&mut self) -> Option<u32> {
+        let id = self.1.take()?;
+        self.retire(id).then_some(id)
+    }
+
+    /// Forgets offer `id` unless it is kept; true if it was alive and must
+    /// now be destroyed (so it is destroyed exactly once).
+    fn retire(&mut self, id: u32) -> bool {
+        if self.1 == Some(id) {
             return false;
         }
         let before = self.0.len();
@@ -976,7 +996,7 @@ mod tests {
         );
         assert_eq!(o.mimes(id).len(), MAX_MIMES);
         // A retired offer frees its slot; MIME types for it are ignored.
-        assert!(o.retire(id, None));
+        assert!(o.retire(id));
         o.mime(id, "late/type".into()).unwrap();
         assert!(o.mimes(id).is_empty());
         o.add(0xff00_1000).unwrap();
@@ -986,13 +1006,37 @@ mod tests {
     fn offers_are_retired_once_and_never_the_one_kept() {
         let mut o = Offers::default();
         o.add(7).unwrap();
+        o.add(8).unwrap();
         o.mime(7, URI_LIST.into()).unwrap();
         assert_eq!(o.mimes(7), [URI_LIST]);
-        // The offer being read stays.
-        assert!(!o.retire(7, Some(7)));
+        // The dropped offer stays until it is released.
+        o.keep(7);
+        assert!(!o.retire(7));
         assert_eq!(o.mimes(7), [URI_LIST]);
-        assert!(o.retire(7, Some(8)));
-        assert!(!o.retire(7, None), "destroyed once");
-        assert!(!o.retire(0, None), "no offer");
+        assert!(o.retire(8));
+        assert!(!o.retire(8), "destroyed once");
+        assert!(!o.retire(0), "no offer");
+        assert_eq!(o.release(), Some(7), "released: destroy it now");
+        assert!(!o.retire(7), "and only once");
+    }
+
+    /// Regression: the keep outlived the read, so a later offer that
+    /// reused the dropped one's id (libwayland reuses ids) was never
+    /// destroyed.
+    #[test]
+    fn a_reused_id_is_retired_after_release() {
+        let mut o = Offers::default();
+        o.add(0xff00_0001).unwrap();
+        o.keep(0xff00_0001);
+        assert_eq!(o.release(), Some(0xff00_0001));
+        assert_eq!(o.kept(), None);
+        // The server reuses the id for the next drag.
+        o.add(0xff00_0001).unwrap();
+        assert!(o.retire(0xff00_0001), "the new offer is destroyed");
+        // Releasing with nothing kept, or a kept offer already gone, is a
+        // no-op.
+        assert_eq!(o.release(), None);
+        o.keep(9);
+        assert_eq!(o.release(), None);
     }
 }
