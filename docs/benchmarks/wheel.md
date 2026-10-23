@@ -8,9 +8,10 @@ wheel ≤ 1 ms, hover repaint ≤ 100 µs, no wakeups while it waits, peak RSS
 **Verdict:** within budget, with memory close to its line. Our CPU from
 `main` to the wheel's commit is 755 µs p50 (856 µs max, budget 1 ms), there
 are no wakeups while the wheel waits, and peak RSS is 4.7 MB (budget 5 MB):
-most of it is the two 900 KB shm buffers. Hover cost comes from the
-rasterizer bench (14 µs median, 49 µs max on this machine, budget 100 µs);
-the drag runs below add the in-situ numbers.
+most of it is the two 900 KB shm buffers. A drop of 1024 files peaks at
+4.98 MB at stage 2. The hover row is the rasterizer bench (14 µs median,
+49 µs max, budget 100 µs), not an in-situ number: the drag runs (hover and
+wakeups while dragging) are pending the user's manual test on niri.
 
 ## Method
 
@@ -52,6 +53,36 @@ over the slices, then 10 s with the pointer still.
 | `idle_wakeups` (no input) | 0 | 0 | 0 |
 | `vm_hwm_kb` | 4702 | 4740 | ≤ 5000 |
 
+The `hover_us` row is `cargo test -p ui --release -- --ignored` (the
+rasterizer alone), and the `idle_wakeups` row comes from the plain starts;
+the drag runs of the method below have not been recorded yet.
+
+### A large drop
+
+The drop path classifies every dropped file while both shm buffers are
+mapped, so a large drop is the memory worst case. Measured by
+`a_large_drop_stays_within_the_rss_budget` (`bins/inacircle/tests/wheel.rs`):
+the release binary against a fake compositor (Unix socket, registry,
+layer-shell configure, data device), 1024 small text files dropped as one
+`text/uri-list` (~31 KB, under the 64 KiB cap), the catalog cache primed
+with one action; `VmHWM` read from `/proc/<pid>/status` once stage 2 is
+drawn. Five runs, cloud VM (not the reference machine), so the absolute
+numbers are indicative; the difference between the rows is the drop's own
+cost.
+
+| drop | VmHWM min | max | budget |
+|---|---|---|---|
+| 1 file | 4824 kB | 4840 kB | ≤ 5120 kB |
+| 1024 files | 4916 kB | 4976 kB | ≤ 5120 kB |
+
+Before the slimming (the raw bytes kept through classification, every
+file's name and type and canonical path held): 1024 files peaked at
+5096 kB, 1 file at 4828 kB. The drop now frees the URI bytes first, tallies
+types (count and one name each) and dedups by a hash of the canonical path.
+What remains of the difference is mostly the dropped paths themselves
+(needed for the run) and file-backed pages that vary by tens of kB between
+runs.
+
 ### Binary size
 
 Stripped release build, `cargo build --release -p inacircle`:
@@ -59,24 +90,26 @@ Stripped release build, `cargo build --release -p inacircle`:
 | | bytes |
 |---|---|
 | `main` (9e30484) | 738,104 |
-| plan 4 (this branch) | 875,608 |
-| growth | +137,504 (+18.6%) |
+| plan 4 (this branch) | 880,760 |
+| growth | +142,656 (+19.3%) |
 
 Sections of the plan 4 build (`size -A`):
 
 | section | bytes | notes |
 |---|---|---|
-| `.text` | 651,486 | code: wire client, rasterizer, wheel, URI parser, engine |
-| `.rodata` | 125,324 | includes the rasterizer's coverage table (~49 KB), the glyph atlas (12,317 B, `atlas.bin`), the LUTs (~4 KB) |
-| `.eh_frame` + hdr + `.gcc_except_table` | 55,096 | unwinding tables, kept by `std` |
+| `.text` | 655,038 | code: wire client, rasterizer, wheel, URI parser, engine |
+| `.rodata` | 126,388 | includes the rasterizer's coverage table (~49 KB), the glyph atlas (12,317 B, `atlas.bin`), the LUTs (~4 KB), the row extents and splits (~2.4 KB) |
+| `.eh_frame` + hdr + `.gcc_except_table` | 55,632 | unwinding tables, kept by `std` |
 | `.data.rel.ro`, `.rela.dyn`, `.dynsym`, `.dynstr`, `.data` | ~40,000 | relocations and vtables |
 
-The plan allowed +100 KB; the wheel is 37 KB over it. The embedded data
+The plan allowed +100 KB; the wheel is 43 KB over it (the final-review
+fixes added 5 KB: the cache-only catalog load, the per-type tally and the
+compass-centred slice runs). The embedded data
 (coverage table, atlas, LUTs, ~65 KB) is justified and counted apart, as the
 budget says; the rest is code for the wire client, the layer-surface and
 drag handling, the state machine and the URI parser (`main`'s per-section
 split was not recorded, so the code share is the remainder). The binary is
-58% of the 1.5 MB budget.
+59% of the 1.5 MB budget.
 
 ## Reproduce
 
@@ -101,3 +134,7 @@ Each run:
    10 s, keep it still for 10 s, press Esc.
 
 Take the `measure wheel` lines from the log; p50 and max over the runs.
+
+**Large drop:** `cargo test --release -p inacircle --test wheel --
+a_large_drop_stays_within_the_rss_budget --nocapture` prints both peaks and
+fails above 5 MB (a debug build checks only the drop's increment).

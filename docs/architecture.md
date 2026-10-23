@@ -77,12 +77,14 @@ are in `CLAUDE.md`.
   (header `inacircle-catalog 0`): per binary a `bin` line (path, mtime,
   size, built in or not) followed by its `action` lines; it is valid only
   while the set of binaries and their mtime and size match it exactly.
+  The wheel never runs a manifest while its overlay is up: it reads the
+  cache as it is and refreshes it after it closes (see the B path).
 - Per action: id and family; input and output as **MIME types** plus the
   output extension (`ext=`); one or many inputs (`batch=no` for one at a
-  time); label and group; cost and whether it loses information (`lossy=` describes the text content, text
-  and line breaks, not how it renders); required external tool (`requires=`,
-  checked on `PATH` at start; missing means a greyed-out slice that says
-  what to install).
+  time); label and group; cost and whether it loses information
+  (`lossy=` describes the text content, text and line breaks, not how it
+  renders); required external tool (`requires=`, checked on `PATH` at
+  start; missing means a greyed-out slice that says what to install).
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
@@ -397,7 +399,16 @@ compositor.
   comments. If nothing is left, the hub says `Nothing to do`.
 - Stage 2: the files are classified and `menu::offer` fills the slices from
   the presets: applicable ones normal, others dim, unused ones empty. Only
-  an applicable slice is clickable (left button); that is the choice.
+  an applicable slice is clickable (left button); that is the choice. The
+  URI bytes are freed before classification, and the files are tallied
+  per type (count and the first name), not kept per file.
+- No action binary runs while the overlay is up: stage 2 takes the
+  catalog from the cache alone. A cached binary still present is used as
+  cached, even if it changed; one the cache does not know is not offered
+  this time; with no cache at all the hub says `No actions yet`. Once the
+  wheel is gone (surface torn down, lock released), the cache is
+  refreshed in the same process with the usual per-binary deadline; a
+  choice's run does that refresh itself.
 - A drag that arrives while stage 2 is up is refused.
 
 **The hub text**
@@ -421,8 +432,10 @@ output when the font is available.
 
 **Look and geometry**
 
-Box 480, outer radius 220, inner 80, hub 64, gap 2 px, eight slices (0 =
-right, clockwise); the label sits at a slice's middle. States: normal,
+Box 480, outer radius 220, inner 80, hub 64, gap 2 px, eight slices
+centred on the compass directions (0 = north, clockwise; borders at
+22.5° + k·45°), so a preset's direction is its slice; the label sits at
+a slice's middle. States: normal,
 hover, dim. Polish comes later.
 
 **Measuring**
