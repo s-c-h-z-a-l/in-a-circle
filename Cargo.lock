@@ -17,10 +17,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.0.0"
+dependencies = [
+ "action",
+ "libc",
+ "manifest",
+]
+
+[[package]]
 name = "gen-entities"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "inacircle"
+version = "0.0.0"
+dependencies = [
+ "engine",
+ "libc",
+ "manifest",
 ]
 
 [[package]]

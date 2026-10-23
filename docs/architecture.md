@@ -1,8 +1,10 @@
 # Architecture
 
 How In.A.Circle is put together, and why. Measurements behind these
-decisions are in [`benchmarks/`](benchmarks). Nothing here is
-implemented in product code yet; the [spikes](../spikes) proved the parts.
+decisions are in [`benchmarks/`](benchmarks); the [spikes](../spikes)
+proved the parts. The engine runs headless today (see
+[Headless CLI](#headless-cli)); the wheel and notifications are not built
+yet.
 
 ## Overview
 
@@ -40,7 +42,7 @@ are in `CLAUDE.md`.
 
 ## Actions and families
 
-- `inacircle` is the wheel and the engine (≤ 500 KB). Actions are separate
+- `inacircle` is the wheel and the engine (≤ 1.5 MB). Actions are separate
   executables, started after the drop.
 - **One binary per family.** A family is a shared internal model: a
   document tree (text and office documents), a value tree (JSON, YAML,
@@ -49,8 +51,13 @@ are in `CLAUDE.md`.
   version needs one or two.
 - **Built-in actions follow the same contract as third-party ones.** Our
   own actions prove the contract works.
-- Locations: `$prefix/lib/inacircle/actions/` (built in) and
-  `$XDG_DATA_HOME/inacircle/actions/` (user, plugins).
+- Locations, in priority order: `/usr/lib/inacircle/actions/` and
+  `/usr/local/lib/inacircle/actions/` (built in), then
+  `$XDG_DATA_HOME/inacircle/actions/` (user, plugins). Every executable
+  regular file there (no dot names) is an action binary; on a duplicate
+  action id the first one found wins. `INACIRCLE_ACTIONS_DIR` (a
+  colon-separated list) replaces all three; actions found through it
+  count as built in.
 - Three groupings, kept apart: the **type** of the input (internal), the
   **group** of a target as the wheel shows it ("Image", "Document"), and
   the **family** of the code that does the work.
@@ -63,10 +70,13 @@ are in `CLAUDE.md`.
 ## Manifest
 
 - Each family binary describes itself: `<family> --manifest`. The engine
-  collects the answers into a cache (`$XDG_CACHE_HOME/inacircle/`) and
-  rebuilds it only when an action binary changed (a few `stat` calls per
-  start). The binary is the single source of truth; the same pattern as
-  fontconfig's or gdk-pixbuf's caches.
+  collects the answers into a cache and reruns a binary only when it
+  changed (a few `stat` calls per start). The binary is the single source
+  of truth; the same pattern as fontconfig's or gdk-pixbuf's caches.
+- The cache, `$XDG_CACHE_HOME/inacircle/catalog`, is a manifest-style file
+  (header `inacircle-catalog 0`): per binary a `bin` line (path, mtime,
+  size, built in or not) followed by its `action` lines; it is valid only
+  while the set of binaries and their mtime and size match it exactly.
 - Per action: id and family; input and output as **MIME types** plus the
   output extension (`ext=`); one or many inputs (`batch=no` for one at a
   time); label and group; cost and whether it loses information (`lossy=` describes the text content, text
@@ -122,16 +132,47 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   produced `done`; otherwise 1 if any input produced `fail`; 3 only when
   every input was unsupported. Exit 1 also covers a batch that cannot run
   at all (`--work` missing or not writable).
-- Cancel with `SIGTERM`; the engine removes the temp dir either way. The
-  engine sets `RLIMIT_FSIZE` on the action, which caps output size for
-  every plugin (archive bombs) without any plugin code.
-- **Every action runs sandboxed** with Landlock, set up in the child
-  between `fork` and `execve`: writes only into the temp dir; reads only
-  the inputs, the action binary and the system paths needed to run it; no
-  network where the kernel supports it. The best available Landlock ABI is
-  used. Where Landlock is missing, actions from the user or plugin
-  directory do not run; built-in actions run, and the history and the
-  notification say they ran unsandboxed.
+- Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
+  later; the engine removes the temp dir either way.
+- Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
+  writes at 16 × the total input size, clamped to 256 MiB – 16 GiB
+  (archive bombs, with no plugin code; many files can still fill a disk);
+  `RLIMIT_CORE` is 0.
+- The supervisor caps what it accepts: at most 16 `warn` per input (then
+  one "n more warnings"), and per action process at most 1024 `done`
+  outputs and 1 MiB of `done` paths. An input that crosses a cap or causes
+  a contract violation fails with nothing of it placed; inputs finished
+  before keep their results. If any process of the action's group is
+  still alive after it exits, the group is killed and every input of that
+  process fails ("action left processes behind"), nothing placed.
+
+### Sandbox
+
+Every action runs sandboxed, set up in the child between `fork` and
+`execve`, after the child's own `setsid`:
+
+- **Landlock** at the best ABI the kernel offers, handling every right
+  that ABI knows. Read and execute: `/usr`, `/lib`, `/lib64`,
+  `/etc/ld.so.cache` (those that exist) and the action binary. Read: the
+  inputs and the input list. Everything inside the step's temp dir.
+  Nothing else: no `/tmp`, `/proc`, `/dev` or `/etc`. Also denied: TCP
+  (ABI 4) and UDP (ABI 10) on existing sockets, pathname unix sockets
+  outside the temp dir (ABI 9), abstract unix sockets and signals outside
+  the sandbox (ABI 6). File names outside can still be probed (`stat`).
+- **seccomp** (x86_64 only; other architectures get Landlock only), also
+  applied without Landlock. Denied: sockets other than `AF_UNIX`;
+  metadata changes (chmod, chown, utime, xattr, `file_setattr`); the
+  ioctls `FS_IOC_SETFLAGS`, `FS_IOC32_SETFLAGS`, `FS_IOC_FSSETXATTR` and
+  `FS_IOC_ENABLE_VERITY`; `io_uring`; `setsid` and `setpgid`, so the
+  action and every descendant stay in one killable group. A syscall
+  through another ABI (i386) kills the process; x32 gets `EPERM`.
+- `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
+- Not covered: no `RLIMIT_NPROC` or memory limit (an action can fork-bomb
+  or exhaust RAM until cancelled).
+- Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
+- Without Landlock, actions from the user or plugin directory do not run
+  ("sandbox unavailable"); built-in actions run with a "ran without
+  sandbox" warning, and the history records `sandbox=no`.
 
 ## Classifier
 
@@ -180,7 +221,14 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   before waiting.
 - **One process per target folder** of a batch (each folder gets its own
   temp dir, so the final move stays an atomic `rename`); actions declaring
-  `batch=no` run per file, in parallel up to the number of cores.
+  `batch=no` run per file, one after the other (parallel runs may come
+  later). A two-step route runs both steps in the same temp dir; only the
+  last step's outputs are placed. Step 1's outputs are checked again once
+  its whole group is gone (a regular file, no symlink on the way), so an
+  action cannot swap one for a link before step 2 reads it.
+- The supervisor is a single-threaded `poll` loop over the action's
+  pipes, a cancel `signalfd` and the child's pidfd; its only timers are an
+  hourly refresh of the temp dir's mtime and the grace after `SIGTERM`.
 - **A batch never stops to ask.** Unsupported or broken files are skipped,
   one failure does not stop the rest, name conflicts get a new name.
   Skipping is always safe here: actions only copy and never overwrite.
@@ -221,8 +269,10 @@ In the engine, in one place:
    final move is an atomic `rename`), always removed at the end; stale ones
    from a crash are cleaned by the next run (our pattern only, older than a
    day).
-7. Undo deletes only files we created, and only if unchanged since (size,
-   mtime, inode); otherwise it keeps them and says why.
+7. Undo deletes only files we created, and only if unchanged since
+   placement (device, inode, size, mtime, ctime); otherwise it keeps them
+   and says why. A folder made for several outputs is removed only if
+   empty afterwards.
 
 ## Context sources
 
@@ -237,16 +287,55 @@ running jobs and history.
 
 No daemon:
 
-- history: an append-only log in `$XDG_STATE_HOME/inacircle/history`;
+- history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
+  (header `inacircle-history 0`), manifest-style lines, each one `write`
+  on an `O_APPEND` descriptor. A job's `dir`, `out` (input, path and the
+  identity taken at placement), `skip` and `fail` lines are appended as
+  they happen, its `job` line (id, time, action, status, sandbox) when it
+  ends, and `undo` once undone. A run that dies midway leaves a valid
+  partial record of what it placed, which undo still finds. Nothing of a
+  run is kept in memory per outcome;
 - running jobs: each supervisor registers itself in
-  `$XDG_RUNTIME_DIR/inacircle/jobs/<pid>` (state, progress, updated
-  sparingly);
-- cancelling: a signal to the supervisor.
+  `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
+  action, inputs, done, progress, start time) rewritten by rename at most
+  four times a second and removed at the end; a job id is
+  `<unix-seconds>-<pid>-<8 random hex digits>`, and an entry whose
+  process is gone is ignored;
+- cancelling: `SIGTERM` to the supervisor.
 
 A jobs view (name, paths, what into what, progress, estimated time,
 cancel) is a reader of these files and is itself spawn-per-use: a CLI, a
 window, or later a web page. A web UI must not be an always-on local HTTP
 server: that is a resident process, and any web page can reach `localhost`.
+
+## Headless CLI
+
+The engine without the wheel, for scripts and tests:
+
+```
+inacircle run <preset-id> <files…>          the menu path
+inacircle run --action <action-id> <files…> one action directly
+inacircle offer <files…>                    what the wheel would offer
+inacircle undo <job-id>
+inacircle jobs
+inacircle cancel <job-id>
+```
+
+- Output is manifest lines on stdout, every field with the manifest
+  escapes (a non-UTF-8 path is printed lossily). `run` prints `job <id>`,
+  then `done`/`skip`/`fail`/`warn` lines as they happen and `progress` of
+  the whole run, and ends with `summary done=… skipped=… failed=…`,
+  counted per input.
+- `run` exits by the batch rule above. A cancel fails the inputs not yet
+  finished (`cancelled`), then the same rule applies.
+- The same file (by canonical path) given twice counts once. A non-UTF-8
+  input path is skipped ("non-UTF-8 path").
+- `undo` of a job that is still running is refused (exit 1): cancel it
+  first.
+- An invocation error (unknown command, preset or action, no files, an
+  empty path) is a message on stderr and exit 2, with nothing on stdout.
+- `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
+  and its peak RSS on stderr (a measurement switch).
 
 ## Configuration
 

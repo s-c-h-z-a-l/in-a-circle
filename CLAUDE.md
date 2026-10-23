@@ -32,7 +32,9 @@ it's a bug.
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
-   - binary: <= 500 KB
+   - binary: `inacircle` <= 1.5 MB; each family binary <= 1 MB of code
+     (embedded data such as fonts is justified and measured separately).
+     A plan that grows a binary by more than 100 KB explains why.
    - dependencies of shipped binaries: `libc` only, unless justified by a
      measurement. Build- and test-time tools may use a few pinned crates
      (e.g. offline atlas baking, test-suite loaders); a check keeps them
@@ -69,7 +71,8 @@ it's a bug.
   the plan's closing review, and only if every success criterion holds
   (all tests, fmt, clippy, dependency check, budgets). Otherwise it stays
   on its branch.
-- Push only when the user says so.
+- Plan branches may always be pushed. `main` gets a plan only by the merge
+  above, never by a direct push.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
