@@ -21,7 +21,7 @@
 //! The same file (by canonical path) given more than once counts once; the
 //! first spelling wins.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -29,8 +29,8 @@ use std::process::ExitCode;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
-use engine::exec::{self, CancelToken, Observer, Outcome, Report};
-use engine::journal::{self, JobId, Running};
+use engine::exec::{self, CancelToken, Observer, Outcome};
+use engine::journal::{self, JobId, Recorder, Running};
 use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
 
@@ -136,15 +136,22 @@ enum Target<'a> {
     Action(&'a str),
 }
 
-/// Forwards outcomes to stdout and progress to stdout and the job registry.
+/// Forwards outcomes to stdout and the history, progress to stdout and the
+/// job registry.
 struct Printer<'a> {
     running: &'a mut Running,
+    rec: &'a mut Recorder,
     last: Option<String>,
 }
 
 impl Observer for Printer<'_> {
     fn event(&mut self, o: &Outcome) {
         print_outcome(o);
+        self.rec.outcome(o);
+    }
+
+    fn dir(&mut self, path: &Path) {
+        self.rec.dir(path);
     }
 
     fn progress(&mut self, done: usize, _total: usize, fraction: f32) {
@@ -252,33 +259,27 @@ fn cmd_run(args: &[OsString]) -> u8 {
 
     let job = journal::new_job_id();
     let mut running = Running::start(&job, &name, inputs.len());
+    let mut rec = Recorder::open(&job, &name);
     out(&Line::new("job").bare(&job.0));
     let _ = io::stdout().flush();
-    for o in &pre {
-        print_outcome(o);
+    for o in pre {
+        print_outcome(&o);
+        rec.outcome(&o);
     }
-    let report = if inputs.is_empty() {
-        Report {
-            outcomes: Vec::new(),
-            dirs: Vec::new(),
-            sandboxed: engine::sandbox::landlock_abi().is_some(),
-        }
+    let sandboxed = if inputs.is_empty() {
+        engine::sandbox::landlock_abi().is_some()
     } else {
         let mut obs = Printer {
             running: &mut running,
+            rec: &mut rec,
             last: None,
         };
-        exec::run(&route, &inputs, &mut obs, &cancel)
+        exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
     };
-    pre.extend(report.outcomes);
-    let report = Report {
-        outcomes: pre,
-        ..report
-    };
-    journal::record(&job, &name, &report);
+    let tally = rec.finish(sandboxed);
     drop(running);
 
-    let (done, skipped, failed) = count(&report.outcomes);
+    let (done, skipped, failed) = tally.counts();
     out(&Line::new("summary")
         .pair("done", &done.to_string())
         .pair("skipped", &skipped.to_string())
@@ -328,24 +329,6 @@ fn measure() {
         cpu_us(libc::RUSAGE_SELF),
         cpu_us(libc::RUSAGE_CHILDREN)
     );
-}
-
-/// Inputs that are done (any output), else failed, else skipped.
-fn count(outcomes: &[Outcome]) -> (usize, usize, usize) {
-    // 3 = done, 2 = failed, 1 = skipped, 0 = only warnings.
-    let mut state: HashMap<&Path, u8> = HashMap::new();
-    for o in outcomes {
-        let (input, rank) = match o {
-            Outcome::Done { input, .. } => (input, 3),
-            Outcome::Failed { input, .. } => (input, 2),
-            Outcome::Skipped { input, .. } => (input, 1),
-            Outcome::Warned { input, .. } => (input, 0),
-        };
-        let s = state.entry(input).or_insert(0);
-        *s = (*s).max(rank);
-    }
-    let n = |r| state.values().filter(|&&s| s == r).count();
-    (n(3), n(1), n(2))
 }
 
 fn cmd_offer(args: &[OsString]) -> u8 {

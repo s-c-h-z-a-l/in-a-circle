@@ -284,9 +284,12 @@ No daemon:
 
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
   (header `inacircle-history 0`), manifest-style lines, each one `write`
-  on an `O_APPEND` descriptor: per job a `job` line (id, time, action,
-  status, sandbox), then `dir`, `out` (input, path and the identity taken
-  at placement), `skip`, `fail`, and `undo` once undone;
+  on an `O_APPEND` descriptor. A job's `dir`, `out` (input, path and the
+  identity taken at placement), `skip` and `fail` lines are appended as
+  they happen, its `job` line (id, time, action, status, sandbox) when it
+  ends, and `undo` once undone. A run that dies midway leaves a valid
+  partial record of what it placed, which undo still finds. Nothing of a
+  run is kept in memory per outcome;
 - running jobs: each supervisor registers itself in
   `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
   action, inputs, done, progress, start time) rewritten by rename at most
@@ -323,6 +326,8 @@ inacircle cancel <job-id>
   input path is skipped ("non-UTF-8 path").
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
+- `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
+  and its peak RSS on stderr (a measurement switch).
 
 ## Configuration
 

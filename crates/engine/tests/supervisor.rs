@@ -199,7 +199,7 @@ fn more_than_1024_outputs_is_a_violation() {
     assert!(t.work_dirs_left().is_empty());
 }
 
-fn dones(r: &engine::exec::Report) -> usize {
+fn dones(r: &common::Ran) -> usize {
     r.outcomes
         .iter()
         .filter(|o| matches!(o, Outcome::Done { .. }))

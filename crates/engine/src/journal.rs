@@ -3,13 +3,15 @@
 //!
 //! History (`$XDG_STATE_HOME/inacircle/history`), header `inacircle-history 0`:
 //! `job`, `out`, `dir`, `skip`, `fail` and `undo` lines, each written with a
-//! single `write` on an `O_APPEND` descriptor. Running jobs live in
-//! `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line per file.
+//! single `write` on an `O_APPEND` descriptor. A job's `out`, `dir`, `skip`
+//! and `fail` lines are written as they happen, its `job` line (with the
+//! status) when it ends; any of them makes the job known to undo. Running
+//! jobs live in `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line
+//! per file.
 
-use crate::exec::{FileId, Outcome, Report};
+use crate::exec::{FileId, Outcome, Tally};
 use crate::xdg;
 use manifest::{Line, parse_line, write_line};
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -104,22 +106,13 @@ fn append_line(f: &mut File, line: &Line) -> io::Result<()> {
     Ok(())
 }
 
-fn status(report: &Report) -> &'static str {
-    let mut inputs: Vec<&Path> = Vec::new();
-    let mut done: HashSet<&Path> = HashSet::new();
-    for o in &report.outcomes {
-        match o {
-            Outcome::Done { input, .. } => {
-                inputs.push(input);
-                done.insert(input);
-            }
-            Outcome::Skipped { input, .. } | Outcome::Failed { input, .. } => inputs.push(input),
-            Outcome::Warned { .. } => {}
-        }
-    }
-    if done.is_empty() {
+/// `done` when every input that ended is done, `partial` when some are,
+/// else `failed`.
+fn status(t: &Tally) -> &'static str {
+    let (done, skipped, failed) = t.counts();
+    if done == 0 {
         "failed"
-    } else if inputs.iter().all(|i| done.contains(i)) {
+    } else if skipped + failed == 0 {
         "done"
     } else {
         "partial"
@@ -134,63 +127,97 @@ fn path_str(p: &Path) -> (String, bool) {
     }
 }
 
-/// Appends the job's lines to the history. `out` lines carry the identity
-/// the executor took right after placing the file, so a later undo can tell
-/// whether it is still the file we made. Failures are ignored: the history
-/// must never fail the action.
-pub fn record(job: &JobId, action: &str, report: &Report) {
-    let _ = try_record(job, action, report);
+/// The history line of an outcome (`None` for a warning). `out` lines carry
+/// the identity the executor took right after placing the file, so a later
+/// undo can tell whether it is still the file we made.
+fn outcome_line(job: &str, o: &Outcome) -> Option<Line> {
+    Some(match o {
+        Outcome::Done { input, output, id } => {
+            let (path, ok) = path_str(output);
+            let mut l = Line::new("out")
+                .pair("job", job)
+                .pair("in", &path_str(input).0)
+                .pair("path", &path)
+                .pair("size", &id.size.to_string())
+                .pair("mtime", &id.mtime_ns.to_string())
+                .pair("ctime", &id.ctime_ns.to_string())
+                .pair("dev", &id.dev.to_string())
+                .pair("ino", &id.ino.to_string());
+            if !ok {
+                l = l.pair("undo", "no");
+            }
+            l
+        }
+        Outcome::Skipped { input, reason } => Line::new("skip")
+            .pair("job", job)
+            .pair("in", &path_str(input).0)
+            .pair("reason", reason),
+        Outcome::Failed { input, reason } => Line::new("fail")
+            .pair("job", job)
+            .pair("in", &path_str(input).0)
+            .pair("reason", reason),
+        Outcome::Warned { .. } => return None,
+    })
 }
 
-fn try_record(job: &JobId, action: &str, report: &Report) -> io::Result<()> {
-    let mut f = open_history()?;
-    let head = Line::new("job")
-        .pair("id", &job.0)
-        .pair("time", &unix_secs().to_string())
-        .pair("action", action)
-        .pair("status", status(report))
-        .pair("sandbox", if report.sandboxed { "yes" } else { "no" });
-    append_line(&mut f, &head)?;
-    for d in &report.dirs {
-        let (path, ok) = path_str(d);
-        if ok {
-            append_line(
-                &mut f,
-                &Line::new("dir").pair("job", &job.0).pair("path", &path),
-            )?;
+/// Writes a job into the history as it runs: each outcome and folder is
+/// appended when it arrives (one `write` per line, so nothing waits in a
+/// buffer), and the `job` line with the final status at [`finish`]. A run
+/// that dies midway leaves its lines so far, all of placed files, and undo
+/// still finds them. Holds one tally entry per input, nothing per outcome.
+/// History failures are ignored: the history must never fail the action.
+///
+/// [`finish`]: Recorder::finish
+pub struct Recorder {
+    file: Option<File>,
+    job: String,
+    action: String,
+    tally: Tally,
+}
+
+impl Recorder {
+    pub fn open(job: &JobId, action: &str) -> Recorder {
+        Recorder {
+            file: open_history().ok(),
+            job: job.0.clone(),
+            action: action.to_owned(),
+            tally: Tally::default(),
         }
     }
-    for o in &report.outcomes {
-        let line = match o {
-            Outcome::Done { input, output, id } => {
-                let (path, ok) = path_str(output);
-                let mut l = Line::new("out")
-                    .pair("job", &job.0)
-                    .pair("in", &path_str(input).0)
-                    .pair("path", &path)
-                    .pair("size", &id.size.to_string())
-                    .pair("mtime", &id.mtime_ns.to_string())
-                    .pair("ctime", &id.ctime_ns.to_string())
-                    .pair("dev", &id.dev.to_string())
-                    .pair("ino", &id.ino.to_string());
-                if !ok {
-                    l = l.pair("undo", "no");
-                }
-                l
-            }
-            Outcome::Skipped { input, reason } => Line::new("skip")
-                .pair("job", &job.0)
-                .pair("in", &path_str(input).0)
-                .pair("reason", reason),
-            Outcome::Failed { input, reason } => Line::new("fail")
-                .pair("job", &job.0)
-                .pair("in", &path_str(input).0)
-                .pair("reason", reason),
-            Outcome::Warned { .. } => continue,
-        };
-        append_line(&mut f, &line)?;
+
+    fn append(&mut self, line: &Line) {
+        if let Some(f) = &mut self.file {
+            let _ = append_line(f, line);
+        }
     }
-    Ok(())
+
+    pub fn outcome(&mut self, o: &Outcome) {
+        self.tally.add(o);
+        if let Some(l) = outcome_line(&self.job, o) {
+            self.append(&l);
+        }
+    }
+
+    /// A folder made for several outputs (non-UTF-8 ones are not recorded,
+    /// so undo never removes them).
+    pub fn dir(&mut self, d: &Path) {
+        if let (path, true) = path_str(d) {
+            let l = Line::new("dir").pair("job", &self.job).pair("path", &path);
+            self.append(&l);
+        }
+    }
+
+    /// Appends the `job` line and returns the per-input tally.
+    pub fn finish(mut self, sandboxed: bool) -> Tally {
+        let l = Line::new("job")
+            .pair("id", &self.job)
+            .pair("time", &unix_secs().to_string())
+            .pair("action", &self.action)
+            .pair("status", status(&self.tally))
+            .pair("sandbox", if sandboxed { "yes" } else { "no" });
+        self.append(&l);
+        self.tally
+    }
 }
 
 /// A registered running job. The file is removed on drop.
@@ -500,10 +527,15 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
             match l.kind.as_str() {
                 "job" if l.get("id") == Some(&job.0) => known = true,
                 "undo" if l.get("job") == Some(&job.0) => undone = true,
-                "out" if l.get("job") == Some(&job.0) => outs.extend(parse_out(&l)),
+                "out" if l.get("job") == Some(&job.0) => {
+                    known = true;
+                    outs.extend(parse_out(&l));
+                }
                 "dir" if l.get("job") == Some(&job.0) => {
+                    known = true;
                     dirs.extend(l.get("path").map(PathBuf::from));
                 }
+                "skip" | "fail" if l.get("job") == Some(&job.0) => known = true,
                 _ => {}
             }
         }
@@ -604,12 +636,76 @@ mod tests {
         }
     }
 
-    fn report(outcomes: Vec<Outcome>) -> Report {
-        Report {
+    /// A finished job's outcomes, as the old one-shot record took them.
+    struct Rec {
+        outcomes: Vec<Outcome>,
+        dirs: Vec<PathBuf>,
+    }
+
+    fn report(outcomes: Vec<Outcome>) -> Rec {
+        Rec {
             outcomes,
             dirs: Vec::new(),
-            sandboxed: true,
         }
+    }
+
+    /// Records a whole job through the incremental recorder.
+    fn record(job: &JobId, action: &str, r: &Rec) {
+        let mut rec = Recorder::open(job, action);
+        for d in &r.dirs {
+            rec.dir(d);
+        }
+        for o in &r.outcomes {
+            rec.outcome(o);
+        }
+        rec.finish(true);
+    }
+
+    #[test]
+    fn lines_are_written_as_outcomes_arrive_and_a_dead_run_is_undoable() {
+        let t = Tmp::new("stream");
+        t.env(|| {
+            let (a, b) = (t.0.join("out/a.png"), t.0.join("out/b.png"));
+            fs::write(&a, "aaa").unwrap();
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            rec.outcome(&done("/in/a", &a));
+            let hist = fs::read_to_string(history_path()).unwrap();
+            assert!(hist.contains("out\tjob="), "{hist}");
+            assert!(!hist.contains("id="), "job line only at the end: {hist}");
+            fs::write(&b, "bb").unwrap();
+            rec.outcome(&done("/in/b", &b));
+            // The run dies here: no finish, no `job` line.
+            drop(rec);
+            let r = undo(&job).unwrap();
+            assert_eq!(r.removed, vec![a.clone(), b.clone()]);
+            assert!(!a.exists() && !b.exists());
+        });
+    }
+
+    #[test]
+    fn finish_writes_status_and_returns_tally() {
+        let t = Tmp::new("finish");
+        t.env(|| {
+            let a = t.0.join("out/a.png");
+            fs::write(&a, "a").unwrap();
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            rec.outcome(&done("/in/a", &a));
+            rec.outcome(&Outcome::Failed {
+                input: "/in/b".into(),
+                reason: "broken".into(),
+            });
+            let tally = rec.finish(false);
+            assert_eq!(tally.counts(), (1, 0, 1));
+            let hist = fs::read_to_string(history_path()).unwrap();
+            let last = hist.lines().last().unwrap();
+            assert!(last.starts_with(&format!("job\tid={}\t", job.0)), "{last}");
+            assert!(
+                last.ends_with("\taction=convert\tstatus=partial\tsandbox=no"),
+                "{last}"
+            );
+        });
     }
 
     #[test]
@@ -829,10 +925,17 @@ mod tests {
             input: "/b".into(),
             reason: "x".into(),
         };
-        assert_eq!(status(&report(vec![d.clone()])), "done");
-        assert_eq!(status(&report(vec![d.clone(), s.clone()])), "partial");
-        assert_eq!(status(&report(vec![f.clone()])), "failed");
-        assert_eq!(status(&report(vec![])), "failed");
+        let st = |os: &[&Outcome]| {
+            let mut t = Tally::default();
+            for o in os {
+                t.add(o);
+            }
+            status(&t)
+        };
+        assert_eq!(st(&[&d]), "done");
+        assert_eq!(st(&[&d, &s]), "partial");
+        assert_eq!(st(&[&f]), "failed");
+        assert_eq!(st(&[]), "failed");
     }
 
     #[test]

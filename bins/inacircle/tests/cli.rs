@@ -792,6 +792,44 @@ fn cancel_after_some_done_exits_0() {
 }
 
 #[test]
+fn undo_removes_a_multi_output_folder() {
+    let e = Env::new("undo-many");
+    let t = e.test_input("t.test", &["outputs=3"]);
+    let o = run_test_action(&e, &[&t]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
+    let folder = e.files().join("t");
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 3);
+    assert!(e.history().contains("dir\tjob="), "{}", e.history());
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("removed").len(), 3, "{}", u.stdout);
+    assert!(!folder.exists());
+}
+
+/// Peak RSS stays within the 5 MB budget however many outcomes a run has:
+/// 64 processes (source folders) × 1024 outputs each.
+#[test]
+fn many_groups_many_outputs_stay_within_rss_budget() {
+    let e = Env::new("rss");
+    let mut args: Vec<PathBuf> = Vec::new();
+    for i in 0..64 {
+        args.push(e.test_input(&format!("d{i}/o.test"), &["outputs=1024"]));
+    }
+    let mut c = e.cmd(&["run", "--action", "test.script"]);
+    c.args(&args).env("INACIRCLE_MEASURE", "1");
+    let o = parse_out(c.output().unwrap());
+    assert_eq!(o.summary(), (64, 0, 0), "{}", o.stderr);
+    assert_eq!(o.kind("done").len(), 64 * 1024);
+    let kb: u64 = o
+        .stderr
+        .split_once("vm_hwm=")
+        .and_then(|(_, r)| r.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no measure line: {}", o.stderr));
+    assert!(kb <= 5 * 1024, "VmHWM {kb} kB > 5 MB");
+}
+
+#[test]
 fn work_dirs_never_left_behind() {
     let e = Env::new("workdirs");
     let ok = e.test_input("ok/a.test", &["events=done"]);

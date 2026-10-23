@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use engine::catalog::Action;
-use engine::exec::{self, CancelToken, Observer, Outcome, Report};
+use engine::exec::{self, CancelToken, Observer, Outcome};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -93,15 +93,20 @@ pub fn action(bin: &Path, ext: &str) -> Action {
     }
 }
 
+/// What the observer saw of a run.
 #[derive(Default)]
-pub struct Count {
-    pub events: usize,
+pub struct Ran {
+    pub outcomes: Vec<Outcome>,
+    pub dirs: Vec<PathBuf>,
     pub progress: usize,
 }
 
-impl Observer for Count {
-    fn event(&mut self, _o: &Outcome) {
-        self.events += 1;
+impl Observer for Ran {
+    fn event(&mut self, o: &Outcome) {
+        self.outcomes.push(o.clone());
+    }
+    fn dir(&mut self, path: &Path) {
+        self.dirs.push(path.to_owned());
     }
     fn progress(&mut self, _d: usize, _t: usize, _f: f32) {
         self.progress += 1;
@@ -115,7 +120,7 @@ pub fn run(
     route: &[&Action],
     inputs: &[PathBuf],
     cancel_after: Option<Duration>,
-) -> (Report, Duration) {
+) -> (Ran, Duration) {
     let tok = CancelToken::install().unwrap();
     // SAFETY: pthread_self has no preconditions.
     let me = unsafe { libc::pthread_self() } as usize;
@@ -129,15 +134,14 @@ pub fn run(
             Instant::now()
         })
     });
-    let mut obs = Count::default();
-    let r = exec::run(route, inputs, &mut obs, &tok);
+    let mut obs = Ran::default();
+    exec::run(route, inputs, &mut obs, &tok);
     let end = Instant::now();
     let from = sent.map_or(start, |h| h.join().unwrap());
-    assert_eq!(obs.events, r.outcomes.len(), "observer saw every outcome");
-    (r, end.saturating_duration_since(from))
+    (obs, end.saturating_duration_since(from))
 }
 
-pub fn failed(r: &Report) -> Vec<(PathBuf, String)> {
+pub fn failed(r: &Ran) -> Vec<(PathBuf, String)> {
     r.outcomes
         .iter()
         .filter_map(|o| match o {

@@ -81,12 +81,41 @@ pub enum Outcome {
     },
 }
 
+/// Per input, the strongest outcome so far: done (any output), else failed,
+/// else skipped; an input with only warnings is not counted. One entry per
+/// input, never per outcome.
+#[derive(Debug, Default)]
+pub struct Tally {
+    rank: HashMap<PathBuf, u8>,
+}
+
+impl Tally {
+    pub fn add(&mut self, o: &Outcome) {
+        let (input, rank) = match o {
+            Outcome::Done { input, .. } => (input, 3),
+            Outcome::Failed { input, .. } => (input, 2),
+            Outcome::Skipped { input, .. } => (input, 1),
+            Outcome::Warned { input, .. } => (input, 0),
+        };
+        match self.rank.get_mut(input.as_path()) {
+            Some(r) => *r = (*r).max(rank),
+            None => {
+                self.rank.insert(input.clone(), rank);
+            }
+        }
+    }
+
+    /// `(done, skipped, failed)` inputs.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let n = |r| self.rank.values().filter(|&&v| v == r).count();
+        (n(3), n(1), n(2))
+    }
+}
+
+/// The end of a run. Outcomes are not kept: they go to the [`Observer`]
+/// as they happen, so a run holds nothing proportional to its outputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
-    pub outcomes: Vec<Outcome>,
-    /// Folders created for several outputs of one input (undo may remove
-    /// them if empty).
-    pub dirs: Vec<PathBuf>,
     /// Whether Landlock confined the actions (seccomp and limits always apply).
     pub sandboxed: bool,
 }
@@ -95,6 +124,9 @@ pub struct Report {
 pub trait Observer {
     /// Every outcome, as it happens (`Done` once the output is in place).
     fn event(&mut self, o: &Outcome);
+    /// A folder created for several outputs of one input, before their
+    /// `Done` (undo may remove it if empty).
+    fn dir(&mut self, path: &Path);
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
 }
@@ -249,12 +281,10 @@ pub fn run(
     sink.report(abi.is_some())
 }
 
-/// Collects outcomes, forwards them to the observer, tracks progress.
+/// Forwards outcomes to the observer, tracks progress.
 struct Sink<'a> {
     obs: &'a mut dyn Observer,
     inputs: &'a [PathBuf],
-    outcomes: Vec<Outcome>,
-    dirs: Vec<PathBuf>,
     finished: Vec<bool>,
     /// Warnings shown per input, and those dropped past `MAX_WARNINGS`.
     warned: Vec<(u32, u64)>,
@@ -272,8 +302,6 @@ impl<'a> Sink<'a> {
         Sink {
             obs,
             inputs,
-            outcomes: Vec::new(),
-            dirs: Vec::new(),
             finished: vec![false; inputs.len()],
             warned: vec![(0, 0); inputs.len()],
             done: 0,
@@ -286,7 +314,6 @@ impl<'a> Sink<'a> {
 
     fn emit(&mut self, o: Outcome) {
         self.obs.event(&o);
-        self.outcomes.push(o);
     }
 
     fn input(&self, i: usize) -> PathBuf {
@@ -360,7 +387,7 @@ impl<'a> Sink<'a> {
         self.obs.progress(done, total, frac.clamp(0.0, 1.0));
     }
 
-    fn report(mut self, sandboxed: bool) -> Report {
+    fn report(&mut self, sandboxed: bool) -> Report {
         for i in 0..self.inputs.len() {
             let dropped = self.warned[i].1;
             if dropped > 0 {
@@ -369,11 +396,7 @@ impl<'a> Sink<'a> {
                 self.emit(Outcome::Warned { input, message });
             }
         }
-        Report {
-            outcomes: self.outcomes,
-            dirs: self.dirs,
-            sandboxed,
-        }
+        Report { sandboxed }
     }
 }
 
@@ -455,7 +478,7 @@ fn run_group(
             return; // cancelled
         };
         if last {
-            place_outputs(action, &step_in, &outputs, &dir, target, sink);
+            place_outputs(action, &step_in, outputs, &dir, target, sink);
             return;
         }
         let mut next = StepIn {
@@ -482,14 +505,14 @@ fn run_group(
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
-    outputs: &[Vec<PathBuf>],
+    outputs: Vec<Vec<PathBuf>>,
     dir: &Path,
     target: &Path,
     sink: &mut Sink,
 ) {
-    // Outputs per original input, in order.
+    // Outputs per original input, in order; the paths are moved, not copied.
     let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
-    for (j, outs) in outputs.iter().enumerate() {
+    for (j, outs) in outputs.into_iter().enumerate() {
         if outs.is_empty() {
             continue;
         }
@@ -501,7 +524,7 @@ fn place_outputs(
                 per.len() - 1
             }
         };
-        per[at].1.extend(outs.iter().cloned());
+        per[at].1.extend(outs);
     }
     for (o, rels) in per {
         let src = &sink.inputs[o];
@@ -523,7 +546,7 @@ fn place_outputs(
         match placed {
             Ok(many) => {
                 if !many.folder.as_os_str().is_empty() {
-                    sink.dirs.push(many.folder);
+                    sink.obs.dir(&many.folder);
                 }
                 for (p, id) in many.files {
                     sink.placed(o, p, id);
