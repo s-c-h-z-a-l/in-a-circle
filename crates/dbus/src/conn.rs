@@ -21,10 +21,10 @@ const MAX_LINE: usize = 512;
 /// dropped, so a broadcast flood cannot grow memory. Kept as raw frames: a
 /// decoded frame can take several times its wire size.
 const MAX_QUEUED_BYTES: usize = 256 << 10;
-/// Control buffer for `recvmsg`, in u64 words for cmsghdr alignment: room
-/// for a few fds, so the ones a peer pushes on us can be received and closed.
 /// Frames `recv_now` looks at per call before it hands control back.
 const NOW_FRAMES: usize = 64;
+/// Control buffer for `recvmsg`, in u64 words for cmsghdr alignment: room
+/// for a few fds, so the ones a peer pushes on us can be received and closed.
 const CTRL_WORDS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +109,8 @@ pub struct Conn {
     queue: VecDeque<Vec<u8>>,
     /// Sum of the frame lengths in `queue`.
     queued: usize,
+    /// When set, only signals from this sender are queued during a call.
+    keep_from: Option<String>,
     /// Set by an error that leaves the stream out of sync, and by a timed
     /// out call (its reply may still come, half a request may be on the
     /// wire).
@@ -127,6 +129,7 @@ impl Conn {
             buf: Vec::new(),
             queue: VecDeque::new(),
             queued: 0,
+            keep_from: None,
             broken: false,
         };
         c.auth(deadline)?;
@@ -168,8 +171,14 @@ impl Conn {
             let r = decode(&frame)?;
             match r.kind {
                 Kind::Signal => {
+                    let keep = self
+                        .keep_from
+                        .as_deref()
+                        .is_none_or(|from| r.sender.as_deref() == Some(from));
                     drop(r);
-                    self.enqueue(frame);
+                    if keep {
+                        self.enqueue(frame);
+                    }
                 }
                 Kind::MethodReturn if r.reply_serial == Some(serial) => return Ok(r),
                 Kind::Error if r.reply_serial == Some(serial) => {
@@ -182,6 +191,14 @@ impl Conn {
                 _ => {} // stale replies, calls to us
             }
         }
+    }
+
+    /// From now on, signals that arrive during a call are queued only when
+    /// `sender` sent them, so a flood from others cannot push out the ones
+    /// we wait for. `recv` and `recv_now` still hand out whatever they read
+    /// from the socket themselves; the caller checks those.
+    pub fn keep_signals_from(&mut self, sender: &str) {
+        self.keep_from = Some(sender.to_owned());
     }
 
     pub fn add_match(&mut self, rule: &str, deadline: Instant) -> Result<(), Error> {
@@ -238,14 +255,25 @@ impl Conn {
     /// socket's data is consumed. At most `NOW_FRAMES` frames are looked at
     /// per call (`None` then, with the fd still readable).
     pub fn recv_now(&mut self) -> Result<Option<Message>, Error> {
+        self.recv_within(&mut { NOW_FRAMES })
+    }
+
+    /// `recv_now` that spends one unit of `frames` per frame it looks at
+    /// (queued or read) and returns `None` when it runs out.
+    pub(crate) fn recv_within(&mut self, frames: &mut usize) -> Result<Option<Message>, Error> {
+        if *frames == 0 {
+            return Ok(None);
+        }
         if let Some(frame) = self.queue.pop_front() {
+            *frames -= 1;
             self.queued -= frame.len();
             return decode(&frame).map(Some);
         }
         if self.broken {
             return Err(Error::Closed);
         }
-        for _ in 0..NOW_FRAMES {
+        while *frames > 0 {
+            *frames -= 1;
             match self
                 .try_frame()
                 .and_then(|f| f.map(|f| decode(&f)).transpose())

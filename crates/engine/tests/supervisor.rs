@@ -164,7 +164,8 @@ fn cancel_fails_unfinished_inputs_quickly() {
     assert!(t.work_dirs_left().is_empty());
 }
 
-/// `TERM_GRACE` in `exec.rs`: how long a cancelled action may ignore SIGTERM.
+/// Copy of `TERM_GRACE` in `exec.rs`: how long a cancelled action may
+/// ignore SIGTERM. Keep in step with it (and with `GROUP_GONE`, below).
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 #[test]
@@ -181,7 +182,7 @@ fn cancel_of_a_term_ignoring_action_ends_within_the_grace() {
     );
     assert_eq!(failed(&r), [(a, "cancelled".to_owned())]);
     assert!(
-        // The grace, then up to `GROUP_GONE` (1 s) for the group to vanish.
+        // The grace, then up to `GROUP_GONE` (1 s, `exec.rs`) for the group to vanish.
         latency < TERM_GRACE + Duration::from_secs(2),
         "cancel took {latency:?}"
     );

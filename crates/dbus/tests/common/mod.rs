@@ -219,10 +219,23 @@ impl Peer {
     }
 
     pub fn signal(&mut self, path: &str, interface: &str, member: &str, body: Vec<Value>) {
+        self.signal_from("org.freedesktop.DBus", path, interface, member, body);
+    }
+
+    /// A signal that claims to come from `sender`.
+    pub fn signal_from(
+        &mut self,
+        sender: &str,
+        path: &str,
+        interface: &str,
+        member: &str,
+        body: Vec<Value>,
+    ) {
         self.send(Message {
             path: Some(path.into()),
             interface: Some(interface.into()),
             member: Some(member.into()),
+            sender: Some(sender.into()),
             ..Peer::base(Kind::Signal, body)
         });
     }

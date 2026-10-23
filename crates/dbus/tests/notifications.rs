@@ -11,6 +11,9 @@ use dbus::{Message, Value};
 
 const IFACE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
+/// The unique name the fake server owns `IFACE` under.
+const OWNER: &str = ":1.7";
+const STRANGER: &str = ":1.99";
 
 fn after(ms: u64) -> Instant {
     Instant::now() + Duration::from_millis(ms)
@@ -23,20 +26,23 @@ fn strings(v: &[&str]) -> Value {
     )
 }
 
-/// Handshake, the two `AddMatch` calls and `GetCapabilities`.
+/// Handshake, `GetNameOwner`, the `AddMatch` and `GetCapabilities`.
 fn serve_open(p: &mut Peer, caps: &[&str]) {
     p.handshake();
-    for member in ["ActionInvoked", "NotificationClosed"] {
-        let m = p.recv();
-        assert_eq!(m.member.as_deref(), Some("AddMatch"));
-        assert_eq!(
-            m.body,
-            vec![Value::Str(format!(
-                "type='signal',interface='{IFACE}',path='{PATH}',member='{member}'"
-            ))]
-        );
-        p.reply(&m, vec![]);
-    }
+    let m = p.recv();
+    assert_eq!(m.destination.as_deref(), Some("org.freedesktop.DBus"));
+    assert_eq!(m.member.as_deref(), Some("GetNameOwner"));
+    assert_eq!(m.body, vec![Value::Str(IFACE.into())]);
+    p.reply(&m, vec![Value::Str(OWNER.into())]);
+    let m = p.recv();
+    assert_eq!(m.member.as_deref(), Some("AddMatch"));
+    assert_eq!(
+        m.body,
+        vec![Value::Str(format!(
+            "type='signal',sender='{OWNER}',interface='{IFACE}',path='{PATH}'"
+        ))]
+    );
+    p.reply(&m, vec![]);
     let m = p.recv();
     assert_eq!(m.destination.as_deref(), Some(IFACE));
     assert_eq!(m.path.as_deref(), Some(PATH));
@@ -51,7 +57,8 @@ fn expect_notify(p: &mut Peer) -> Message {
 }
 
 fn action_invoked(p: &mut Peer, id: u32, key: &str) {
-    p.signal(
+    p.signal_from(
+        OWNER,
         PATH,
         IFACE,
         "ActionInvoked",
@@ -60,7 +67,8 @@ fn action_invoked(p: &mut Peer, id: u32, key: &str) {
 }
 
 fn closed(p: &mut Peer, id: u32, reason: u32) {
-    p.signal(
+    p.signal_from(
+        OWNER,
         PATH,
         IFACE,
         "NotificationClosed",
@@ -179,13 +187,14 @@ fn foreign_action_is_ignored() {
     let fake = Fake::start(|p| {
         serve_open(p, &["actions"]);
         action_invoked(p, 99, "undo");
-        p.signal(
+        p.signal_from(
+            OWNER,
             PATH,
             IFACE,
             "ActivationToken",
             vec![Value::U32(7), Value::Str("t".into())],
         );
-        p.signal(PATH, IFACE, "SomethingNew", vec![]);
+        p.signal_from(OWNER, PATH, IFACE, "SomethingNew", vec![]);
         closed(p, 99, 1);
         closed(p, 7, 2);
         p.drain();
@@ -275,6 +284,99 @@ fn next_event_times_out_without_wakeups() {
         "{waited:?}"
     );
     assert!(used < Duration::from_millis(5), "spun for {used:?}");
+    drop(n);
+    fake.join();
+}
+
+#[test]
+fn spoofed_signals_are_ignored() {
+    let fake = Fake::start(|p| {
+        serve_open(p, &["actions"]);
+        let ours = || vec![Value::U32(7), Value::Str("undo".into())];
+        // Right id and member, wrong sender (unicast ignores match rules).
+        p.signal_from(STRANGER, PATH, IFACE, "ActionInvoked", ours());
+        // The owner, but not on the Notifications path.
+        p.signal_from(OWNER, "/x", IFACE, "ActionInvoked", ours());
+        closed(p, 7, 3);
+        p.drain();
+    });
+    let mut n = Notifications::open(&fake.address(), after(300)).unwrap();
+    assert_eq!(n.next_event(7, after(1000)).unwrap(), Event::Closed(3));
+    drop(n);
+    fake.join();
+}
+
+#[test]
+fn open_fails_without_a_name_owner() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        assert_eq!(m.member.as_deref(), Some("GetNameOwner"));
+        p.error(&m, "org.freedesktop.DBus.Error.NameHasNoOwner", "no owner");
+        p.drain();
+    });
+    let r = Notifications::open(&fake.address(), after(300));
+    assert!(matches!(r, Err(dbus::Error::Remote(..))), "{:?}", r.err());
+    fake.join();
+}
+
+#[test]
+fn our_action_survives_a_flood_during_a_call() {
+    let fake = Fake::start(|p| {
+        serve_open(p, &["actions"]);
+        let m = expect_notify(p);
+        action_invoked(p, 7, "cancel");
+        // Well over the 256 KiB the connection queues.
+        for _ in 0..3000 {
+            p.signal_from(
+                STRANGER,
+                PATH,
+                IFACE,
+                "ActionInvoked",
+                vec![Value::U32(99), Value::Str("x".into())],
+            );
+        }
+        p.reply(&m, vec![Value::U32(7)]);
+        p.drain();
+    });
+    let mut n = Notifications::open(&fake.address(), after(300)).unwrap();
+    let notice = Notice {
+        replaces: 0,
+        summary: "s",
+        body: "b",
+        actions: &[],
+        progress: Some(1),
+    };
+    assert_eq!(n.notify(&notice, after(2000)).unwrap(), 7);
+    assert_eq!(
+        n.next_event(7, after(1000)).unwrap(),
+        Event::Action("cancel".into())
+    );
+    drop(n);
+    fake.join();
+}
+
+#[test]
+fn progress_is_clamped_to_100() {
+    let fake = Fake::start(|p| {
+        serve_open(p, &[]);
+        let m = expect_notify(p);
+        let Value::Dict(_, _, hints) = &m.body[6] else {
+            panic!("{:?}", m.body[6]);
+        };
+        assert_eq!(hints[0].1, Value::Variant(Box::new(Value::I32(100))));
+        p.reply(&m, vec![Value::U32(1)]);
+        p.drain();
+    });
+    let mut n = Notifications::open(&fake.address(), after(300)).unwrap();
+    let notice = Notice {
+        replaces: 0,
+        summary: "s",
+        body: "b",
+        actions: &[],
+        progress: Some(250),
+    };
+    n.notify(&notice, after(500)).unwrap();
     drop(n);
     fake.join();
 }

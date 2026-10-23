@@ -10,10 +10,13 @@ use crate::{Address, Conn, Error};
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
+const BUS: &str = "org.freedesktop.DBus";
+const BUS_PATH: &str = "/org/freedesktop/DBus";
 const APP_NAME: &str = "In.A.Circle";
-/// Foreign signals `poll_event` discards per call before it hands control
-/// back (the fd stays readable, so the caller's `poll` returns at once).
-const POLL_BATCH: usize = 256;
+/// Frames (queued or read, signals or not) one `poll_event` call looks at
+/// before it hands control back (the fd stays readable, so the caller's
+/// `poll` returns at once).
+const POLL_FRAMES: usize = 256;
 
 pub struct Notice<'a> {
     /// 0 for a new notification, else the id to replace.
@@ -38,6 +41,8 @@ pub enum Event {
 
 pub struct Notifications {
     conn: Conn,
+    /// Unique name of the server; only its signals count.
+    owner: String,
     caps: Vec<String>,
 }
 
@@ -46,12 +51,23 @@ impl Notifications {
     /// all before `deadline`.
     pub fn open(addr: &Address, deadline: Instant) -> Result<Notifications, Error> {
         let mut conn = Conn::connect(addr, deadline)?;
-        for member in ["ActionInvoked", "NotificationClosed"] {
-            conn.add_match(
-                &format!("type='signal',interface='{SERVICE}',path='{PATH}',member='{member}'"),
-                deadline,
-            )?;
-        }
+        let q = Message::call(
+            0,
+            BUS,
+            BUS_PATH,
+            BUS,
+            "GetNameOwner",
+            vec![Value::Str(SERVICE.into())],
+        );
+        let owner = match conn.call(q, deadline)?.body.into_iter().next() {
+            Some(Value::Str(name)) => name,
+            _ => return Err(Error::Malformed("GetNameOwner reply")),
+        };
+        conn.keep_signals_from(&owner);
+        conn.add_match(
+            &format!("type='signal',sender='{owner}',interface='{SERVICE}',path='{PATH}'"),
+            deadline,
+        )?;
         let r = conn.call(call("GetCapabilities", vec![]), deadline)?;
         let caps = match r.body.into_iter().next() {
             Some(Value::Array(_, items)) => items
@@ -63,7 +79,7 @@ impl Notifications {
                 .collect(),
             _ => return Err(Error::Malformed("GetCapabilities reply")),
         };
-        Ok(Notifications { conn, caps })
+        Ok(Notifications { conn, owner, caps })
     }
 
     pub fn has(&self, cap: &str) -> bool {
@@ -116,7 +132,7 @@ impl Notifications {
             match self.conn.recv(deadline)? {
                 None => return Ok(Event::Timeout),
                 Some(m) => {
-                    if let Some(e) = event_for(&m, id) {
+                    if let Some(e) = event_for(&m, id, &self.owner) {
                         return Ok(e);
                     }
                 }
@@ -127,17 +143,17 @@ impl Notifications {
     /// Like `next_event` but never waits, for callers that `poll` the fd:
     /// `None` when nothing for `id` is available right now.
     pub fn poll_event(&mut self, id: u32) -> Result<Option<Event>, Error> {
-        for _ in 0..POLL_BATCH {
-            match self.conn.recv_now()? {
+        let mut frames = POLL_FRAMES;
+        loop {
+            match self.conn.recv_within(&mut frames)? {
                 None => return Ok(None),
                 Some(m) => {
-                    if let Some(e) = event_for(&m, id) {
+                    if let Some(e) = event_for(&m, id, &self.owner) {
                         return Ok(Some(e));
                     }
                 }
             }
         }
-        Ok(None)
     }
 
     /// For the caller's `poll`; check `pending` first.
@@ -157,9 +173,14 @@ fn call(member: &str, body: Vec<Value>) -> Message {
 }
 
 /// The event a signal means for notification `id`; `None` for everything
-/// else (other ids, other members, other interfaces).
-fn event_for(m: &Message, id: u32) -> Option<Event> {
-    if m.kind != Kind::Signal || m.interface.as_deref() != Some(SERVICE) {
+/// else (other ids, members, interfaces, paths or senders: unicast signals
+/// ignore match rules, so the sender is checked here).
+fn event_for(m: &Message, id: u32, owner: &str) -> Option<Event> {
+    if m.kind != Kind::Signal
+        || m.interface.as_deref() != Some(SERVICE)
+        || m.path.as_deref() != Some(PATH)
+        || m.sender.as_deref() != Some(owner)
+    {
         return None;
     }
     match (m.member.as_deref()?, &m.body[..]) {
