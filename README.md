@@ -12,11 +12,13 @@ gesture.
 
 ## Status
 
-**Research phase. There is nothing to install yet.**
+**Early development. There is nothing to install yet.**
 
 Every architectural decision has been measured first, and the reports are
-public in [`docs/benchmarks/`](docs/benchmarks). Next is the first usable
-version: a **File Circle** on [niri](https://github.com/YaLTeR/niri).
+public in [`docs/benchmarks/`](docs/benchmarks). The engine runs headless
+(a command line that classifies files, runs sandboxed actions and undoes
+them); the wheel is next. The first usable version is a **File Circle** on
+[niri](https://github.com/YaLTeR/niri).
 
 ## How it will work
 
