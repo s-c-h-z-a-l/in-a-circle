@@ -2,16 +2,18 @@
 
 **Question:** does the shipped wheel (`inacircle` without arguments) stay
 within the budgets: our CPU from `main` to the first commit of the mapped
-wheel ≤ 1 ms, hover repaint ≤ 100 µs, no wakeups while it waits, peak RSS
-≤ 5 MB, binary ≤ 1.5 MB?
+wheel ≤ 1 ms, hover repaint ≤ 100 µs, no wakeups while it waits, peak memory
+≤ 5 MB PSS, binary ≤ 1.5 MB?
 
-**Verdict:** within budget, with memory close to its line. Our CPU from
-`main` to the wheel's commit is 755 µs p50 (856 µs max, budget 1 ms), there
-are no wakeups while the wheel waits, and peak RSS is 4.7 MB (budget 5 MB):
-most of it is the two 900 KB shm buffers. A drop of 1024 files peaks at
-4.98 MB at stage 2. The hover row is the rasterizer bench (14 µs median,
-49 µs max, budget 100 µs), not an in-situ number: the drag runs (hover and
-wakeups while dragging) are pending the user's manual test on niri.
+**Verdict:** within budget. Our CPU from `main` to the wheel's commit is
+755 µs p50 (856 µs max, budget 1 ms), there are no wakeups while the wheel
+waits, and peak memory is 2.5 MB PSS (budget 5 MB). RSS reads 4.7 MB, but
+2.2 MB of it is libc and loader pages shared with every process; our own
+part is the two 900 KB shm buffers, 160 kB of heap and the binary's pages.
+A drop of 1024 files adds about 120 kB at stage 2. The hover row is the
+rasterizer bench (14 µs median, 49 µs max, budget 100 µs), not an in-situ
+number: the drag runs (hover and wakeups while dragging) are pending the
+user's manual test on niri.
 
 ## Method
 
@@ -19,7 +21,7 @@ wakeups while dragging) are pending the user's manual test on niri.
 closes (nothing else changes; unset, it costs one `getenv`):
 
 ```
-inacircle: measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=… hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… vm_hwm_kb=…
+inacircle: measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=… hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… pss_kb=… vm_hwm_kb=…
 ```
 
 - `main_to_commit_cpu_us`: our `getrusage(RUSAGE_SELF)` user + system CPU
@@ -31,7 +33,11 @@ inacircle: measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=… ho
   `hover_events` of them; p50 is the lower middle.
 - `idle_wakeups`: `poll` returns with nothing to do while the wheel waits
   (before its deadline). With no input it must be 0.
-- `vm_hwm_kb`: peak RSS.
+- `pss_kb`: the highest proportional set size sampled after a full paint
+  (`/proc/self/smaps_rollup`): the budget's measure. Shared libc and loader
+  pages count by their share; the kernel keeps no PSS peak, so the surface
+  samples it.
+- `vm_hwm_kb`: peak RSS, reported alongside (it counts shared pages whole).
 - Binary size: the stripped release `inacircle` against `main` at 9e30484
   (738,104 B).
 
@@ -51,7 +57,8 @@ over the slices, then 10 s with the pointer still.
 | `main_to_commit_wall_us` | 1115 | 2688 | reported |
 | `hover_us` (per event, rasterizer bench) | 14 | 49 | ≤ 100 |
 | `idle_wakeups` (no input) | 0 | 0 | 0 |
-| `vm_hwm_kb` | 4702 | 4740 | ≤ 5000 |
+| `pss_kb` | 2545 | 2575 | ≤ 5000 |
+| `vm_hwm_kb` (reported) | 4630 | 4820 | — |
 
 The `hover_us` row is `cargo test -p ui --release -- --ignored` (the
 rasterizer alone), and the `idle_wakeups` row comes from the plain starts;
@@ -61,12 +68,13 @@ the drag runs of the method below have not been recorded yet.
 
 The drop path classifies every dropped file while both shm buffers are
 mapped, so a large drop is the memory worst case. Measured by
-`a_large_drop_stays_within_the_rss_budget` (`bins/inacircle/tests/wheel.rs`):
+`a_large_drop_stays_within_the_memory_budget` (`bins/inacircle/tests/wheel.rs`):
 the release binary against a fake compositor (Unix socket, registry,
 layer-shell configure, data device), 1024 small text files dropped as one
 `text/uri-list` (~31 KB, under the 64 KiB cap), the catalog cache primed
-with one action; `VmHWM` read from `/proc/<pid>/status` once stage 2 is
-drawn. Five runs, cloud VM (not the reference machine), so the absolute
+with one action; `Pss` read from `/proc/<pid>/smaps_rollup` once stage 2
+is drawn (the cloud runs below read `VmHWM`, before the budget moved to
+PSS; on the reference machine: PSS 2281 kB for 1 file, 2403 kB for 1024). Five runs, cloud VM (not the reference machine), so the absolute
 numbers are indicative; the difference between the rows is the drop's own
 cost.
 

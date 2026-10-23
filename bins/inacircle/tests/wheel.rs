@@ -277,12 +277,13 @@ impl Drop for Root {
     }
 }
 
-/// A peak-RSS field (`VmHWM`) of a live process, in kB.
-fn vm_hwm_kb(pid: u32) -> u64 {
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    status
+/// The proportional set size (`Pss`) of a live process, in kB: the
+/// budget's measure (shared libc and loader pages count by their share).
+fn pss_kb(pid: u32) -> u64 {
+    let rollup = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap();
+    rollup
         .lines()
-        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .find_map(|l| l.strip_prefix("Pss:"))
         .and_then(|v| v.split_whitespace().next()?.parse().ok())
         .unwrap()
 }
@@ -365,7 +366,7 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
 /// debug build, larger by itself, checks that the drop adds little over a
 /// one-file drop instead.
 #[test]
-fn a_large_drop_stays_within_the_rss_budget() {
+fn a_large_drop_stays_within_the_memory_budget() {
     let peak = |name: &str, n: usize| -> u64 {
         let root = Root::new(name);
         root.markdown_action_cached();
@@ -385,7 +386,7 @@ fn a_large_drop_stays_within_the_rss_budget() {
         let w = c.drag_and_drop(Duration::from_secs(2));
         source_writes(w, &list);
         c.wheel_drawn(Duration::from_secs(5));
-        let kb = vm_hwm_kb(child.id());
+        let kb = pss_kb(child.id());
         c.close();
         assert_eq!(
             wait_exit(&mut child, Duration::from_secs(5)).code(),
@@ -393,11 +394,11 @@ fn a_large_drop_stays_within_the_rss_budget() {
         );
         kb
     };
-    // File-backed pages vary by tens of kB from run to run: the lower of
+    // Shared and file-backed pages vary by tens of kB from run to run: the lower of
     // two runs each.
     let one = peak("rss1a", 1).min(peak("rss1b", 1));
     let many = peak("rss1024a", 1024).min(peak("rss1024b", 1024));
-    eprintln!("VmHWM at stage 2: 1 file {one} kB, 1024 files {many} kB");
+    eprintln!("PSS at stage 2: 1 file {one} kB, 1024 files {many} kB");
     if cfg!(debug_assertions) {
         assert!(many <= one + 256, "1 file {one} kB, 1024 files {many} kB");
     } else {

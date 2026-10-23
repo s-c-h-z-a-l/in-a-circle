@@ -510,7 +510,7 @@ inacircle cancel <job-id>
   stdout lines, `summary` included, are written before the Undo window
   starts; the exit code is the same as without it.
 - `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
-  and its peak RSS on stderr (a measurement switch), before the
+  and its peak memory (PSS, and RSS) on stderr (a measurement switch), before the
   notifications at the end; with `--notify` a further line
   `measure notify_cpu_us=<n>` gives our CPU spent on the final notice (open
   and `Notify`) before the Undo window.

@@ -691,7 +691,7 @@ impl Wheel {
         let canvas = &mut canvas[..CANVAS_LEN];
         let lit = self.lit(hover);
         // Spans cover [C - row_end, C + row_end) of each row; clear the rest.
-        for (y, row) in canvas.chunks_exact_mut(STRIDE).enumerate() {
+        for (y, row) in canvas.as_chunks_mut::<STRIDE>().0.iter_mut().enumerate() {
             let b = if y as u32 >= C {
                 y as u32 - C
             } else {
@@ -851,9 +851,9 @@ mod tests {
     }
 
     fn pixels(c: &[u8]) -> impl Iterator<Item = (u32, u32, [u8; 4])> + '_ {
-        c.chunks_exact(4).enumerate().map(|(i, p)| {
+        c.as_chunks::<4>().0.iter().enumerate().map(|(i, p)| {
             let i = i as u32;
-            (i % BOX, i / BOX, [p[0], p[1], p[2], p[3]])
+            (i % BOX, i / BOX, *p)
         })
     }
 

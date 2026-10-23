@@ -13,6 +13,8 @@ pub struct Meter {
     commit: Option<(i64, Duration)>,
     hover_us: Vec<u64>,
     idle_wakeups: u64,
+    /// Highest proportional set size sampled, in kB (-1 before a sample).
+    pss_kb: i64,
 }
 
 impl Meter {
@@ -24,6 +26,7 @@ impl Meter {
             commit: None,
             hover_us: Vec::new(),
             idle_wakeups: 0,
+            pss_kb: -1,
         }
     }
 
@@ -37,6 +40,12 @@ impl Meter {
     /// One hover repaint took `d`.
     pub fn hover(&mut self, d: Duration) {
         self.hover_us.push(d.as_micros() as u64);
+    }
+
+    /// A proportional-set-size sample in kB; the highest one is kept. The
+    /// kernel tracks no PSS peak, so the surface samples after full paints.
+    pub fn pss(&mut self, kb: i64) {
+        self.pss_kb = self.pss_kb.max(kb);
     }
 
     /// `poll` returned with nothing to do while the wheel waited.
@@ -56,13 +65,28 @@ impl Meter {
         let max = sorted.last().copied();
         format!(
             "measure wheel main_to_commit_cpu_us={cpu} main_to_commit_wall_us={wall} \
-             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} vm_hwm_kb={vm_hwm_kb}",
+             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
             sorted.len(),
             p50.unwrap_or(0),
             max.unwrap_or(0),
-            self.idle_wakeups
+            self.idle_wakeups,
+            self.pss_kb
         )
     }
+}
+
+/// Proportional set size (`Pss`) in kB from `/proc/self/smaps_rollup`, -1
+/// if unavailable. Shared pages (libc, the loader) count by their share, so
+/// this is the budget's measure; `VmHWM` counts them whole.
+pub fn pss_kb() -> i64 {
+    std::fs::read_to_string("/proc/self/smaps_rollup")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Pss:"))
+                .and_then(|v| v.split_whitespace().next()?.parse().ok())
+        })
+        .unwrap_or(-1)
 }
 
 /// Peak RSS (`VmHWM`) in kB from `/proc/self/status`, -1 if unavailable.
@@ -97,10 +121,12 @@ mod tests {
         m.committed(1_700, t0 + ms(2_500));
         // A later commit does not move the first one.
         m.committed(9_999, t0 + ms(9_999));
+        m.pss(2_100);
+        m.pss(1_900);
         assert_eq!(
             m.report(2_840),
             "measure wheel main_to_commit_cpu_us=700 main_to_commit_wall_us=2500 \
-             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 vm_hwm_kb=2840"
+             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 pss_kb=2100 vm_hwm_kb=2840"
         );
     }
 
@@ -110,7 +136,7 @@ mod tests {
         assert_eq!(
             m.report(-1),
             "measure wheel main_to_commit_cpu_us=-1 main_to_commit_wall_us=-1 \
-             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 vm_hwm_kb=-1"
+             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 pss_kb=-1 vm_hwm_kb=-1"
         );
     }
 

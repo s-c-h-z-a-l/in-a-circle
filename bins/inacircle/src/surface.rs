@@ -866,6 +866,10 @@ impl Surface {
             if first {
                 meter.committed(crate::cpu_us(libc::RUSAGE_SELF), Instant::now());
             }
+            // After the timings are taken: reading smaps costs tens of µs.
+            if started.is_none() {
+                meter.pss(crate::measure::pss_kb());
+            }
         }
         Ok(())
     }
