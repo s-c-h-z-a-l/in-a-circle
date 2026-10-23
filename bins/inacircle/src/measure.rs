@@ -84,6 +84,11 @@ impl Meter {
         self.list_cpu.is_some()
     }
 
+    #[cfg(test)]
+    pub fn list_cpu(&self) -> Option<i64> {
+        self.list_cpu
+    }
+
     /// A new wheel's first commit: after the early list, level 1 shown;
     /// after a drop, stage 2 shown.
     pub fn swapped(&mut self, cpu_us: i64) {

@@ -276,6 +276,8 @@ struct Surface {
     inputs: Vec<Input>,
     /// The measurement switch's meter; `None` unless it is on.
     meter: Option<Meter>,
+    /// Process CPU when the latest list or drop input reached `feed`.
+    input_cpu: i64,
 }
 
 impl Surface {
@@ -309,6 +311,7 @@ impl Surface {
             pending: false,
             inputs: Vec::new(),
             meter: None,
+            input_cpu: 0,
         }
     }
 
@@ -713,6 +716,11 @@ impl Surface {
         }
         for i in inputs {
             let list = matches!(i, Input::DragList(..));
+            // The measured waits start at the input's arrival, before the
+            // machine builds a menu from it.
+            if self.meter.is_some() && (list || matches!(i, Input::Drop)) {
+                self.input_cpu = crate::cpu_us(libc::RUSAGE_SELF);
+            }
             let was_ready = m.early_ready();
             let fxs = m.on_at(self.started.elapsed(), i);
             // Only a list the machine took (right tag, right moment) counts.
@@ -721,7 +729,7 @@ impl Surface {
                 && m.early_ready()
                 && let Some(meter) = &mut self.meter
             {
-                meter.listed(crate::cpu_us(libc::RUSAGE_SELF));
+                meter.listed(self.input_cpu);
             }
             for fx in fxs {
                 if let Some(end) = self.apply(fx, m)? {
@@ -823,7 +831,7 @@ impl Surface {
         let copy = self.drop_action == DND_COPY;
         self.end_offer(offer, copy);
         if let Some(meter) = &mut self.meter {
-            meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
+            meter.dropped(self.input_cpu);
         }
     }
 
@@ -1626,6 +1634,15 @@ mod tests {
         assert_eq!(requests(&mut s, &server).0, []);
     }
 
+    /// Level 1 that burns measurable CPU, like a real classification.
+    fn slow_groups(b: &[u8]) -> GroupMenu {
+        let t = crate::cpu_us(libc::RUSAGE_SELF);
+        while crate::cpu_us(libc::RUSAGE_SELF) - t < 5000 {
+            std::hint::spin_loop();
+        }
+        empty_groups(b)
+    }
+
     /// `list_to_level1_cpu_us` starts at a list the machine took: a list
     /// with a stale tag, or one after a failure, is not counted.
     #[test]
@@ -1644,10 +1661,24 @@ mod tests {
             .push(Input::DragList(9, Ok(b"file:///x\r\n".to_vec())));
         s.feed(&mut m).unwrap();
         assert!(!s.meter.as_ref().unwrap().has_list(), "stale tag");
+        // The start is the list's arrival: before the menu is built (5 ms
+        // of CPU here), not after.
+        let mut m = Machine::with_menus(slow_groups, empty_targets);
+        m.on(Input::DragEnter {
+            x: 10.0,
+            y: 10.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        let before = crate::cpu_us(libc::RUSAGE_SELF);
         s.inputs
             .push(Input::DragList(1, Ok(b"file:///x\r\n".to_vec())));
         s.feed(&mut m).unwrap();
-        assert!(s.meter.as_ref().unwrap().has_list(), "taken list");
+        let at = s.meter.as_ref().unwrap().list_cpu().expect("taken list");
+        assert!(at >= before && at < before + 2000, "{at} vs {before}");
+        assert!(
+            crate::cpu_us(libc::RUSAGE_SELF) - at >= 5000,
+            "span covers the build"
+        );
     }
 
     /// No offer to read (the null offer): the read fails at once, so the

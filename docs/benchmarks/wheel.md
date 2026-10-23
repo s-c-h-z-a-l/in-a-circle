@@ -77,11 +77,12 @@ The wheel's waiting points, our CPU for one input (the budget is per point):
 | per input event (pointer, drag motion), from 4 runs of 109–941 events | ~4.3 µs | per event |
 | peak memory | 2.6 MB PSS (RSS 5.06 MB) | ≤ 5 MB PSS |
 
-`list_to_level1_cpu_us` counts our CPU from the moment the machine accepts
-the early list (right tag, still dragging) to the first commit of the lit
-level-1 wheel. Release binary against the fake compositor, one file: about
-276–329 µs (budget 1 ms). The niri numbers come from the user's manual
-test and are not recorded here yet.
+`list_to_level1_cpu_us` counts our CPU from the early list's arrival
+(counted only when the machine accepts it) to the first commit of the lit
+level-1 wheel; the span includes parsing, classifying and building the
+menu. Release binary against the fake compositor (this cloud VM), one file,
+8 runs: median 320 µs, max 358 µs (budget 1 ms). The niri numbers come
+from the user's manual test and are not recorded here yet.
 
 Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
 same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind

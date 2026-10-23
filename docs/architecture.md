@@ -378,10 +378,9 @@ compositor.
 
 **The B path (drag, then drop)**
 
-- Two levels. Level 1 shows **categories** (the `group=` of an action,
-  mapped by the `GROUPS` table in `engine::menu`: today `document` =
-  north, labelled `Document`; an unknown `group` is not shown, one
-  stderr line per run). A category is **lit** when any dragged file has a
+- Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
+  `GROUPS` table in `engine::menu`: today `document` = north, labelled
+  `Document`; an unknown `group` is not shown, one stderr line per run). A category is **lit** when any dragged file has a
   target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
@@ -445,7 +444,7 @@ compositor.
   wheel is gone (surface torn down, lock released), the cache is
   refreshed in the same process with the usual per-binary deadline; a
   choice's run does that refresh itself.
-- A drag that arrives once a category was chosen is refused.
+- A drag that arrives once the drop was taken is refused.
 
 **The hub text**
 
@@ -479,8 +478,8 @@ hover, dim. Polish comes later.
 `INACIRCLE_MEASURE=1` prints one line on stderr when the wheel closes:
 `measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=…
 hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… … list_to_level1_cpu_us=… …`
-(`list_to_level1_cpu_us`: from an accepted early list to the lit level-1
-wheel's first commit; -1 when there was none).
+(`list_to_level1_cpu_us`: from the early list's arrival (counted only when
+the machine accepts it) to the lit level-1 wheel's first commit; -1 when there was none).
 Unset, it costs one `getenv`. Numbers:
 [benchmarks/wheel.md](benchmarks/wheel.md).
 
