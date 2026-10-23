@@ -5,13 +5,19 @@
 //! this frame repainted leaves the other buffer's last change on screen (the
 //! spike's bug).
 //!
-//! The model: every paint (`Wheel::paint_full`, `Wheel::paint_hover`) leaves
-//! its buffer equal to a full paint of the new state, and the rectangle it
-//! returns covers everything it changed from the state the buffer held. Then
-//! the buffer being attached differs from the one on screen only within its
-//! own painted rectangle and the one painted into the screen's buffer last:
-//! the damage is exactly their union. Older frames do not matter, so the
-//! damage does not grow with the history.
+//! The invariant: every paint (`Wheel::paint_full`, `Wheel::paint_hover`)
+//! leaves its buffer equal to a full paint of the new state, and the
+//! rectangle it returns contains every pixel where that state differs from
+//! the unlit base (the same wheel with no slice lit): the lit slice, or the
+//! whole box for `paint_full`. Two buffers then differ only where one of
+//! them differs from the base, so the buffer being attached differs from the
+//! one on screen only within its own painted rectangle and the one painted
+//! into the screen's buffer last: the damage is their union. Older frames do
+//! not matter, so the damage does not grow with the history.
+//!
+//! The base is one `Wheel`. After a new `Wheel` (stage 1 -> stage 2) the
+//! next paint of *each* buffer must be `paint_full` with the new one; until
+//! then a buffer holds the old wheel and `paint_hover` would leave it so.
 
 use crate::wheel::{BOX, Rect};
 
@@ -37,7 +43,8 @@ impl Screen {
     /// frame, outside `Screen`). Then per frame: paint the free buffer
     /// (`paint_full` the first time buffer 1 is used, `paint_hover` after),
     /// attach it with the damage `commit` returns. Never `paint_hover` a
-    /// buffer that was not painted in full.
+    /// buffer that was not painted in full with the current `Wheel`: after
+    /// a new `Wheel`, the next paint of each buffer is `paint_full`.
     pub fn new() -> Screen {
         Screen {
             last: [FULL, Rect::EMPTY],
@@ -132,7 +139,9 @@ mod tests {
         s.commit(0, r(0));
         s.commit(1, r(100));
         assert_eq!(s.commit(1, r(200)), r(200).union(r(0)));
-        // The screen now shows buffer 1; buffer 0 must cover r(200) and r(100).
+        // The screen now shows buffer 1, lit within r(200) only (r(100) was
+        // repainted unlit). Buffer 0's frame must cover its own paint and
+        // r(200).
         let d = s.commit(0, r(300));
         assert!(d.contains(r(300)) && d.contains(r(200)), "{d:?}");
     }

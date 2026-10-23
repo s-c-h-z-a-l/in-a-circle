@@ -672,8 +672,9 @@ impl Wheel {
 
     /// Repaint a canvas showing `old` to show `new`; only the two slices'
     /// pixels (and labels) change. Indexes outside 0..8 count as no slice.
-    /// The canvas must be one `paint_full` or `paint_hover` left in state
-    /// `old`.
+    /// The canvas must be one `paint_full` or `paint_hover` of *this*
+    /// `Wheel` left in state `old`: after a new `Wheel`, the next paint of
+    /// each buffer is `paint_full`.
     ///
     /// The returned rectangle is what changed in *this canvas*. With more
     /// than one buffer the screen shows another buffer's state, so feed it

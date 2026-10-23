@@ -19,6 +19,8 @@ for pkg in $SHIPPED; do
             inacircle:dbus) ;;
             # Our own libc-only Wayland client.
             inacircle:wire) ;;
+            # Wheel rasterizer and the baked glyph atlas: no dependencies.
+            inacircle:ui) ;;
             *) echo "$pkg: disallowed dependency: $name"; bad=1 ;;
         esac
     done
