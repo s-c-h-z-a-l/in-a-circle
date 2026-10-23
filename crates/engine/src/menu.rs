@@ -83,28 +83,67 @@ pub struct Offer {
     pub total: usize,
 }
 
+/// What the offer needs to know about a selection, without keeping every
+/// file: how many there are, how many of each type with the first one's
+/// name, and the first file's type label.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tally {
+    pub total: usize,
+    /// MIME type, count, the first such file's name; in order of first
+    /// appearance.
+    pub types: Vec<(String, usize, String)>,
+    pub first_label: Option<String>,
+}
+
+impl Tally {
+    pub fn add(&mut self, name: &str, kind: &Kind) {
+        self.total += 1;
+        if self.first_label.is_none() {
+            self.first_label = Some(kind.label.clone());
+        }
+        let Some(mime) = &kind.mime else {
+            return;
+        };
+        match self.types.iter_mut().find(|t| t.0 == *mime) {
+            Some(t) => t.1 += 1,
+            None => self.types.push((mime.clone(), 1, name.to_owned())),
+        }
+    }
+
+    /// How many files have type `mime`, and the first one's name.
+    pub fn of(&self, mime: &str) -> (usize, &str) {
+        self.types
+            .iter()
+            .find(|t| t.0 == mime)
+            .map_or((0, ""), |t| (t.1, t.2.as_str()))
+    }
+}
+
 /// The wheel for a selection: presets of the most common file type, each in
 /// its fixed direction.
 pub fn offer(cat: &Catalog, files: &[(String, Kind)]) -> Offer {
-    let total = files.len();
+    let mut tally = Tally::default();
+    for (name, kind) in files {
+        tally.add(name, kind);
+    }
+    offer_tally(cat, &tally)
+}
+
+/// [`offer`] from a [`Tally`].
+pub fn offer_tally(cat: &Catalog, tally: &Tally) -> Offer {
+    let total = tally.total;
     let mut slices: [Option<Slice>; 8] = Default::default();
-    let count = |mime: &str| {
-        files
-            .iter()
-            .filter(|(_, k)| k.mime.as_deref() == Some(mime))
-            .count()
-    };
     // Most common type that has presets; ties: first preset order.
     let mut best: Option<(&str, usize)> = None;
     for p in PRESETS {
-        let n = count(p.input);
+        let n = tally.of(p.input).0;
         if n > 0 && best.is_none_or(|(_, m)| n > m) {
             best = Some((p.input, n));
         }
     }
     let Some((mime, applicable)) = best else {
-        let hub = match files.first() {
-            Some((_, k)) => format!("no action for {}", k.label),
+        let hub = match &tally.first_label {
+            Some(label) => format!("no action for {label}"),
             None => String::new(),
         };
         return Offer { slices, hub, total };
@@ -129,7 +168,7 @@ pub fn offer(cat: &Catalog, files: &[(String, Kind)]) -> Offer {
         });
     }
     let hub = if total == 1 {
-        files[0].0.clone()
+        tally.of(mime).1.to_owned()
     } else {
         format!("{applicable} / {total} files")
     };
@@ -180,6 +219,31 @@ mod tests {
                 act("to-txt", "text/markdown", "text/plain", 1, false),
             ],
         }
+    }
+
+    /// The tally keeps counts and one name per type, and the offer from it
+    /// matches the offer from the full list.
+    #[test]
+    fn tally_keeps_counts_and_one_name_per_type() {
+        let files = [
+            file("a.txt", "text/plain"),
+            file("b.md", "text/markdown"),
+            file("c.txt", "text/plain"),
+            ("d".to_owned(), kind(None, "PDF")),
+        ];
+        let mut t = Tally::default();
+        for (n, k) in &files {
+            t.add(n, k);
+        }
+        assert_eq!(t.total, 4);
+        assert_eq!(t.of("text/plain"), (2, "a.txt"));
+        assert_eq!(t.of("text/markdown"), (1, "b.md"));
+        assert_eq!(t.of("image/png"), (0, ""));
+        assert_eq!(t.types.len(), 2);
+        assert_eq!(t.first_label.as_deref(), Some("X"));
+        let (a, b) = (offer_tally(&two_way(), &t), offer(&two_way(), &files));
+        assert_eq!((a.hub.as_str(), a.total), ("2 / 4 files", 4));
+        assert_eq!((b.hub, b.total), (a.hub, a.total));
     }
 
     #[test]

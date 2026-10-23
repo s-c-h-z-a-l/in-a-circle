@@ -17,6 +17,7 @@ Spike code lives in [`spikes/`](../../spikes).
 | 9 | Grab a file, press the hotkey, drop it on a slice? | Works over the standard protocol, on the real surface layout, with keyboard focus: exact URIs, copy-only, Esc cancels. The wheel appears on the first movement during a drag; file types are known before the drop (Nautilus, Thunar, Nemo, Firefox: under 2 ms). | [drag-into-circle.md](drag-into-circle.md) |
 | 10 | Is a 635 KiB `inacircle` a problem? What does a run cost? | No: half is `std` (its backtrace symbolizer alone ~173 KiB), and untouched pages are never faulted in. Budget raised to 1.5 MB. A small run: ~0.7 ms our CPU, 2.85 MB peak RSS; 65,536 outputs: 3.39 MB (42.5 MB before streaming). | [binary-size.md](binary-size.md) |
 | 11 | What do desktop notifications cost? | Within every target: final notice ~75 µs of our CPU, peak RSS ~2.9 MB with or without `--notify`, +86 KB binary. | [notifications.md](notifications.md) |
+| 12 | What does the wheel cost end to end? | Within budget: 755 µs of our CPU from `main` to the wheel's commit, no idle wakeups, peak 2.5 MB PSS (RSS 4.7 MB, of which 2.2 MB shared libc), 879 KB binary (+137 KB, 65 KB of it embedded data). | [wheel.md](wheel.md) |
 
 ## Reference machine
 

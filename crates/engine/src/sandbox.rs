@@ -623,12 +623,29 @@ pub(crate) mod tests {
 
     /// Runs `/bin/sh -c script` under `ruleset` and `limits`.
     fn sh(ruleset: Option<&Ruleset>, limits: Limits, script: &str) -> Output {
+        sh_with_fd9(ruleset, limits, script, -1)
+    }
+
+    /// `sh`, with `leak` (if >= 0) dup'd to fd 9 in the child before the
+    /// sandbox is applied.
+    fn sh_with_fd9(ruleset: Option<&Ruleset>, limits: Limits, script: &str, leak: RawFd) -> Output {
         let fd = ruleset.map(|r| r.as_raw_fd());
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
             .arg(script)
             .env("LC_ALL", "C")
             .stdin(Stdio::null());
+        if leak >= 0 {
+            // SAFETY: dup2 is async-signal-safe.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::dup2(leak, 9) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
         // SAFETY: apply_in_child only makes async-signal-safe calls; the
         // ruleset outlives the spawn (borrowed for this whole function).
         unsafe {
@@ -1494,14 +1511,33 @@ pub(crate) mod tests {
         let victim = other.0.join("victim");
         fs::write(&victim, "victim\n").unwrap();
         let c = cpath(&victim);
+        // Force a two-digit number, as a busy parallel test run does.
+        let _pad: Vec<_> = (0..12)
+            .map(|_| fs::File::open("/dev/null").unwrap())
+            .collect();
         // SAFETY: open reads the NUL-terminated path; we close the fd below.
         let leak = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_APPEND) };
         assert!(leak >= 3);
-        let script = format!("echo LEAKED >&{leak}");
-        let o = sh(None, NO_LIMIT, &script);
+        // dash only takes a one-digit fd in `>&N`, but the number we got
+        // depends on what the other test threads have open. The child gets
+        // the leaked file as fd 9, inherited (not close-on-exec) like a real
+        // leak, whatever the parent's number is.
+        let script = "echo LEAKED >&9";
+        let o = sh_with_fd9(None, NO_LIMIT, script, leak);
         let sandboxed = fs::read(&victim).unwrap();
         // Control: without apply_in_child the fd is inherited.
-        let control = Command::new("/bin/sh").arg("-c").arg(&script).status();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(script);
+        // SAFETY: dup2 is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(leak, 9) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let control = cmd.status();
         // SAFETY: `leak` is ours and still open.
         unsafe { libc::close(leak) };
         assert!(!o.status.success());

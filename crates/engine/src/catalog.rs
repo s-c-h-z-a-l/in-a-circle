@@ -64,23 +64,31 @@ impl Catalog {
     /// A refused cache or data dir (see [`crate::xdg`]) is reported and
     /// not used.
     pub fn load() -> Catalog {
-        let cache = match crate::xdg::cache_home() {
-            Ok(c) => Some(c.join("inacircle/catalog")),
-            Err(e) => {
-                eprintln!("inacircle: no catalog cache: {e}");
-                None
-            }
-        };
-        let data = crate::xdg::data_home()
-            .inspect_err(|e| eprintln!("inacircle: no user actions: {e}"))
-            .ok();
-        let dirs = dirs_from(std::env::var_os("INACIRCLE_ACTIONS_DIR"), data);
+        let (dirs, cache) = standard();
         Catalog::load_with(&dirs, cache.as_deref())
     }
 
     /// Testable core. `dirs` is in priority order; the bool marks built-in.
     pub fn load_from(dirs: &[(PathBuf, bool)], cache: &Path) -> Catalog {
         Catalog::load_with(dirs, Some(cache))
+    }
+
+    /// The catalog from the cache alone, for the wheel: no manifest is run
+    /// while the overlay is up. A cached binary still found in the action
+    /// directories is used as cached, even if it changed since; one the
+    /// cache does not know is left out until the next [`Catalog::load`].
+    /// `None` without a readable cache.
+    pub fn load_cached() -> Option<Catalog> {
+        let (dirs, cache) = standard();
+        Catalog::load_cached_from(&dirs, cache.as_deref()?)
+    }
+
+    /// Testable core of [`Catalog::load_cached`].
+    pub fn load_cached_from(dirs: &[(PathBuf, bool)], cache: &Path) -> Option<Catalog> {
+        let bins = scan(dirs);
+        let mut entries = read_cache(cache)?;
+        entries.retain(|e| bins.iter().any(|b| b.path == e.bin.path));
+        Some(Catalog::of(&entries))
     }
 
     fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>) -> Catalog {
@@ -108,8 +116,13 @@ impl Catalog {
             }
             entries
         };
+        Catalog::of(&entries)
+    }
+
+    /// The actions of `entries`; a duplicate id after the first is ignored.
+    fn of(entries: &[Entry]) -> Catalog {
         let mut actions: Vec<Action> = Vec::new();
-        for e in &entries {
+        for e in entries {
             for l in &e.lines {
                 let Some(a) = parse_action(l) else {
                     continue;
@@ -150,6 +163,24 @@ pub fn missing_tools(a: &Action) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+/// The standard action directories and cache path.
+fn standard() -> (Vec<(PathBuf, bool)>, Option<PathBuf>) {
+    let cache = match crate::xdg::cache_home() {
+        Ok(c) => Some(c.join("inacircle/catalog")),
+        Err(e) => {
+            eprintln!("inacircle: no catalog cache: {e}");
+            None
+        }
+    };
+    let data = crate::xdg::data_home()
+        .inspect_err(|e| eprintln!("inacircle: no user actions: {e}"))
+        .ok();
+    (
+        dirs_from(std::env::var_os("INACIRCLE_ACTIONS_DIR"), data),
+        cache,
+    )
 }
 
 /// Action directories: the override (colon-separated, all built-in; empty
@@ -661,6 +692,59 @@ mod tests {
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
         assert!(c.actions.is_empty());
+    }
+
+    /// The wheel's load: from the cache alone, never running a manifest.
+    /// Stale entries are used as cached while their binary is still there;
+    /// a binary the cache does not know is left out; no cache, no catalog.
+    #[test]
+    fn cached_load_never_runs_a_manifest() {
+        let f = Fix::new("cached");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        manifest_script(&d.join("one"), &[act("x.a", "A")]);
+        assert_eq!(Catalog::load_cached_from(&dirs, &f.cache()), None);
+        manifest_script(&d.join("two"), &[act("y.a", "Y")]);
+        Catalog::load_from(&dirs, &f.cache());
+        let cache = std::fs::read(f.cache()).unwrap();
+        // Changed since it was cached: used as cached.
+        manifest_script(&d.join("one"), &[act("x.a", "B")]);
+        let t = std::fs::metadata(d.join("one"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        set_mtime(&d.join("one"), t + Duration::from_secs(5));
+        // Gone: not offered.
+        std::fs::remove_file(d.join("two")).unwrap();
+        // New, and its manifest would hang: not run.
+        let marker = f.root.join("marker");
+        script(
+            &d.join("three"),
+            &format!("echo run >> {}\nexec sleep 10", marker.display()),
+        );
+        let t = Instant::now();
+        let c = Catalog::load_cached_from(&dirs, &f.cache()).expect("a cache");
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
+        );
+        let ids: Vec<_> = c
+            .actions
+            .iter()
+            .map(|a| (a.id.as_str(), a.label.as_str()))
+            .collect();
+        assert_eq!(ids, [("x.a", "A")]);
+        assert!(c.actions[0].builtin);
+        assert!(!marker.exists(), "a manifest ran");
+        assert_eq!(
+            std::fs::read(f.cache()).unwrap(),
+            cache,
+            "the cache is not rewritten"
+        );
+        // A corrupt cache is no cache.
+        std::fs::write(f.cache(), "garbage\n").unwrap();
+        assert_eq!(Catalog::load_cached_from(&dirs, &f.cache()), None);
     }
 
     #[test]

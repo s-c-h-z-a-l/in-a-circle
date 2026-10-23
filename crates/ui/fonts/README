@@ -1,0 +1,18 @@
+Noto Sans Medium (SIL Open Font License 1.1, see OFL.txt).
+
+The TTF is not in the repository; only the atlas baked from it
+(../src/atlas.bin) is. Re-bake with:
+
+    cargo run -p bake-atlas -- NotoSans-Medium.ttf crates/ui/src/atlas.bin
+
+Check that the committed atlas is what the tool bakes (the test skips itself
+unless the font matches the length and hash below, so point it at the exact
+file; add `-- --nocapture` to see a "skipped" line):
+
+    INACIRCLE_FONT=/path/to/NotoSans-Medium.ttf cargo test -p bake-atlas -- --nocapture
+
+Source:  https://github.com/notofonts/notofonts.github.io/blob/main/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf
+Version: 2.015 (name table: "Version 2.015; ttfautohint (v1.8.4.7-5d5b)")
+Length:  619976 bytes
+FNV-1a 64: 0xa753604bcd606329
+SHA-256: 635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb

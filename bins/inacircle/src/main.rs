@@ -1,6 +1,7 @@
-//! `inacircle`: the engine's command line (headless mode).
+//! `inacircle`: the wheel, and the engine's command line (headless mode).
 //!
 //! ```text
+//! inacircle                                   the wheel (the hotkey)
 //! inacircle run [--notify] <preset-id> <files…>          the menu path
 //! inacircle run [--notify] --action <action-id> <files…> one action directly
 //! inacircle offer <files…>                    the wheel for these files
@@ -24,12 +25,24 @@
 //! `--notify` adds desktop notifications: "running" with Cancel after a
 //! second, the result with Undo at the end. The stdout lines are written
 //! before the Undo window starts; the exit code does not depend on them.
+//!
+//! Without arguments: the wheel. SIGALRM is reset to its default action
+//! and unblocked, whatever the parent left us, and `alarm` armed first: it
+//! kills the process if a stage (the lock included) outlives its deadline.
+//! Then one instance at a time: a held lock makes a second one exit 0 at
+//! once, before touching Wayland. The lock file is opened with
+//! `O_NOFOLLOW | O_NONBLOCK` and must be a regular file; anything else
+//! (a symlink, a FIFO) is an error, exit 1. Closed without a choice:
+//! exit 0.
+//! A choice tears the wheel down, releases the lock, then runs the preset
+//! as `run --notify` does, exit code included.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
@@ -39,7 +52,11 @@ use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
 use notice::Notifier;
 
+mod measure;
 mod notice;
+mod surface;
+mod uri;
+mod wheel;
 
 const USAGE: &str = "usage: inacircle run [--notify] <preset-id> <files…>\n       \
 inacircle run [--notify] --action <action-id> <files…>\n       \
@@ -63,7 +80,8 @@ fn main() -> ExitCode {
         Some("jobs") => cmd_jobs(rest),
         Some("cancel") => cmd_cancel(rest),
         Some(other) => usage(&format!("unknown command `{other}`")),
-        None => usage("no command"),
+        None if args.is_empty() => cmd_wheel(),
+        None => usage("invalid command"),
     };
     ExitCode::from(code)
 }
@@ -119,22 +137,41 @@ fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     }
     let cwd = std::env::current_dir().ok();
     let mut files = Vec::with_capacity(args.len());
-    let mut seen = HashSet::with_capacity(args.len());
     for a in args {
         match absolute(Path::new(a), cwd.as_deref()) {
-            Some(p) => {
-                let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
-                if seen.insert(key) {
-                    files.push(p);
-                }
-            }
+            Some(p) => files.push(p),
             None => {
                 usage("relative path without a current directory");
                 return None;
             }
         }
     }
-    Some(files)
+    Some(dedup(files))
+}
+
+/// Each file (by canonical path) once, first spelling kept. Only a hash
+/// of each kept file's canonical path is held, not the path: a hash match
+/// is confirmed by canonicalizing the kept file again.
+fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let state = std::hash::RandomState::new();
+    let mut seen = HashSet::with_capacity(paths.len());
+    let mut hashes: Vec<u64> = Vec::with_capacity(paths.len());
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let c = canon(&p);
+        let h = std::hash::BuildHasher::hash_one(&state, &c);
+        let dup = !seen.insert(h)
+            && kept
+                .iter()
+                .zip(&hashes)
+                .any(|(k, &kh)| kh == h && canon(k) == c);
+        if !dup {
+            hashes.push(h);
+            kept.push(p);
+        }
+    }
+    kept
 }
 
 #[derive(Clone, Copy)]
@@ -226,6 +263,12 @@ fn cmd_run(args: &[OsString]) -> u8 {
     let Some(files) = files_of(rest) else {
         return EXIT_USAGE;
     };
+    run(target, files, notify, cancel)
+}
+
+/// Runs `target` on `files` (absolute, each once): the shared tail of `run`
+/// and the wheel.
+fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -> u8 {
     let preset = match target {
         Target::Preset(id) => match PRESETS.iter().find(|p| p.id == id) {
             Some(p) => Some(p),
@@ -397,28 +440,7 @@ fn cmd_offer(args: &[OsString]) -> u8 {
     let Some(files) = files_of(args) else {
         return EXIT_USAGE;
     };
-    let named: Vec<(String, Kind)> = files
-        .iter()
-        .map(|p| {
-            let name = p
-                .file_name()
-                .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
-            let unknown = |label: &str| Kind {
-                mime: None,
-                label: label.into(),
-            };
-            let kind = match classify(p) {
-                Ok(Classified::File(k)) => k,
-                Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
-                Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => {
-                    unknown("broken link")
-                }
-                Ok(Classified::NotRegular) => unknown("special file"),
-                Err(_) => unknown("unreadable file"),
-            };
-            (name, kind)
-        })
-        .collect();
+    let named = named_kinds(&files);
     let cat = Catalog::load();
     let offer = menu::offer(&cat, &named);
     for (dir, s) in offer.slices.iter().enumerate() {
@@ -435,6 +457,30 @@ fn cmd_offer(args: &[OsString]) -> u8 {
     }
     out(&Line::new("hub").bare(&offer.hub));
     EXIT_DONE
+}
+
+/// Each file's name and what it is, as the offer needs them.
+fn named_kinds(files: &[PathBuf]) -> Vec<(String, Kind)> {
+    files.iter().map(|p| named_kind(p)).collect()
+}
+
+/// A file's name and what it is.
+fn named_kind(p: &Path) -> (String, Kind) {
+    let name = p
+        .file_name()
+        .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
+    let unknown = |label: &str| Kind {
+        mime: None,
+        label: label.into(),
+    };
+    let kind = match classify(p) {
+        Ok(Classified::File(k)) => k,
+        Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
+        Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => unknown("broken link"),
+        Ok(Classified::NotRegular) => unknown("special file"),
+        Err(_) => unknown("unreadable file"),
+    };
+    (name, kind)
 }
 
 fn one_job_id(args: &[OsString], cmd: &str) -> Result<JobId, u8> {
@@ -523,4 +569,358 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
         return EXIT_FAILED;
     }
     EXIT_DONE
+}
+
+/// The wheel: lock, deadline, surface; then the chosen preset, if any.
+fn cmd_wheel() -> u8 {
+    let mut meter =
+        measuring().then(|| measure::Meter::new(cpu_us(libc::RUSAGE_SELF), Instant::now()));
+    // The deadline first: it covers the lock too (a slow runtime dir).
+    if let Err(e) = default_sigalrm() {
+        eprintln!("inacircle: cannot arm the deadline: {e}");
+        return EXIT_FAILED;
+    }
+    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
+    // kills the process: the backstop if anything below hangs.
+    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
+    // The lock comes before Wayland: a second instance must not draw.
+    let lock = match lock_wheel() {
+        Ok(Some(l)) => l,
+        Ok(None) => return EXIT_DONE,
+        Err(e) => {
+            eprintln!("inacircle: wheel lock: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    let mut machine = wheel::Machine::new();
+    let chosen = surface::run(&mut machine, &mut meter);
+    // The surface is gone (its connection closed); free the hotkey.
+    drop(lock);
+    if let Some(meter) = meter {
+        eprintln!("inacircle: {}", meter.report(measure::vm_hwm_kb()));
+    }
+    // SAFETY: as above; 0 cancels the pending alarm.
+    unsafe { libc::alarm(0) };
+    // Stage 2 read the catalog from the cache only; now that the overlay
+    // is gone, bring the cache up to date (manifests run with their usual
+    // deadline and group kill). A choice's run loads the catalog itself,
+    // which is that refresh.
+    match chosen {
+        Ok(Some((files, preset))) => run_choice(files, &preset),
+        Ok(None) => {
+            Catalog::load();
+            EXIT_DONE
+        }
+        Err(e) => {
+            eprintln!("inacircle: wheel: {e}");
+            Catalog::load();
+            EXIT_FAILED
+        }
+    }
+}
+
+/// Runs the wheel's choice exactly as `inacircle run --notify <preset>
+/// <files…>`: the same function, so the same checks, output and exit code.
+fn run_choice(files: Vec<PathBuf>, preset: &str) -> u8 {
+    cmd_run(&choice_args(files, preset))
+}
+
+/// The `run` arguments for a choice. The paths are absolute (from
+/// `file://` URIs), so none reads as a flag.
+fn choice_args(files: Vec<PathBuf>, preset: &str) -> Vec<OsString> {
+    let mut args = Vec::with_capacity(files.len() + 2);
+    args.extend([OsString::from("--notify"), OsString::from(preset)]);
+    args.extend(files.into_iter().map(PathBuf::into_os_string));
+    args
+}
+
+/// SIGALRM back to its default action (terminate) and unblocked: an
+/// ignored disposition and a blocked mask both survive `execve`, so
+/// whoever started us could have disabled the alarm.
+fn default_sigalrm() -> io::Result<()> {
+    // SAFETY: a zeroed sigaction is valid storage; sa_sigaction = SIG_DFL
+    // with an empty mask installs no handler code; sigaction reads `act`,
+    // which lives on this frame.
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut act.sa_mask);
+        if libc::sigaction(libc::SIGALRM, &act, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: a zeroed sigset_t is valid storage, initialized by
+    // sigemptyset/sigaddset; pthread_sigmask reads it from this frame. One
+    // thread: this is the process mask.
+    let r = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGALRM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut())
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r));
+    }
+    Ok(())
+}
+
+/// `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, held: `None` if another
+/// instance holds it. Opened without following a symlink and without
+/// blocking (a FIFO planted there would hang `open`), and refused unless it
+/// is a regular file.
+fn lock_wheel() -> io::Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = engine::xdg::runtime_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?
+        .join("inacircle");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let path = dir.join("wheel.lock");
+    // std adds O_CLOEXEC; create(true) is O_CREAT.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    // fstat of what we opened, not of the path.
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}: not a regular file", path.display()),
+        ));
+    }
+    // SAFETY: flock on an fd we own; the lock lives as long as `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let e = io::Error::last_os_error();
+    if e.kind() == io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(e)
+    }
+}
+
+/// Stage 2 for the dropped `text/uri-list`. The list's bytes are freed
+/// before the files are classified, and the catalog comes from the cache
+/// alone: no action binary runs while the overlay is up (the cache is
+/// refreshed once the wheel is gone).
+fn drop_menu(list: Vec<u8>) -> wheel::Menu {
+    let paths = uri::parse_uri_list(&list);
+    drop(list);
+    drop_menu_for(dedup(paths), Catalog::load_cached())
+}
+
+/// Stage 2 for `paths` (absolute, each once) with catalog `cat` (`None`:
+/// no cache yet, so `No actions yet`). The offer by wheel slice: a
+/// preset's compass direction is its slice (0 = north, clockwise). The
+/// files are tallied by type as they are classified, keeping one name per
+/// type, not one per file. The hub (`ui::text::hub_text`) counts the files
+/// of the offered type, the most common one with presets; when it cannot
+/// show the one file's name, it names that type by its MIME top-level type
+/// (`1 file · text`): short enough for the hub, unlike the type's label.
+fn drop_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::Menu {
+    let mut slices: [Option<wheel::Choice>; 8] = Default::default();
+    let (paths, cat) = match cat {
+        Some(cat) if !paths.is_empty() => (paths, cat),
+        // Nothing is offered, so nothing can be chosen: any click closes.
+        _ => {
+            let hub = if paths.is_empty() {
+                wheel::NOTHING
+            } else {
+                wheel::NO_ACTIONS
+            };
+            return wheel::Menu {
+                paths: Vec::new(),
+                slices,
+                hub: hub.into(),
+            };
+        }
+    };
+    let mut tally = menu::Tally::default();
+    for p in &paths {
+        let (name, kind) = named_kind(p);
+        tally.add(&name, &kind);
+    }
+    let offer = menu::offer_tally(&cat, &tally);
+    let mut mime = None;
+    for (dir, s) in offer.slices.iter().enumerate() {
+        let Some(s) = s else { continue };
+        mime = PRESETS.iter().find(|p| p.id == s.preset).map(|p| p.input);
+        slices[dir] = Some(wheel::Choice {
+            label: s.label.clone(),
+            preset: s.preset.into(),
+            applicable: s.applicable > 0 && s.disabled.is_none(),
+        });
+    }
+    let hub = match mime {
+        Some(mime) => {
+            let (count, name) = tally.of(mime);
+            let label = mime.split('/').next().unwrap_or(mime);
+            ui::text::hub_text(count, name, offer.total, label, ui::wheel::HUB_TEXT_W)
+        }
+        None if offer.hub.is_empty() => wheel::NOTHING.into(),
+        None => offer.hub,
+    };
+    wheel::Menu { paths, slices, hub }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wheel's choice runs as `inacircle run --notify <preset> <files…>`:
+    /// through `cmd_run` itself, whose contract the CLI tests hold.
+    #[test]
+    fn run_path_is_shared_with_the_cli() {
+        let files = vec![PathBuf::from("/a b"), PathBuf::from("/c")];
+        assert_eq!(
+            choice_args(files, "markdown"),
+            ["--notify", "markdown", "/a b", "/c"].map(OsString::from)
+        );
+        // The CLI's own checks apply: an unknown preset is its usage error,
+        // before anything is run or recorded.
+        assert_eq!(
+            run_choice(vec![PathBuf::from("/a")], "no-such-preset"),
+            EXIT_USAGE
+        );
+    }
+
+    /// Each file once by canonical path, first spelling kept: another
+    /// spelling or a symlink of a kept file is dropped; a missing file is
+    /// matched by its path as given.
+    #[test]
+    fn dedup_keeps_each_file_once() {
+        let (dir, a) = text_file("dedup", "a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&b, "b\n").unwrap();
+        std::os::unix::fs::symlink(&a, dir.join("link")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let missing = dir.join("gone.txt");
+        let kept = dedup(vec![
+            dir.join("./a.txt"),
+            b.clone(),
+            dir.join("link"),
+            a.clone(),
+            missing.clone(),
+            dir.join("sub/../b.txt"),
+            missing.clone(),
+        ]);
+        assert_eq!(kept, [dir.join("./a.txt"), b, missing]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A catalog with one plain-text-to-Markdown action.
+    fn md_catalog() -> Catalog {
+        Catalog {
+            actions: vec![engine::catalog::Action {
+                id: "t.md".into(),
+                family: "t".into(),
+                bin: "/bin/true".into(),
+                input: "text/plain".into(),
+                output: "text/markdown".into(),
+                ext: "md".into(),
+                label: "Markdown".into(),
+                group: "g".into(),
+                cost: 1,
+                lossy: false,
+                batch: true,
+                requires: Vec::new(),
+                builtin: true,
+            }],
+        }
+    }
+
+    /// Stage 2 for a URI list, with `md_catalog`.
+    fn menu_of(list: &str) -> wheel::Menu {
+        drop_menu_for(
+            dedup(uri::parse_uri_list(list.as_bytes())),
+            Some(md_catalog()),
+        )
+    }
+
+    /// A private dir with one plain-text file named `name`.
+    fn text_file(tag: &str, name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, "plain words\n").unwrap();
+        (dir, file)
+    }
+
+    /// One file whose name the atlas cannot draw: its count and type.
+    #[test]
+    fn drop_menu_hub_falls_back_to_the_type() {
+        let (dir, file) = text_file("cjk", "日本.txt");
+        let m = menu_of(&format!(
+            "file://{}/%E6%97%A5%E6%9C%AC.txt\n",
+            dir.display()
+        ));
+        assert_eq!(m.paths, [file]);
+        assert_eq!(m.hub, "1 file · text");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A preset's compass direction is its wheel slice (0 = north). The hub
+    /// names the one file.
+    #[test]
+    fn drop_menu_maps_presets_to_wheel_slices() {
+        let (dir, file) = text_file("map", "notes ő.txt");
+        let m = menu_of(&format!(
+            "# dropped\r\nfile://{}\r\nfile://{}\r\n",
+            dir.join("notes%20%C5%91.txt").display(),
+            file.display()
+                .to_string()
+                .replace(' ', "%20")
+                .replace('ő', "%C5%91")
+        ));
+        assert_eq!(m.paths, std::slice::from_ref(&file), "the same file once");
+        let north = m.slices[0].as_ref().expect("markdown points north");
+        assert_eq!(
+            (
+                north.label.as_str(),
+                north.preset.as_str(),
+                north.applicable
+            ),
+            ("Markdown", "markdown", true)
+        );
+        assert_eq!(m.slices.iter().flatten().count(), 1);
+        assert_eq!(m.hub, "notes ő.txt");
+
+        let none = menu_of("https://example.com/\r\n");
+        assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
+        assert_eq!(none.hub, wheel::NOTHING);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Before the catalog was ever cached, stage 2 offers nothing (no
+    /// manifest runs under the overlay) and says so; any click closes.
+    #[test]
+    fn drop_menu_without_a_cache_offers_nothing() {
+        let (dir, file) = text_file("nocache", "a.txt");
+        let m = drop_menu_for(vec![file], None);
+        assert!(m.paths.is_empty() && m.slices.iter().all(Option::is_none));
+        assert_eq!(m.hub, wheel::NO_ACTIONS);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Several files: the hub counts those of the offered type.
+    #[test]
+    fn drop_menu_counts_the_offered_type() {
+        let (dir, a) = text_file("count", "a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&b, "more words\n").unwrap();
+        let pdf = dir.join("c.pdf");
+        std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
+        let m = drop_menu_for(vec![a, b, pdf], Some(md_catalog()));
+        assert_eq!(m.paths.len(), 3);
+        assert_eq!(m.hub, "2 / 3 files");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

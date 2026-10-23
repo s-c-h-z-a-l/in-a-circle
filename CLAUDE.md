@@ -31,7 +31,8 @@ it's a bug.
    - hover repaint: <= 100 µs per event
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
-   - peak RSS: <= 5 MB
+   - peak memory: <= 5 MB PSS (proportional set size: shared libc and
+     loader pages count by their share; RSS is reported alongside)
    - binary: `inacircle` <= 1.5 MB; each family binary <= 1 MB of code
      (embedded data such as fonts is justified and measured separately).
      A plan that grows a binary by more than 100 KB explains why.
@@ -115,7 +116,7 @@ In short:
   `MSG_CTRUNC` as an error.
 - Overlay: wlr-layer-shell.
 - Text: alpha glyph atlas baked offline at the exact sizes used (scale 1
-  and 2), embedded in the binary. No runtime font parsing.
+  now; scale 2 later), embedded in the binary. No runtime font parsing.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. One-octant coverage table mirrored by the
   wheel's symmetry + LUT. Damage-only repaint, damaged against what is on

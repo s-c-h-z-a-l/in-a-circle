@@ -1,0 +1,5 @@
+Protocol XMLs used to check our opcodes (tests/opcodes.rs). Each file
+carries its own copyright and license (MIT-style) in its <copyright> block.
+- wayland.xml: wayland 1.26 (core protocol)
+- viewporter.xml: wayland-protocols 1.49, stable/viewporter
+- wlr-layer-shell-unstable-v1.xml: wlr-protocols

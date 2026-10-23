@@ -147,8 +147,8 @@ pub trait Observer {
     /// The wake point: `wake_fd` is readable or `wake_at` has passed.
     /// Called on the supervisor's thread between polls: may block only
     /// briefly, under a hard deadline (read what is there, queue writes);
-    /// the action's pipes go unread meanwhile. The observer drains its fd: one left readable wakes it
-    /// again at once.
+    /// the action's pipes go unread meanwhile. The observer drains its fd:
+    /// one left readable wakes it again at once.
     fn wake(&mut self) -> Wake {
         Wake::Continue
     }
