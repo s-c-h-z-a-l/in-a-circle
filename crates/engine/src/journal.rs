@@ -477,10 +477,17 @@ fn parse_out(l: &Line) -> Option<Out> {
 /// the recorded identity (dev, inode, size, mtime, ctime); the rest are kept
 /// with the reason. Folders recorded as made for this job are removed if
 /// empty afterwards. The history is held under an exclusive `flock` for the
-/// whole undo, so two undos of one job cannot both run.
+/// whole undo, so two undos of one job cannot both run. A job that is
+/// still running is refused (`ResourceBusy`): it could place more files.
 ///
 /// The history is streamed: only lines that mention the job are parsed.
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
+    if list_running().iter().any(|(id, ..)| id == job) {
+        return Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "job is running; cancel it first",
+        ));
+    }
     let mut file = OpenOptions::new()
         .read(true)
         .append(true)
@@ -960,6 +967,26 @@ mod tests {
             }
             assert!(!path.exists());
             assert!(list_running().is_empty());
+        });
+    }
+
+    #[test]
+    fn undo_of_a_running_job_is_refused() {
+        let t = Tmp::new("undorun");
+        t.env(|| {
+            let f = t.0.join("out/x");
+            fs::write(&f, "x").unwrap();
+            let job = JobId("10-1".into());
+            let running = Running::start(&job, "a", 1);
+            let mut rec = Recorder::open(&job, "a");
+            rec.outcome(&done("/i", &f));
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
+            assert!(f.exists());
+            drop(running);
+            drop(rec.finish(true));
+            assert_eq!(undo(&job).unwrap().removed, [f.clone()]);
+            assert!(!f.exists());
         });
     }
 

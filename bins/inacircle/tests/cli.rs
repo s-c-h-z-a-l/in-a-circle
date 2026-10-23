@@ -841,6 +841,16 @@ fn cancel_end_to_end() {
     assert_eq!(mine[0].get("pid"), Some(child.id().to_string().as_str()));
     assert!(mine[0].get("progress").is_some());
 
+    // A running job cannot be undone.
+    let u = e.run(&["undo", &id]);
+    assert_eq!(u.code, Some(1), "{}{}", u.stdout, u.stderr);
+    assert!(u.stdout.is_empty(), "{}", u.stdout);
+    assert!(
+        u.stderr.contains("is running; cancel it first"),
+        "{}",
+        u.stderr
+    );
+
     let c = e.run(&["cancel", &id]);
     assert_eq!(c.code, Some(0), "{}", c.stderr);
     let mut rest = String::new();

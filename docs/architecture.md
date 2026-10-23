@@ -326,6 +326,8 @@ inacircle cancel <job-id>
   finished (`cancelled`), then the same rule applies.
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
+- `undo` of a job that is still running is refused (exit 1): cancel it
+  first.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
 - `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,

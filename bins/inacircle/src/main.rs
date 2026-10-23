@@ -404,6 +404,10 @@ fn cmd_undo(args: &[OsString]) -> u8 {
             eprintln!("inacircle: unknown job {}", job.0);
             EXIT_USAGE
         }
+        Err(e) if e.kind() == io::ErrorKind::ResourceBusy => {
+            eprintln!("inacircle: job {} is running; cancel it first", job.0);
+            EXIT_FAILED
+        }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             eprintln!("inacircle: job {} already undone", job.0);
             EXIT_FAILED
