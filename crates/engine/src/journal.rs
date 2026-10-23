@@ -1011,7 +1011,7 @@ mod tests {
             assert!(f.exists());
             drop(running);
             drop(rec.finish(true));
-            assert_eq!(undo(&job).unwrap().removed, [f.clone()]);
+            assert_eq!(undo(&job).unwrap().removed, std::slice::from_ref(&f));
             assert!(!f.exists());
         });
     }
