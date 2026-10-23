@@ -438,3 +438,53 @@ fn progress_is_clamped_to_100() {
     drop(n);
     fake.join();
 }
+
+#[test]
+fn poll_event_within_spends_one_budget() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let fake = Fake::start(move |p| {
+        serve_open(p, &["actions"]);
+        for _ in 0..10 {
+            action_invoked(p, 7, "bogus");
+        }
+        tx.send(()).unwrap();
+        p.drain();
+    });
+    let mut n = Notifications::open(&fake.address(), after(300)).unwrap();
+    rx.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    let mut frames = 3;
+    let mut got = 0;
+    while let Some(e) = n.poll_event_within(7, &mut frames).unwrap() {
+        assert_eq!(e, Event::Action("bogus".into()));
+        got += 1;
+    }
+    // Three frames, three events: the budget is spent across calls.
+    assert_eq!((got, frames), (3, 0));
+    drop(n);
+    fake.join();
+}
+
+#[test]
+fn open_within_shares_one_deadline() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        assert_eq!(m.member.as_deref(), Some("GetCapabilities"));
+        std::thread::sleep(Duration::from_millis(200));
+        p.reply(&m, vec![strings(&["actions"])]);
+        let m = p.recv();
+        assert_eq!(m.member.as_deref(), Some("GetNameOwner"));
+        std::thread::sleep(Duration::from_millis(200));
+        p.reply(&m, vec![Value::Str(OWNER.into())]);
+        // The match rule never gets an answer.
+        p.drain();
+    });
+    let start = Instant::now();
+    let r = Notifications::open_within(&fake.address(), after(500));
+    let took = start.elapsed();
+    assert!(matches!(r, Err(dbus::Error::Timeout)), "{:?}", r.err());
+    // Each call alone is in time; together they are not.
+    assert!(took < Duration::from_millis(650), "{took:?}");
+    fake.join();
+}

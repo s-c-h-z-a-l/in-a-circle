@@ -53,11 +53,25 @@ impl Notifications {
     /// reads the capabilities, finds the server's unique name and subscribes
     /// to its signals, each call within `CALL_WAIT` of its start.
     pub fn open(addr: &Address, deadline: Instant) -> Result<Notifications, Error> {
+        // Activation may take longer than the connect deadline: every call
+        // after it has its own `CALL_WAIT`.
+        Notifications::open_with(addr, deadline, || Instant::now() + CALL_WAIT)
+    }
+
+    /// `open` with one deadline for all of it, calls included: for a caller
+    /// that cannot wait long (no time for activation).
+    pub fn open_within(addr: &Address, deadline: Instant) -> Result<Notifications, Error> {
+        Notifications::open_with(addr, deadline, || deadline)
+    }
+
+    /// Connects before `deadline`, then each call before `wait()`.
+    fn open_with(
+        addr: &Address,
+        deadline: Instant,
+        wait: impl Fn() -> Instant,
+    ) -> Result<Notifications, Error> {
         let mut conn = Conn::connect(addr, deadline)?;
         // To the well-known name, so a D-Bus activated daemon gets started.
-        // Activation may take longer than the connect deadline: every call
-        // from here on has its own `CALL_WAIT`.
-        let wait = || Instant::now() + CALL_WAIT;
         let r = conn.call(call("GetCapabilities", vec![]), wait())?;
         let caps = match r.body.into_iter().next() {
             Some(Value::Array(_, items)) => items
@@ -152,9 +166,18 @@ impl Notifications {
     /// Like `next_event` but never waits, for callers that `poll` the fd:
     /// `None` when nothing for `id` is available right now.
     pub fn poll_event(&mut self, id: u32) -> Result<Option<Event>, Error> {
-        let mut frames = POLL_FRAMES;
+        self.poll_event_within(id, &mut { POLL_FRAMES })
+    }
+
+    /// `poll_event` that spends one unit of `frames` per frame it looks at
+    /// and returns `None` when it runs out, so one budget can span calls.
+    pub fn poll_event_within(
+        &mut self,
+        id: u32,
+        frames: &mut usize,
+    ) -> Result<Option<Event>, Error> {
         loop {
-            match self.conn.recv_within(&mut frames)? {
+            match self.conn.recv_within(frames)? {
                 None => return Ok(None),
                 Some(m) => {
                     if let Some(e) = event_for(&m, id, &self.owner) {

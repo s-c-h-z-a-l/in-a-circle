@@ -184,6 +184,12 @@ impl Peer {
         self.serial
     }
 
+    /// `send` to a client that may have gone: false if it has.
+    pub fn try_send(&mut self, mut m: Message) -> bool {
+        m.serial = self.next_serial();
+        self.stream.write_all(&encode(&m).unwrap()).is_ok()
+    }
+
     pub fn send(&mut self, mut m: Message) {
         if m.serial == 0 {
             m.serial = self.next_serial();

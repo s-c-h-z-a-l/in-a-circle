@@ -250,9 +250,12 @@ Every action runs sandboxed, set up in the child between `fork` and
   and **Cancel**. The supervisor waits for Undo for a bounded time (about
   ten seconds after completion).
 - The bus connection is lazy: made at the one-second mark or at the end,
-  so a quick run connects once. Connect, authenticate and `Hello` have
-  300 ms together, every call 500 ms; while the run goes on, progress
-  updates (at most four a second) have 100 ms. Any error or timeout turns
+  so a quick run connects once. At the end, connect, authenticate and
+  `Hello` have 300 ms together and every call 500 ms (activation may start
+  the server). While the run goes on the supervisor waits for each call,
+  so the whole open has 500 ms, a progress update (at most four a second)
+  100 ms, and one wake reads at most 256 frames; more than 64 events about
+  our notification in one wake mean a broken server. Any error or timeout turns
   notifications off for the rest of the run with one line on stderr
   (`inacircle: notifications unavailable: …`); the result, the history and
   the exit code never depend on them.

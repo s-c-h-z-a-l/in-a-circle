@@ -148,10 +148,35 @@ impl Run {
     }
 }
 
+/// How long a run may take before the test kills it (a hung run must fail
+/// the test, not hang the suite).
+const WATCHDOG: Duration = Duration::from_secs(30);
+
+/// Sends `sig` to `pid` with kill(1).
+fn kill(pid: u32, sig: &str) {
+    let _ = Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Runs `c` to the end, its stdout copied into `seen` as it arrives.
-fn run(mut c: Command, seen: &Arc<Mutex<String>>) -> Run {
+fn run(c: Command, seen: &Arc<Mutex<String>>) -> Run {
+    run_then(c, seen, |_| {})
+}
+
+/// `run` that calls `meanwhile` with the child's pid once it started.
+fn run_then(mut c: Command, seen: &Arc<Mutex<String>>, meanwhile: impl FnOnce(u32)) -> Run {
     let start = Instant::now();
     let mut child = c.spawn().unwrap();
+    let pid = child.id();
+    let (ended, ended_rx) = mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if ended_rx.recv_timeout(WATCHDOG).is_err() {
+            kill(pid, "-KILL");
+        }
+    });
+    meanwhile(pid);
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let seen2 = seen.clone();
     let reader = std::thread::spawn(move || {
@@ -170,6 +195,8 @@ fn run(mut c: Command, seen: &Arc<Mutex<String>>) -> Run {
         .unwrap();
     let st = child.wait().unwrap();
     let elapsed = start.elapsed();
+    let _ = ended.send(());
+    watchdog.join().unwrap();
     reader.join().unwrap();
     let stdout = seen.lock().unwrap().clone();
     Run {
@@ -261,7 +288,15 @@ fn close(p: &mut Peer, id: u32) {
 
 /// A notification server: answers every `Notify` (a new id unless it
 /// replaces one), reports it on the channel, then lets `react` answer it.
-fn server(mut react: impl FnMut(&mut Peer, &Got) + Send + 'static) -> (Fake, Receiver<Got>) {
+fn server(react: impl FnMut(&mut Peer, &Got) + Send + 'static) -> (Fake, Receiver<Got>) {
+    server_hooked(|_, _| {}, react)
+}
+
+/// `server` that also lets `before` act on a `Notify` before its reply.
+fn server_hooked(
+    mut before: impl FnMut(&mut Peer, &Got) + Send + 'static,
+    mut react: impl FnMut(&mut Peer, &Got) + Send + 'static,
+) -> (Fake, Receiver<Got>) {
     let (tx, rx): (Sender<Got>, _) = mpsc::channel();
     let fake = Fake::start(move |p| {
         serve_open(p);
@@ -277,12 +312,17 @@ fn server(mut react: impl FnMut(&mut Peer, &Got) + Send + 'static) -> (Fake, Rec
                         Value::U32(r) => r,
                         _ => panic!("{:?}", m.body),
                     };
-                    p.reply(&m, vec![Value::U32(id)]);
                     let g = got(&m, id);
-                    react(p, &g);
+                    before(p, &g);
+                    // A client that gave up (a test of that) is gone.
+                    if p.try_send(Peer::reply_msg(&m, vec![Value::U32(id)])) {
+                        react(p, &g);
+                    }
                     tx.send(g).unwrap();
                 }
-                Some("CloseNotification") => p.reply(&m, vec![]),
+                Some("CloseNotification") => {
+                    p.try_send(Peer::reply_msg(&m, vec![]));
+                }
                 other => panic!("unexpected call {other:?}"),
             }
         }
@@ -604,4 +644,139 @@ fn dismissed_running_notice_is_not_shown_again() {
     let running = n.iter().filter(|g| g.has_button("cancel")).count();
     assert_eq!(running, 1, "running notice shown again after its close");
     assert_eq!(n.last().unwrap().summary, "2 done");
+}
+
+/// `inacircle run --notify --action test.script <inputs>`.
+fn test_script(e: &Env, bus: Option<&str>, notify: bool, inputs: &[&Path]) -> Command {
+    let mut args = vec![OsStr::new("run")];
+    if notify {
+        args.push(OsStr::new("--notify"));
+    }
+    args.extend([OsStr::new("--action"), OsStr::new("test.script")]);
+    args.extend(inputs.iter().map(|p| p.as_os_str()));
+    e.cmd(bus, &args)
+}
+
+#[test]
+fn signal_flood_does_not_stall_the_run() {
+    let e = Env::new("flood");
+    let a = e.test_input("a.test", &["sleep_ms=2000", "events=done"]);
+    let (fake, _rx) = server(|p, g| {
+        if g.replaces == 0 && g.has_button("cancel") {
+            // Endless clicks on our own notification, from the server.
+            let m = Message {
+                kind: dbus::Kind::Signal,
+                serial: 1000,
+                reply_serial: None,
+                path: Some(PATH.into()),
+                interface: Some(IFACE.into()),
+                member: Some("ActionInvoked".into()),
+                error_name: None,
+                destination: None,
+                sender: Some(OWNER.into()),
+                signature: String::new(),
+                body: vec![Value::U32(g.id), Value::Str("bogus".into())],
+            };
+            let one = dbus::encode(&m).unwrap();
+            p.flood(&one.repeat(100));
+        }
+    });
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.lines("done").len(), 1, "{}", r.stdout);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+    assert_eq!(r.unavailable(), 1, "{}", r.stderr);
+    assert!(r.elapsed < Duration::from_secs(3), "{:?}", r.elapsed);
+}
+
+#[test]
+fn cancel_during_a_progress_update_is_not_lost() {
+    let e = Env::new("cancel-in-update");
+    fs::create_dir_all(e.files().join("d1")).unwrap();
+    fs::create_dir_all(e.files().join("d2")).unwrap();
+    let a = e.test_input("d1/a.test", &["sleep_ms=1300", "events=done"]);
+    let b = e.test_input("d2/b.test", &["sleep_ms=4000", "events=done"]);
+    // The click arrives while the client waits for the update's reply.
+    let (fake, rx) = server_hooked(
+        |p, g| {
+            if g.has_button("cancel") && g.body == "1 / 2 files" {
+                invoke(p, g.id, "cancel");
+            }
+        },
+        |p, g| {
+            if g.has_button("undo") {
+                close(p, g.id);
+            }
+        },
+    );
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a, &b]));
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert!(n.iter().any(|g| g.body == "1 / 2 files"), "no 1 / 2 update");
+    assert_eq!(r.lines("fail"), [format!("{}\tcancelled", b.display())]);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=1"]);
+    assert_eq!(n.last().unwrap().summary, "Cancelled");
+    assert!(r.elapsed < Duration::from_secs(4), "{:?}", r.elapsed);
+}
+
+#[test]
+fn sigterm_cancel_says_cancelled() {
+    let e = Env::new("sigterm");
+    let a = e.test_input("a.test", &["sleep_ms=5000", "events=done"]);
+    let (fake, rx) = server(|_, _| {});
+    let seen = Arc::new(Mutex::new(String::new()));
+    let r = run_then(
+        test_script(&e, Some(&bus_of(&fake)), true, &[&a]),
+        &seen,
+        |pid| {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                kill(pid, "-TERM");
+            });
+        },
+    );
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(1), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.lines("fail"), [format!("{}\tcancelled", a.display())]);
+    let last = n.last().unwrap();
+    assert_eq!(
+        (
+            last.summary.as_str(),
+            last.body.contains("0 done, 1 not converted")
+        ),
+        ("Cancelled", true),
+        "{}",
+        last.body
+    );
+}
+
+#[test]
+fn slow_server_stalls_the_run_once_briefly() {
+    let e = Env::new("slow");
+    let a = e.test_input("a.test", &["sleep_ms=1100", "events=done"]);
+    // Every call after `Hello` is answered 400 ms late; the client's open
+    // during the run has 500 ms for all of them.
+    let fake = Fake::start(|p| {
+        p.handshake();
+        while let Some(m) = p.try_recv() {
+            std::thread::sleep(Duration::from_millis(400));
+            let body = match m.member.as_deref() {
+                Some("GetCapabilities") => vec![strings(&CAPS)],
+                Some("GetNameOwner") => vec![Value::Str(OWNER.into())],
+                Some("Notify") => vec![Value::U32(FIRST_ID)],
+                _ => vec![],
+            };
+            // The client may have given up and gone.
+            p.try_send(Peer::reply_msg(&m, body));
+        }
+    });
+    let plain = plain_run(test_script(&e, None, false, &[&a]));
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.unavailable(), 1, "{}", r.stderr);
+    let late = r.elapsed.saturating_sub(plain.elapsed);
+    assert!(late < Duration::from_millis(600), "{late:?}");
 }

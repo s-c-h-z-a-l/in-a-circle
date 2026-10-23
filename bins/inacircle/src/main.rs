@@ -320,6 +320,8 @@ fn cmd_run(args: &[OsString]) -> u8 {
         };
         exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
     };
+    // Read now: a cancel after this point stopped nothing.
+    let cancelled = cancel.is_cancelled();
     let tally = rec.finish(sandboxed);
     drop(running);
 
@@ -341,7 +343,7 @@ fn cmd_run(args: &[OsString]) -> u8 {
     // The job is closed in the history and gone from the registry, so an
     // Undo click can undo it.
     if let Some(n) = notifier {
-        n.finish(&job, sandboxed, (done, skipped, failed));
+        n.finish(&job, sandboxed, (done, skipped, failed), cancelled);
     }
     if done > 0 {
         EXIT_DONE

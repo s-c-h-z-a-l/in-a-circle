@@ -20,6 +20,13 @@ pub const UNDO_WAIT: Duration = Duration::from_secs(10);
 const CONNECT_WAIT: Duration = Duration::from_millis(300);
 /// A call while the run goes on: the supervisor waits for it.
 const QUICK_WAIT: Duration = Duration::from_millis(100);
+/// The whole open while the run goes on.
+const QUICK_OPEN: Duration = Duration::from_millis(500);
+/// Frames one wake reads before it hands back to the supervisor.
+const WAKE_FRAMES: usize = 256;
+/// Events about our notification in one wake past which the server is
+/// taken as broken.
+const WAKE_EVENTS: usize = 64;
 /// A call once the run is over.
 const CALL_WAIT: Duration = Duration::from_millis(500);
 
@@ -68,8 +75,6 @@ impl Summary {
                 self.done_count += 1;
             }
             Outcome::Failed { input, reason } => {
-                // The engine's reason for the inputs a cancel stopped.
-                self.cancelled |= reason == "cancelled";
                 // Failures stay ahead of skips: the first `failed` entries
                 // are failures.
                 let at = self.failed.min(self.problems.len());
@@ -98,8 +103,10 @@ impl Summary {
 }
 
 /// The "running" notification: summary, body and the progress value.
-pub fn running_text(label: &str, done: usize, total: usize) -> (String, String, u8) {
-    let value = (done.min(total) * 100).checked_div(total).unwrap_or(0) as u8;
+/// `fraction` is the engine's progress of the whole run.
+pub fn running_text(label: &str, done: usize, total: usize, fraction: f32) -> (String, String, u8) {
+    // `as` saturates and maps NaN to 0.
+    let value = (fraction * 100.0).round().clamp(0.0, 100.0) as u8;
     (fit(label, false), format!("{done} / {total} files"), value)
 }
 
@@ -170,16 +177,26 @@ pub fn body_of(lines: &[String], markup: bool) -> String {
     fitted.join("\n")
 }
 
-/// One line of at most `MAX_CHARS` characters: control characters become
-/// spaces, markup is escaped (an entity counts in full and is never cut),
+/// One line of at most `MAX_CHARS` characters: control characters, line
+/// and paragraph separators and bidi controls become spaces, markup is escaped (an entity counts in full and is never cut),
 /// and a cut line ends in `…`.
+/// Separators some servers break lines at, and the bidi marks, embeddings,
+/// overrides and isolates that reorder what is shown (`invoice\u{202E}fdp.exe`
+/// would read `invoiceexe.pdf`).
+fn is_layout_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn fit(s: &str, markup: bool) -> String {
     let piece = |c: char| -> std::borrow::Cow<'static, str> {
         match c {
             '&' if markup => "&amp;".into(),
             '<' if markup => "&lt;".into(),
             '>' if markup => "&gt;".into(),
-            c if c.is_control() => " ".into(),
+            c if c.is_control() || is_layout_control(c) => " ".into(),
             c => c.to_string().into(),
         }
     };
@@ -229,11 +246,16 @@ pub struct Notifier {
     id: u32,
     /// The user closed the "running" notification: no more updates.
     closed: bool,
-    /// Inputs done, and the count on screen.
+    /// Inputs done and the run's fraction, and what is on screen of them.
     done: usize,
-    shown: usize,
+    fraction: f32,
+    shown: (usize, u8),
     /// When the last progress update went out.
     sent: Instant,
+    /// A Cancel click read outside `wake`, for the next `wake` to answer.
+    cancel_seen: bool,
+    /// `wake` answered Cancel.
+    cancelled: bool,
 }
 
 impl Notifier {
@@ -251,25 +273,34 @@ impl Notifier {
             id: 0,
             closed: false,
             done: 0,
-            shown: 0,
+            fraction: 0.0,
+            shown: (0, 0),
             sent: now,
+            cancel_seen: false,
+            cancelled: false,
         }
     }
 
-    /// The open connection, connecting first if not tried yet.
-    fn bus(&mut self) -> Option<&mut Notifications> {
-        if let Bus::Idle = self.bus {
-            match dbus::session_address() {
-                Some(addr) => match Notifications::open(&addr, Instant::now() + CONNECT_WAIT) {
-                    Ok(n) => self.bus = Bus::On(n),
-                    Err(e) => self.off(&e),
-                },
-                None => self.off(&"no unix session bus address"),
-            }
+    /// Connects if not tried yet. During the run (`quick`) the whole open
+    /// has `QUICK_OPEN`: the supervisor waits for it. At the end, connect
+    /// has `CONNECT_WAIT` and every call its own time (a D-Bus activated
+    /// server may need it to start).
+    fn connect(&mut self, quick: bool) {
+        if !matches!(self.bus, Bus::Idle) {
+            return;
         }
-        match &mut self.bus {
-            Bus::On(n) => Some(n),
-            _ => None,
+        let Some(addr) = dbus::session_address() else {
+            return self.off(&"no unix session bus address");
+        };
+        let now = Instant::now();
+        let opened = if quick {
+            Notifications::open_within(&addr, now + QUICK_OPEN)
+        } else {
+            Notifications::open(&addr, now + CONNECT_WAIT)
+        };
+        match opened {
+            Ok(n) => self.bus = Bus::On(n),
+            Err(e) => self.off(&e),
         }
     }
 
@@ -278,10 +309,12 @@ impl Notifier {
         self.bus = Bus::Off;
     }
 
-    /// Shows `n`; an error turns notifications off.
+    /// Shows `n` if connected; an error turns notifications off.
     fn show(&mut self, n: &Notice, wait: Duration) -> Option<u32> {
-        let r = self.bus()?.notify(n, Instant::now() + wait);
-        match r {
+        let Bus::On(bus) = &mut self.bus else {
+            return None;
+        };
+        match bus.notify(n, Instant::now() + wait) {
             Ok(id) => Some(id),
             Err(e) => {
                 self.off(&e);
@@ -290,13 +323,15 @@ impl Notifier {
         }
     }
 
-    fn markup(&mut self) -> bool {
-        self.bus().is_some_and(|n| n.has("body-markup"))
+    fn value(&self) -> u8 {
+        running_text("", self.done, self.total, self.fraction).2
     }
 
     /// Shows or updates the "running" notification.
     fn running(&mut self) {
-        let (summary, body, value) = running_text(&self.label, self.done, self.total);
+        self.connect(true);
+        let (summary, body, value) =
+            running_text(&self.label, self.done, self.total, self.fraction);
         let n = Notice {
             replaces: self.id,
             summary: &summary,
@@ -304,12 +339,13 @@ impl Notifier {
             actions: &[("cancel", "Cancel")],
             progress: Some(value),
         };
-        // The first one may connect (with its own deadlines); updates and
-        // the rest must not hold up the supervisor.
         if let Some(id) = self.show(&n, QUICK_WAIT) {
             self.id = id;
-            self.shown = self.done;
+            self.shown = (self.done, value);
             self.sent = Instant::now();
+            // A click that came during the call is queued, and the fd no
+            // longer says so: read it now.
+            self.cancel_seen |= self.drain();
         }
     }
 
@@ -320,7 +356,7 @@ impl Notifier {
         let first = self.id == 0 && now >= self.start + RUNNING_AFTER;
         let update = self.id != 0
             && !self.closed
-            && self.done != self.shown
+            && (self.done, self.value()) != self.shown
             && now >= self.sent + PROGRESS_EVERY;
         if matches!(self.bus, Bus::Off) || !(first || update) {
             return;
@@ -328,24 +364,35 @@ impl Notifier {
         self.running();
     }
 
-    /// Reads what the server sent; true for a Cancel click on ours.
+    /// Reads what the server sent, at most `WAKE_FRAMES` frames (the rest
+    /// waits for the next wake); true for a Cancel click on ours. More
+    /// than `WAKE_EVENTS` events about ours is no person clicking: off.
     fn drain(&mut self) -> bool {
         let id = self.id;
         let Bus::On(n) = &mut self.bus else {
             return false;
         };
+        let mut frames = WAKE_FRAMES;
+        let mut events = 0;
         let mut cancel = false;
         loop {
-            match n.poll_event(id) {
-                Ok(Some(Event::Action(key))) => cancel |= key == "cancel",
-                Ok(Some(Event::Closed(_))) => self.closed = true,
-                Ok(Some(Event::Timeout)) => {}
-                Ok(None) if n.pending() => {}
+            let e = match n.poll_event_within(id, &mut frames) {
+                Ok(Some(e)) => e,
                 Ok(None) => return cancel,
                 Err(e) => {
                     self.off(&e);
                     return cancel;
                 }
+            };
+            events += 1;
+            if events > WAKE_EVENTS {
+                self.off(&"too many signals from the notification server");
+                return cancel;
+            }
+            match e {
+                Event::Action(key) => cancel |= key == "cancel",
+                Event::Closed(_) => self.closed = true,
+                Event::Timeout => {}
             }
         }
     }
@@ -353,16 +400,25 @@ impl Notifier {
     /// The result of the run with Undo, then the Undo window: an Undo click
     /// undoes `job` and says how it went; at the end of the window the
     /// notification is sent again without the button. `counts` are the
-    /// run's `(done, skipped, failed)` inputs. The run's history and job
-    /// registry entry must be closed before this is called.
-    pub fn finish(mut self, job: &JobId, sandboxed: bool, counts: (usize, usize, usize)) {
-        if matches!(self.bus, Bus::Off) {
+    /// run's `(done, skipped, failed)` inputs; `cancelled`: a cancel signal
+    /// stopped the run (a Cancel click seen here counts too). The run's
+    /// history and job registry entry must be closed before this is called.
+    pub fn finish(
+        mut self,
+        job: &JobId,
+        sandboxed: bool,
+        counts: (usize, usize, usize),
+        cancelled: bool,
+    ) {
+        self.connect(false);
+        let Bus::On(bus) = &self.bus else {
             return;
-        }
+        };
+        let markup = bus.has("body-markup");
         let mut s = std::mem::take(&mut self.summary);
         s.set_counts(counts);
         s.sandboxed = sandboxed;
-        let markup = self.markup();
+        s.cancelled = cancelled || self.cancelled;
         let (summary, body) = final_text(&s, markup);
         let undo: &[(&str, &str)] = if s.done_count > 0 {
             &[("undo", "Undo")]
@@ -435,8 +491,9 @@ impl Observer for Notifier {
 
     fn dir(&mut self, _path: &Path) {}
 
-    fn progress(&mut self, done: usize, _total: usize, _fraction: f32) {
+    fn progress(&mut self, done: usize, _total: usize, fraction: f32) {
         self.done = done;
+        self.fraction = fraction;
         self.tick();
     }
 
@@ -448,18 +505,30 @@ impl Observer for Notifier {
     }
 
     fn wake_at(&self) -> Option<Instant> {
-        match self.bus {
+        match &self.bus {
+            // Work the fd cannot announce: a click already read (even if
+            // the bus failed right after), signals queued during a call or
+            // left by a spent budget.
+            _ if self.cancel_seen => Some(Instant::now()),
             Bus::Off => None,
+            Bus::On(n) if n.pending() => Some(Instant::now()),
             _ if self.id == 0 => Some(self.start + RUNNING_AFTER),
-            _ if !self.closed && self.done != self.shown => Some(self.sent + PROGRESS_EVERY),
+            _ if !self.closed && (self.done, self.value()) != self.shown => {
+                Some(self.sent + PROGRESS_EVERY)
+            }
             _ => None,
         }
     }
 
     fn wake(&mut self) -> Wake {
-        let cancel = self.drain();
+        let cancel = self.drain() || std::mem::take(&mut self.cancel_seen);
         self.tick();
-        if cancel { Wake::Cancel } else { Wake::Continue }
+        if cancel {
+            self.cancelled = true;
+            Wake::Cancel
+        } else {
+            Wake::Continue
+        }
     }
 }
 
@@ -524,12 +593,16 @@ mod tests {
 
     #[test]
     fn running_text_counts_files() {
+        // The value is the engine's fraction of the whole run, so it moves
+        // within one long input too.
         assert_eq!(
-            running_text("Markdown", 1, 3),
-            ("Markdown".into(), "1 / 3 files".into(), 33)
+            running_text("Markdown", 1, 3, 0.456),
+            ("Markdown".into(), "1 / 3 files".into(), 46)
         );
-        assert_eq!(running_text("Markdown", 0, 0).2, 0);
-        assert_eq!(running_text("Markdown", 5, 5).2, 100);
+        assert_eq!(running_text("Markdown", 0, 1, 0.5).2, 50);
+        assert_eq!(running_text("Markdown", 0, 0, f32::NAN).2, 0);
+        assert_eq!(running_text("Markdown", 5, 5, 1.7).2, 100);
+        assert_eq!(running_text("Markdown", 0, 5, -0.2).2, 0);
     }
 
     #[test]
@@ -591,15 +664,26 @@ mod tests {
 
     #[test]
     fn cancelled_text() {
-        let s = summary(&[
+        let mut s = summary(&[
             done("/d/a.txt", "/d/a.md"),
             fail("/d/b.txt", "cancelled"),
             fail("/d/c.txt", "cancelled"),
         ]);
-        assert!(s.cancelled);
+        s.cancelled = true;
         assert_eq!(
             final_text(&s, false),
             ("Cancelled".into(), "1 done, 2 not converted".into())
+        );
+    }
+
+    #[test]
+    fn cancelled_reason_without_a_cancel_is_a_failure() {
+        // An action may report a failure in the same words.
+        let s = summary(&[fail("/d/b.txt", "cancelled")]);
+        assert!(!s.cancelled);
+        assert_eq!(
+            final_text(&s, false),
+            ("Nothing converted".into(), "b.txt: cancelled".into())
         );
     }
 
@@ -661,6 +745,13 @@ mod tests {
         // Control characters would break the lines apart.
         let s = summary(&[fail("/d/a\tb\nc.txt", "bad")]);
         assert_eq!(final_text(&s, false).1, "a b c.txt: bad");
+        // Bidi overrides would show `invoiceexe.pdf`; line and paragraph
+        // separators break lines on some servers.
+        let s = summary(&[fail("/d/invoice\u{202E}fdp.exe", "bad")]);
+        assert_eq!(final_text(&s, false).1, "invoice fdp.exe: bad");
+        let odd = "a\u{2028}b\u{2029}c\u{200E}d\u{200F}e\u{202A}f\u{202D}g\u{2066}h\u{2069}i";
+        let s = summary(&[fail(&format!("/d/{odd}"), "bad")]);
+        assert_eq!(final_text(&s, false).1, "a b c d e f g h i: bad");
 
         let long = format!("{}.txt", "é".repeat(300));
         let out = format!("/d/{}.md", "é".repeat(300));
@@ -680,7 +771,7 @@ mod tests {
             body.chars().count()
         );
         assert!(body.ends_with("&amp;…"), "{body}");
-        let (sum, _, _) = running_text(&"x".repeat(300), 0, 1);
+        let (sum, _, _) = running_text(&"x".repeat(300), 0, 1, 0.0);
         assert_eq!(sum.chars().count(), MAX_CHARS);
     }
 
