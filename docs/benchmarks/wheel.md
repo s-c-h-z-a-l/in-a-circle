@@ -61,8 +61,25 @@ over the slices, then 10 s with the pointer still.
 | `vm_hwm_kb` (reported) | 4630 | 4820 | — |
 
 The `hover_us` row is `cargo test -p ui --release -- --ignored` (the
-rasterizer alone), and the `idle_wakeups` row comes from the plain starts;
-the drag runs of the method below have not been recorded yet.
+rasterizer alone), and the `idle_wakeups` row comes from the plain starts.
+
+### Drag runs (the user's manual test on niri, Nautilus)
+
+The wheel's waiting points, our CPU for one input (the budget is per point):
+
+| point | one run | budget |
+|---|---|---|
+| `main` → the wheel's commit | 828 µs | ≤ 1 ms |
+| the drop's data → the stage-2 wheel's commit | 260 µs | ≤ 1 ms |
+| the choice → the action's start (`run` start − `choice_abs` + catalog + classify) | 303 µs | ≤ 1 ms |
+| hover repaint, in situ (after the stage-2 prepaint fix; was ~150 µs) | 17–23 µs | ≤ 100 µs |
+| per input event (pointer, drag motion), from 4 runs of 109–941 events | ~4.3 µs | per event |
+| peak memory | 2.6 MB PSS (RSS 5.06 MB) | ≤ 5 MB PSS |
+
+Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
+same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind
+without a shell avoids it. A 1024-file drop takes ~3 ms from the drop to
+stage 2 (about 3 µs per file to classify), reported, not budgeted.
 
 ### A large drop
 
