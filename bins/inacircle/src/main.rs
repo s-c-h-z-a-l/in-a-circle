@@ -459,11 +459,31 @@ fn measure() {
 }
 
 fn cmd_offer(args: &[OsString]) -> u8 {
+    let (groups, args) = match args.split_first() {
+        Some((a, rest)) if a == "--groups" => (true, rest),
+        _ => (false, args),
+    };
     let Some(files) = files_of(args) else {
         return EXIT_USAGE;
     };
     let named = named_kinds(&files);
     let cat = Catalog::load();
+    if groups {
+        let mut tally = menu::Tally::default();
+        for (name, kind) in &named {
+            tally.add(name, kind);
+        }
+        for (dir, g) in menu::groups(&cat, &tally).iter().enumerate() {
+            let Some(g) = g else { continue };
+            out(&Line::new("group")
+                .pair("dir", &dir.to_string())
+                .pair("id", g.group)
+                .pair("label", g.label)
+                .pair("lit", if g.lit { "yes" } else { "no" }));
+        }
+        out(&Line::new("hub").bare(&tally.source_text()));
+        return EXIT_DONE;
+    }
     let offer = menu::offer(&cat, &named);
     for (dir, s) in offer.slices.iter().enumerate() {
         let Some(s) = s else { continue };

@@ -1019,6 +1019,34 @@ fn offer_output() {
 }
 
 #[test]
+fn offer_groups_output() {
+    let e = Env::new("offer-groups");
+    e.file("a.txt", b"a\n");
+    e.file("b.md", b"b\n");
+    e.file("x.bin", b"\x00\x01\x02");
+    let o = e.run(&["offer", "--groups", "a.txt"]);
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert_eq!(
+        o.stdout,
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\nhub\ta.txt\n"
+    );
+    let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
+    assert_eq!(
+        o.stdout,
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\nhub\t2 files\n"
+    );
+    // Nothing applies: the category stays, dim.
+    let o = e.run(&["offer", "--groups", "x.bin"]);
+    assert_eq!(
+        o.stdout,
+        "group\tdir=0\tid=document\tlabel=Document\tlit=no\nhub\tx.bin\n"
+    );
+    // The plain offer output is unchanged and `--groups` needs files.
+    let o = e.run(&["offer", "--groups"]);
+    assert_eq!(o.code, Some(2), "{}", o.stderr);
+}
+
+#[test]
 fn offer_counts_the_same_file_once() {
     let e = Env::new("offer-dedup");
     e.file("a.txt", b"a\n");
