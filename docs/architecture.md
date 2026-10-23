@@ -220,7 +220,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   temp dir, so the final move stays an atomic `rename`); actions declaring
   `batch=no` run per file, one after the other (parallel runs may come
   later). A two-step route runs both steps in the same temp dir; only the
-  last step's outputs are placed.
+  last step's outputs are placed. Step 1's outputs are checked again once
+  its whole group is gone (a regular file, no symlink on the way), so an
+  action cannot swap one for a link before step 2 reads it.
 - The supervisor is a single-threaded `poll` loop over the action's
   pipes, a cancel `signalfd` and the child's pidfd; its only timers are an
   hourly refresh of the temp dir's mtime and the grace after `SIGTERM`.

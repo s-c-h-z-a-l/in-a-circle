@@ -51,6 +51,9 @@
 //!   fill a disk.
 //! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
 //!   installs none (sockets and metadata are then not restricted).
+//! - No `RLIMIT_NPROC` or memory limit: an action can fork-bomb or exhaust
+//!   RAM until it is cancelled.
+//! - Keyring syscalls (`keyctl`, `add_key`, `request_key`) are allowed.
 
 use std::fs::OpenOptions;
 use std::io;
@@ -130,8 +133,13 @@ impl AsRawFd for Ruleset {
 pub struct Policy<'a> {
     /// Read + execute. A path that does not exist is skipped.
     pub exec: &'a [PathBuf],
-    /// Read only (the inputs, the `--inputs-from` file). Must exist.
+    /// Read only, followed if a symlink (the user's inputs: a link to a
+    /// file is the file the user meant). Must exist.
     pub read: &'a [PathBuf],
+    /// Read only, made by the engine (intermediate outputs, the
+    /// `--inputs-from` file): a symlink is refused, never followed. Must
+    /// exist.
+    pub read_exact: &'a [PathBuf],
     /// Full write (the work dir). Must exist.
     pub write: &'a Path,
 }
@@ -220,8 +228,12 @@ fn build_for_abi(policy: &Policy, abi: u32) -> io::Result<Ruleset> {
             r => r?,
         }
     }
+    let read = (ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR) & fs;
     for p in policy.read {
-        allow(&ruleset, p, (ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR) & fs)?;
+        allow(&ruleset, p, read)?;
+    }
+    for p in policy.read_exact {
+        allow_at(&ruleset, p, read, libc::O_NOFOLLOW)?;
     }
     allow(&ruleset, policy.write, fs)?;
     Ok(ruleset)
@@ -230,11 +242,24 @@ fn build_for_abi(policy: &Policy, abi: u32) -> io::Result<Ruleset> {
 /// Adds a rule granting `access` beneath `path`, limited to the
 /// file-applicable rights when `path` is not a directory.
 fn allow(ruleset: &Ruleset, path: &Path, access: u64) -> io::Result<()> {
+    allow_at(ruleset, path, access, 0)
+}
+
+/// [`allow`], opening `path` with `O_PATH | flags`. With `O_NOFOLLOW` a
+/// symlink leaf opens as the link itself and is refused.
+fn allow_at(ruleset: &Ruleset, path: &Path, access: u64, flags: libc::c_int) -> io::Result<()> {
     let f = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_PATH)
+        .custom_flags(libc::O_PATH | flags)
         .open(path)?;
-    let access = if f.metadata()?.is_dir() {
+    let ft = f.metadata()?.file_type();
+    if ft.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("landlock rule for {}: is a symlink", path.display()),
+        ));
+    }
+    let access = if ft.is_dir() {
         access
     } else {
         access & ACCESS_FS_FILE
@@ -546,6 +571,7 @@ pub(crate) mod tests {
         let policy = Policy {
             exec: &exec,
             read,
+            read_exact: &[],
             write,
         };
         build(&policy).unwrap().expect("Landlock available")
@@ -738,6 +764,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exact_read_path_refuses_a_symlink() {
+        if abi_or_skip("exact_read_path_refuses_a_symlink", 1).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let secret = other.0.join("secret");
+        let link = work.0.join("link");
+        fs::write(&secret, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let exec = system_exec();
+        let exact = [link.clone()];
+        let policy = Policy {
+            exec: &exec,
+            read: &[],
+            read_exact: &exact,
+            write: &other.0,
+        };
+        let e = build(&policy).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+        // A regular file is granted and readable.
+        let exact = [secret.clone()];
+        let policy = Policy {
+            exec: &exec,
+            read: &[],
+            read_exact: &exact,
+            write: &work.0,
+        };
+        let rs = build(&policy).unwrap().unwrap();
+        let o = sh(Some(&rs), NO_LIMIT, &format!("cat '{}'", secret.display()));
+        assert_eq!(o.stdout, b"secret\n", "{}", stderr(&o));
+    }
+
+    #[test]
     fn listed_input_dir_readable_not_writable_not_executable() {
         if abi_or_skip("listed_input_dir_readable_not_writable_not_executable", 1).is_none() {
             return;
@@ -774,6 +834,7 @@ pub(crate) mod tests {
         let policy = Policy {
             exec: &exec,
             read: &[],
+            read_exact: &[],
             write: &work.0,
         };
         let rs = build(&policy).unwrap().unwrap();
@@ -792,6 +853,7 @@ pub(crate) mod tests {
         let policy = Policy {
             exec: &exec,
             read: &read,
+            read_exact: &[],
             write: &work.0,
         };
         let e = build(&policy).unwrap_err();
@@ -800,6 +862,7 @@ pub(crate) mod tests {
         let policy = Policy {
             exec: &exec,
             read: &[],
+            read_exact: &[],
             write: &gone,
         };
         assert_eq!(build(&policy).unwrap_err().kind(), io::ErrorKind::NotFound);
@@ -816,6 +879,7 @@ pub(crate) mod tests {
         let policy = Policy {
             exec: &exec,
             read: &[],
+            read_exact: &[],
             write: &work.0,
         };
         for abi in 1..=top {

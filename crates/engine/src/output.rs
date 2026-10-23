@@ -616,6 +616,12 @@ fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
     Ok((dir, leaf))
 }
 
+/// Checks that `rel` beneath `root` is a regular file reached without any
+/// symlink on the way (see [`resolve_beneath`]).
+pub(crate) fn check_regular_beneath(root: &Path, rel: &Path) -> io::Result<()> {
+    resolve_beneath(root, rel).map(drop)
+}
+
 /// The placed name must still be the regular file we moved (a leaf swapped
 /// for a symlink between the check and the rename would land as a link):
 /// otherwise it is removed again.

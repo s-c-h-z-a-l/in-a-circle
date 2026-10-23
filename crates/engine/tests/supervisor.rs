@@ -273,3 +273,127 @@ fn more_than_1_mib_of_output_paths_is_a_violation() {
     assert_eq!(dones(&r), 0);
     assert_eq!(placed_files(&t), 0);
 }
+
+/// Step 1 of a two-step route: copies input `i` to `<work>/i/a.mid`, reports
+/// it, then runs `after` (with `$work`).
+fn copy_step(after: &str) -> String {
+    format!(
+        "work=$4; i=0\n\
+         while IFS= read -r in; do mkdir -p \"$work/$i\"; cat \"$in\" > \"$work/$i/a.mid\"\n\
+         printf 'done\\t%s\\t%s/a.mid\\n' \"$in\" $i; i=$((i+1)); done < \"$6\"\n\
+         {after}"
+    )
+}
+
+/// Step 2: appends `+` to each input, as `<work>/j/out.md`.
+const APPEND_STEP: &str = "work=$4; j=0\n\
+     while IFS= read -r in; do mkdir -p \"$work/$j\"; { cat \"$in\"; echo +; } > \"$work/$j/out.md\"\n\
+     printf 'done\\t%s\\t%s/out.md\\n' \"$in\" $j; j=$((j+1)); done < \"$6\"";
+
+#[test]
+fn two_step_route_places_the_last_steps_output() {
+    let t = Tmp::new("twostep");
+    let a = t.input("a.txt", "a\n");
+    let b = t.input("b.txt", "b\n");
+    let s1 = t.script("copy", &copy_step(""));
+    let s2 = t.script("append", APPEND_STEP);
+    let (a1, a2) = (action(&s1, "mid"), action(&s2, "md"));
+    let (r, _) = run(&[&a1, &a2], &[a.clone(), b.clone()], None);
+    assert_eq!(dones(&r), 2, "{:?}", r.outcomes);
+    let docs = t.0.join("docs");
+    assert_eq!(
+        std::fs::read_to_string(docs.join("a.md")).unwrap(),
+        "a\n+\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(docs.join("b.md")).unwrap(),
+        "b\n+\n"
+    );
+    assert_eq!(placed_files(&t), 2);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// A secret outside every sandbox rule: `<tmp>/secret/a.mid`, mode 0600.
+fn secret(t: &Tmp) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let d = t.0.join("secret");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("a.mid");
+    std::fs::write(&p, "SECRET\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    p
+}
+
+/// Nothing of the secret reached the user's folder.
+fn assert_no_secret_placed(t: &Tmp) {
+    for e in std::fs::read_dir(t.0.join("docs")).unwrap().flatten() {
+        let body = std::fs::read(e.path()).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("SECRET"),
+            "secret leaked into {}",
+            e.path().display()
+        );
+    }
+}
+
+#[test]
+fn two_step_intermediate_swapped_for_a_symlink_fails() {
+    let t = Tmp::new("swapfile");
+    let a = t.input("a.txt", "a\n");
+    let b = t.input("b.txt", "b\n");
+    let key = secret(&t);
+    // After reporting, input 0's output becomes a link to the secret.
+    let s1 = t.script(
+        "swapfile",
+        &copy_step(&format!(
+            "rm \"$work/0/a.mid\"; ln -s '{}' \"$work/0/a.mid\"",
+            key.display()
+        )),
+    );
+    let s2 = t.script("append", APPEND_STEP);
+    let (a1, a2) = (action(&s1, "mid"), action(&s2, "md"));
+    let (r, _) = run(&[&a1, &a2], &[a.clone(), b.clone()], None);
+    assert_eq!(
+        failed(&r),
+        [(a, "intermediate output changed".to_owned())],
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(dones(&r), 1);
+    let docs = t.0.join("docs");
+    assert_eq!(
+        std::fs::read_to_string(docs.join("b.md")).unwrap(),
+        "b\n+\n"
+    );
+    assert_no_secret_placed(&t);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+#[test]
+fn two_step_intermediate_dir_swapped_for_a_symlink_fails() {
+    let t = Tmp::new("swapdir");
+    let a = t.input("a.txt", "a\n");
+    let key = secret(&t);
+    // After reporting, `<work>/0` becomes a link to the secret's folder,
+    // which holds a file of the reported name.
+    let s1 = t.script(
+        "swapdir",
+        &copy_step(&format!(
+            "mv \"$work/0\" \"$work/moved\"; ln -s '{}' \"$work/0\"",
+            key.parent().unwrap().display()
+        )),
+    );
+    let s2 = t.script("append", APPEND_STEP);
+    let (a1, a2) = (action(&s1, "mid"), action(&s2, "md"));
+    let (r, _) = run(&[&a1, &a2], std::slice::from_ref(&a), None);
+    assert_eq!(
+        failed(&r),
+        [(a, "intermediate output changed".to_owned())],
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(dones(&r), 0);
+    assert_eq!(placed_files(&t), 0);
+    assert_no_secret_placed(&t);
+    assert!(t.work_dirs_left().is_empty());
+}

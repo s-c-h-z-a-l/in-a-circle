@@ -433,6 +433,8 @@ fn group_by_target(
 struct StepIn {
     paths: Vec<PathBuf>,
     origin: Vec<usize>,
+    /// The paths are the previous step's outputs, not the user's inputs.
+    intermediate: bool,
 }
 
 fn run_group(
@@ -456,6 +458,7 @@ fn run_group(
     let mut step_in = StepIn {
         paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
         origin: members.to_vec(),
+        intermediate: false,
     };
     for (s, action) in route.iter().enumerate() {
         sink.step = s;
@@ -481,14 +484,35 @@ fn run_group(
             place_outputs(action, &step_in, outputs, &dir, target, sink);
             return;
         }
+        // Each output was checked when its `done` arrived, but the action
+        // could swap it for a symlink afterwards. Its whole process group is
+        // gone now (`outputs` is `None` otherwise) and the next step can
+        // write only its own dir, so what resolves here stays put.
+        let mut changed: Vec<usize> = Vec::new();
+        for (j, outs) in outputs.iter().enumerate() {
+            let o = step_in.origin[j];
+            if !changed.contains(&o)
+                && outs
+                    .iter()
+                    .any(|rel| output::check_regular_beneath(&dir, rel).is_err())
+            {
+                changed.push(o);
+                sink.fail(o, "intermediate output changed".to_owned());
+            }
+        }
         let mut next = StepIn {
             paths: Vec::new(),
             origin: Vec::new(),
+            intermediate: true,
         };
         for (j, outs) in outputs.iter().enumerate() {
+            let o = step_in.origin[j];
+            if changed.contains(&o) {
+                continue;
+            }
             for rel in outs {
                 next.paths.push(dir.join(rel));
-                next.origin.push(step_in.origin[j]);
+                next.origin.push(o);
             }
         }
         if next.paths.is_empty() {
@@ -802,11 +826,18 @@ fn run_step(
         .filter(|p| p.exists())
         .collect();
     exec.push(action.bin.clone());
-    let mut read = step_in.paths.clone();
-    read.push(list.to_path_buf());
+    // Intermediate outputs and the list are the engine's: never followed.
+    let mut exact = vec![list.to_path_buf()];
+    let read = if step_in.intermediate {
+        exact.extend_from_slice(&step_in.paths);
+        &[][..]
+    } else {
+        &step_in.paths[..]
+    };
     let policy = Policy {
         exec: &exec,
-        read: &read,
+        read,
+        read_exact: &exact,
         write: dir,
     };
     let ruleset = if landlock {

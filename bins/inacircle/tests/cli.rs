@@ -567,6 +567,129 @@ fn catalog_from_actions_dir_list() {
     assert_eq!(o.code, Some(2));
 }
 
+// ---- two-step routes through plugin scripts ----
+
+/// A `#!/bin/sh` plugin in `actions/`: `--manifest` prints one action
+/// `in` -> `out`, `run` executes `body` (`$work`, `$list` set). Written
+/// under a temporary name by `cp` and renamed, so no fd of this process
+/// is open on it when another test's child execs it (ETXTBSY).
+fn plugin(e: &Env, name: &str, input: &str, output: &str, ext: &str, body: &str) {
+    let src = e.root.join(format!("{name}.src"));
+    fs::write(
+        &src,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --manifest ]; then\n\
+             printf 'inacircle-manifest 0\\naction\\tp.{name}\\tfamily=p\\tin={input}\\tout={output}\\text={ext}\\tlabel={name}\\tgroup=p\\tcost=1\\tlossy=no\\tbatch=yes\\n'\n\
+             exit 0\nfi\n\
+             work=\"$4\"; list=\"$6\"\n{body}\n"
+        ),
+    )
+    .unwrap();
+    let tmp = e.root.join("actions").join(format!(".{name}.tmp"));
+    assert!(
+        Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, e.root.join("actions").join(name)).unwrap();
+}
+
+/// Step 1 of the route text/plain -> text/x-mid -> text/markdown: copies
+/// the first input to `0/a.mid`, reports it, then runs `after`.
+fn mid_step(e: &Env, after: &str) {
+    plugin(
+        e,
+        "s1",
+        "text/plain",
+        "text/x-mid",
+        "mid",
+        &format!(
+            "in=$(head -n1 \"$list\"); mkdir -p \"$work/0\"; cat \"$in\" > \"$work/0/a.mid\"\n\
+             printf 'done\\t%s\\t0/a.mid\\n' \"$in\"\n{after}"
+        ),
+    );
+    plugin(
+        e,
+        "s2",
+        "text/x-mid",
+        "text/markdown",
+        "md",
+        "in=$(head -n1 \"$list\"); mkdir -p \"$work/0\"; { cat \"$in\"; echo +; } > \"$work/0/out.md\"\n\
+         printf 'done\\t%s\\t0/out.md\\n' \"$in\"",
+    );
+}
+
+/// True (and a note printed) when plugins could not run for lack of Landlock.
+fn skip_no_sandbox(test: &str, o: &Out) -> bool {
+    if o.pairs("fail")
+        .iter()
+        .any(|(_, m)| m == "sandbox unavailable")
+    {
+        assert!(
+            !landlock_required(),
+            "{test}: Landlock unavailable but INACIRCLE_REQUIRE_LANDLOCK=1"
+        );
+        eprintln!("{test}: skipped, Landlock unavailable");
+        return true;
+    }
+    false
+}
+
+#[test]
+fn two_step_route_end_to_end() {
+    let e = Env::with_actions("twostep", &[]);
+    mid_step(&e, "");
+    let a = e.file("doc.txt", b"text\n");
+    let o = e.run(&["run", "markdown", "doc.txt"]);
+    if skip_no_sandbox("two_step_route_end_to_end", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("doc.md");
+    assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
+    assert_eq!(fs::read_to_string(&out).unwrap(), "text\n+\n");
+}
+
+#[test]
+fn two_step_intermediate_symlink_swap_is_refused() {
+    let e = Env::with_actions("swap", &[]);
+    let secret = e.root.join("secret/key");
+    fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    fs::write(&secret, b"SECRET\n").unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    mid_step(
+        &e,
+        &format!(
+            "rm \"$work/0/a.mid\"; ln -s '{}' \"$work/0/a.mid\"",
+            secret.display()
+        ),
+    );
+    let a = e.file("doc.txt", b"text\n");
+    let o = e.run(&["run", "markdown", "doc.txt"]);
+    if skip_no_sandbox("two_step_intermediate_symlink_swap_is_refused", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
+    assert_eq!(
+        o.pairs("fail"),
+        [(a, "intermediate output changed".to_owned())]
+    );
+    assert!(!e.files().join("doc.md").exists());
+    for f in fs::read_dir(e.files()).unwrap().flatten() {
+        let body = fs::read_to_string(f.path()).unwrap_or_default();
+        assert!(
+            !body.contains("SECRET"),
+            "leaked into {}",
+            f.path().display()
+        );
+    }
+}
+
 // ---- contract and sandbox through inacircle-testaction ----
 
 fn run_test_action(e: &Env, inputs: &[&Path]) -> Out {
