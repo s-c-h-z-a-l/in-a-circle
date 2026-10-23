@@ -32,7 +32,9 @@ it's a bug.
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
    - peak RSS: <= 5 MB
-   - binary: <= 500 KB
+   - binary: `inacircle` <= 1.5 MB; each family binary <= 1 MB of code
+     (embedded data such as fonts is justified and measured separately).
+     A plan that grows a binary by more than 100 KB explains why.
    - dependencies of shipped binaries: `libc` only, unless justified by a
      measurement. Build- and test-time tools may use a few pinned crates
      (e.g. offline atlas baking, test-suite loaders); a check keeps them

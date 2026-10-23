@@ -42,7 +42,7 @@ are in `CLAUDE.md`.
 
 ## Actions and families
 
-- `inacircle` is the wheel and the engine (≤ 500 KB). Actions are separate
+- `inacircle` is the wheel and the engine (≤ 1.5 MB). Actions are separate
   executables, started after the drop.
 - **One binary per family.** A family is a shared internal model: a
   document tree (text and office documents), a value tree (JSON, YAML,
