@@ -115,7 +115,7 @@ In short:
   `MSG_CTRUNC` as an error.
 - Overlay: wlr-layer-shell.
 - Text: alpha glyph atlas baked offline at the exact sizes used (scale 1
-  and 2), embedded in the binary. No runtime font parsing.
+  now; scale 2 later), embedded in the binary. No runtime font parsing.
 - Rendering: own analytic rasterizer straight into `wl_shm` buffers (CPU),
   no rasterizer dependency. One-octant coverage table mirrored by the
   wheel's symmetry + LUT. Damage-only repaint, damaged against what is on

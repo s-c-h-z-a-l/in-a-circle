@@ -517,8 +517,8 @@ fn lock_with_deadline(file: &File, wait: Duration) -> io::Result<()> {
 /// with the reason. Folders recorded as made for this job are removed if
 /// empty afterwards. The history is held under an exclusive `flock` for the
 /// whole undo (waiting at most 2 s for it), so two undos of one job cannot
-/// both run. A job that is
-/// still running is refused (`ResourceBusy`): it could place more files.
+/// both run. A job that is still running is refused (`ResourceBusy`): it
+/// could place more files.
 ///
 /// The history is streamed: only lines that mention the job are parsed.
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
