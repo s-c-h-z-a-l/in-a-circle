@@ -276,7 +276,15 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         },
         Target::Action(_) => None,
     };
+    // The measurement switch: our CPU at each phase boundary of the run.
+    let mut lap = measuring().then(|| vec![("start", cpu_us(libc::RUSAGE_SELF))]);
+    let mut mark = |name: &'static str| {
+        if let Some(l) = &mut lap {
+            l.push((name, cpu_us(libc::RUSAGE_SELF)));
+        }
+    };
     let cat = Catalog::load();
+    mark("catalog");
     // The input type, the route, and why a matching input cannot run.
     let (mime, route, blocked): (&str, Vec<&Action>, Option<String>) = match (target, preset) {
         (Target::Preset(_), Some(p)) => match menu::route(&cat, p.input, p.output) {
@@ -340,6 +348,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
     });
 
+    mark("classify");
     let job = journal::new_job_id();
     let mut running = Running::start(&job, &name, inputs.len());
     let mut rec = Recorder::open(&job, &name);
@@ -363,10 +372,12 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         };
         exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
     };
+    mark("exec");
     // Read now: a cancel after this point stopped nothing.
     let cancelled = cancel.is_cancelled();
     let tally = rec.finish(sandboxed);
     drop(running);
+    mark("record");
 
     let (done, skipped, failed) = tally.counts();
     out(&Line::new("summary")
@@ -377,6 +388,13 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // Before the notifications: their cost is measured on its own.
     if measuring() {
         measure();
+    }
+    if let Some(l) = &lap {
+        let phases: Vec<String> = l
+            .windows(2)
+            .map(|w| format!("{}_cpu_us={}", w[1].0, w[1].1 - w[0].1))
+            .collect();
+        eprintln!("inacircle: measure run {}", phases.join(" "));
     }
     // The job is closed in the history and gone from the registry, so an
     // Undo click can undo it. The token stays: a signal in the Undo window
