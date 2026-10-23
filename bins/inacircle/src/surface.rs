@@ -1117,6 +1117,11 @@ mod tests {
     /// The events of a drag over us: a new offer with copy negotiated,
     /// entered at serial `serial`.
     fn drag_enters(s: &Surface, offer: u32, serial: u32) -> Vec<u8> {
+        drag_enters_with(s, offer, serial, DND_COPY)
+    }
+
+    /// `drag_enters`, with `action` negotiated instead of copy.
+    fn drag_enters_with(s: &Surface, offer: u32, serial: u32, action: u32) -> Vec<u8> {
         let dd = s.id.data_device;
         let at = 100 * 256; // wl_fixed 100.0
         let mut m = msg(dd, op::wl_data_device::DATA_OFFER, &[offer]);
@@ -1125,7 +1130,7 @@ mod tests {
             op::wl_data_device::ENTER,
             &[serial, 1, at, at, offer],
         ));
-        m.extend(msg(offer, op::wl_data_offer::ACTION, &[DND_COPY]));
+        m.extend(msg(offer, op::wl_data_offer::ACTION, &[action]));
         m
     }
 
@@ -1215,7 +1220,9 @@ mod tests {
         let (mut s, server) = fake_compositor();
         let mut ev = drag_enters(&s, DEVICE_OFFER_A, 1);
         ev.extend(msg(s.id.data_device, op::wl_data_device::DROP, &[]));
-        ev.extend(drag_enters(&s, DEVICE_OFFER_B, 2));
+        // Drag B negotiates no copy: `finish` must use the action of the
+        // drop (copy), not the current drag's.
+        ev.extend(drag_enters_with(&s, DEVICE_OFFER_B, 2, 0));
         deliver(&mut s, &server, &ev);
         s.start_read().unwrap();
         let (reqs, mut fds) = requests(&mut s, &server);
