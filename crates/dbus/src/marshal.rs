@@ -2,10 +2,18 @@
 
 use crate::Error;
 
-/// Variants nested this deep or deeper are rejected.
-const MAX_VARIANT_DEPTH: usize = 64;
-/// Maximum container nesting of one signature.
+/// Maximum container nesting while reading, counted across arrays, structs,
+/// dict entries and variants together (the inner signature of a variant
+/// continues at the depth of the variant).
+const MAX_DEPTH: usize = 64;
+/// Maximum container nesting of one signature string. Arrays and structs are
+/// deliberately counted together: stricter than the spec (32 of each), and
+/// the depth is shared with the variants in `MAX_DEPTH`, so do not "fix" it
+/// into separate counters.
 const MAX_SIG_DEPTH: usize = 32;
+/// Values (every scalar, string, container and variant) one `Reader` may
+/// produce; a peer must not turn a few KiB on the wire into megabytes of heap.
+const MAX_VALUES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -63,6 +71,76 @@ fn align_of(sig: &str) -> usize {
         Some(b'b' | b'i' | b'u' | b's' | b'o' | b'a') => 4,
         Some(b'x' | b't' | b'(' | b'{') => 8,
         _ => 1,
+    }
+}
+
+pub(crate) fn validate_str(s: &str) -> Result<(), Error> {
+    if s.contains('\0') {
+        return Err(Error::Malformed("NUL inside string"));
+    }
+    Ok(())
+}
+
+/// Checks that `v` can be written as valid wire data: no interior NULs,
+/// signatures within 255 bytes, items matching their declared signatures.
+pub(crate) fn validate(v: &Value) -> Result<(), Error> {
+    validate_at(v, 0)
+}
+
+fn one_type(sig: &str) -> Result<Ty, Error> {
+    let mut pos = 0;
+    let t = parse_type(sig, &mut pos, 0)?;
+    if pos != sig.len() {
+        return Err(Error::Malformed("signature is not one complete type"));
+    }
+    Ok(t)
+}
+
+fn validate_at(v: &Value, depth: usize) -> Result<(), Error> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Malformed("containers nested too deep"));
+    }
+    match v {
+        Value::Str(s) | Value::Path(s) => validate_str(s),
+        Value::Sig(s) => {
+            validate_str(s)?;
+            if s.len() > 255 {
+                return Err(Error::Malformed("signature too long"));
+            }
+            Ok(())
+        }
+        Value::Array(elem, items) => {
+            one_type(elem)?;
+            for it in items {
+                if it.signature() != *elem {
+                    return Err(Error::Malformed("array item does not match its signature"));
+                }
+                validate_at(it, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Struct(fields) => fields.iter().try_for_each(|f| validate_at(f, depth + 1)),
+        Value::Dict(ks, vs, entries) => {
+            if !one_type(ks)?.is_basic() {
+                return Err(Error::Malformed("dict key is not a basic type"));
+            }
+            one_type(vs)?;
+            for (k, val) in entries {
+                if k.signature() != *ks || val.signature() != *vs {
+                    return Err(Error::Malformed("dict entry does not match its signature"));
+                }
+                validate_at(k, depth + 1)?;
+                validate_at(val, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Variant(inner) => {
+            if inner.signature().len() > 255 {
+                return Err(Error::Malformed("signature too long"));
+            }
+            validate_at(inner, depth + 1)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -299,10 +377,14 @@ fn parse_all(sig: &str) -> Result<Vec<Ty>, Error> {
 }
 
 /// Deserializes values; offsets are counted from the start of `buf`.
+/// Padding bytes are not checked (the spec says zero): being lenient on
+/// input is harmless for a client.
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     le: bool,
+    /// Values we may still produce.
+    budget: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -311,7 +393,19 @@ impl<'a> Reader<'a> {
             buf,
             pos: 0,
             le: little_endian,
+            budget: MAX_VALUES,
         }
+    }
+
+    /// Values this reader may still produce.
+    pub(crate) fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Continues another reader's value budget (one budget per message).
+    pub(crate) fn with_budget(mut self, budget: usize) -> Reader<'a> {
+        self.budget = budget;
+        self
     }
 
     /// True when every byte has been consumed.
@@ -366,7 +460,20 @@ impl<'a> Reader<'a> {
         Ok(s.to_owned())
     }
 
-    fn read_ty(&mut self, ty: &Ty, vdepth: usize) -> Result<Value, Error> {
+    /// Reads one value; `depth` is the number of containers around it.
+    fn read_ty(&mut self, ty: &Ty, depth: usize) -> Result<Value, Error> {
+        self.budget = self
+            .budget
+            .checked_sub(1)
+            .ok_or(Error::Malformed("too many values"))?;
+        if depth >= MAX_DEPTH
+            && matches!(
+                ty,
+                Ty::Variant | Ty::Array(..) | Ty::Struct(_) | Ty::Dict(..)
+            )
+        {
+            return Err(Error::Malformed("containers nested too deep"));
+        }
         macro_rules! num {
             ($t:ty, $n:expr, $v:path) => {{
                 self.align($n)?;
@@ -404,9 +511,6 @@ impl<'a> Reader<'a> {
                 Value::Sig(self.text(n)?)
             }
             Ty::Variant => {
-                if vdepth + 1 >= MAX_VARIANT_DEPTH {
-                    return Err(Error::Malformed("variants nested too deep"));
-                }
                 let n = self.take(1)?[0] as usize;
                 let sig = self.text(n)?;
                 let mut pos = 0;
@@ -414,13 +518,13 @@ impl<'a> Reader<'a> {
                 if pos != sig.len() {
                     return Err(Error::Malformed("variant signature is not one type"));
                 }
-                Value::Variant(Box::new(self.read_ty(&inner, vdepth + 1)?))
+                Value::Variant(Box::new(self.read_ty(&inner, depth + 1)?))
             }
             Ty::Array(es, elem) => {
                 let end = self.array_end(elem_align(elem))?;
                 let mut items = Vec::new();
                 while self.pos < end {
-                    items.push(self.read_ty(elem, vdepth)?);
+                    items.push(self.read_ty(elem, depth + 1)?);
                 }
                 if self.pos != end {
                     return Err(Error::Malformed("array length mismatch"));
@@ -431,7 +535,7 @@ impl<'a> Reader<'a> {
                 self.align(8)?;
                 let mut out = Vec::with_capacity(fields.len());
                 for f in fields {
-                    out.push(self.read_ty(f, vdepth)?);
+                    out.push(self.read_ty(f, depth + 1)?);
                 }
                 Value::Struct(out)
             }
@@ -440,8 +544,8 @@ impl<'a> Reader<'a> {
                 let mut entries = Vec::new();
                 while self.pos < end {
                     self.align(8)?;
-                    let key = self.read_ty(k, vdepth)?;
-                    let val = self.read_ty(v, vdepth)?;
+                    let key = self.read_ty(k, depth + 1)?;
+                    let val = self.read_ty(v, depth + 1)?;
                     entries.push((key, val));
                 }
                 if self.pos != end {
@@ -612,10 +716,159 @@ mod tests {
 
     #[test]
     fn variant_nesting_is_limited() {
-        let ok = nested_variants(10);
-        assert!(Reader::new(&ok, true).read("v").is_ok());
+        for levels in [10, 63] {
+            let ok = nested_variants(levels);
+            assert!(Reader::new(&ok, true).read("v").is_ok(), "{levels}");
+        }
         for levels in [64, 100, 10_000] {
             err("v", &nested_variants(levels));
         }
+    }
+
+    #[test]
+    fn big_endian_reads_every_integer_width() {
+        let bytes = [
+            0xff, 0xfe, // n = -2
+            0x01, 0x02, // q = 0x0102
+            0, 0, 0, 1, // b = true
+            0xff, 0xff, 0xff, 0xfb, // i = -5
+            0, 0, 0, 0, // padding to 8
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd, // x = -3
+            1, 2, 3, 4, 5, 6, 7, 8, // t
+        ];
+        let mut r = Reader::new(&bytes, false);
+        assert_eq!(
+            r.read("nqbixt").unwrap(),
+            vec![
+                Value::I16(-2),
+                Value::U16(0x0102),
+                Value::Bool(true),
+                Value::I32(-5),
+                Value::I64(-3),
+                Value::U64(0x0102030405060708),
+            ]
+        );
+        assert!(r.finished());
+    }
+
+    #[test]
+    fn nonzero_padding_is_tolerated() {
+        let bytes = [1, 9, 9, 9, 7, 0, 0, 0];
+        let v = Reader::new(&bytes, true).read("yu").unwrap();
+        assert_eq!(v, vec![Value::Byte(1), Value::U32(7)]);
+    }
+
+    fn ay(n: usize) -> Vec<u8> {
+        let mut b = (n as u32).to_le_bytes().to_vec();
+        b.resize(4 + n, 0);
+        b
+    }
+
+    #[test]
+    fn value_budget_stops_a_byte_array_flood() {
+        // A 64 KiB array of zeros would otherwise become 64 Ki Values.
+        let flood = ay(64 * 1024 - 4);
+        assert!(matches!(
+            Reader::new(&flood, true).read("ay"),
+            Err(Error::Malformed("too many values"))
+        ));
+        // The array itself is one value, each byte one more: 4095 fit.
+        assert_eq!(
+            Reader::new(&ay(4095), true).read("ay").unwrap()[0],
+            Value::Array("y".into(), vec![Value::Byte(0); 4095])
+        );
+        assert!(matches!(
+            Reader::new(&ay(4096), true).read("ay"),
+            Err(Error::Malformed("too many values"))
+        ));
+    }
+
+    #[test]
+    fn value_budget_counts_containers_and_variants() {
+        // 2049 empty arrays: 2049 + 1 values; 4096 of them exceed the budget.
+        let mut b = ((2049 * 4) as u32).to_le_bytes().to_vec();
+        b.resize(4 + 2049 * 4, 0);
+        assert!(Reader::new(&b, true).read("aay").is_ok());
+        let mut b = ((4096 * 4) as u32).to_le_bytes().to_vec();
+        b.resize(4 + 4096 * 4, 0);
+        assert!(matches!(
+            Reader::new(&b, true).read("aay"),
+            Err(Error::Malformed("too many values"))
+        ));
+        // Each av element costs two values (variant + payload).
+        let mut b = ((2048 * 4) as u32).to_le_bytes().to_vec();
+        for _ in 0..2048 {
+            b.extend([1, b'y', 0, 0]);
+        }
+        assert!(matches!(
+            Reader::new(&b, true).read("av"),
+            Err(Error::Malformed("too many values"))
+        ));
+    }
+
+    /// `n` containers nested in each other through variants only.
+    fn variant_chain(n: usize) -> Value {
+        let mut v = Value::Byte(0);
+        for _ in 0..n {
+            v = Value::Variant(Box::new(v));
+        }
+        v
+    }
+
+    /// `layers` of a variant holding a one-element array of the next layer.
+    fn variant_array_chain(layers: usize) -> Value {
+        let mut v = Value::Byte(0);
+        for _ in 0..layers {
+            v = Value::Variant(Box::new(Value::Array(v.signature(), vec![v])));
+        }
+        v
+    }
+
+    fn read_value(v: &Value) -> Result<Vec<Value>, Error> {
+        let mut w = Writer::new(true);
+        w.value(v);
+        let bytes = w.into_bytes();
+        Reader::new(&bytes, true).read(&v.signature())
+    }
+
+    #[test]
+    fn total_container_depth_is_limited_to_64() {
+        // Depth counts arrays, structs, dict entries and variants together.
+        assert!(read_value(&variant_chain(64)).is_ok());
+        assert!(matches!(
+            read_value(&variant_chain(65)),
+            Err(Error::Malformed(_))
+        ));
+        assert!(read_value(&variant_array_chain(32)).is_ok());
+        assert!(matches!(
+            read_value(&variant_array_chain(33)),
+            Err(Error::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn variants_wrapping_deep_signatures_do_not_overflow_the_stack() {
+        // 63 nested variants, each wrapping 31 arrays: about 2000 levels in
+        // total. Must be an error, not a stack overflow, on a default
+        // test-thread stack in a debug build.
+        fn layer(inner: Value, arrays: usize) -> Value {
+            let mut v = inner;
+            for _ in 0..arrays {
+                let sig = v.signature();
+                v = Value::Array(sig, vec![v]);
+            }
+            Value::Variant(Box::new(v))
+        }
+        let mut v = Value::Byte(0);
+        for _ in 0..63 {
+            v = layer(v, 31);
+        }
+        let mut w = Writer::new(true);
+        w.value(&v);
+        let bytes = w.into_bytes();
+        assert!(matches!(
+            Reader::new(&bytes, true).read("v"),
+            Err(Error::Malformed(_))
+        ));
     }
 }

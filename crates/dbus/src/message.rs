@@ -1,10 +1,10 @@
 //! D-Bus messages: fixed header, header fields and body.
 
 use crate::Error;
-use crate::marshal::{Reader, Value, Writer};
+use crate::marshal::{Reader, Value, Writer, validate, validate_str};
 
-/// Largest message (header + body) we accept.
-const MAX_MESSAGE: u64 = 1 << 20;
+/// Largest message (header + body) we accept. Notification traffic is tiny.
+const MAX_MESSAGE: u64 = 64 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -63,12 +63,33 @@ fn field(code: u8, v: Value) -> Value {
 }
 
 /// Serializes `m` in little-endian byte order.
-pub fn encode(m: &Message) -> Vec<u8> {
+///
+/// Fails with `Malformed` instead of producing wire data the peer would
+/// reject: interior NULs, signatures over 255 bytes, array or dict items that
+/// do not match the declared element signature.
+pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
+    for s in [
+        &m.path,
+        &m.interface,
+        &m.member,
+        &m.error_name,
+        &m.destination,
+        &m.sender,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_str(s)?;
+    }
     let mut body = Writer::new(true);
     let mut sig = String::new();
     for v in &m.body {
+        validate(v)?;
         body.value(v);
         sig.push_str(&v.signature());
+    }
+    if sig.len() > 255 {
+        return Err(Error::Malformed("body signature too long"));
     }
     let body = body.into_bytes();
 
@@ -118,7 +139,7 @@ pub fn encode(m: &Message) -> Vec<u8> {
     }
     w.align(8);
     w.bytes(&body);
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 fn u32_at(head: &[u8; 16], at: usize, le: bool) -> u32 {
@@ -139,7 +160,7 @@ fn endian(marker: u8) -> Result<bool, Error> {
 }
 
 /// Total message length (header, padding, body) from the fixed 16-byte
-/// prefix. At most 1 MiB.
+/// prefix. At most 64 KiB.
 pub fn frame_len(head: &[u8; 16]) -> Result<usize, Error> {
     let le = endian(head[0])?;
     let body = u64::from(u32_at(head, 4, le));
@@ -149,20 +170,6 @@ pub fn frame_len(head: &[u8; 16]) -> Result<usize, Error> {
         return Err(Error::TooLarge);
     }
     Ok(total as usize)
-}
-
-fn take_str(v: Value) -> Result<String, Error> {
-    match v {
-        Value::Str(s) | Value::Path(s) | Value::Sig(s) => Ok(s),
-        _ => Err(Error::Malformed("header field has the wrong type")),
-    }
-}
-
-fn take_u32(v: Value) -> Result<u32, Error> {
-    match v {
-        Value::U32(n) => Ok(n),
-        _ => Err(Error::Malformed("header field has the wrong type")),
-    }
 }
 
 /// Parses exactly one complete message.
@@ -183,6 +190,7 @@ pub fn decode(buf: &[u8]) -> Result<Message, Error> {
 
     let mut r = Reader::new(&buf[..total - body_len], le);
     let mut hdr = r.read("yyyyuua(yv)")?.into_iter();
+    let left = r.budget();
     let (Some(Value::Byte(_)), Some(Value::Byte(kind)), Some(Value::Byte(_)), Some(Value::Byte(_))) =
         (hdr.next(), hdr.next(), hdr.next(), hdr.next())
     else {
@@ -226,17 +234,16 @@ pub fn decode(buf: &[u8]) -> Result<Message, Error> {
             unreachable!()
         };
         let v = *v;
-        match code {
-            1 if matches!(v, Value::Path(_)) => m.path = Some(take_str(v)?),
-            1 => return Err(Error::Malformed("header field has the wrong type")),
-            2 => m.interface = Some(take_str(v)?),
-            3 => m.member = Some(take_str(v)?),
-            4 => m.error_name = Some(take_str(v)?),
-            5 => m.reply_serial = Some(take_u32(v)?),
-            6 => m.destination = Some(take_str(v)?),
-            7 => m.sender = Some(take_str(v)?),
-            8 if matches!(v, Value::Sig(_)) => m.signature = take_str(v)?,
-            8 => return Err(Error::Malformed("header field has the wrong type")),
+        match (code, v) {
+            (1, Value::Path(s)) => m.path = Some(s),
+            (2, Value::Str(s)) => m.interface = Some(s),
+            (3, Value::Str(s)) => m.member = Some(s),
+            (4, Value::Str(s)) => m.error_name = Some(s),
+            (5, Value::U32(n)) => m.reply_serial = Some(n),
+            (6, Value::Str(s)) => m.destination = Some(s),
+            (7, Value::Str(s)) => m.sender = Some(s),
+            (8, Value::Sig(s)) => m.signature = s,
+            (1..=8, _) => return Err(Error::Malformed("header field has the wrong type")),
             _ => {} // unknown or unused (unix fds): ignored
         }
     }
@@ -251,7 +258,7 @@ pub fn decode(buf: &[u8]) -> Result<Message, Error> {
         return Err(Error::Malformed("required header field missing"));
     }
 
-    let mut br = Reader::new(&buf[total - body_len..], le);
+    let mut br = Reader::new(&buf[total - body_len..], le).with_budget(left);
     m.body = br.read(&m.signature)?;
     if !br.finished() {
         return Err(Error::Malformed("trailing bytes in body"));
@@ -303,7 +310,7 @@ mod tests {
 
     #[test]
     fn hello_call_matches_reference_bytes() {
-        let bytes = encode(&hello());
+        let bytes = encode(&hello()).unwrap();
         assert_eq!(bytes, hello_bytes());
         assert_eq!(decode(&bytes).unwrap(), hello());
     }
@@ -342,7 +349,7 @@ mod tests {
             ],
         );
         assert_eq!(m.signature, "susssasa{sv}i");
-        let bytes = encode(&m);
+        let bytes = encode(&m).unwrap();
         assert_eq!(decode(&bytes).unwrap(), m);
     }
 
@@ -364,7 +371,7 @@ mod tests {
             member: None,
             ..ret
         };
-        assert_eq!(decode(&encode(&ret)).unwrap(), ret);
+        assert_eq!(decode(&encode(&ret).unwrap()).unwrap(), ret);
         let err = Message {
             kind: Kind::Error,
             error_name: Some("org.freedesktop.DBus.Error.UnknownMethod".into()),
@@ -372,7 +379,7 @@ mod tests {
             body: vec![Value::Str("nope".into())],
             ..ret.clone()
         };
-        assert_eq!(decode(&encode(&err)).unwrap(), err);
+        assert_eq!(decode(&encode(&err).unwrap()).unwrap(), err);
         let sig = Message {
             kind: Kind::Signal,
             path: Some("/o".into()),
@@ -383,7 +390,7 @@ mod tests {
             body: vec![Value::U32(4), Value::Str("undo".into())],
             ..ret
         };
-        assert_eq!(decode(&encode(&sig)).unwrap(), sig);
+        assert_eq!(decode(&encode(&sig).unwrap()).unwrap(), sig);
     }
 
     #[test]
@@ -432,7 +439,7 @@ mod tests {
 
     #[test]
     fn frame_len_reads_the_fixed_prefix() {
-        let bytes = encode(&hello());
+        let bytes = encode(&hello()).unwrap();
         let head: [u8; 16] = bytes[..16].try_into().unwrap();
         assert_eq!(frame_len(&head).unwrap(), bytes.len());
     }
@@ -475,15 +482,135 @@ mod tests {
         // Required field missing: a call without MEMBER.
         let mut m = hello();
         m.member = None;
-        assert!(decode(&encode(&m)).is_err());
+        assert!(decode(&encode(&m).unwrap()).is_err());
         // Body longer than the signature says.
         let mut m = hello();
         m.body = vec![Value::U32(1)];
-        let mut b = encode(&m);
+        let mut b = encode(&m).unwrap();
         let n = b.len();
         b[4] = 8; // claim 8 body bytes
         b.extend([0; 4]);
         assert_eq!(b.len(), n + 4);
         assert!(decode(&b).is_err());
+    }
+
+    #[test]
+    fn frame_cap_is_64_kib() {
+        let mut head = [0u8; 16];
+        head[0] = b'l';
+        head[4..8].copy_from_slice(&(64u32 * 1024 - 16).to_le_bytes());
+        assert_eq!(frame_len(&head).unwrap(), 64 * 1024);
+        head[4..8].copy_from_slice(&(64u32 * 1024 - 15).to_le_bytes());
+        assert!(matches!(frame_len(&head), Err(Error::TooLarge)));
+    }
+
+    fn ay_message(n: usize) -> Vec<u8> {
+        let m = Message::call(
+            1,
+            "a.b",
+            "/o",
+            "a.B",
+            "M",
+            vec![Value::Array("y".into(), vec![Value::Byte(0); n])],
+        );
+        encode(&m).unwrap()
+    }
+
+    #[test]
+    fn value_budget_covers_the_whole_message() {
+        // Header fields and body share one budget of 4096 values.
+        assert!(decode(&ay_message(4000)).is_ok());
+        assert!(decode(&ay_message(4060)).is_ok());
+        assert!(matches!(
+            decode(&ay_message(4080)),
+            Err(Error::Malformed("too many values"))
+        ));
+        assert!(matches!(
+            decode(&ay_message(60_000)),
+            Err(Error::Malformed("too many values"))
+        ));
+    }
+
+    #[test]
+    fn header_fields_must_have_their_exact_type() {
+        // Re-type one header field of an encoded call: (code, wrong value).
+        fn with_field(code: u8, v: Value) -> Vec<u8> {
+            let mut fields: Vec<Value> = vec![
+                field(1, Value::Path("/o".into())),
+                field(3, Value::Str("M".into())),
+            ];
+            fields.retain(|f| !matches!(f, Value::Struct(p) if p[0] == Value::Byte(code)));
+            fields.push(field(code, v));
+            let mut w = Writer::new(true);
+            for x in [
+                Value::Byte(b'l'),
+                Value::Byte(1),
+                Value::Byte(0),
+                Value::Byte(1),
+                Value::U32(0),
+                Value::U32(1),
+                Value::Array("(yv)".into(), fields),
+            ] {
+                w.value(&x);
+            }
+            w.align(8);
+            w.into_bytes()
+        }
+        let s = || Value::Str("x".into());
+        let o = || Value::Path("/x".into());
+        let g = || Value::Sig("y".into());
+        // Sanity: the right types decode.
+        assert!(decode(&with_field(2, s())).is_ok());
+        assert!(decode(&with_field(4, s())).is_ok());
+        assert!(decode(&with_field(5, Value::U32(1))).is_ok());
+        assert!(decode(&with_field(6, s())).is_ok());
+        assert!(decode(&with_field(7, s())).is_ok());
+        for code in [2, 3, 4, 6, 7] {
+            for wrong in [o(), g(), Value::U32(1)] {
+                assert!(
+                    decode(&with_field(code, wrong.clone())).is_err(),
+                    "{code} {wrong:?}"
+                );
+            }
+        }
+        assert!(decode(&with_field(1, s())).is_err());
+        assert!(decode(&with_field(1, g())).is_err());
+        assert!(decode(&with_field(5, s())).is_err());
+        assert!(decode(&with_field(8, s())).is_err());
+    }
+
+    #[test]
+    fn encode_rejects_values_that_would_be_invalid_on_the_wire() {
+        let call = |body: Vec<Value>| Message::call(1, "a.b", "/o", "a.B", "M", body);
+        let bad = |body: Vec<Value>| matches!(encode(&call(body)), Err(Error::Malformed(_)));
+        assert!(!bad(vec![Value::Str("fine".into())]));
+        // Interior NUL in strings, paths and signatures.
+        assert!(bad(vec![Value::Str("a\0b".into())]));
+        assert!(bad(vec![Value::Path("/a\0".into())]));
+        // Signature longer than 255 bytes: a variant holding a deep struct.
+        let mut v = Value::Byte(0);
+        for _ in 0..30 {
+            v = Value::Struct(vec![v, Value::Byte(0), Value::Byte(0), Value::Byte(0)]);
+        }
+        assert!(bad(vec![Value::Sig("y".repeat(256))]));
+        // Items that do not match the declared element signature.
+        assert!(bad(vec![Value::Array("s".into(), vec![Value::U32(1)])]));
+        assert!(bad(vec![Value::Array("zz".into(), vec![])]));
+        assert!(bad(vec![Value::Dict(
+            "s".into(),
+            "v".into(),
+            vec![(Value::U32(1), Value::Variant(Box::new(Value::Byte(0))))]
+        )]));
+        assert!(bad(vec![Value::Dict(
+            "s".into(),
+            "v".into(),
+            vec![(Value::Str("k".into()), Value::Byte(0))]
+        )]));
+        // A body signature over 255 bytes.
+        assert!(bad(vec![Value::Byte(0); 256]));
+        // Header strings are checked too.
+        let mut m = call(vec![]);
+        m.member = Some("M\0".into());
+        assert!(matches!(encode(&m), Err(Error::Malformed(_))));
     }
 }
