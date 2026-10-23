@@ -17,9 +17,10 @@ const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
 /// Longest auth reply line ("OK " + 32 hex digits + CRLF is 37 bytes).
 const MAX_LINE: usize = 512;
-/// Signals kept until `recv`; past this the oldest are dropped, so a
-/// broadcast flood cannot grow memory.
-const MAX_QUEUED: usize = 64;
+/// Wire bytes of signals kept until `recv`; past this the oldest are
+/// dropped, so a broadcast flood cannot grow memory. Kept as raw frames: a
+/// decoded frame can take several times its wire size.
+const MAX_QUEUED_BYTES: usize = 256 << 10;
 /// Control buffer for `recvmsg`, in u64 words for cmsghdr alignment: room
 /// for a few fds, so the ones a peer pushes on us can be received and closed.
 const CTRL_WORDS: usize = 4;
@@ -31,7 +32,7 @@ pub enum Address {
 }
 
 /// The session bus: the first unix address in `DBUS_SESSION_BUS_ADDRESS`,
-/// or `$XDG_RUNTIME_DIR/bus` when the variable is not set.
+/// or `$XDG_RUNTIME_DIR/bus` when the variable is not set or empty.
 pub fn session_address() -> Option<Address> {
     address_from(
         std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
@@ -41,8 +42,8 @@ pub fn session_address() -> Option<Address> {
 
 fn address_from(bus: Option<&OsStr>, runtime_dir: Option<&OsStr>) -> Option<Address> {
     match bus {
-        Some(s) => parse_address(s.to_str()?),
-        None => {
+        Some(s) if !s.is_empty() => parse_address(s.to_str()?),
+        _ => {
             let dir = Path::new(runtime_dir?);
             dir.is_absolute().then(|| Address::Path(dir.join("bus")))
         }
@@ -50,20 +51,30 @@ fn address_from(bus: Option<&OsStr>, runtime_dir: Option<&OsStr>) -> Option<Addr
 }
 
 /// The first `unix:path=` or `unix:abstract=` entry of a D-Bus address
-/// list. Other transports and listen-only entries are skipped.
+/// list. Other transports, listen-only and malformed entries are skipped.
 pub fn parse_address(s: &str) -> Option<Address> {
-    s.split(';').find_map(|entry| {
-        let rest = entry.strip_prefix("unix:")?;
-        rest.split(',').find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            let v = unescape(v).filter(|v| !v.is_empty())?;
-            match k {
-                "path" => Some(Address::Path(OsString::from_vec(v).into())),
-                "abstract" => Some(Address::Abstract(v)),
-                _ => None,
-            }
-        })
-    })
+    s.split(';')
+        .find_map(|entry| unix_entry(entry.strip_prefix("unix:")?))
+}
+
+/// The keys of one `unix:` entry: exactly one `path` or `abstract`, maybe a
+/// `guid`. Any other key or a bad value rejects the whole entry.
+fn unix_entry(keys: &str) -> Option<Address> {
+    let mut addr = None;
+    for kv in keys.split(',') {
+        let (k, v) = kv.split_once('=')?;
+        let v = unescape(v).filter(|v| !v.is_empty())?;
+        let a = match k {
+            "path" => Address::Path(OsString::from_vec(v).into()),
+            "abstract" => Address::Abstract(v),
+            "guid" => continue,
+            _ => return None,
+        };
+        if addr.replace(a).is_some() {
+            return None;
+        }
+    }
+    addr
 }
 
 /// Undoes the `%XX` escaping of address values.
@@ -92,9 +103,13 @@ pub struct Conn {
     /// Bytes received but not yet consumed: at most one partial frame (or
     /// the rest of an auth line), because reads never go past the frame.
     buf: Vec<u8>,
-    /// Signals that arrived while waiting for a reply.
-    queue: VecDeque<Message>,
-    /// Set by an error that leaves the stream out of sync.
+    /// Signals that arrived while waiting for a reply, as raw frames.
+    queue: VecDeque<Vec<u8>>,
+    /// Sum of the frame lengths in `queue`.
+    queued: usize,
+    /// Set by an error that leaves the stream out of sync, and by a timed
+    /// out call (its reply may still come, half a request may be on the
+    /// wire).
     broken: bool,
 }
 
@@ -109,6 +124,7 @@ impl Conn {
             serial: 0,
             buf: Vec::new(),
             queue: VecDeque::new(),
+            queued: 0,
             broken: false,
         };
         c.auth(deadline)?;
@@ -141,13 +157,17 @@ impl Conn {
     fn exchange(&mut self, bytes: &[u8], serial: u32, deadline: Instant) -> Result<Message, Error> {
         self.write_all(bytes, deadline)?;
         loop {
-            let r = self.read_message(deadline)?;
+            // Checked even when data keeps coming: a flooding peer must not
+            // stretch the deadline.
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            let frame = self.read_frame(deadline)?;
+            let r = decode(&frame)?;
             match r.kind {
                 Kind::Signal => {
-                    if self.queue.len() == MAX_QUEUED {
-                        self.queue.pop_front();
-                    }
-                    self.queue.push_back(r);
+                    drop(r);
+                    self.enqueue(frame);
                 }
                 Kind::MethodReturn if r.reply_serial == Some(serial) => return Ok(r),
                 Kind::Error if r.reply_serial == Some(serial) => {
@@ -174,16 +194,31 @@ impl Conn {
         self.call(m, deadline).map(drop)
     }
 
+    fn enqueue(&mut self, frame: Vec<u8>) {
+        while self.queued + frame.len() > MAX_QUEUED_BYTES {
+            let Some(old) = self.queue.pop_front() else {
+                break;
+            };
+            self.queued -= old.len();
+        }
+        self.queued += frame.len();
+        self.queue.push_back(frame);
+    }
+
     /// The next signal: queued ones first. `None` when the deadline passes.
     pub fn recv(&mut self, deadline: Instant) -> Result<Option<Message>, Error> {
-        if let Some(m) = self.queue.pop_front() {
-            return Ok(Some(m));
+        if let Some(frame) = self.queue.pop_front() {
+            self.queued -= frame.len();
+            return decode(&frame).map(Some);
         }
         if self.broken {
             return Err(Error::Closed);
         }
         loop {
-            match self.read_message(deadline) {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            match self.read_frame(deadline).and_then(|f| decode(&f)) {
                 Ok(m) if m.kind == Kind::Signal => return Ok(Some(m)),
                 Ok(_) => {}
                 Err(Error::Timeout) => return Ok(None),
@@ -198,10 +233,17 @@ impl Conn {
         !self.queue.is_empty()
     }
 
-    /// Marks the connection broken on errors that desynchronize the stream.
+    /// Wire bytes held by queued signals (for tests).
+    #[doc(hidden)]
+    pub fn queued_bytes(&self) -> usize {
+        self.queued
+    }
+
+    /// Marks the connection broken on any error but a remote one: after a
+    /// timeout the stream may hold half a request or a late reply.
     fn track<T>(&mut self, r: Result<T, Error>) -> Result<T, Error> {
         if let Err(e) = &r
-            && !matches!(e, Error::Timeout | Error::Remote(..))
+            && !matches!(e, Error::Remote(..))
         {
             self.broken = true;
         }
@@ -209,8 +251,9 @@ impl Conn {
     }
 
     fn auth(&mut self, deadline: Instant) -> Result<(), Error> {
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        // The bus checks this against SO_PEERCRED, the effective uid.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::geteuid() };
         let hex: String = uid
             .to_string()
             .bytes()
@@ -239,7 +282,7 @@ impl Conn {
 
     /// Reads exactly one frame: the fixed header first, then no more than
     /// the length it announces.
-    fn read_message(&mut self, deadline: Instant) -> Result<Message, Error> {
+    fn read_frame(&mut self, deadline: Instant) -> Result<Vec<u8>, Error> {
         let total = loop {
             let want = match self.buf.first_chunk::<16>() {
                 Some(head) => frame_len(head)?,
@@ -250,9 +293,7 @@ impl Conn {
             }
             self.fill(want - self.buf.len(), deadline)?;
         };
-        let m = decode(&self.buf[..total]);
-        self.buf.drain(..total);
-        m
+        Ok(self.buf.drain(..total).collect())
     }
 
     /// Appends up to `max` bytes once the socket is readable.
@@ -313,10 +354,15 @@ impl AsRawFd for Conn {
 }
 
 /// Waits until `fd` reports one of `events` (or an error or hangup, which
-/// the following read or write reports), or the deadline passes.
+/// the following read or write reports), or the deadline passes. A passed
+/// deadline wins even over a ready fd.
 fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error> {
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(Error::Timeout);
+        }
+        let left = deadline - now;
         // Round up so the deadline has passed when poll times out.
         let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
         let mut p = libc::pollfd {
@@ -334,8 +380,6 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
             if e.kind() != io::ErrorKind::Interrupted {
                 return Err(e.into());
             }
-        } else if Instant::now() >= deadline {
-            return Err(Error::Timeout);
         }
     }
 }
@@ -507,5 +551,35 @@ mod tests {
         assert_eq!(address_from(None, None), None);
         assert_eq!(address_from(None, os("")), None);
         assert_eq!(address_from(None, os("relative")), None);
+    }
+
+    #[test]
+    fn empty_session_variable_counts_as_unset() {
+        let os = |s: &'static str| Some(OsStr::new(s));
+        assert_eq!(
+            address_from(os(""), os("/run/user/7")),
+            path("/run/user/7/bus")
+        );
+        assert_eq!(address_from(os(""), None), None);
+    }
+
+    #[test]
+    fn unix_entry_with_any_bad_part_is_skipped_whole() {
+        for bad in [
+            "unix:path=%zz,abstract=/x",
+            "unix:abstract=/x,path=%zz",
+            "unix:path=/a,abstract=/b",
+            "unix:path=/a,path=/b",
+            "unix:path=/a,tmpdir=/tmp",
+            "unix:path=/a,noequals",
+            "unix:path=/a,guid=%zz",
+        ] {
+            assert_eq!(
+                parse_address(&format!("{bad};unix:path=/ok")),
+                path("/ok"),
+                "{bad}"
+            );
+        }
+        assert_eq!(parse_address("unix:guid=00,path=/a"), path("/a"));
     }
 }

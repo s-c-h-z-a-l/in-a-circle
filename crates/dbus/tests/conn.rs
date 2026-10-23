@@ -1,7 +1,7 @@
 //! Connection behaviour against a scripted peer (and a real `dbus-daemon`
 //! when one is installed).
 
-mod fake;
+mod common;
 
 use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use common::{Fake, Peer};
 use dbus::{Address, Conn, Error, Message, Value, parse_address};
-use fake::{Fake, Peer};
 
 fn after(ms: u64) -> Instant {
     Instant::now() + Duration::from_millis(ms)
@@ -30,8 +30,8 @@ fn call(member: &str) -> Message {
 #[test]
 fn connects_and_says_hello() {
     let fake = Fake::start(|p| {
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
         let hex: String = uid
             .to_string()
             .chars()
@@ -342,4 +342,132 @@ fn real_daemon_roundtrip() {
     // The daemon announced our name with a signal.
     let s = c.recv(after(2000)).unwrap().unwrap();
     assert_eq!(s.member.as_deref(), Some("NameAcquired"));
+}
+
+/// `n` copies of one encoded message, for a peer that floods.
+fn batch(m: Message, n: usize) -> Vec<u8> {
+    let one = dbus::encode(&Message { serial: 1, ..m }).unwrap();
+    one.repeat(n)
+}
+
+fn signal(member: &str, body: Vec<Value>) -> Message {
+    Message {
+        kind: dbus::Kind::Signal,
+        path: Some("/a".into()),
+        interface: Some("a.B".into()),
+        member: Some(member.into()),
+        reply_serial: None,
+        ..Peer::reply_msg(&call("x"), body)
+    }
+}
+
+#[test]
+fn signal_flood_does_not_extend_a_call_deadline() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        p.recv();
+        p.flood(&batch(signal("Spam", vec![Value::U32(1)]), 64));
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let t = Instant::now();
+    let r = c.call(call("Ping"), t + Duration::from_millis(200));
+    let took = t.elapsed();
+    assert!(matches!(r, Err(Error::Timeout)), "{:?}", r.err());
+    assert!(took <= Duration::from_millis(250), "{took:?}");
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn stale_reply_flood_does_not_extend_a_recv_deadline() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let mut stale = call("x");
+        stale.serial = 9999;
+        p.flood(&batch(Peer::reply_msg(&stale, vec![]), 64));
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let t = Instant::now();
+    let r = c.recv(t + Duration::from_millis(200));
+    let took = t.elapsed();
+    assert!(matches!(r, Ok(None)), "{r:?}");
+    assert!(took <= Duration::from_millis(250), "{took:?}");
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn queued_signals_are_bounded_by_bytes() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        for i in 0..100u32 {
+            p.signal(
+                "/a",
+                "a.B",
+                "Big",
+                vec![
+                    Value::U32(i),
+                    Value::Array("y".into(), vec![Value::Byte(7); 4000]),
+                ],
+            );
+        }
+        p.reply(&m, vec![Value::Str("pong".into())]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let r = c.call(call("Ping"), after(2000)).unwrap();
+    assert_eq!(r.body, vec![Value::Str("pong".into())]);
+    assert!(c.queued_bytes() <= 256 << 10, "{}", c.queued_bytes());
+    // The newest signals survive, in order, and decode intact.
+    let mut last = None;
+    while let Some(s) = c.recv(after(50)).unwrap() {
+        let Value::U32(i) = s.body[0] else { panic!() };
+        assert!(last.is_none_or(|l| l + 1 == i));
+        last = Some(i);
+    }
+    assert_eq!(last, Some(99));
+    assert_eq!(c.queued_bytes(), 0);
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn timed_out_call_breaks_the_connection() {
+    // A late reply would be dropped anyway; the connection is not reused.
+    let fake = Fake::start(|p| {
+        p.handshake();
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    assert!(matches!(
+        c.call(call("Ping"), after(20)),
+        Err(Error::Timeout)
+    ));
+    let t = Instant::now();
+    let r = c.call(call("Ping"), after(500));
+    assert!(matches!(r, Err(Error::Closed)), "{:?}", r.err());
+    assert!(t.elapsed() < Duration::from_millis(50));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn partial_write_timeout_breaks_the_connection() {
+    // The peer stops reading: a 1 MiB call cannot be written in time and
+    // leaves part of a frame on the wire.
+    let fake = Fake::start(|p| {
+        p.handshake();
+        std::thread::sleep(Duration::from_millis(300));
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let mut big = call("Big");
+    big.body = vec![Value::Str("x".repeat(1 << 20))];
+    big.signature = "s".into();
+    assert!(matches!(c.call(big, after(20)), Err(Error::Timeout)));
+    let r = c.call(call("Ping"), after(500));
+    assert!(matches!(r, Err(Error::Closed)), "{:?}", r.err());
+    drop(c);
+    fake.join();
 }

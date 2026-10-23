@@ -240,6 +240,11 @@ impl Peer {
         self.hello(":1.42");
     }
 
+    /// Writes `batch` over and over until the client hangs up.
+    pub fn flood(&mut self, batch: &[u8]) {
+        while self.stream.write_all(batch).is_ok() {}
+    }
+
     /// Reads and discards until the client hangs up.
     pub fn drain(&mut self) {
         while self.fill() {
