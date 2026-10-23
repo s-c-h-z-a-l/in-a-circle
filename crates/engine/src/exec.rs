@@ -132,18 +132,22 @@ pub trait Observer {
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
     /// An fd the supervisor polls for `POLLIN` while an action runs;
     /// [`Observer::wake`] is called when it is readable. Asked again
-    /// before every poll.
+    /// before every poll. After a hangup (or an error, or an invalid fd)
+    /// `wake` is called once and the fd is not polled again while this
+    /// returns the same number; return a different one to resume.
     fn wake_fd(&self) -> Option<RawFd> {
         None
     }
     /// A deadline for the supervisor's poll; [`Observer::wake`] is called
-    /// once it has passed. Asked again before every poll.
+    /// once it has passed. Asked again before every poll. A deadline fires
+    /// once: returned again unchanged after its wake, it is ignored.
     fn wake_at(&self) -> Option<Instant> {
         None
     }
-    /// The wake point: `wake_fd` is readable or `wake_at` has passed. The
-    /// observer consumes what made it ready: an fd left readable (or hung
-    /// up: stop returning it) or a deadline left in the past wakes it
+    /// The wake point: `wake_fd` is readable or `wake_at` has passed.
+    /// Called on the supervisor's thread between polls: must not block
+    /// (read what is there, queue writes); the action's pipes go unread
+    /// meanwhile. The observer drains its fd: one left readable wakes it
     /// again at once.
     fn wake(&mut self) -> Wake {
         Wake::Continue
@@ -336,6 +340,12 @@ struct Sink<'a> {
     step: usize,
     /// The observer answered [`Wake::Cancel`]: sticky, like the token.
     cancelled: bool,
+    /// The observer's wake fd that hung up (or is invalid): not polled
+    /// again while `wake_fd` returns it.
+    dead_wake_fd: Option<RawFd>,
+    /// The observer's deadline that has fired: ignored while `wake_at`
+    /// returns it.
+    fired_at: Option<Instant>,
 }
 
 impl<'a> Sink<'a> {
@@ -351,6 +361,8 @@ impl<'a> Sink<'a> {
             steps: 1,
             step: 0,
             cancelled: false,
+            dead_wake_fd: None,
+            fired_at: None,
         }
     }
 
@@ -1176,8 +1188,17 @@ impl<'a> Supervisor<'a> {
                 deadline = deadline.min(now + NO_PIDFD_POLL);
             }
             // Asked anew each time: the observer may change them in `wake`.
+            // A dead fd or a fired deadline does not count while unchanged.
             let wake_fd = sink.obs.wake_fd();
+            if wake_fd != sink.dead_wake_fd {
+                sink.dead_wake_fd = None;
+            }
+            let wake_fd = wake_fd.filter(|_| sink.dead_wake_fd.is_none());
             let wake_at = sink.obs.wake_at();
+            if wake_at != sink.fired_at {
+                sink.fired_at = None;
+            }
+            let wake_at = wake_at.filter(|_| sink.fired_at.is_none());
             if let Some(t) = wake_at {
                 deadline = deadline.min(t);
             }
@@ -1232,12 +1253,20 @@ impl<'a> Supervisor<'a> {
                 self.cancelled = true;
                 self.terminate();
             }
-            if (ready(wake_fd_at) || wake_at.is_some_and(|t| now >= t))
-                && sink.obs.wake() == Wake::Cancel
-            {
-                self.cancelled = true;
-                sink.cancelled = true;
-                self.terminate();
+            let due = wake_at.is_some_and(|t| now >= t);
+            if ready(wake_fd_at) || due {
+                let dead = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+                if wake_fd_at.is_some_and(|i| fds[i].revents & dead != 0) {
+                    sink.dead_wake_fd = wake_fd;
+                }
+                if due {
+                    sink.fired_at = wake_at;
+                }
+                if sink.obs.wake() == Wake::Cancel {
+                    self.cancelled = true;
+                    sink.cancelled = true;
+                    self.terminate();
+                }
             }
             let exited = match pid_at {
                 Some(_) => ready(pid_at),

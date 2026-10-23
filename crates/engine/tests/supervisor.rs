@@ -423,12 +423,16 @@ fn two_step_intermediate_dir_swapped_for_a_symlink_fails() {
     assert!(t.work_dirs_left().is_empty());
 }
 
-/// An observer with a wake point: `fd` (drained on each wake) and/or `at`
-/// (cleared on each wake); every wake answers `answer`.
+/// An observer with a wake point: `fd` (drained on each wake; else the raw
+/// number `raw`) and/or `at` (on each wake replaced by the next of `then`,
+/// or `None`; kept as is with `keep_at`); every wake answers `answer`.
 struct Waker {
     ran: common::Ran,
     fd: Option<std::os::fd::OwnedFd>,
+    raw: Option<RawFd>,
     at: Option<std::time::Instant>,
+    then: Vec<std::time::Instant>,
+    keep_at: bool,
     answer: Wake,
     wakes: usize,
 }
@@ -438,7 +442,10 @@ impl Waker {
         Waker {
             ran: common::Ran::default(),
             fd: None,
+            raw: None,
             at: None,
+            then: Vec::new(),
+            keep_at: false,
             answer,
             wakes: 0,
         }
@@ -456,14 +463,16 @@ impl Observer for Waker {
         self.ran.progress(d, t, f);
     }
     fn wake_fd(&self) -> Option<RawFd> {
-        self.fd.as_ref().map(|f| f.as_raw_fd())
+        self.fd.as_ref().map(|f| f.as_raw_fd()).or(self.raw)
     }
     fn wake_at(&self) -> Option<std::time::Instant> {
         self.at
     }
     fn wake(&mut self) -> Wake {
         self.wakes += 1;
-        self.at = None;
+        if !self.keep_at {
+            self.at = (!self.then.is_empty()).then(|| self.then.remove(0));
+        }
         if let Some(f) = &self.fd {
             let mut buf = [0u8; 64];
             // SAFETY: f is our non-blocking pipe; buf holds 64 bytes.
@@ -631,4 +640,71 @@ fn cancel_after_wake_starts_no_new_process() {
     assert_eq!(failed(&obs.ran), cancelled);
     assert_eq!(obs.wakes, 1);
     assert!(t.work_dirs_left().is_empty());
+}
+
+#[test]
+fn hung_up_wake_fd_wakes_once() {
+    let t = Tmp::new("wakehup");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    let (r, w) = pipe();
+    drop(w);
+    let mut obs = Waker::new(Wake::Continue);
+    obs.fd = Some(r);
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(obs.wakes, 1);
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Skipped { .. }]),
+        "{:?}",
+        obs.ran.outcomes
+    );
+}
+
+#[test]
+fn closed_wake_fd_wakes_once() {
+    let t = Tmp::new("wakenval");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    // A number far above what the tests open, so no other thread reuses it.
+    let closed = 999;
+    // SAFETY: F_GETFD only checks the number.
+    assert_eq!(unsafe { libc::fcntl(closed, libc::F_GETFD) }, -1);
+    let mut obs = Waker::new(Wake::Continue);
+    obs.raw = Some(closed);
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(obs.wakes, 1);
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Skipped { .. }]),
+        "{:?}",
+        obs.ran.outcomes
+    );
+}
+
+#[test]
+fn past_wake_at_left_in_place_wakes_once() {
+    let t = Tmp::new("wakepast");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    let mut obs = Waker::new(Wake::Continue);
+    obs.at = Some(std::time::Instant::now());
+    obs.keep_at = true;
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(obs.wakes, 1);
+}
+
+#[test]
+fn wake_at_moved_in_wake_is_honoured() {
+    let t = Tmp::new("wakemove");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    let mut obs = Waker::new(Wake::Continue);
+    let start = std::time::Instant::now();
+    obs.at = Some(start + Duration::from_millis(300));
+    obs.then = vec![start + Duration::from_millis(600)];
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(obs.wakes, 2);
 }
