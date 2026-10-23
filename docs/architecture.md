@@ -286,6 +286,7 @@ Every action runs sandboxed, set up in the child between `fork` and
 - After the Undo window, the result is sent again (same id) without the
   button, so no dead button stays in the notification centre. A closed
   notification ends the window at once, and so does SIGTERM or SIGINT
+  received during the window (a cancel during the run is part of the run)
   (still blocked and read through the signalfd): the result is sent again
   without the button and `run` exits with its own code. An Undo click
   undoes the job and replaces the result with `Undone` and
