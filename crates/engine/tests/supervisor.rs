@@ -158,8 +158,31 @@ fn cancel_fails_unfinished_inputs_quickly() {
         failed(&r),
         [(a, "cancelled".to_owned()), (b, "cancelled".to_owned())]
     );
+    // Generous: a loaded VM needs more than the 200 ms plus teardown.
+    assert!(latency < Duration::from_secs(2), "cancel took {latency:?}");
+    assert!(!process_with(&token));
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// `TERM_GRACE` in `exec.rs`: how long a cancelled action may ignore SIGTERM.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+#[test]
+fn cancel_of_a_term_ignoring_action_ends_within_the_grace() {
+    let t = Tmp::new("cancel-ign");
+    let a = t.input("a.txt", "a");
+    let token = format!("34.{}{}", std::process::id(), line!());
+    let bin = t.script("stubborn", &format!("trap '' TERM\nsleep {token}"));
+    let act = action(&bin, "md");
+    let (r, latency) = run(
+        &[&act],
+        std::slice::from_ref(&a),
+        Some(Duration::from_millis(200)),
+    );
+    assert_eq!(failed(&r), [(a, "cancelled".to_owned())]);
     assert!(
-        latency < Duration::from_millis(500),
+        // The grace, then up to `GROUP_GONE` (1 s) for the group to vanish.
+        latency < TERM_GRACE + Duration::from_secs(2),
         "cancel took {latency:?}"
     );
     assert!(!process_with(&token));
