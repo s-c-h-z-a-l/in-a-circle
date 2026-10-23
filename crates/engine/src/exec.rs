@@ -12,8 +12,9 @@
 //! outputs are placed.
 //!
 //! The supervisor is a single-threaded `poll` loop over the child's stdout
-//! and stderr, the cancel signalfd and the child's pidfd; its only timer is
-//! the hourly refresh of the work dir's mtime (so a long job's dir is never
+//! and stderr, the cancel signalfd, the child's pidfd and the observer's
+//! wake fd; besides the observer's `wake_at`, its only timers are the
+//! hourly refresh of the work dir's mtime (so a long job's dir is never
 //! taken for a stale one) and, after a SIGTERM, the 5 s grace before
 //! SIGKILL.
 
@@ -129,6 +130,32 @@ pub trait Observer {
     fn dir(&mut self, path: &Path);
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
+    /// An fd the supervisor polls for `POLLIN` while an action runs;
+    /// [`Observer::wake`] is called when it is readable. Asked again
+    /// before every poll.
+    fn wake_fd(&self) -> Option<RawFd> {
+        None
+    }
+    /// A deadline for the supervisor's poll; [`Observer::wake`] is called
+    /// once it has passed. Asked again before every poll.
+    fn wake_at(&self) -> Option<Instant> {
+        None
+    }
+    /// The wake point: `wake_fd` is readable or `wake_at` has passed. The
+    /// observer consumes what made it ready: an fd left readable (or hung
+    /// up: stop returning it) or a deadline left in the past wakes it
+    /// again at once.
+    fn wake(&mut self) -> Wake {
+        Wake::Continue
+    }
+}
+
+/// What the supervisor does after [`Observer::wake`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    Continue,
+    /// Cancel the run, exactly as a SIGTERM does.
+    Cancel,
 }
 
 /// SIGTERM and SIGINT, blocked in the calling thread and read through a
@@ -276,7 +303,7 @@ pub fn run(
     for g in groups {
         let members: Vec<usize> = g.members.iter().map(|&j| ok[j]).collect();
         sink.begin_group(members.len());
-        if cancel.is_cancelled() {
+        if sink.is_cancelled(cancel) {
             for &i in &members {
                 sink.fail(i, "cancelled".to_owned());
             }
@@ -307,6 +334,8 @@ struct Sink<'a> {
     span: usize,
     steps: usize,
     step: usize,
+    /// The observer answered [`Wake::Cancel`]: sticky, like the token.
+    cancelled: bool,
 }
 
 impl<'a> Sink<'a> {
@@ -321,7 +350,13 @@ impl<'a> Sink<'a> {
             span: 0,
             steps: 1,
             step: 0,
+            cancelled: false,
         }
+    }
+
+    /// Cancelled by a signal or by the observer.
+    fn is_cancelled(&self, cancel: &CancelToken) -> bool {
+        self.cancelled || cancel.is_cancelled()
     }
 
     fn emit(&mut self, o: Outcome) {
@@ -900,7 +935,7 @@ fn run_step(
             sandbox::apply_in_child(fd, &limits)
         });
     }
-    if cancel.is_cancelled() {
+    if sink.is_cancelled(cancel) {
         for &o in &step_in.origin {
             sink.fail(o, "cancelled".to_owned());
         }
@@ -1140,6 +1175,12 @@ impl<'a> Supervisor<'a> {
             if self.pidfd.is_none() {
                 deadline = deadline.min(now + NO_PIDFD_POLL);
             }
+            // Asked anew each time: the observer may change them in `wake`.
+            let wake_fd = sink.obs.wake_fd();
+            let wake_at = sink.obs.wake_at();
+            if let Some(t) = wake_at {
+                deadline = deadline.min(t);
+            }
             let wait = deadline.saturating_duration_since(now);
             // Round up so the deadline has passed when poll returns.
             let ms = wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
@@ -1156,6 +1197,7 @@ impl<'a> Supervisor<'a> {
             let err_at = self.stderr.as_ref().map(|s| push(s.as_raw_fd()));
             let sig_at = (!self.cancelled).then(|| push(self.cancel.fd.as_raw_fd()));
             let pid_at = self.pidfd.as_ref().map(|p| push(p.as_raw_fd()));
+            let wake_fd_at = wake_fd.map(push);
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
             if r < 0 {
@@ -1188,6 +1230,13 @@ impl<'a> Supervisor<'a> {
             }
             if ready(sig_at) && self.cancel.is_cancelled() {
                 self.cancelled = true;
+                self.terminate();
+            }
+            if (ready(wake_fd_at) || wake_at.is_some_and(|t| now >= t))
+                && sink.obs.wake() == Wake::Cancel
+            {
+                self.cancelled = true;
+                sink.cancelled = true;
                 self.terminate();
             }
             let exited = match pid_at {

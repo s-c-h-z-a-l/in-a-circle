@@ -2,8 +2,9 @@
 
 mod common;
 
-use common::{Tmp, action, failed, process_with, run};
-use engine::exec::Outcome;
+use common::{Tmp, action, failed, process_with, run, run_with};
+use engine::exec::{Observer, Outcome, Wake};
+use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
 #[test]
@@ -419,5 +420,215 @@ fn two_step_intermediate_dir_swapped_for_a_symlink_fails() {
     assert_eq!(dones(&r), 0);
     assert_eq!(placed_files(&t), 0);
     assert_no_secret_placed(&t);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// An observer with a wake point: `fd` (drained on each wake) and/or `at`
+/// (cleared on each wake); every wake answers `answer`.
+struct Waker {
+    ran: common::Ran,
+    fd: Option<std::os::fd::OwnedFd>,
+    at: Option<std::time::Instant>,
+    answer: Wake,
+    wakes: usize,
+}
+
+impl Waker {
+    fn new(answer: Wake) -> Waker {
+        Waker {
+            ran: common::Ran::default(),
+            fd: None,
+            at: None,
+            answer,
+            wakes: 0,
+        }
+    }
+}
+
+impl Observer for Waker {
+    fn event(&mut self, o: &Outcome) {
+        self.ran.event(o);
+    }
+    fn dir(&mut self, path: &std::path::Path) {
+        self.ran.dir(path);
+    }
+    fn progress(&mut self, d: usize, t: usize, f: f32) {
+        self.ran.progress(d, t, f);
+    }
+    fn wake_fd(&self) -> Option<RawFd> {
+        self.fd.as_ref().map(|f| f.as_raw_fd())
+    }
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        self.at
+    }
+    fn wake(&mut self) -> Wake {
+        self.wakes += 1;
+        self.at = None;
+        if let Some(f) = &self.fd {
+            let mut buf = [0u8; 64];
+            // SAFETY: f is our non-blocking pipe; buf holds 64 bytes.
+            while unsafe { libc::read(f.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        }
+        self.answer
+    }
+}
+
+/// A non-blocking pipe: (read end, write end).
+fn pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    use std::os::fd::FromRawFd;
+    let mut p = [0; 2];
+    // SAFETY: p holds two ints for pipe2 to fill.
+    let r = unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    assert_eq!(r, 0);
+    // SAFETY: pipe2 succeeded, both fds are new and ours.
+    unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(p[0]),
+            std::os::fd::OwnedFd::from_raw_fd(p[1]),
+        )
+    }
+}
+
+/// Writes one byte to `w` after `d`, from another thread. The caller keeps
+/// `w` open until the run is over (a closed write end is a hangup, which
+/// keeps the read end ready).
+fn write_after(w: RawFd, d: Duration) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(d);
+        // SAFETY: w is our pipe's write end, open until joined; one byte
+        // from a static.
+        let n = unsafe { libc::write(w, b"x".as_ptr().cast(), 1) };
+        assert_eq!(n, 1);
+    })
+}
+
+/// Sleeps `secs`, then skips every input.
+fn sleep_then_skip(secs: &str) -> String {
+    format!(
+        "sleep {secs}\n\
+         while IFS= read -r in; do printf 'skip\\t%s\\tunsupported\\n' \"$in\"; done < \"$6\""
+    )
+}
+
+#[test]
+fn wake_fd_cancel_cancels_the_run() {
+    let t = Tmp::new("wakefd");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    let token = format!("35.{}{}", std::process::id(), line!());
+    let bin = t.script("slow", &format!("sleep {token}"));
+    let act = action(&bin, "md");
+    let (r, w) = pipe();
+    let mut obs = Waker::new(Wake::Cancel);
+    obs.fd = Some(r);
+    let writer = write_after(w.as_raw_fd(), Duration::from_millis(200));
+    let took = run_with(&[&act], &[a.clone(), b.clone()], &mut obs);
+    writer.join().unwrap();
+    drop(w);
+    assert_eq!(
+        failed(&obs.ran),
+        [(a, "cancelled".to_owned()), (b, "cancelled".to_owned())]
+    );
+    assert_eq!(obs.wakes, 1);
+    assert!(took < Duration::from_secs(6), "cancel took {took:?}");
+    assert!(!process_with(&token));
+    assert!(t.work_dirs_left().is_empty());
+}
+
+#[test]
+fn drained_wake_fd_wakes_once() {
+    let t = Tmp::new("wakedrain");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    let (r, w) = pipe();
+    let mut obs = Waker::new(Wake::Continue);
+    obs.fd = Some(r);
+    let writer = write_after(w.as_raw_fd(), Duration::from_millis(200));
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    writer.join().unwrap();
+    drop(w);
+    assert_eq!(obs.wakes, 1);
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Skipped { .. }]),
+        "{:?}",
+        obs.ran.outcomes
+    );
+}
+
+#[test]
+fn wake_at_fires_once_per_deadline() {
+    let t = Tmp::new("wakeat");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("sleep1", &sleep_then_skip("1"));
+    let act = action(&bin, "md");
+    let mut obs = Waker::new(Wake::Continue);
+    let start = std::time::Instant::now();
+    obs.at = Some(start + Duration::from_millis(300));
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(obs.wakes, 1);
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Skipped { .. }]),
+        "{:?}",
+        obs.ran.outcomes
+    );
+}
+
+#[test]
+fn default_observer_is_unchanged() {
+    // `Ran` implements none of the wake point: no fd, no deadline.
+    let mut ran = common::Ran::default();
+    assert_eq!(ran.wake_fd(), None);
+    assert_eq!(ran.wake_at(), None);
+    assert_eq!(ran.wake(), Wake::Continue);
+    let t = Tmp::new("default");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("quick", &sleep_then_skip("0"));
+    let act = action(&bin, "md");
+    let took = run_with(&[&act], std::slice::from_ref(&a), &mut ran);
+    assert!(
+        matches!(&ran.outcomes[..], [Outcome::Skipped { .. }]),
+        "{:?}",
+        ran.outcomes
+    );
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+}
+
+#[test]
+fn cancel_after_wake_starts_no_new_process() {
+    let t = Tmp::new("wakebatch");
+    let inputs = [
+        t.input("a.txt", "a"),
+        t.input("b.txt", "b"),
+        t.input("c.txt", "c"),
+    ];
+    // Announces its start with a warning, then outlives the wake.
+    let bin = t.script(
+        "announce",
+        "in=$(head -n1 \"$6\"); printf 'warn\\t%s\\tstarted\\n' \"$in\"\n\
+         sleep 1\n\
+         printf 'skip\\t%s\\tunsupported\\n' \"$in\"",
+    );
+    let mut act = action(&bin, "md");
+    act.batch = false;
+    let mut obs = Waker::new(Wake::Cancel);
+    obs.at = Some(std::time::Instant::now() + Duration::from_millis(200));
+    run_with(&[&act], &inputs, &mut obs);
+    let started: Vec<_> = obs
+        .ran
+        .outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Warned { input, message } if message == "started" => Some(input.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [inputs[0].clone()], "{:?}", obs.ran.outcomes);
+    let cancelled: Vec<_> = inputs
+        .iter()
+        .map(|p| (p.clone(), "cancelled".to_owned()))
+        .collect();
+    assert_eq!(failed(&obs.ran), cancelled);
+    assert_eq!(obs.wakes, 1);
     assert!(t.work_dirs_left().is_empty());
 }
