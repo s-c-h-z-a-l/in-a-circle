@@ -1,6 +1,7 @@
-//! `inacircle`: the engine's command line (headless mode).
+//! `inacircle`: the wheel, and the engine's command line (headless mode).
 //!
 //! ```text
+//! inacircle                                   the wheel (the hotkey)
 //! inacircle run [--notify] <preset-id> <files…>          the menu path
 //! inacircle run [--notify] --action <action-id> <files…> one action directly
 //! inacircle offer <files…>                    the wheel for these files
@@ -24,6 +25,12 @@
 //! `--notify` adds desktop notifications: "running" with Cancel after a
 //! second, the result with Undo at the end. The stdout lines are written
 //! before the Undo window starts; the exit code does not depend on them.
+//!
+//! Without arguments: the wheel. One instance at a time (a held lock makes
+//! a second one exit 0 at once, before touching Wayland), and SIGALRM kills
+//! it if a stage outlives its deadline. Closed without a choice: exit 0.
+//! A choice tears the wheel down, releases the lock, then runs the preset
+//! as `run --notify` does, exit code included.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -40,6 +47,9 @@ use manifest::{Line, write_line};
 use notice::Notifier;
 
 mod notice;
+mod surface;
+mod uri;
+mod wheel;
 
 const USAGE: &str = "usage: inacircle run [--notify] <preset-id> <files…>\n       \
 inacircle run [--notify] --action <action-id> <files…>\n       \
@@ -63,7 +73,8 @@ fn main() -> ExitCode {
         Some("jobs") => cmd_jobs(rest),
         Some("cancel") => cmd_cancel(rest),
         Some(other) => usage(&format!("unknown command `{other}`")),
-        None => usage("no command"),
+        None if args.is_empty() => cmd_wheel(),
+        None => usage("invalid command"),
     };
     ExitCode::from(code)
 }
@@ -119,22 +130,25 @@ fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     }
     let cwd = std::env::current_dir().ok();
     let mut files = Vec::with_capacity(args.len());
-    let mut seen = HashSet::with_capacity(args.len());
     for a in args {
         match absolute(Path::new(a), cwd.as_deref()) {
-            Some(p) => {
-                let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
-                if seen.insert(key) {
-                    files.push(p);
-                }
-            }
+            Some(p) => files.push(p),
             None => {
                 usage("relative path without a current directory");
                 return None;
             }
         }
     }
-    Some(files)
+    Some(dedup(files))
+}
+
+/// Each file (by canonical path) once, first spelling kept.
+fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::with_capacity(paths.len());
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -226,6 +240,12 @@ fn cmd_run(args: &[OsString]) -> u8 {
     let Some(files) = files_of(rest) else {
         return EXIT_USAGE;
     };
+    run(target, files, notify, cancel)
+}
+
+/// Runs `target` on `files` (absolute, each once): the shared tail of `run`
+/// and the wheel.
+fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -> u8 {
     let preset = match target {
         Target::Preset(id) => match PRESETS.iter().find(|p| p.id == id) {
             Some(p) => Some(p),
@@ -397,7 +417,28 @@ fn cmd_offer(args: &[OsString]) -> u8 {
     let Some(files) = files_of(args) else {
         return EXIT_USAGE;
     };
-    let named: Vec<(String, Kind)> = files
+    let named = named_kinds(&files);
+    let cat = Catalog::load();
+    let offer = menu::offer(&cat, &named);
+    for (dir, s) in offer.slices.iter().enumerate() {
+        let Some(s) = s else { continue };
+        let mut l = Line::new("slice")
+            .pair("dir", &dir.to_string())
+            .pair("preset", s.preset)
+            .pair("label", &s.label)
+            .pair("applicable", &s.applicable.to_string());
+        if let Some(why) = &s.disabled {
+            l = l.pair("disabled", why);
+        }
+        out(&l);
+    }
+    out(&Line::new("hub").bare(&offer.hub));
+    EXIT_DONE
+}
+
+/// Each file's name and what it is, as the offer needs them.
+fn named_kinds(files: &[PathBuf]) -> Vec<(String, Kind)> {
+    files
         .iter()
         .map(|p| {
             let name = p
@@ -418,23 +459,7 @@ fn cmd_offer(args: &[OsString]) -> u8 {
             };
             (name, kind)
         })
-        .collect();
-    let cat = Catalog::load();
-    let offer = menu::offer(&cat, &named);
-    for (dir, s) in offer.slices.iter().enumerate() {
-        let Some(s) = s else { continue };
-        let mut l = Line::new("slice")
-            .pair("dir", &dir.to_string())
-            .pair("preset", s.preset)
-            .pair("label", &s.label)
-            .pair("applicable", &s.applicable.to_string());
-        if let Some(why) = &s.disabled {
-            l = l.pair("disabled", why);
-        }
-        out(&l);
-    }
-    out(&Line::new("hub").bare(&offer.hub));
-    EXIT_DONE
+        .collect()
 }
 
 fn one_job_id(args: &[OsString], cmd: &str) -> Result<JobId, u8> {
@@ -523,4 +548,148 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
         return EXIT_FAILED;
     }
     EXIT_DONE
+}
+
+/// The wheel: lock, deadline, surface; then the chosen preset, if any.
+fn cmd_wheel() -> u8 {
+    // The lock comes before Wayland: a second instance must not draw.
+    let lock = match lock_wheel() {
+        Ok(Some(l)) => l,
+        Ok(None) => return EXIT_DONE,
+        Err(e) => {
+            eprintln!("inacircle: wheel lock: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
+    // kills the process: the backstop if anything below hangs.
+    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
+    let mut machine = wheel::Machine::new();
+    let chosen = surface::run(&mut machine);
+    // The surface is gone (its connection closed); free the hotkey.
+    drop(lock);
+    // SAFETY: as above; 0 cancels the pending alarm.
+    unsafe { libc::alarm(0) };
+    match chosen {
+        Ok(None) => EXIT_DONE,
+        Ok(Some((files, preset))) => match CancelToken::install() {
+            Ok(cancel) => run(Target::Preset(&preset), dedup(files), true, cancel),
+            Err(e) => {
+                eprintln!("inacircle: cannot set up cancel handling: {e}");
+                EXIT_FAILED
+            }
+        },
+        Err(e) => {
+            eprintln!("inacircle: wheel: {e}");
+            EXIT_FAILED
+        }
+    }
+}
+
+/// `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, held: `None` if another
+/// instance holds it.
+fn lock_wheel() -> io::Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = engine::xdg::runtime_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?
+        .join("inacircle");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(dir.join("wheel.lock"))?;
+    // SAFETY: flock on an fd we own; the lock lives as long as `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let e = io::Error::last_os_error();
+    if e.kind() == io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(e)
+    }
+}
+
+/// Stage 2 for the dropped `text/uri-list`: the offer for its files, by
+/// wheel slice (the presets' direction 0 is north, the wheel's slice 0
+/// points right).
+fn drop_menu(list: &[u8]) -> wheel::Menu {
+    let paths = dedup(uri::parse(list));
+    let mut slices: [Option<wheel::Choice>; 8] = Default::default();
+    if paths.is_empty() {
+        return wheel::Menu {
+            paths,
+            slices,
+            hub: wheel::NOTHING.into(),
+        };
+    }
+    let named = named_kinds(&paths);
+    let offer = menu::offer(&Catalog::load(), &named);
+    let mut mime = None;
+    for (dir, s) in offer.slices.iter().enumerate() {
+        let Some(s) = s else { continue };
+        mime = PRESETS.iter().find(|p| p.id == s.preset).map(|p| p.input);
+        slices[(dir + 6) % 8] = Some(wheel::Choice {
+            label: s.label.clone(),
+            preset: s.preset.into(),
+            applicable: s.applicable > 0 && s.disabled.is_none(),
+        });
+    }
+    let hub = match mime {
+        Some(mime) => {
+            let of_type: Vec<&(String, Kind)> = named
+                .iter()
+                .filter(|(_, k)| k.mime.as_deref() == Some(mime))
+                .collect();
+            let names: Vec<&str> = of_type.iter().map(|(n, _)| n.as_str()).collect();
+            let label = of_type.first().map_or("", |(_, k)| k.label.as_str());
+            ui::text::hub_text(&names, offer.total, label, ui::wheel::HUB_TEXT_W)
+        }
+        None if offer.hub.is_empty() => wheel::NOTHING.into(),
+        None => offer.hub,
+    };
+    wheel::Menu { paths, slices, hub }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Presets point by compass (0 = north); the wheel's slice 0 points
+    /// right. The hub names the one file.
+    #[test]
+    fn drop_menu_maps_presets_to_wheel_slices() {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes ő.txt");
+        std::fs::write(&file, "plain words\n").unwrap();
+        let list = format!(
+            "# dropped\r\nfile://{}\r\nfile://{}\r\n",
+            dir.join("notes%20%C5%91.txt").display(),
+            file.display()
+                .to_string()
+                .replace(' ', "%20")
+                .replace('ő', "%C5%91")
+        );
+        let m = drop_menu(list.as_bytes());
+        assert_eq!(m.paths, std::slice::from_ref(&file), "the same file once");
+        let north = m.slices[6].as_ref().expect("markdown points north");
+        assert_eq!(
+            (north.label.as_str(), north.preset.as_str()),
+            ("Markdown", "markdown")
+        );
+        assert_eq!(m.slices.iter().flatten().count(), 1);
+        assert_eq!(m.hub, "notes ő.txt");
+
+        let none = drop_menu(b"https://example.com/\r\n");
+        assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
+        assert_eq!(none.hub, wheel::NOTHING);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

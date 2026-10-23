@@ -1072,8 +1072,8 @@ fn offer_without_actions_disables_slices() {
 fn invocation_errors_exit_2() {
     let e = Env::new("usage");
     e.file("a.txt", b"a\n");
+    // No arguments is the wheel (tests/wheel.rs), not an error.
     let cases: &[&[&str]] = &[
-        &[],
         &["frobnicate"],
         &["run"],
         &["run", "markdown"],

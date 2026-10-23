@@ -9,3 +9,5 @@ dbus = { path = "../../crates/dbus" }
 engine = { path = "../../crates/engine" }
 libc = "0.2"
 manifest = { path = "../../crates/manifest" }
+ui = { path = "../../crates/ui" }
+wire = { path = "../../crates/wire" }
