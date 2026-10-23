@@ -900,9 +900,13 @@ impl Surface {
             // SAFETY: two valid pollfds (a negative fd is ignored).
             let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, ms) };
             if r >= 0
-                && pfds.iter().all(|p| p.revents == 0)
-                && Instant::now() < self.deadline
                 && let Some(meter) = &mut self.meter
+                && idle_wakeup(
+                    pfds.iter().any(|p| p.revents != 0),
+                    Instant::now(),
+                    self.deadline,
+                    self.reading.as_ref().map(|r| r.until),
+                )
             {
                 meter.idle_wakeup();
             }
@@ -920,6 +924,13 @@ impl Surface {
             }
         }
     }
+}
+
+/// Whether a `poll` return is an idle wakeup for the meter: nothing
+/// `ready`, and `now` before both our deadlines (the stage's, and the drop
+/// read's if one is in progress), which are wakeups we asked for.
+fn idle_wakeup(ready: bool, now: Instant, deadline: Instant, read_until: Option<Instant>) -> bool {
+    !ready && now < deadline && read_until.is_none_or(|u| now < u)
 }
 
 fn pollfd(fd: RawFd) -> libc::pollfd {
@@ -1108,6 +1119,30 @@ mod tests {
         let r = pump_all(MAX_BYTES + 1);
         assert!(r.as_ref().is_err_and(|e| e.contains("bytes")), "{r:?}");
         assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
+    }
+
+    /// A `poll` that returns at one of our own deadlines (the stage's, or
+    /// the drop read's) is not an idle wakeup; one with nothing ready
+    /// before them is.
+    #[test]
+    fn idle_wakeups_exclude_our_deadlines() {
+        let now = Instant::now();
+        let (later, earlier) = (now + Duration::from_secs(1), now - Duration::from_millis(1));
+        assert!(idle_wakeup(false, now, later, None));
+        assert!(idle_wakeup(false, now, later, Some(later)));
+        assert!(!idle_wakeup(true, now, later, None), "input");
+        assert!(
+            !idle_wakeup(false, now, earlier, None),
+            "the stage deadline"
+        );
+        assert!(
+            !idle_wakeup(false, now, later, Some(earlier)),
+            "the read deadline"
+        );
+        assert!(
+            !idle_wakeup(false, now, later, Some(now)),
+            "the read deadline, exactly"
+        );
     }
 
     // A fake compositor: the server end of a socketpair under a Surface.

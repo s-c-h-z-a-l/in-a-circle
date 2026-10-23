@@ -166,8 +166,14 @@ impl Conn {
     }
 
     /// Records the interface of an id the server allocated (a `new_id`
-    /// argument of an event). A reused id gets the new interface.
+    /// argument of an event). A reused id gets the new interface. An id
+    /// outside the server's range breaks the connection: requests sent to
+    /// it would reach one of our own objects.
     pub fn register_server_id(&mut self, id: u32, iface: Iface) {
+        if id < SERVER_IDS {
+            self.broken = Some("server new_id in the client range");
+            return;
+        }
         match self.server_ids.iter_mut().find(|(i, _)| *i == id) {
             Some(e) => e.1 = iface,
             None => self.server_ids.push((id, iface)),
@@ -820,6 +826,22 @@ mod tests {
             assert!(matches!(err, Error::Broken(_)), "{obj:#x}: {err:?}");
             assert!(c.event().is_err(), "stays broken");
             assert!(c.flush(after(10)).is_err());
+        }
+    }
+
+    /// A `new_id` from the server must be in the server's range: one in
+    /// ours (an existing object, or 0) would have us send its requests to
+    /// our own objects. It breaks the connection and changes nothing.
+    #[test]
+    fn a_server_id_in_the_client_range_breaks() {
+        for id in [0, 1, 2, SERVER_IDS - 1] {
+            let (mut c, server) = pair();
+            let ours = c.new_id(Iface::Pointer);
+            c.register_server_id(id, Iface::DataOffer);
+            send(&server, &msg(ours, op::wl_pointer::FRAME, &[]), &[]);
+            assert!(matches!(c.event(), Err(Error::Broken(_))), "{id:#x}");
+            assert!(c.flush(after(10)).is_err(), "{id:#x}: stays broken");
+            assert_eq!(c.iface_of(ours), Some(Iface::Pointer), "{id:#x}");
         }
     }
 
