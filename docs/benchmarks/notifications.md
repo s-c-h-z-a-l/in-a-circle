@@ -4,9 +4,10 @@
 notification path (connect, authenticate, `Hello`, `GetCapabilities`,
 `Notify`), peak memory, and binary growth from the `libc`-only D-Bus client?
 
-**Verdict:** _pending: measured on the developer machine, not yet filled in._
-Target: the notification path ≤ 300 µs of our CPU, peak RSS ≤ 5 MB, growth
-well under the plan's +100 KB allowance.
+**Verdict:** within every target. The final notice costs about 75 µs of our
+CPU (target ≤ 300 µs), peak RSS stays at about 2.9 MB with or without
+`--notify` (budget 5 MB), and the D-Bus client adds 86 KB to the binary
+(allowance +100 KB per plan).
 
 ## Method
 
@@ -21,7 +22,9 @@ action has started) and is reported separately.
 
 The bus is the real session bus with the real notification server
 (noctalia), 20 runs of one small `.txt` converted to Markdown, p50 and max.
-Peak RSS is `VmHWM` of the same runs. Binary size is the stripped release
+Peak RSS: `vm_hwm` of the same runs (printed before the notifications), and,
+for the notification path itself, `VmHWM` read from `/proc/<pid>/status`
+during a 1.5 s Undo window, after the final notice (5 runs). Binary size is the stripped release
 `inacircle` against 650,472 B at the end of plan 2.
 
 ## Machine
@@ -33,16 +36,18 @@ server named above.
 
 | | p50 | max |
 |---|---|---|
-| `notify_cpu_us` (final notice) | — | — |
-| `self_cpu_us` (whole run, `--notify`) | — | — |
-| `vm_hwm` (`--notify`) | — | — |
-| `vm_hwm` (without `--notify`, for reference) | — | — |
+| `notify_cpu_us` (final notice) | 75 µs | 88 µs |
+| `self_cpu_us` (whole run, `--notify`) | 745 µs | 936 µs |
+| `vm_hwm` (`--notify`, before the notice) | 2.89 MB | 2.99 MB |
+| `VmHWM` after the final notice (5 runs) | 2.94 MB | 3.01 MB |
+| `vm_hwm` (without `--notify`, for reference) | 2.90 MB | 2.98 MB |
+| `self_cpu_us` (without `--notify`, for reference) | 691 µs | 778 µs |
 
 | | bytes |
 |---|---|
 | `inacircle` at the end of plan 2 | 650,472 |
-| `inacircle` now (stripped release) | — |
-| growth | — |
+| `inacircle` now (stripped release) | 738,296 |
+| growth | +87,824 (+86 KB) |
 
 ## Reproduce
 
