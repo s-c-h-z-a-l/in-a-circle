@@ -62,10 +62,6 @@ pub enum Input {
     /// could not be read, tagged with the `ReadEarly` tag it was started
     /// with; one that is not the latest is ignored. Not used after the
     /// drop.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the surface feeds it from task 3 on")
-    )]
     DragList(u32, Result<Vec<u8>, String>),
     /// The stage's deadline passed.
     Deadline,
@@ -305,6 +301,8 @@ impl Machine {
             Input::Configured(w, h) => {
                 self.output = Some((w, h));
                 self.settle(&mut fx, false);
+                // A drag that came first can be hit now.
+                self.update_accept(&mut fx);
             }
             Input::PointerAt(x, y) => {
                 self.cursor = Some((x, y));
@@ -1328,14 +1326,25 @@ mod tests {
         ];
         for _ in 0..40_000 {
             let mut m = fake_machine();
+            // A pseudo-random 0-299 ms between inputs, so the swap guard
+            // is exercised both ways.
+            let mut clock = Duration::ZERO;
+            let mut step = |next: &mut dyn FnMut() -> u64| {
+                clock += Duration::from_millis(next() % 300);
+                clock
+            };
             let happy = &paths[(next() % 2) as usize];
             let prefix = (next() % (happy.len() as u64 + 1)) as usize;
-            let mut effects: Vec<Effect> = feed(&mut m, happy[..prefix].iter().cloned());
+            let mut effects: Vec<Effect> = Vec::new();
+            for i in &happy[..prefix] {
+                effects.extend(m.on_at(step(&mut next), i.clone()));
+            }
             let len = next() % 8;
             for _ in 0..len {
-                effects.extend(m.on(pool(next())));
+                let at = step(&mut next);
+                effects.extend(m.on_at(at, pool(next())));
             }
-            effects.extend(m.on(Input::Deadline));
+            effects.extend(m.on_at(step(&mut next), Input::Deadline));
             let ends = effects
                 .iter()
                 .filter(|e| matches!(e, Effect::Close | Effect::Run(..)))
@@ -1419,6 +1428,22 @@ mod tests {
             [Effect::ReadEarly(1), Effect::Draw, Effect::Accept(true)]
         );
         assert_eq!(m.hub(), DROP_HERE);
+    }
+
+    /// Regression: a drag that entered before the first configure was
+    /// refused (nothing to hit yet) and stayed refused when the wheel was
+    /// placed under it.
+    #[test]
+    fn configure_recomputes_the_accept() {
+        let mut m = fake_machine();
+        assert_eq!(
+            m.on(enter(HUB)),
+            [Effect::ReadEarly(1), Effect::Accept(false)]
+        );
+        assert_eq!(
+            m.on(Input::Configured(W, H)),
+            [Effect::Draw, Effect::Accept(true)]
+        );
     }
 
     /// The position may arrive before the size: the wheel is placed once

@@ -23,6 +23,10 @@ pub struct Meter {
     drop_cpu: Option<i64>,
     /// CPU from the drop's data to the stage-2 wheel's first commit.
     stage2_us: Option<i64>,
+    /// Process CPU when the early list came in.
+    list_cpu: Option<i64>,
+    /// CPU from the early list to the lit level-1 wheel's first commit.
+    level1_us: Option<i64>,
     /// Process CPU at the choice (absolute, like the run's marks).
     choice_cpu: Option<i64>,
 }
@@ -41,6 +45,8 @@ impl Meter {
             overhead_us: 0,
             drop_cpu: None,
             stage2_us: None,
+            list_cpu: None,
+            level1_us: None,
             choice_cpu: None,
         }
     }
@@ -68,8 +74,17 @@ impl Meter {
         self.drop_cpu.get_or_insert(cpu_us);
     }
 
-    /// A new wheel's first commit; after a drop, that is stage 2 shown.
+    /// The early list (read at `enter`) is in; the first one counts.
+    pub fn listed(&mut self, cpu_us: i64) {
+        self.list_cpu.get_or_insert(cpu_us);
+    }
+
+    /// A new wheel's first commit: after the early list, level 1 shown;
+    /// after a drop, stage 2 shown.
     pub fn swapped(&mut self, cpu_us: i64) {
+        if let (Some(l), None, None) = (self.list_cpu, self.level1_us, self.drop_cpu) {
+            self.level1_us = Some(cpu_us - l);
+        }
         if let (Some(d), None) = (self.drop_cpu, self.stage2_us) {
             self.stage2_us = Some(cpu_us - d);
         }
@@ -109,7 +124,7 @@ impl Meter {
         let max = sorted.last().copied();
         format!(
             "measure wheel main_to_commit_cpu_us={cpu} main_to_commit_wall_us={wall} \
-             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} drop_to_stage2_cpu_us={} choice_abs_cpu_us={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
+             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} drop_to_stage2_cpu_us={} list_to_level1_cpu_us={} choice_abs_cpu_us={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
             sorted.len(),
             p50.unwrap_or(0),
             max.unwrap_or(0),
@@ -122,6 +137,7 @@ impl Meter {
             },
             self.overhead_us,
             self.stage2_us.unwrap_or(-1),
+            self.level1_us.unwrap_or(-1),
             self.choice_cpu.unwrap_or(-1),
             self.pss_kb
         )
@@ -187,8 +203,26 @@ mod tests {
         assert_eq!(
             m.report(2_840, 4_000),
             "measure wheel main_to_commit_cpu_us=700 main_to_commit_wall_us=2500 \
-             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 events=3 wheel_cpu_us=3000 meter_cpu_us=0 drop_to_stage2_cpu_us=400 choice_abs_cpu_us=3800 pss_kb=2100 vm_hwm_kb=2840"
+             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 events=3 wheel_cpu_us=3000 meter_cpu_us=0 drop_to_stage2_cpu_us=400 list_to_level1_cpu_us=-1 choice_abs_cpu_us=3800 pss_kb=2100 vm_hwm_kb=2840"
         );
+    }
+
+    /// The early list's CPU runs to the first commit after it, once; the
+    /// drop's stage-2 swap is a separate number.
+    #[test]
+    fn list_to_level1_is_the_first_swap_after_the_list() {
+        let t0 = Instant::now();
+        let mut m = Meter::new(0, t0);
+        m.swapped(500); // no list yet: nothing
+        m.listed(1_000);
+        m.listed(1_100);
+        m.swapped(1_400);
+        m.swapped(1_900);
+        m.dropped(2_000);
+        m.swapped(2_300);
+        let r = m.report(0, -1);
+        assert!(r.contains("list_to_level1_cpu_us=400"), "{r}");
+        assert!(r.contains("drop_to_stage2_cpu_us=300"), "{r}");
     }
 
     #[test]
@@ -197,7 +231,7 @@ mod tests {
         assert_eq!(
             m.report(-1, -1),
             "measure wheel main_to_commit_cpu_us=-1 main_to_commit_wall_us=-1 \
-             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=0 wheel_cpu_us=-1 meter_cpu_us=0 drop_to_stage2_cpu_us=-1 choice_abs_cpu_us=-1 pss_kb=-1 vm_hwm_kb=-1"
+             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=0 wheel_cpu_us=-1 meter_cpu_us=0 drop_to_stage2_cpu_us=-1 list_to_level1_cpu_us=-1 choice_abs_cpu_us=-1 pss_kb=-1 vm_hwm_kb=-1"
         );
     }
 

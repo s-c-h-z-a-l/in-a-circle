@@ -131,12 +131,14 @@ impl Drop for Shm {
     }
 }
 
-/// A drop being read: the pipe, the offer and the action negotiated for it
-/// at the drop, what came so far, the read's deadline.
+/// A list being read: the pipe, the offer and the action negotiated for it
+/// at the drop, what came so far, the read's deadline. The early read's
+/// carries the machine's tag instead of an action.
 struct Reading {
     fd: OwnedFd,
     offer: u32,
     action: u32,
+    seq: u32,
     data: Vec<u8>,
     until: Instant,
 }
@@ -147,6 +149,7 @@ impl Reading {
             fd,
             offer,
             action,
+            seq: 0,
             // Room for the limit and one more read: never regrown (a
             // doubling would hold two copies). Pages are touched only as
             // data arrives.
@@ -249,6 +252,8 @@ struct Surface {
     /// `dnd_action` at the drop, for the dropped offer's `finish`.
     drop_action: u32,
     reading: Option<Reading>,
+    /// The early read of the current drag's list, before the drop.
+    early: Option<Reading>,
     /// The machine's clock: inputs are timed from here.
     started: Instant,
     busy: [bool; 2],
@@ -287,6 +292,7 @@ impl Surface {
             dnd_action: 0,
             drop_action: 0,
             reading: None,
+            early: None,
             started: Instant::now(),
             busy: [false; 2],
             painted: [None; 2],
@@ -606,6 +612,8 @@ impl Surface {
                 {
                     self.retire(old);
                 }
+                // A new drag forgets the old one's list: close its pipe.
+                self.early = None;
                 self.dnd = Some((offer, serial));
                 self.dnd_action = 0;
                 let mimes = self.offers.mimes(offer);
@@ -616,6 +624,7 @@ impl Surface {
                 Some(Input::DragMotion(e.fixed()?, e.fixed()?))
             }
             (Iface::DataDevice, op::wl_data_device::LEAVE) => {
+                self.early = None;
                 // After a drop the offer stays until its data is read.
                 if let Some((offer, _)) = self.dnd
                     && self.offers.kept() != Some(offer)
@@ -709,10 +718,7 @@ impl Surface {
         match fx {
             Effect::Draw | Effect::Hover(_) => self.render(m)?,
             Effect::Accept(yes) => self.accept(yes),
-            // TODO(task 3): receive the list before the drop, tagged with
-            // `_seq`. Until then no `DragList` comes, so the machine takes
-            // its `Drop here` fallback.
-            Effect::ReadEarly(_seq) => {}
+            Effect::ReadEarly(seq) => self.start_early(seq)?,
             Effect::EndDrop => self.end_drop(),
             Effect::ReadDrop => self.start_read()?,
             Effect::Arm(d) => {
@@ -765,6 +771,8 @@ impl Surface {
     /// Receives the dropped offer's URI list: the offer kept at the drop,
     /// not the current drag (an enter may have come in between).
     fn start_read(&mut self) -> io::Result<()> {
+        // The drop's own read replaces an early one still in flight.
+        self.early = None;
         let Some(offer) = self.offers.to_read() else {
             if let Some(offer) = self.offers.release() {
                 self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
@@ -796,12 +804,65 @@ impl Surface {
         let Some(offer) = self.offers.to_read() else {
             return;
         };
-        // `finish` is a protocol error unless copy was negotiated.
-        if self.drop_action == DND_COPY {
+        let copy = self.drop_action == DND_COPY;
+        self.end_offer(offer, copy);
+        if let Some(meter) = &mut self.meter {
+            meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
+        }
+    }
+
+    /// The tail of every ended drop: `finish` only after a negotiated copy
+    /// (anything else is a protocol error; niri drops even without it),
+    /// then the keep ends, so a reused id is destroyed later, and the offer
+    /// is destroyed.
+    fn end_offer(&mut self, offer: u32, copy: bool) {
+        if copy {
             self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
         }
         if self.offers.release() == Some(offer) {
             self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
+        }
+    }
+
+    /// Receives the current drag's URI list now, before the drop, tagged
+    /// `seq`. The offer is neither finished nor destroyed: it lives on to
+    /// the drop. No offer or a failing pipe fails the read at once (the
+    /// machine falls back to `Drop here`).
+    fn start_early(&mut self, seq: u32) -> io::Result<()> {
+        self.early = None;
+        let Some(offer) = self.dnd.map(|d| d.0).filter(|&o| o != 0) else {
+            self.inputs
+                .push(Input::DragList(seq, Err("no offer".into())));
+            return Ok(());
+        };
+        let (r, w) = drop_pipe()?;
+        self.conn.req(
+            offer,
+            op::wl_data_offer::RECEIVE,
+            &[S(URI_LIST), Fd(w.as_fd())],
+        );
+        self.flush()?;
+        // Our copy of the write end must go, or the read never sees EOF.
+        drop(w);
+        let mut rd = Reading::new(r, offer, 0, Instant::now() + READ_DROP);
+        rd.seq = seq;
+        self.early = Some(rd);
+        Ok(())
+    }
+
+    /// Reads what the early pipe has; queues `DragList` at EOF, past the
+    /// size limit, on error or past its deadline.
+    fn pump_early(&mut self) {
+        let Some(rd) = &mut self.early else {
+            return;
+        };
+        if let Some(r) = rd.pump(Instant::now()) {
+            let seq = rd.seq;
+            self.early = None;
+            if let (Some(meter), true) = (&mut self.meter, r.is_ok()) {
+                meter.listed(crate::cpu_us(libc::RUSAGE_SELF));
+            }
+            self.inputs.push(Input::DragList(seq, r));
         }
     }
 
@@ -814,15 +875,7 @@ impl Surface {
         if let Some(r) = rd.pump(Instant::now()) {
             let (offer, action) = (rd.offer, rd.action);
             self.reading = None;
-            // `finish` is a protocol error unless copy was negotiated
-            // (niri drops even without it).
-            if r.is_ok() && action == DND_COPY {
-                self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
-            }
-            // The keep ends with the read, so a reused id is destroyed later.
-            if self.offers.release() == Some(offer) {
-                self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
-            }
+            self.end_offer(offer, r.is_ok() && action == DND_COPY);
             if let Some(meter) = &mut self.meter {
                 meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
             }
@@ -942,6 +995,7 @@ impl Surface {
         loop {
             self.dispatch(m)?;
             self.pump_read();
+            self.pump_early();
             if let Some(end) = self.feed(m)? {
                 return Ok(end);
             }
@@ -956,25 +1010,29 @@ impl Surface {
                 self.inputs.push(Input::Deadline);
                 continue;
             }
-            let until = self
-                .reading
-                .as_ref()
-                .map_or(self.deadline, |r| r.until.min(self.deadline));
+            // The nearest read deadline: one wakeup for either read.
+            let read_until = [&self.reading, &self.early]
+                .into_iter()
+                .flatten()
+                .map(|r| r.until)
+                .min();
+            let until = read_until.map_or(self.deadline, |u| u.min(self.deadline));
             let mut pfds = [
                 pollfd(self.conn.as_raw_fd()),
                 pollfd(self.reading.as_ref().map_or(-1, |r| r.fd.as_raw_fd())),
+                pollfd(self.early.as_ref().map_or(-1, |r| r.fd.as_raw_fd())),
             ];
             let left = until.saturating_duration_since(now);
             let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
-            // SAFETY: two valid pollfds (a negative fd is ignored).
-            let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, ms) };
+            // SAFETY: three valid pollfds (a negative fd is ignored).
+            let r = unsafe { libc::poll(pfds.as_mut_ptr(), 3, ms) };
             if r >= 0
                 && let Some(meter) = &mut self.meter
                 && idle_wakeup(
                     pfds.iter().any(|p| p.revents != 0),
                     Instant::now(),
                     self.deadline,
-                    self.reading.as_ref().map(|r| r.until),
+                    read_until,
                 )
             {
                 meter.idle_wakeup();
@@ -1440,6 +1498,173 @@ mod tests {
             ]
         );
         assert_eq!(s.offers.kept(), None);
+    }
+
+    /// The early read's source writes the list and closes its end.
+    fn early_source_writes(s: &mut Surface, w: OwnedFd) {
+        let list = b"file:///x\r\n";
+        // SAFETY: writing a valid buffer to a valid fd.
+        let n = unsafe { libc::write(w.as_raw_fd(), list.as_ptr().cast(), list.len()) };
+        assert_eq!(n as usize, list.len());
+        drop(w);
+        s.pump_early();
+        assert!(s.early.is_none(), "read to EOF");
+    }
+
+    /// Whether the reader of the pipe whose write end is `w` is gone.
+    fn reader_gone(w: &OwnedFd) -> bool {
+        let mut p = libc::pollfd {
+            fd: w.as_raw_fd(),
+            events: 0,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        unsafe { libc::poll(&mut p, 1, 0) };
+        p.revents & libc::POLLERR != 0
+    }
+
+    /// The tail of every ended drop: `finish` only after a negotiated copy
+    /// (anything else is a protocol error), then the keep ends and the offer
+    /// is destroyed, once.
+    #[test]
+    fn ending_a_dropped_offer_finishes_only_after_copy() {
+        for (action, expect) in [
+            (
+                DND_COPY,
+                vec![
+                    (DEVICE_OFFER_A, op::wl_data_offer::FINISH),
+                    (DEVICE_OFFER_A, op::wl_data_offer::DESTROY),
+                ],
+            ),
+            (0, vec![(DEVICE_OFFER_A, op::wl_data_offer::DESTROY)]),
+        ] {
+            let (mut s, server) = fake_compositor();
+            let mut ev = drag_enters_with(&s, DEVICE_OFFER_A, 1, action);
+            ev.extend(msg(s.id.data_device, op::wl_data_device::DROP, &[]));
+            deliver(&mut s, &server, &ev);
+            s.end_drop();
+            let (reqs, _) = requests(&mut s, &server);
+            assert_eq!(reqs, expect, "action {action}");
+            assert_eq!(s.offers.kept(), None);
+            // Ending twice destroys nothing again.
+            s.end_drop();
+            assert_eq!(requests(&mut s, &server).0, []);
+        }
+    }
+
+    /// The early read receives the drag's list on a pipe, tags the result
+    /// with the machine's tag, and leaves the offer alone: no `finish`, no
+    /// `destroy`.
+    #[test]
+    fn the_early_read_delivers_the_tagged_list_and_keeps_the_offer() {
+        let (mut s, server) = fake_compositor();
+        let ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(7), &Machine::new()).unwrap();
+        let (reqs, mut fds) = requests(&mut s, &server);
+        assert_eq!(reqs, [(DEVICE_OFFER_A, op::wl_data_offer::RECEIVE)]);
+        assert_eq!(fds.len(), 1, "the pipe's write end");
+        early_source_writes(&mut s, fds.remove(0));
+        assert_eq!(
+            s.inputs.last(),
+            Some(&Input::DragList(7, Ok(b"file:///x\r\n".to_vec())))
+        );
+        assert_eq!(requests(&mut s, &server).0, []);
+    }
+
+    /// No offer to read (the null offer): the read fails at once, so the
+    /// machine falls back to `Drop here`.
+    #[test]
+    fn an_early_read_without_an_offer_fails_at_once() {
+        let (mut s, _server) = fake_compositor();
+        s.apply(Effect::ReadEarly(3), &Machine::new()).unwrap();
+        assert!(s.early.is_none());
+        assert!(matches!(s.inputs.last(), Some(Input::DragList(3, Err(_)))));
+    }
+
+    /// A source that never writes: the early read ends in an error at its
+    /// deadline, tagged, and the offer is untouched.
+    #[test]
+    fn a_silent_early_source_times_out() {
+        let (mut s, server) = fake_compositor();
+        let ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(2), &Machine::new()).unwrap();
+        let (_, fds) = requests(&mut s, &server);
+        s.pump_early();
+        assert!(s.early.is_some(), "still waiting");
+        s.early.as_mut().unwrap().until = Instant::now() - Duration::from_millis(1);
+        s.pump_early();
+        assert!(s.early.is_none());
+        assert!(matches!(s.inputs.last(), Some(Input::DragList(2, Err(_)))));
+        drop(fds);
+    }
+
+    /// Regression guard: a new enter (another offer, or the same one again)
+    /// closes the early pipe in flight, so its list cannot reach the new
+    /// drag; the same for a leave.
+    #[test]
+    fn a_new_enter_or_a_leave_closes_the_early_pipe() {
+        let (mut s, server) = fake_compositor();
+        let ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(1), &Machine::new()).unwrap();
+        let (_, mut fds) = requests(&mut s, &server);
+        let w = fds.remove(0);
+        assert!(!reader_gone(&w));
+        let ev = drag_enters(&s, DEVICE_OFFER_B, 2);
+        deliver(&mut s, &server, &ev);
+        assert!(s.early.is_none());
+        assert!(reader_gone(&w), "the pipe was closed");
+
+        s.apply(Effect::ReadEarly(2), &Machine::new()).unwrap();
+        let (_, mut fds) = requests(&mut s, &server);
+        let w = fds.remove(0);
+        let leave = msg(s.id.data_device, op::wl_data_device::LEAVE, &[]);
+        deliver(&mut s, &server, &leave);
+        assert!(reader_gone(&w));
+    }
+
+    /// A drop while the early read is still in flight takes the fallback's
+    /// read: the early pipe is closed, and the one drop read follows.
+    #[test]
+    fn a_drop_closes_the_early_read_before_the_fallback_read() {
+        let (mut s, server) = fake_compositor();
+        let mut ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(1), &Machine::new()).unwrap();
+        let (_, mut fds) = requests(&mut s, &server);
+        let early_w = fds.remove(0);
+        ev = msg(s.id.data_device, op::wl_data_device::DROP, &[]);
+        deliver(&mut s, &server, &ev);
+        s.start_read().unwrap();
+        assert!(s.early.is_none());
+        assert!(reader_gone(&early_w));
+        let (reqs, fds) = requests(&mut s, &server);
+        assert_eq!(reqs, [(DEVICE_OFFER_A, op::wl_data_offer::RECEIVE)]);
+        assert_eq!(fds.len(), 1);
+    }
+
+    /// The early path's drop: no second receive, `finish` (copy) and
+    /// `destroy` of the same offer.
+    #[test]
+    fn the_early_path_ends_the_drop_without_a_second_read() {
+        let (mut s, server) = fake_compositor();
+        let ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(1), &Machine::new()).unwrap();
+        let (_, mut fds) = requests(&mut s, &server);
+        early_source_writes(&mut s, fds.remove(0));
+        let ev = msg(s.id.data_device, op::wl_data_device::DROP, &[]);
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::EndDrop, &Machine::new()).unwrap();
+        assert_eq!(
+            requests(&mut s, &server).0,
+            [
+                (DEVICE_OFFER_A, op::wl_data_offer::FINISH),
+                (DEVICE_OFFER_A, op::wl_data_offer::DESTROY),
+            ]
+        );
     }
 
     /// The kept offer is the one to read, never the null offer.
