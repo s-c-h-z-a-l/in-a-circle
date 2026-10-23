@@ -296,7 +296,8 @@ No daemon:
   `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
   action, inputs, done, progress, start time) rewritten by rename at most
   four times a second and removed at the end; a job id is
-  `<unix-seconds>-<pid>`, and an entry whose process is gone is ignored;
+  `<unix-seconds>-<pid>-<8 random hex digits>`, and an entry whose
+  process is gone is ignored;
 - cancelling: `SIGTERM` to the supervisor.
 
 A jobs view (name, paths, what into what, progress, estimated time,

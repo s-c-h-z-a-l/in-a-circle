@@ -152,7 +152,7 @@ fn cstr(p: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
-fn random_u64() -> io::Result<u64> {
+pub(crate) fn random_u64() -> io::Result<u64> {
     let mut buf = [0u8; 8];
     loop {
         // SAFETY: buf is a valid, writable 8-byte buffer and we pass its

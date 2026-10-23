@@ -36,9 +36,20 @@ fn unix_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// `<unix-seconds>-<pid>`.
+/// `<unix-seconds>-<pid>-<8 hex digits>`: seconds and a pid can repeat
+/// (pid reuse, a namespace), the random part makes a clash unlikely.
 pub fn new_job_id() -> JobId {
-    JobId(format!("{}-{}", unix_secs(), std::process::id()))
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    // Without getrandom (never on a supported kernel), the nanoseconds.
+    let r = crate::output::random_u64().unwrap_or(u64::from(now.subsec_nanos()));
+    JobId(format!(
+        "{}-{}-{:08x}",
+        now.as_secs(),
+        std::process::id(),
+        r as u32
+    ))
 }
 
 fn history_path() -> PathBuf {
@@ -968,6 +979,21 @@ mod tests {
             assert!(!path.exists());
             assert!(list_running().is_empty());
         });
+    }
+
+    #[test]
+    fn job_ids_differ_within_one_second_and_process() {
+        let (a, b) = (new_job_id(), new_job_id());
+        assert_ne!(a, b);
+        let parts: Vec<&str> = a.0.split('-').collect();
+        assert_eq!(parts.len(), 3, "{}", a.0);
+        assert!(parts[0].parse::<u64>().is_ok(), "{}", a.0);
+        assert_eq!(parts[1], std::process::id().to_string());
+        assert!(
+            parts[2].len() == 8 && parts[2].bytes().all(|c| c.is_ascii_hexdigit()),
+            "{}",
+            a.0
+        );
     }
 
     #[test]

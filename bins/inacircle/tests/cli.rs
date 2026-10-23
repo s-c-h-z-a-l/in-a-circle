@@ -257,9 +257,13 @@ fn txt_to_md_end_to_end() {
     // The source is untouched.
     assert_eq!(fs::read(&src).unwrap(), b"Hello *world*\n\n# not heading\n");
     let job = o.job();
-    let (secs, pid) = job.split_once('-').unwrap();
+    let parts: Vec<&str> = job.split('-').collect();
     assert!(
-        secs.parse::<u64>().is_ok() && pid.parse::<u32>().is_ok(),
+        matches!(parts[..], [secs, pid, rand]
+            if secs.parse::<u64>().is_ok()
+                && pid.parse::<u32>().is_ok()
+                && rand.len() == 8
+                && u32::from_str_radix(rand, 16).is_ok()),
         "{job}"
     );
 
