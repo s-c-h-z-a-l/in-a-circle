@@ -394,7 +394,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             .windows(2)
             .map(|w| format!("{}_cpu_us={}", w[1].0, w[1].1 - w[0].1))
             .collect();
-        eprintln!("inacircle: measure run {}", phases.join(" "));
+        eprintln!(
+            "inacircle: measure run start_abs_cpu_us={} {}",
+            l[0].1,
+            phases.join(" ")
+        );
     }
     // The job is closed in the history and gone from the registry, so an
     // Undo click can undo it. The token stays: a signal in the Undo window
@@ -617,7 +621,7 @@ fn cmd_wheel() -> u8 {
     if let Some(meter) = meter {
         let exit_cpu = cpu_us(libc::RUSAGE_SELF);
         eprintln!(
-            "inacircle: {}",
+            "inacircle: {} exit_abs_cpu_us={exit_cpu}",
             meter.report(measure::vm_hwm_kb(), exit_cpu)
         );
     }
