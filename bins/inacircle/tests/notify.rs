@@ -129,6 +129,8 @@ struct Run {
     stdout: String,
     stderr: String,
     elapsed: Duration,
+    /// The child's own CPU time (user + system).
+    cpu: Duration,
 }
 
 impl Run {
@@ -193,6 +195,7 @@ fn run_then(mut c: Command, seen: &Arc<Mutex<String>>, meanwhile: impl FnOnce(u3
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
+    let cpu = cpu_at_exit(pid);
     let st = child.wait().unwrap();
     let elapsed = start.elapsed();
     let _ = ended.send(());
@@ -204,7 +207,32 @@ fn run_then(mut c: Command, seen: &Arc<Mutex<String>>, meanwhile: impl FnOnce(u3
         stdout,
         stderr,
         elapsed,
+        cpu,
     }
+}
+
+/// Waits until `pid` (our child) has exited, without reaping it, and
+/// returns its CPU time (user + system, its reaped children included).
+fn cpu_at_exit(pid: u32) -> Duration {
+    // SAFETY: an all-zero siginfo_t is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: pid is our unreaped child, info is writable; WNOWAIT leaves
+    // it to `Child::wait`.
+    let r = unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+    assert_eq!(r, 0, "{}", std::io::Error::last_os_error());
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // Fields after the command's `)`: utime, stime, cutime and cstime are
+    // the 12th to 15th.
+    let rest = &stat[stat.rfind(')').unwrap() + 2..];
+    let ticks: u64 = rest
+        .split(' ')
+        .skip(11)
+        .take(4)
+        .map(|f| f.parse::<u64>().unwrap())
+        .sum();
+    // SAFETY: sysconf has no preconditions.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    Duration::from_millis(ticks * 1000 / hz)
 }
 
 fn plain_run(c: Command) -> Run {
@@ -688,6 +716,54 @@ fn signal_flood_does_not_stall_the_run() {
     assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
     assert_eq!(r.unavailable(), 1, "{}", r.stderr);
     assert!(r.elapsed < Duration::from_secs(3), "{:?}", r.elapsed);
+}
+
+#[test]
+fn foreign_id_flood_turns_notifications_off() {
+    let e = Env::new("foreign-flood");
+    let a = e.test_input("a.test", &["sleep_ms=2000", "events=done"]);
+    let (fake, _rx) = server(|p, g| {
+        if g.replaces == 0 && g.has_button("cancel") {
+            // Endless clicks on another application's notification.
+            let m = Message {
+                kind: dbus::Kind::Signal,
+                serial: 1000,
+                reply_serial: None,
+                path: Some(PATH.into()),
+                interface: Some(IFACE.into()),
+                member: Some("ActionInvoked".into()),
+                error_name: None,
+                destination: None,
+                sender: Some(OWNER.into()),
+                signature: String::new(),
+                body: vec![Value::U32(999), Value::Str("bogus".into())],
+            };
+            let one = dbus::encode(&m).unwrap();
+            p.flood(&one.repeat(100));
+        }
+    });
+    let r = plain_run(test_script(&e, Some(&bus_of(&fake)), true, &[&a]));
+    fake.join();
+    assert!(
+        r.cpu < r.elapsed / 4,
+        "cpu {:?} over a {:?} run",
+        r.cpu,
+        r.elapsed
+    );
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.lines("done").len(), 1, "{}", r.stdout);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+    assert_eq!(
+        r.stderr
+            .lines()
+            .filter(|l| *l
+                == "inacircle: notifications unavailable: \
+                    too many signals from the notification server")
+            .count(),
+        1,
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]

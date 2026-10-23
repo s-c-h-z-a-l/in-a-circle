@@ -27,6 +27,9 @@ const WAKE_FRAMES: usize = 256;
 /// Events about our notification in one wake past which the server is
 /// taken as broken.
 const WAKE_EVENTS: usize = 64;
+/// Wakes in a row that spend all of `WAKE_FRAMES` past which the server is
+/// taken as broken (a flood of signals about other notifications).
+const SPENT_WAKES: u32 = 4;
 /// A call once the run is over.
 const CALL_WAIT: Duration = Duration::from_millis(500);
 
@@ -177,19 +180,23 @@ pub fn body_of(lines: &[String], markup: bool) -> String {
     fitted.join("\n")
 }
 
-/// One line of at most `MAX_CHARS` characters: control characters, line
-/// and paragraph separators and bidi controls become spaces, markup is escaped (an entity counts in full and is never cut),
-/// and a cut line ends in `…`.
 /// Separators some servers break lines at, and the bidi marks, embeddings,
-/// overrides and isolates that reorder what is shown (`invoice\u{202E}fdp.exe`
-/// would read `invoiceexe.pdf`).
+/// overrides and isolates that reorder what is shown
+/// (`invoice\u{202E}fdp.exe` would read `invoiceexe.pdf`).
 fn is_layout_control(c: char) -> bool {
     matches!(
         c,
-        '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        '\u{2028}' | '\u{2029}' // line and paragraph separators
+            | '\u{200E}' | '\u{200F}' // LRM, RLM
+            | '\u{202A}'..='\u{202E}' // embeddings and overrides
+            | '\u{2066}'..='\u{2069}' // isolates
     )
 }
 
+/// One line of at most `MAX_CHARS` characters: control characters, line
+/// and paragraph separators and bidi controls become spaces, markup is
+/// escaped (an entity counts in full and is never cut), and a cut line
+/// ends in `…`.
 fn fit(s: &str, markup: bool) -> String {
     let piece = |c: char| -> std::borrow::Cow<'static, str> {
         match c {
@@ -256,6 +263,8 @@ pub struct Notifier {
     cancel_seen: bool,
     /// `wake` answered Cancel.
     cancelled: bool,
+    /// Drains in a row that spent all of `WAKE_FRAMES`.
+    spent: u32,
 }
 
 impl Notifier {
@@ -278,6 +287,7 @@ impl Notifier {
             sent: now,
             cancel_seen: false,
             cancelled: false,
+            spent: 0,
         }
     }
 
@@ -366,7 +376,8 @@ impl Notifier {
 
     /// Reads what the server sent, at most `WAKE_FRAMES` frames (the rest
     /// waits for the next wake); true for a Cancel click on ours. More
-    /// than `WAKE_EVENTS` events about ours is no person clicking: off.
+    /// than `WAKE_EVENTS` events about ours, or `SPENT_WAKES` drains in a
+    /// row that spend every frame, is no person clicking: off.
     fn drain(&mut self) -> bool {
         let id = self.id;
         let Bus::On(n) = &mut self.bus else {
@@ -378,7 +389,17 @@ impl Notifier {
         loop {
             let e = match n.poll_event_within(id, &mut frames) {
                 Ok(Some(e)) => e,
-                Ok(None) => return cancel,
+                Ok(None) if frames > 0 => {
+                    self.spent = 0;
+                    return cancel;
+                }
+                Ok(None) => {
+                    self.spent += 1;
+                    if self.spent >= SPENT_WAKES {
+                        self.off(&"too many signals from the notification server");
+                    }
+                    return cancel;
+                }
                 Err(e) => {
                     self.off(&e);
                     return cancel;
