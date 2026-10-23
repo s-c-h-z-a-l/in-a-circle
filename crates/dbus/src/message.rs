@@ -587,12 +587,24 @@ mod tests {
         // Interior NUL in strings, paths and signatures.
         assert!(bad(vec![Value::Str("a\0b".into())]));
         assert!(bad(vec![Value::Path("/a\0".into())]));
-        // Signature longer than 255 bytes: a variant holding a deep struct.
-        let mut v = Value::Byte(0);
-        for _ in 0..30 {
-            v = Value::Struct(vec![v, Value::Byte(0), Value::Byte(0), Value::Byte(0)]);
-        }
+        // Signature longer than 255 bytes: a signature value, and a variant
+        // holding a wide struct.
         assert!(bad(vec![Value::Sig("y".repeat(256))]));
+        assert!(bad(vec![Value::Variant(Box::new(Value::Struct(vec![
+            Value::Byte(0);
+            300
+        ])))]));
+        // More than 32 nested containers in one signature, at the top level
+        // and inside a variant.
+        let mut deep = Value::Byte(0);
+        for _ in 0..33 {
+            deep = Value::Array(deep.signature(), vec![]);
+        }
+        assert!(bad(vec![deep.clone()]));
+        assert!(bad(vec![Value::Variant(Box::new(deep))]));
+        // Empty structs have no valid signature.
+        assert!(bad(vec![Value::Struct(vec![])]));
+        assert!(bad(vec![Value::Variant(Box::new(Value::Struct(vec![])))]));
         // Items that do not match the declared element signature.
         assert!(bad(vec![Value::Array("s".into(), vec![Value::U32(1)])]));
         assert!(bad(vec![Value::Array("zz".into(), vec![])]));

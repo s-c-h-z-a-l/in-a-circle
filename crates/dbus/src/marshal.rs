@@ -82,8 +82,11 @@ pub(crate) fn validate_str(s: &str) -> Result<(), Error> {
 }
 
 /// Checks that `v` can be written as valid wire data: no interior NULs,
-/// signatures within 255 bytes, items matching their declared signatures.
+/// signatures within 255 bytes, items matching their declared signatures,
+/// and every complete type passing the same check `decode` applies (nesting,
+/// no empty structs).
 pub(crate) fn validate(v: &Value) -> Result<(), Error> {
+    one_type(&v.signature())?;
     validate_at(v, 0)
 }
 
@@ -135,9 +138,11 @@ fn validate_at(v: &Value, depth: usize) -> Result<(), Error> {
             Ok(())
         }
         Value::Variant(inner) => {
-            if inner.signature().len() > 255 {
+            let sig = inner.signature();
+            if sig.len() > 255 {
                 return Err(Error::Malformed("signature too long"));
             }
+            one_type(&sig)?;
             validate_at(inner, depth + 1)
         }
         _ => Ok(()),
