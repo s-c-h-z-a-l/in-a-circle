@@ -2,9 +2,9 @@
 
 How In.A.Circle is put together, and why. Measurements behind these
 decisions are in [`benchmarks/`](benchmarks); the [spikes](../spikes)
-proved the parts. The engine runs headless today (see
-[Headless CLI](#headless-cli)), with desktop notifications on request;
-the wheel is not built yet.
+proved the parts. `inacircle` without arguments is the wheel (see
+[The wheel](#the-wheel)); the engine also runs headless (see
+[Headless CLI](#headless-cli)), with desktop notifications on request.
 
 ## Overview
 
@@ -317,6 +317,122 @@ In the engine, in one place:
    and says why. A folder made for several outputs is removed only if
    empty afterwards.
 
+## The wheel
+
+`inacircle` without arguments. One process per hotkey press, gone when the
+choice has run.
+
+**Life of a run**
+
+1. SIGALRM is reset to its default action and unblocked (an ignored
+   disposition survives `execve`), then `alarm(10)` is armed, before the
+   lock: a slow runtime dir is covered too. The default action kills the
+   process, so this is the last guard if everything else hangs.
+2. One instance: `flock` on `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, opened
+   `O_NONBLOCK | O_NOFOLLOW` (a symlink or FIFO there is an error, exit 1).
+   A held lock makes a second instance exit 0 at once, before touching
+   Wayland.
+3. The surface is shown (below). Stage 1 waits for the drop, stage 2 for
+   the choice; each stage has 10 s. The drop re-arms `alarm` (and the
+   surface's own deadline, 500 ms shorter so a timeout normally ends in an
+   orderly close). The deadline will become configurable.
+4. Closed without a choice (Esc, a click off the wheel, the drag leaving
+   without a drop, the deadline, a Wayland error, the compositor closing
+   the connection): surface torn down, lock released, exit 0 (1 on an
+   error). Nothing runs and nothing is notified.
+5. A choice: the Wayland connection is closed (the surface disappears), the
+   lock released, `alarm(0)`; then the same run path as
+   `inacircle run --notify <preset> <files…>` (executor, journal,
+   notifications), with its exit code. The hotkey is usable again at once.
+
+The logic is a pure state machine (inputs in, effects out, no syscalls)
+driven by the Wayland layer, so every exit path is tested without a
+compositor.
+
+**Surface**
+
+- A full-screen `zwlr_layer_shell` surface on the `overlay` layer,
+  anchored to all four edges, with exclusive keyboard focus, so Esc always
+  reaches us. Its buffer is 1x1 and transparent, stretched over the output
+  with `wp_viewporter`.
+- The wheel lives in a subsurface with an **empty input region**: every
+  pointer and drag event lands on the parent. The wheel is painted while
+  the cursor position is still on its way; only the subsurface position
+  depends on it. It is placed once, clamped to stay on the output; hit
+  testing uses the shifted center.
+- Two `wl_shm` buffers; damage is computed against what is on screen, not
+  against the buffer being drawn.
+- Required globals (minimum version): `wl_compositor` 4, `wl_shm` 1,
+  `wl_seat` 1, `wl_subcompositor` 1, `wp_viewporter` 1,
+  `zwlr_layer_shell_v1` 1; missing or older is an error, exit 1.
+  `wl_data_device_manager` 3 is optional (`set_actions` and `finish` need
+  it): without it there is no drop target and the hub says `Nothing to do`.
+- Caps against a hostile or broken server, each an error past the limit:
+  256 globals, 16 live data offers, 64 MIME types per offer.
+
+**The B path (drag, then drop)**
+
+- Stage 1: the wheel appears with the hub `Drop here`, every slice empty
+  and dim, the whole wheel a drop target. With no drag (a plain hotkey
+  press) the hub says `Nothing to do` and any click or Esc closes.
+- Drag rules: copy only, never a `DELETE` target. Over the wheel with
+  `text/uri-list` on offer, `accept` and `set_actions(copy)`; off it, and
+  for any other drag, `accept(null)` and `set_actions(none)`. `finish` is
+  sent only if copy was negotiated at the drop. During a drag the position
+  comes from `wl_data_device.enter`/`motion`, not `wl_pointer.enter`. A
+  `leave` without a drop closes the wheel. Events that carry an fd take it
+  even when ignored.
+- **Hit** semantics: a point on a slice is `Slice(k)`; inside the wheel's
+  outer radius but off every slice (the hub and the gaps) is `Hub`;
+  beyond it, `Outside`. `Hub` is a drop target and ignores clicks;
+  `Outside` closes on click.
+- The drop's `text/uri-list` is read through a pipe with a 500 ms deadline,
+  at most 64 KiB and 1024 URIs. A source that never writes or never closes
+  times out. A failed read closes the wheel.
+- Only `file://` URIs with an empty or `localhost` host count. `%XX`
+  decodes to bytes; a non-`file` URI, another host, a bad escape or a
+  `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
+  Paths are kept as given (`..` and non-UTF-8 bytes stay, as on the
+  command line). CRLF and LF both end a line; lines starting with `#` are
+  comments. If nothing is left, the hub says `Nothing to do`.
+- Stage 2: the files are classified and `menu::offer` fills the slices from
+  the presets: applicable ones normal, others dim, unused ones empty. Only
+  an applicable slice is clickable (left button); that is the choice.
+- A drag that arrives while stage 2 is up is refused.
+
+**The hub text**
+
+The hub shows the source: the file name for one file; `<n> / <total>
+files` for several (`n` is what the wheel offers on, `total` what was
+dropped). Text wider than the hub is cut with `…`. If a character of the
+name is missing from the atlas (or the name is empty), the name is
+replaced by `1 file · <type label>` (e.g. `1 file · text`), until a larger
+atlas exists.
+
+**Text**
+
+One font (Noto Sans Medium, OFL), one size (15 px), scale 1: ASCII plus
+the Hungarian accented letters, 115 glyphs. `tools/bake-atlas` bakes it
+offline (the only place `fontdue` is used); the alpha atlas
+(`crates/ui/src/atlas.bin`, ~12 KB) is embedded with `include_bytes!`,
+advances in 26.6 fixed point. No font parsing at run time; the TTF is not
+in the repository. A test compares the committed atlas with the bake's
+output when the font is available.
+
+**Look and geometry**
+
+Box 480, outer radius 220, inner 80, hub 64, gap 2 px, eight slices (0 =
+right, clockwise); the label sits at a slice's middle. States: normal,
+hover, dim. Polish comes later.
+
+**Measuring**
+
+`INACIRCLE_MEASURE=1` prints one line on stderr when the wheel closes:
+`measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=…
+hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… vm_hwm_kb=…`.
+Unset, it costs one `getenv`. Numbers:
+[benchmarks/wheel.md](benchmarks/wheel.md).
+
 ## Context sources
 
 A source (drag now; selection, clipboard and the active window later)
@@ -401,10 +517,12 @@ inacircle cancel <job-id>
 
 ```
 crates/   wire, dbus, ui, engine, manifest, action, toml, doc
-          (dbus: the notifications client, libc only; the shipped
-          `inacircle` links it, never `doc`)
+          (wire: the Wayland client, libc only; dbus: the notifications
+          client, libc only; ui: the wheel's geometry, rasterizer, damage
+          and text; the shipped `inacircle` links them, never `doc`)
 bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
-tools/    gen-entities (dev tool)
+tools/    gen-entities, bake-atlas (dev tools; bake-atlas alone uses
+          `fontdue`, kept out of the shipped binaries)
 scripts/  checks and helpers
 spikes/   measurements, not product code
 ```
@@ -416,15 +534,12 @@ Product code is written from these decisions, not copied from the spikes.
 On drag enter, files offer only `text/uri-list`, which says nothing about
 the type; the URI list itself is guaranteed only after the drop.
 
-- **The base path works everywhere:** drop on the wheel hands the files
-  over, then a second wheel (click mode, the drag is over) offers the
-  type-specific targets.
-- **A shortcut on top of it, not a second path:** if the URI list can be
-  read during the drag (`wl_data_offer.receive` before the drop) within a
-  deadline, the wheel shows the type-specific slices already, and the drop
-  is the final choice. If it does not arrive, the same wheel shows a single
-  "drop here" target and the second step follows.
-
-Whether Nautilus and Thunar serve the list before the drop is not measured
-yet; other applications may never do it, which is why the shortcut cannot
-be the only path.
+- **The base path (built, [B path](#the-wheel)):** drop on the wheel hands
+  the files over, then the second stage offers the type-specific targets.
+- **A shortcut on top of it, not a second path (not built):** if the URI
+  list can be read during the drag (`wl_data_offer.receive` before the
+  drop) within a deadline, the wheel shows the type-specific slices
+  already, and the drop is the final choice. If it does not arrive, the
+  same wheel shows a single "drop here" target and the second step
+  follows. Other applications may never serve the list early, which is why
+  the shortcut cannot be the only path.
