@@ -27,7 +27,12 @@ it's a bug.
      and reported, not budgeted. Do our work during compositor waits.
    - our CPU from `main` to exit, excluding per-event work (hover, motion):
      <= 1 ms. This covers reading the payload, classifying, and starting
-     the action.
+     the action. The wheel splits this into its waiting points, each
+     <= 1 ms of our CPU for one input: `main` to the wheel's commit, the
+     drop's data to the stage-2 wheel's commit, and the choice to the
+     action's start. Per-input work beyond one input scales and is
+     reported, not budgeted. CPU before `main` (a launcher's `sh -c`, exec,
+     loader) is reported, not budgeted.
    - hover repaint: <= 100 µs per event
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)

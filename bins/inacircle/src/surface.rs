@@ -713,7 +713,12 @@ impl Surface {
                 unsafe { libc::alarm(d.as_secs().max(1) as u32) };
             }
             Effect::Close => return Ok(Some(None)),
-            Effect::Run(files, preset) => return Ok(Some(Some((files, preset)))),
+            Effect::Run(files, preset) => {
+                if let Some(meter) = &mut self.meter {
+                    meter.chose(crate::cpu_us(libc::RUSAGE_SELF));
+                }
+                return Ok(Some(Some((files, preset))));
+            }
         }
         Ok(None)
     }
@@ -795,6 +800,9 @@ impl Surface {
             if self.offers.release() == Some(offer) {
                 self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
             }
+            if let Some(meter) = &mut self.meter {
+                meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
+            }
             self.inputs.push(Input::DropData(r));
         }
     }
@@ -868,6 +876,7 @@ impl Surface {
         // A synced subsurface: the parent's commit applies it.
         c.req(id.surface, op::wl_surface::COMMIT, &[]);
         self.busy[i] = true;
+        let swapped = !first && self.shown.is_some_and(|(g, _)| g != m.generation());
         self.shown = want;
         if let Some(meter) = &mut self.meter {
             if let Some(t) = started {
@@ -875,6 +884,9 @@ impl Surface {
             }
             if first {
                 meter.committed(crate::cpu_us(libc::RUSAGE_SELF), Instant::now());
+            }
+            if swapped {
+                meter.swapped(crate::cpu_us(libc::RUSAGE_SELF));
             }
             // After the timings are taken: reading smaps costs tens of µs.
             if started.is_none() {

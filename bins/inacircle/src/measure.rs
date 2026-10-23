@@ -19,6 +19,12 @@ pub struct Meter {
     events: u64,
     /// CPU the meter itself spent (reading smaps for PSS), in µs.
     overhead_us: i64,
+    /// Process CPU when the drop's data was in.
+    drop_cpu: Option<i64>,
+    /// CPU from the drop's data to the stage-2 wheel's first commit.
+    stage2_us: Option<i64>,
+    /// Process CPU at the choice (absolute, like the run's marks).
+    choice_cpu: Option<i64>,
 }
 
 impl Meter {
@@ -33,6 +39,9 @@ impl Meter {
             pss_kb: -1,
             events: 0,
             overhead_us: 0,
+            drop_cpu: None,
+            stage2_us: None,
+            choice_cpu: None,
         }
     }
 
@@ -52,6 +61,23 @@ impl Meter {
     /// kernel tracks no PSS peak, so the surface samples after full paints.
     pub fn pss(&mut self, kb: i64) {
         self.pss_kb = self.pss_kb.max(kb);
+    }
+
+    /// The drop's data is in (stage 2 starts).
+    pub fn dropped(&mut self, cpu_us: i64) {
+        self.drop_cpu.get_or_insert(cpu_us);
+    }
+
+    /// A new wheel's first commit; after a drop, that is stage 2 shown.
+    pub fn swapped(&mut self, cpu_us: i64) {
+        if let (Some(d), None) = (self.drop_cpu, self.stage2_us) {
+            self.stage2_us = Some(cpu_us - d);
+        }
+    }
+
+    /// The user chose a slice.
+    pub fn chose(&mut self, cpu_us: i64) {
+        self.choice_cpu.get_or_insert(cpu_us);
     }
 
     /// CPU the meter spent on itself, to subtract from the wheel's.
@@ -83,7 +109,7 @@ impl Meter {
         let max = sorted.last().copied();
         format!(
             "measure wheel main_to_commit_cpu_us={cpu} main_to_commit_wall_us={wall} \
-             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
+             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} drop_to_stage2_cpu_us={} choice_abs_cpu_us={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
             sorted.len(),
             p50.unwrap_or(0),
             max.unwrap_or(0),
@@ -95,6 +121,8 @@ impl Meter {
                 exit_cpu_us - self.cpu0_us
             },
             self.overhead_us,
+            self.stage2_us.unwrap_or(-1),
+            self.choice_cpu.unwrap_or(-1),
             self.pss_kb
         )
     }
@@ -151,10 +179,15 @@ mod tests {
         m.event();
         m.event();
         m.event();
+        m.dropped(3_000);
+        m.dropped(9_000);
+        m.swapped(3_400);
+        m.swapped(9_999);
+        m.chose(3_800);
         assert_eq!(
             m.report(2_840, 4_000),
             "measure wheel main_to_commit_cpu_us=700 main_to_commit_wall_us=2500 \
-             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 events=3 wheel_cpu_us=3000 meter_cpu_us=0 pss_kb=2100 vm_hwm_kb=2840"
+             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 events=3 wheel_cpu_us=3000 meter_cpu_us=0 drop_to_stage2_cpu_us=400 choice_abs_cpu_us=3800 pss_kb=2100 vm_hwm_kb=2840"
         );
     }
 
@@ -164,7 +197,7 @@ mod tests {
         assert_eq!(
             m.report(-1, -1),
             "measure wheel main_to_commit_cpu_us=-1 main_to_commit_wall_us=-1 \
-             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=0 wheel_cpu_us=-1 meter_cpu_us=0 pss_kb=-1 vm_hwm_kb=-1"
+             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=0 wheel_cpu_us=-1 meter_cpu_us=0 drop_to_stage2_cpu_us=-1 choice_abs_cpu_us=-1 pss_kb=-1 vm_hwm_kb=-1"
         );
     }
 
