@@ -3,8 +3,8 @@
 How In.A.Circle is put together, and why. Measurements behind these
 decisions are in [`benchmarks/`](benchmarks); the [spikes](../spikes)
 proved the parts. The engine runs headless today (see
-[Headless CLI](#headless-cli)); the wheel and notifications are not built
-yet.
+[Headless CLI](#headless-cli)), with desktop notifications on request;
+the wheel is not built yet.
 
 ## Overview
 
@@ -244,11 +244,53 @@ Every action runs sandboxed, set up in the child between `fork` and
 - Desktop notifications through **our own `libc`-only D-Bus client**
   (`org.freedesktop.Notifications`), so they appear in whatever
   notification centre the user runs.
-- Every action ends in a notification ("18 done, 2 skipped: …"), with
-  **Undo** where the server supports action buttons. Actions running
-  longer than a second first get a "running" notification with progress
-  and **Cancel**. The supervisor waits for Undo for a bounded time (about
-  ten seconds after completion).
+- Every action ends in a notification, with **Undo** where the server
+  lists the `actions` capability. Actions running longer than a second
+  (`RUNNING_AFTER`) first get a "running" notification (label, `n / m
+  files`, a progress hint from the engine's fraction, at most four updates
+  a second, same id) with **Cancel**. The supervisor then waits for Undo
+  for ten seconds after completion.
+- The final text is fixed English. One input, one output: the output's file
+  name (plus `Saved to Downloads (source folder is read-only)` when it went
+  there). Several: `<n> done[, <m> skipped][, <k> failed]` and up to three
+  problem lines `<input>: <reason>` (failures first), then `… and <r>
+  more`. Nothing finished: `Nothing converted`. Cancelled: `Cancelled`,
+  `<n> done, <r> not converted`. A lossy action that produced output starts
+  the body with `Formatting was lost.`; a run without the sandbox ends it
+  with `Ran without sandbox.`. Text is cut to 200 characters on a UTF-8
+  boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
+- The bus connection is lazy: made at the one-second mark or at the end,
+  so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`
+  (the first well-formed `unix:` path or abstract entry) or
+  `$XDG_RUNTIME_DIR/bus`; the server is D-Bus activated if it is not
+  running. At the end, connect, authenticate and `Hello` have 300 ms
+  together and every call 500 ms (activation may start the server). While
+  the run goes on the supervisor waits for each call, so the whole open has
+  500 ms and a progress update 100 ms. One wake reads at most 256 frames.
+  More than 64 events about our notification in one wake, or four wakes in
+  a row that spend all 256 frames, mean a broken server, as does a
+  malformed reply (a `Notify` id of 0 included) or an error reply. A
+  timeout, I/O error or hangup during the run only drops the connection:
+  no more updates, and the end opens once more (with the end's deadlines)
+  so the result still replaces the "running" notification and its Cancel.
+  A broken server, or any failure at the end, turns notifications off for
+  the rest of the run with one line on stderr
+  (`inacircle: notifications unavailable: …`); the result, the history and
+  the exit code never depend on them. No update is sent once every input
+  is done: the result follows.
+- Cancel arrives on the supervisor's wake point, in the same `poll` as the
+  signalfd and the pidfd: no thread. A click after the last action exited
+  is ignored. Signals count only from the server's unique name, on its
+  object path, and about our own notification id; everything else on the
+  bus is ignored.
+- After the Undo window, the result is sent again (same id) without the
+  button, so no dead button stays in the notification centre. A closed
+  notification ends the window at once, and so does SIGTERM or SIGINT
+  received during the window (a cancel during the run is part of the run)
+  (still blocked and read through the signalfd): the result is sent again
+  without the button and `run` exits with its own code. An Undo click
+  undoes the job and replaces the result with `Undone` and
+  `<n> removed[, <k> kept (<reason>)]`, or `Undo failed` with the cause.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 
@@ -313,9 +355,9 @@ server: that is a resident process, and any web page can reach `localhost`.
 The engine without the wheel, for scripts and tests:
 
 ```
-inacircle run <preset-id> <files…>          the menu path
-inacircle run --action <action-id> <files…> one action directly
-inacircle offer <files…>                    what the wheel would offer
+inacircle run [--notify] <preset-id> <files…>          the menu path
+inacircle run [--notify] --action <action-id> <files…> one action directly
+inacircle offer <files…>                               what the wheel would offer
 inacircle undo <job-id>
 inacircle jobs
 inacircle cancel <job-id>
@@ -334,8 +376,15 @@ inacircle cancel <job-id>
   first.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
+- `--notify` adds the desktop notifications of [Feedback](#feedback). All
+  stdout lines, `summary` included, are written before the Undo window
+  starts; the exit code is the same as without it.
 - `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
-  and its peak RSS on stderr (a measurement switch).
+  and its peak RSS on stderr (a measurement switch), before the
+  notifications at the end; with `--notify` a further line
+  `measure notify_cpu_us=<n>` gives our CPU spent on the final notice (open
+  and `Notify`) before the Undo window.
+- `INACIRCLE_UNDO_WAIT_MS=<n>` shortens the Undo window. Test-only.
 
 ## Configuration
 
@@ -351,6 +400,8 @@ inacircle cancel <job-id>
 
 ```
 crates/   wire, dbus, ui, engine, manifest, action, toml, doc
+          (dbus: the notifications client, libc only; the shipped
+          `inacircle` links it, never `doc`)
 bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
 tools/    gen-entities (dev tool)
 scripts/  checks and helpers

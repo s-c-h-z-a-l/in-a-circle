@@ -1109,3 +1109,27 @@ fn jobs_empty_when_idle() {
     assert_eq!(o.code, Some(0));
     assert!(o.stdout.is_empty());
 }
+
+#[test]
+fn unwritable_history_warns_once_and_the_run_proceeds() {
+    let e = Env::new("nohistory");
+    e.file("a.txt", b"hi\n");
+    // The state home is a regular file: no history can be opened under it.
+    let state = e.root.join("state-file");
+    fs::write(&state, b"").unwrap();
+    let o = parse_out(
+        e.cmd(&["run", "markdown", "a.txt"])
+            .env("XDG_STATE_HOME", &state)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (1, 0, 0));
+    assert!(e.files().join("a.md").exists());
+    let warns = o
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("inacircle: history not written: "))
+        .count();
+    assert_eq!(warns, 1, "{}", o.stderr);
+}

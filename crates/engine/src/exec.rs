@@ -12,8 +12,9 @@
 //! outputs are placed.
 //!
 //! The supervisor is a single-threaded `poll` loop over the child's stdout
-//! and stderr, the cancel signalfd and the child's pidfd; its only timer is
-//! the hourly refresh of the work dir's mtime (so a long job's dir is never
+//! and stderr, the cancel signalfd, the child's pidfd and the observer's
+//! wake fd; besides the observer's `wake_at`, its only timers are the
+//! hourly refresh of the work dir's mtime (so a long job's dir is never
 //! taken for a stale one) and, after a SIGTERM, the 5 s grace before
 //! SIGKILL.
 
@@ -24,7 +25,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read};
 use std::marker::PhantomData;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -129,6 +130,36 @@ pub trait Observer {
     fn dir(&mut self, path: &Path);
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
+    /// An fd the supervisor polls for `POLLIN` while an action runs;
+    /// [`Observer::wake`] is called when it is readable. Asked again
+    /// before every poll. After a hangup (or an error, or an invalid fd)
+    /// `wake` is called once and the fd is not polled again while this
+    /// returns the same number; return a different one to resume.
+    fn wake_fd(&self) -> Option<RawFd> {
+        None
+    }
+    /// A deadline for the supervisor's poll; [`Observer::wake`] is called
+    /// once it has passed. Asked again before every poll. A deadline fires
+    /// once: returned again unchanged after its wake, it is ignored.
+    fn wake_at(&self) -> Option<Instant> {
+        None
+    }
+    /// The wake point: `wake_fd` is readable or `wake_at` has passed.
+    /// Called on the supervisor's thread between polls: may block only
+    /// briefly, under a hard deadline (read what is there, queue writes);
+    /// the action's pipes go unread meanwhile. The observer drains its fd: one left readable wakes it
+    /// again at once.
+    fn wake(&mut self) -> Wake {
+        Wake::Continue
+    }
+}
+
+/// What the supervisor does after [`Observer::wake`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    Continue,
+    /// Cancel the run, exactly as a SIGTERM does.
+    Cancel,
 }
 
 /// SIGTERM and SIGINT, blocked in the calling thread and read through a
@@ -196,6 +227,14 @@ impl CancelToken {
             }
             return self.cancelled.get();
         }
+    }
+}
+
+/// The signalfd: readable while a cancel signal is pending, for a caller
+/// that waits on other fds too (then [`CancelToken::is_cancelled`]).
+impl AsRawFd for CancelToken {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
@@ -276,7 +315,7 @@ pub fn run(
     for g in groups {
         let members: Vec<usize> = g.members.iter().map(|&j| ok[j]).collect();
         sink.begin_group(members.len());
-        if cancel.is_cancelled() {
+        if sink.is_cancelled(cancel) {
             for &i in &members {
                 sink.fail(i, "cancelled".to_owned());
             }
@@ -307,6 +346,14 @@ struct Sink<'a> {
     span: usize,
     steps: usize,
     step: usize,
+    /// The observer answered [`Wake::Cancel`]: sticky, like the token.
+    cancelled: bool,
+    /// The observer's wake fd that hung up (or is invalid): not polled
+    /// again while `wake_fd` returns it.
+    dead_wake_fd: Option<RawFd>,
+    /// The observer's deadline that has fired: ignored while `wake_at`
+    /// returns it.
+    fired_at: Option<Instant>,
 }
 
 impl<'a> Sink<'a> {
@@ -321,7 +368,15 @@ impl<'a> Sink<'a> {
             span: 0,
             steps: 1,
             step: 0,
+            cancelled: false,
+            dead_wake_fd: None,
+            fired_at: None,
         }
+    }
+
+    /// Cancelled by a signal or by the observer.
+    fn is_cancelled(&self, cancel: &CancelToken) -> bool {
+        self.cancelled || cancel.is_cancelled()
     }
 
     fn emit(&mut self, o: Outcome) {
@@ -472,6 +527,8 @@ fn run_group(
         origin: members.to_vec(),
         intermediate: false,
     };
+    // The next step's ruleset, with the intermediate outputs' rules.
+    let mut pre = None;
     for (s, action) in route.iter().enumerate() {
         sink.step = s;
         let last = s + 1 == route.len();
@@ -480,7 +537,15 @@ fn run_group(
         let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
         let result = match ran {
             Ok(()) => run_step(
-                action, &step_in, &dir, &list, &work.path, landlock, cancel, sink,
+                action,
+                &step_in,
+                pre.take(),
+                &dir,
+                &list,
+                &work.path,
+                landlock,
+                cancel,
+                sink,
             ),
             Err(reason) => {
                 for &o in &step_in.origin {
@@ -498,20 +563,46 @@ fn run_group(
         }
         // Each output was checked when its `done` arrived, but the action
         // could swap it for a symlink afterwards. Its whole process group is
-        // gone now (`outputs` is `None` otherwise) and the next step can
-        // write only its own dir, so what resolves here stays put.
+        // gone now (`outputs` is `None` otherwise), but a descendant that
+        // left the group (`setsid`, where seccomp does not deny it) may still
+        // write its dir. So the next step's read rules are built here, from
+        // the fds this check opens, and no path is resolved again.
+        let rules = if landlock {
+            match sandbox::create() {
+                Ok(r) => r,
+                Err(e) => {
+                    for &o in &step_in.origin {
+                        sink.fail(o, format!("sandbox setup failed: {e}"));
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let mut changed: Vec<usize> = Vec::new();
         for (j, outs) in outputs.iter().enumerate() {
             let o = step_in.origin[j];
-            if !changed.contains(&o)
-                && outs
-                    .iter()
-                    .any(|rel| output::check_regular_beneath(&dir, rel).is_err())
-            {
-                changed.push(o);
-                sink.fail(o, "intermediate output changed".to_owned());
+            if changed.contains(&o) {
+                continue;
+            }
+            for rel in outs {
+                let allowed = output::open_regular_beneath(&dir, rel)
+                    .map_err(|_| "intermediate output changed".to_owned())
+                    .and_then(|fd| match &rules {
+                        Some(r) => sandbox::allow_read_fd(r, fd.as_fd(), &dir.join(rel))
+                            .map_err(|e| format!("sandbox setup failed: {e}")),
+                        None => Ok(()),
+                    });
+                if let Err(reason) = allowed {
+                    changed.push(o);
+                    sink.fail(o, reason);
+                    break;
+                }
             }
         }
+        #[cfg(test)]
+        tests::AFTER_CHECK.with_borrow_mut(|f| f.as_mut().map(|f| f(&dir)));
         let mut next = StepIn {
             paths: Vec::new(),
             origin: Vec::new(),
@@ -531,6 +622,7 @@ fn run_group(
             return;
         }
         step_in = next;
+        pre = rules;
     }
 }
 
@@ -798,11 +890,13 @@ fn last_line(tail: &[u8]) -> String {
 
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
-/// unfinished input is then failed as cancelled).
+/// unfinished input is then failed as cancelled). With Landlock, an
+/// intermediate step's ruleset comes as `pre`, already granting its inputs.
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
     step_in: &StepIn,
+    pre: Option<sandbox::Ruleset>,
     dir: &Path,
     list: &Path,
     root: &Path,
@@ -838,10 +932,10 @@ fn run_step(
         .filter(|p| p.exists())
         .collect();
     exec.push(action.bin.clone());
-    // Intermediate outputs and the list are the engine's: never followed.
-    let mut exact = vec![list.to_path_buf()];
+    // The list is the engine's: never followed. Intermediate outputs are
+    // granted in `pre`, from the fds their check opened.
+    let exact = [list.to_path_buf()];
     let read = if step_in.intermediate {
-        exact.extend_from_slice(&step_in.paths);
         &[][..]
     } else {
         &step_in.paths[..]
@@ -853,7 +947,12 @@ fn run_step(
         write: dir,
     };
     let ruleset = if landlock {
-        match sandbox::build(&policy) {
+        let built = match pre {
+            Some(r) => sandbox::add(&r, &policy).map(|()| Some(r)),
+            None if step_in.intermediate => Err(io::Error::other("no intermediate rules")),
+            None => sandbox::build(&policy),
+        };
+        match built {
             Ok(r) => r,
             Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
         }
@@ -900,7 +999,7 @@ fn run_step(
             sandbox::apply_in_child(fd, &limits)
         });
     }
-    if cancel.is_cancelled() {
+    if sink.is_cancelled(cancel) {
         for &o in &step_in.origin {
             sink.fail(o, "cancelled".to_owned());
         }
@@ -1140,6 +1239,21 @@ impl<'a> Supervisor<'a> {
             if self.pidfd.is_none() {
                 deadline = deadline.min(now + NO_PIDFD_POLL);
             }
+            // Asked anew each time: the observer may change them in `wake`.
+            // A dead fd or a fired deadline does not count while unchanged.
+            let wake_fd = sink.obs.wake_fd();
+            if wake_fd != sink.dead_wake_fd {
+                sink.dead_wake_fd = None;
+            }
+            let wake_fd = wake_fd.filter(|_| sink.dead_wake_fd.is_none());
+            let wake_at = sink.obs.wake_at();
+            if wake_at != sink.fired_at {
+                sink.fired_at = None;
+            }
+            let wake_at = wake_at.filter(|_| sink.fired_at.is_none());
+            if let Some(t) = wake_at {
+                deadline = deadline.min(t);
+            }
             let wait = deadline.saturating_duration_since(now);
             // Round up so the deadline has passed when poll returns.
             let ms = wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
@@ -1156,6 +1270,7 @@ impl<'a> Supervisor<'a> {
             let err_at = self.stderr.as_ref().map(|s| push(s.as_raw_fd()));
             let sig_at = (!self.cancelled).then(|| push(self.cancel.fd.as_raw_fd()));
             let pid_at = self.pidfd.as_ref().map(|p| push(p.as_raw_fd()));
+            let wake_fd_at = wake_fd.map(push);
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
             if r < 0 {
@@ -1189,6 +1304,21 @@ impl<'a> Supervisor<'a> {
             if ready(sig_at) && self.cancel.is_cancelled() {
                 self.cancelled = true;
                 self.terminate();
+            }
+            let due = wake_at.is_some_and(|t| now >= t);
+            if ready(wake_fd_at) || due {
+                let dead = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+                if wake_fd_at.is_some_and(|i| fds[i].revents & dead != 0) {
+                    sink.dead_wake_fd = wake_fd;
+                }
+                if due {
+                    sink.fired_at = wake_at;
+                }
+                if sink.obs.wake() == Wake::Cancel {
+                    self.cancelled = true;
+                    sink.cancelled = true;
+                    self.terminate();
+                }
             }
             let exited = match pid_at {
                 Some(_) => ready(pid_at),
@@ -1617,6 +1747,110 @@ mod tests {
         assert_eq!(last_line(b"a\n  b  \n\n"), "b");
         assert_eq!(last_line(b""), "");
         assert_eq!(last_line(b"\xff\xfeoops"), "\u{fffd}\u{fffd}oops");
+    }
+
+    type Hook = Option<Box<dyn FnMut(&Path)>>;
+
+    thread_local! {
+        /// Runs in `run_group` after the intermediate outputs' check (and
+        /// their rules), before the next step's ruleset is finished, with
+        /// the checked step's dir. The check and its rule share one fd, so
+        /// no window exists between them; the hook emulates a race between
+        /// the rule and the next step's spawn.
+        pub(super) static AFTER_CHECK: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[derive(Default)]
+    struct Seen(Vec<Outcome>);
+    impl Observer for Seen {
+        fn event(&mut self, o: &Outcome) {
+            self.0.push(o.clone());
+        }
+        fn dir(&mut self, _: &Path) {}
+        fn progress(&mut self, _: usize, _: usize, _: f32) {}
+    }
+
+    fn script_action(t: &Tmp, name: &str, body: &str, ext: &str) -> Action {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = t.0.join(name);
+        fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        Action {
+            id: "test.fake".into(),
+            family: "test".into(),
+            bin,
+            input: "text/plain".into(),
+            output: "text/markdown".into(),
+            ext: ext.into(),
+            label: "Fake".into(),
+            group: "test".into(),
+            cost: 1,
+            lossy: false,
+            batch: true,
+            requires: Vec::new(),
+            builtin: true,
+        }
+    }
+
+    #[test]
+    fn intermediate_rule_comes_from_the_checked_fd() {
+        if sandbox::landlock_abi().is_none() {
+            eprintln!("SKIPPED intermediate_rule_comes_from_the_checked_fd: no Landlock");
+            return;
+        }
+        let t = Tmp::new("ruleswap");
+        let docs = t.0.join("docs");
+        let secret = t.0.join("secret");
+        fs::create_dir_all(&docs).unwrap();
+        fs::create_dir_all(&secret).unwrap();
+        fs::write(secret.join("a.mid"), "SECRET\n").unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let s1 = script_action(
+            &t,
+            "copy",
+            "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.mid\"\n\
+             printf 'done\\t%s\\t0/a.mid\\n' \"$in\"",
+            "mid",
+        );
+        let s2 = script_action(
+            &t,
+            "append",
+            "read -r in < \"$6\"; mkdir \"$4/0\"\n\
+             if cat \"$in\" > \"$4/0/out.md\"; then printf 'done\\t%s\\t0/out.md\\n' \"$in\"\n\
+             else printf 'fail\\t%s\\tdenied\\n' \"$in\"; fi",
+            "md",
+        );
+        // Between the check and the next step's rules, `<step1>/0` becomes
+        // a link to the secret's folder, which holds a file of that name.
+        let target = secret.clone();
+        AFTER_CHECK.set(Some(Box::new(move |dir: &Path| {
+            fs::rename(dir.join("0"), dir.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&target, dir.join("0")).unwrap();
+        })));
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        let report = run(&[&s1, &s2], std::slice::from_ref(&input), &mut seen, &tok);
+        AFTER_CHECK.set(None);
+        assert!(report.sandboxed);
+        for e in fs::read_dir(&docs).unwrap().flatten() {
+            let body = fs::read(e.path()).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&body).contains("SECRET"),
+                "secret leaked into {}: {:?}",
+                e.path().display(),
+                seen.0
+            );
+        }
+        // Step 2 ran and the read of the swapped path was denied.
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "denied".to_owned()
+            }]
+        );
     }
 
     #[test]

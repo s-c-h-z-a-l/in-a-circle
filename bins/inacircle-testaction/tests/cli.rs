@@ -296,8 +296,9 @@ fn connect_reports_and_continues() {
     );
     drop(l);
 
-    // Nothing listens on the port any more: refused, reported, and the run
-    // goes on.
+    // A bound socket that never listens: refused, reported, and the run goes
+    // on. Holding the port keeps parallel tests from taking it.
+    let (_held, port) = bound_unlistened_port();
     let o = run(&w, &[&format!("connect=127.0.0.1:{port}"), "events=skip"]);
     assert_eq!(o.status.code(), Some(0));
     let lines = out_lines(&o);
@@ -309,6 +310,30 @@ fn connect_reports_and_continues() {
     for bad in ["connect=nope", "connect=127.0.0.1", "connect=::1:80"] {
         assert_eq!(run(&w, &[bad]).status.code(), Some(2), "{bad}");
     }
+}
+
+/// A TCP socket bound to a free loopback port, never listening: connecting
+/// to the port is refused while the returned fd keeps it reserved.
+fn bound_unlistened_port() -> (std::os::fd::OwnedFd, u16) {
+    use std::os::fd::FromRawFd;
+    // SAFETY: plain socket(2) call; the result is checked below.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+    // SAFETY: fd is a fresh, owned socket.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+    // SAFETY: sockaddr_in is plain data; all-zero is a valid value.
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    // SAFETY: addr is a valid sockaddr_in of `len` bytes; raw is open.
+    let r = unsafe { libc::bind(raw, (&raw const addr).cast(), len) };
+    assert_eq!(r, 0, "bind: {}", std::io::Error::last_os_error());
+    // SAFETY: addr and len are writable and sized for a sockaddr_in.
+    let r = unsafe { libc::getsockname(raw, (&raw mut addr).cast(), &mut len) };
+    assert_eq!(r, 0, "getsockname: {}", std::io::Error::last_os_error());
+    (fd, u16::from_be(addr.sin_port))
 }
 
 /// The engine passes no `--opt`: the first input's content carries them.

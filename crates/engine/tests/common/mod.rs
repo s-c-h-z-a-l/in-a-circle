@@ -141,6 +141,15 @@ pub fn run(
     (obs, end.saturating_duration_since(from))
 }
 
+/// Runs `route` on `inputs` with the observer `obs`. Returns the time the
+/// run took.
+pub fn run_with(route: &[&Action], inputs: &[PathBuf], obs: &mut dyn Observer) -> Duration {
+    let tok = CancelToken::install().unwrap();
+    let start = Instant::now();
+    exec::run(route, inputs, obs, &tok);
+    start.elapsed()
+}
+
 pub fn failed(r: &Ran) -> Vec<(PathBuf, String)> {
     r.outcomes
         .iter()

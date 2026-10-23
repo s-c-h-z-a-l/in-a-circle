@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dbus = { path = "../../crates/dbus" }
 engine = { path = "../../crates/engine" }
 libc = "0.2"
 manifest = { path = "../../crates/manifest" }

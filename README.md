@@ -16,8 +16,8 @@ gesture.
 
 Every architectural decision has been measured first, and the reports are
 public in [`docs/benchmarks/`](docs/benchmarks). The engine runs headless
-(a command line that classifies files, runs sandboxed actions and undoes
-them); the wheel is next. The first usable version is a **File Circle** on
+(a command line that classifies files, runs sandboxed actions, undoes
+them and reports through desktop notifications); the wheel is next. The first usable version is a **File Circle** on
 [niri](https://github.com/YaLTeR/niri).
 
 ## How it will work

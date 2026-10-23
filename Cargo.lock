@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbus"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "doc"
 version = "0.0.0"
 dependencies = [
@@ -36,6 +43,7 @@ dependencies = [
 name = "inacircle"
 version = "0.0.0"
 dependencies = [
+ "dbus",
  "engine",
  "libc",
  "manifest",
