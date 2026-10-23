@@ -5,7 +5,7 @@
 
 // Layout (little endian), read in place by `ui::atlas`:
 //   0  "IACA"          magic
-//   4  u16 version     (1)
+//   4  u16 version     (2)
 //   6  u16 size        pixel size the glyphs were rasterized at
 //   8  i16 ascent      rounded, pixels above the baseline
 //  10  i16 descent     rounded, pixels below the baseline (positive)
@@ -17,14 +17,14 @@
 //  32  u64 font_hash   FNV-1a of the source font
 //  40  glyph table, `glyph_count` entries of 20 bytes sorted by codepoint:
 //        u32 codepoint, u16 w, u16 h, i16 xoff, i16 yoff (top edge, y down
-//        from the baseline), u16 advance (rounded), u16 reserved (0),
+//        from the baseline), u16 advance (26.6 fixed point: 1/64 px), u16 reserved (0),
 //        u32 offset into the alpha data
 //      alpha data: `alpha_len` bytes of w*h coverage, row-major
 const SIZE_PX: u16 = 15;
 
 fn charset() -> Vec<char> {
     let mut v: Vec<char> = (0x20u8..=0x7E).map(char::from).collect();
-    v.extend("áéíóöőúüűÁÉÍÓÖŐÚÜŰ…".chars());
+    v.extend("áéíóöőúüűÁÉÍÓÖŐÚÜŰ…·".chars());
     v.sort_unstable();
     v
 }
@@ -62,7 +62,11 @@ fn bake(font_bytes: &[u8]) -> Result<Vec<u8>, String> {
                 .to_le_bytes(),
         );
         table.extend(i16::try_from(top).map_err(|e| e.to_string())?.to_le_bytes());
-        table.extend((m.advance_width.round() as u16).to_le_bytes());
+        let advance = (m.advance_width * 64.0).round();
+        if !(0.0..=f32::from(u16::MAX)).contains(&advance) {
+            return Err(format!("advance of {c:?} out of range"));
+        }
+        table.extend((advance as u16).to_le_bytes());
         table.extend(0u16.to_le_bytes());
         table.extend(
             u32::try_from(alpha.len())
@@ -73,7 +77,7 @@ fn bake(font_bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::with_capacity(40 + table.len() + alpha.len());
     out.extend(b"IACA");
-    out.extend(1u16.to_le_bytes());
+    out.extend(2u16.to_le_bytes());
     out.extend(SIZE_PX.to_le_bytes());
     out.extend((lm.ascent.round() as i16).to_le_bytes());
     out.extend(((-lm.descent).round() as i16).to_le_bytes());
@@ -154,6 +158,20 @@ mod tests {
             return;
         };
         assert!(bake(&font).unwrap() == bake(&font).unwrap());
+    }
+
+    #[test]
+    fn committed_atlas_header_is_version_2_with_the_charset() {
+        let b = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/ui/src/atlas.bin"
+        ))
+        .unwrap();
+        assert_eq!(&b[..4], b"IACA");
+        assert_eq!(u16::from_le_bytes([b[4], b[5]]), 2);
+        assert_eq!(u32::from_le_bytes(b[16..20].try_into().unwrap()), 115);
+        assert_eq!(charset().len(), 115);
+        assert!(charset().contains(&'\u{b7}'));
     }
 
     #[test]

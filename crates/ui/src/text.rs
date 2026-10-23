@@ -1,21 +1,28 @@
 //! Text measuring, fitting and drawing with the baked atlas.
 //!
-//! Glyphs sit on integer pen positions (advances are rounded when baked).
-//! A character the atlas lacks takes no room and draws nothing; callers that
-//! must show it faithfully check `Atlas::has_all` first.
+//! Advances are 26.6 fixed point and accumulate before rounding: glyph k sits
+//! at `round(x + sum of the advances before it)`, and a text's width is the
+//! rounded sum, so measuring and drawing agree. A character the atlas lacks
+//! takes no room and draws nothing; callers that must show it faithfully
+//! check `Atlas::has_all` first.
 
-use crate::atlas;
+use crate::atlas::{self, SUBPIXEL};
 use std::borrow::Cow;
 
 const ELLIPSIS: char = '…';
+const HALF: u64 = (SUBPIXEL / 2) as u64;
 
-/// Width of `s` in pixels: the sum of its glyph advances.
+fn round_px(fixed: u64) -> u32 {
+    ((fixed + HALF) / SUBPIXEL as u64) as u32
+}
+
+fn advance(c: char) -> u64 {
+    atlas::get().glyph(c).map_or(0, |g| u64::from(g.advance))
+}
+
+/// Width of `s` in pixels: the rounded sum of its glyph advances.
 pub fn width(s: &str) -> u32 {
-    let a = atlas::get();
-    s.chars()
-        .filter_map(|c| a.glyph(c))
-        .map(|g| g.advance)
-        .sum()
+    round_px(s.chars().map(advance).sum())
 }
 
 /// `s` if it fits in `max_w`, else its longest prefix that fits together
@@ -25,19 +32,19 @@ pub fn fit(s: &str, max_w: u32) -> Cow<'_, str> {
     if width(s) <= max_w {
         return Cow::Borrowed(s);
     }
-    let ell = width("…");
+    let ell = advance(ELLIPSIS);
+    if round_px(ell) > max_w {
+        return Cow::Borrowed("");
+    }
     let mut used = 0;
     let mut cut = 0;
     for (i, c) in s.char_indices() {
-        let adv = atlas::get().glyph(c).map_or(0, |g| g.advance);
-        if used + adv + ell > max_w {
+        let next = used + advance(c);
+        if round_px(next + ell) > max_w {
             break;
         }
-        used += adv;
+        used = next;
         cut = i + c.len_utf8();
-    }
-    if used + ell > max_w {
-        return Cow::Borrowed("");
     }
     let mut out = String::with_capacity(cut + ELLIPSIS.len_utf8());
     out.push_str(&s[..cut]);
@@ -47,28 +54,30 @@ pub fn fit(s: &str, max_w: u32) -> Cow<'_, str> {
 
 /// Draws `s` with its line box's top-left at (`x`, `y`) onto a premultiplied
 /// BGRA canvas (`stride` bytes per row). `color` is the premultiplied BGRA of
-/// full coverage; each pixel is composited with `over`. Clipped to the canvas.
+/// full coverage; each pixel is composited with `over`. Clipped to the canvas;
+/// any `x`/`y` is safe (the pen math is 64-bit).
 pub fn draw(canvas: &mut [u8], stride: usize, x: i32, y: i32, s: &str, color: [u8; 4]) {
     let a = atlas::get();
-    let rows = canvas.len().checked_div(stride).unwrap_or(0);
-    let cols = stride / 4;
-    let base = y + a.ascent();
-    let mut pen = x;
+    let rows = canvas.len().checked_div(stride).unwrap_or(0) as i64;
+    let cols = (stride / 4) as i64;
+    let base = i64::from(y) + i64::from(a.ascent());
+    let mut pen = i64::from(x) * SUBPIXEL as i64;
     for c in s.chars() {
         let Some(g) = a.glyph(c) else { continue };
-        let (gx, gy) = (pen + g.xoff, base + g.yoff);
-        pen += g.advance as i32;
-        for row in 0..g.h as i32 {
+        let gx = ((pen + HALF as i64) >> 6) + i64::from(g.xoff);
+        let gy = base + i64::from(g.yoff);
+        pen += i64::from(g.advance);
+        for row in 0..i64::from(g.h) {
             let py = gy + row;
-            if py < 0 || py as usize >= rows {
+            if py < 0 || py >= rows {
                 continue;
             }
-            for col in 0..g.w as i32 {
+            for col in 0..i64::from(g.w) {
                 let px = gx + col;
-                if px < 0 || px as usize >= cols {
+                if px < 0 || px >= cols {
                     continue;
                 }
-                let cov = u32::from(g.alpha[(row as u32 * g.w + col as u32) as usize]);
+                let cov = u32::from(g.alpha[(row * i64::from(g.w) + col) as usize]);
                 if cov == 0 {
                     continue;
                 }
@@ -89,11 +98,18 @@ fn div255(x: u32) -> u32 {
 
 /// What the hub shows for the dropped files. One file: its name, cut to
 /// `max_w`, unless the atlas lacks a character of it, then
-/// `1 file · <type_label>`. Several: `n / total files`. No names: `Nothing to do`.
+/// `1 file · <type_label>`; an empty name counts as unrenderable. Several: `n / total files`. No names: `Nothing to do`.
 pub fn hub_text(names: &[&str], total: usize, type_label: &str, max_w: u32) -> String {
+    debug_assert!(
+        names.len() <= total,
+        "{} names for {total} files",
+        names.len()
+    );
     let text = match names {
         [] => return "Nothing to do".to_string(),
-        [name] if total == 1 && atlas::get().has_all(name) => (*name).to_string(),
+        [name] if total == 1 && !name.is_empty() && atlas::get().has_all(name) => {
+            (*name).to_string()
+        }
         [_] if total == 1 => format!("1 file · {type_label}"),
         _ => format!("{} / {total} files", names.len()),
     };
@@ -105,15 +121,27 @@ mod tests {
     use super::*;
     use crate::atlas;
 
+    /// Rounded sum of 26.6 advances, as `width` must measure.
+    fn rounded(sum: u32) -> u32 {
+        (sum + 32) >> 6
+    }
+
     #[test]
     fn width_sums_advances() {
         let a = atlas::get();
         assert_eq!(width(""), 0);
         let adv = |c| a.glyph(c).unwrap().advance;
-        assert_eq!(width("A"), adv('A'));
-        assert_eq!(width("Aőx "), adv('A') + adv('ő') + adv('x') + adv(' '));
+        assert_eq!(width("A"), rounded(adv('A')));
+        assert_eq!(
+            width("Aőx "),
+            rounded(adv('A') + adv('ő') + adv('x') + adv(' '))
+        );
+        // Fractions accumulate before rounding: eight 'e's are not 8 * round(e).
+        let e = adv('e');
+        assert_eq!(width("eeeeeeee"), rounded(8 * e));
+        assert_ne!(e % 64, 0);
         // A character outside the atlas takes no room (callers check has_all).
-        assert_eq!(width("A漢"), adv('A'));
+        assert_eq!(width("A漢"), width("A"));
     }
 
     #[test]
@@ -131,6 +159,19 @@ mod tests {
         let next = s[body.len()..].chars().next().unwrap();
         let longer = format!("{body}{next}…");
         assert!(width(&longer) > full - 1);
+        // Measuring and fitting agree at every limit.
+        for max in 0..=full {
+            let f = fit(s, max);
+            assert!(width(&f) <= max, "max {max}: {f:?} is {}", width(&f));
+            if !f.is_empty() && *f != *s {
+                let body = f.trim_end_matches('…');
+                let next = s[body.len()..].chars().next().unwrap();
+                assert!(
+                    width(&format!("{body}{next}…")) > max,
+                    "max {max}: {f:?} not maximal"
+                );
+            }
+        }
         // Tight limits: only the ellipsis, or nothing at all.
         let ell = width("…");
         assert_eq!(fit(s, ell), "…");
@@ -141,36 +182,39 @@ mod tests {
 
     /// Premultiplied-over of `color` at coverage `a` onto `dst`, per channel.
     fn over(dst: u8, color: u8, color_a: u8, a: u8) -> u8 {
-        let d = |x: u32| ((x + 127) / 255) as u8;
+        let d = |x: u32| (x + 127) / 255;
         let src = d(color as u32 * a as u32);
         let sa = d(color_a as u32 * a as u32);
-        src + d(dst as u32 * (255 - sa as u32))
+        (src + d(dst as u32 * (255 - sa))) as u8
     }
 
     #[test]
     fn draw_matches_reference_pixels() {
         let a = atlas::get();
-        let (w, h) = (40usize, 24usize);
+        let (w, h) = (60usize, 24usize);
         let stride = w * 4;
         let bg = [7u8, 9, 11, 200];
+        let word = "Hiemt";
         let mut canvas: Vec<u8> = bg.iter().copied().cycle().take(stride * h).collect();
         let color = [200u8, 150, 100, 255];
         let (x0, y0) = (3, 2);
-        draw(&mut canvas, stride, x0, y0, "Hi", color);
+        draw(&mut canvas, stride, x0, y0, word, color);
 
-        // Independent reference: place each glyph at the running pen.
+        // Independent reference: glyph k sits at round(x0 + sum of the
+        // fractional advances before it).
         let mut expect: Vec<u8> = bg.iter().copied().cycle().take(stride * h).collect();
-        let mut pen = x0;
-        for c in "Hi".chars() {
+        let mut sum = 0.0f64;
+        for c in word.chars() {
             let g = a.glyph(c).unwrap();
+            let pen = (f64::from(x0) + sum).round() as i32;
             for gy in 0..g.h as i32 {
                 for gx in 0..g.w as i32 {
                     let cov = g.alpha[(gy as u32 * g.w + gx as u32) as usize];
-                    let px = pen + g.xoff + gx;
-                    let py = y0 + a.ascent() + g.yoff + gy;
                     if cov == 0 {
                         continue;
                     }
+                    let px = pen + g.xoff + gx;
+                    let py = y0 + a.ascent() + g.yoff + gy;
                     assert!(px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h);
                     let o = py as usize * stride + px as usize * 4;
                     for k in 0..4 {
@@ -178,10 +222,9 @@ mod tests {
                     }
                 }
             }
-            pen += g.advance as i32;
+            sum += f64::from(g.advance) / 64.0;
         }
         assert_eq!(canvas, expect);
-        // Something was drawn, and the first glyph's full-coverage pixel is exact.
         assert_ne!(
             canvas,
             bg.iter()
@@ -191,10 +234,10 @@ mod tests {
                 .collect::<Vec<u8>>()
         );
         // Golden pin of the rendered word (catches atlas or blend drift).
-        assert_eq!(fnv(&canvas), GOLDEN_HI);
+        assert_eq!(fnv(&canvas), GOLDEN);
     }
 
-    const GOLDEN_HI: u64 = 7361427187234151445;
+    const GOLDEN: u64 = 9400555634322009208;
 
     fn fnv(b: &[u8]) -> u64 {
         b.iter().fold(0xcbf29ce484222325, |h, &x| {
@@ -204,16 +247,62 @@ mod tests {
 
     #[test]
     fn draw_clips_to_the_canvas() {
+        let word = "Wqő.";
+        let color = [255u8, 255, 255, 255];
+        // Reference: the word drawn unclipped into a big canvas.
+        let (bw, bh) = (80usize, 60usize);
+        let (ox, oy) = (30i32, 20i32);
+        let mut big = vec![0u8; bw * 4 * bh];
+        draw(&mut big, bw * 4, ox, oy, word, color);
+        assert!(big.iter().any(|&b| b != 0));
         let (w, h) = (10usize, 10usize);
-        let stride = w * 4;
-        let mut canvas = vec![0u8; stride * h];
-        // Entirely off-canvas on every side: nothing changes, no panic.
-        for (x, y) in [(-200, 0), (200, 0), (0, -200), (0, 200), (-3, -5), (8, 7)] {
-            draw(&mut canvas, stride, x, y, "Wq", [255, 255, 255, 255]);
+        let cases = [
+            (-4, -3),
+            (-200, 0),
+            (200, 0),
+            (0, -200),
+            (0, 200),
+            (-3, -5),
+            (8, 7),
+            (5, 3),
+            (-9, 2),
+            (3, -8),
+            (0, 0),
+        ];
+        for (x, y) in cases {
+            let mut c = vec![0u8; w * 4 * h];
+            draw(&mut c, w * 4, x, y, word, color);
+            // Crop: the small canvas sits at (cx, cy) in the big canvas so
+            // that the word lands at (x, y) in the small one.
+            let mut expect = vec![0u8; w * 4 * h];
+            for r in 0..h as i32 {
+                for col in 0..w as i32 {
+                    let (bx, by) = (col + ox - x, r + oy - y);
+                    if bx >= 0 && by >= 0 && (bx as usize) < bw && (by as usize) < bh {
+                        let s = by as usize * bw * 4 + bx as usize * 4;
+                        let d = r as usize * w * 4 + col as usize * 4;
+                        expect[d..d + 4].copy_from_slice(&big[s..s + 4]);
+                    }
+                }
+            }
+            assert_eq!(c, expect, "at ({x}, {y})");
         }
-        let mut one = vec![0u8; stride * h];
-        draw(&mut one, stride, -4, -3, "W", [255, 255, 255, 255]);
-        assert!(one.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn draw_survives_extreme_coordinates() {
+        let mut c = vec![0u8; 16 * 4 * 16];
+        for x in [i32::MAX, i32::MAX - 3, i32::MIN, i32::MIN + 3, 0] {
+            for y in [i32::MAX, i32::MAX - 3, i32::MIN, i32::MIN + 3, 0] {
+                draw(&mut c, 16 * 4, x, y, "Wq.…", [255, 255, 255, 255]);
+            }
+        }
+        // Only the (0, 0) draws touched the canvas, and they did.
+        assert!(c.iter().any(|&b| b != 0));
+        let mut d = vec![0u8; 16 * 4 * 16];
+        draw(&mut d, 16 * 4, i32::MAX - 3, i32::MAX - 3, "Wq", [255; 4]);
+        draw(&mut d, 16 * 4, i32::MIN, i32::MIN, "Wq", [255; 4]);
+        assert!(d.iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -236,5 +325,20 @@ mod tests {
         let tiny = width("1 fi…");
         let t = hub_text(&["漢字.txt"], 1, "text", tiny);
         assert!(t.ends_with('…') && width(&t) <= tiny, "{t}");
+        // An empty name is as unrenderable as a missing glyph.
+        assert_eq!(hub_text(&[""], 1, "text", wide), "1 file · text");
+        // Whatever the hub shows must be drawable: every glyph is in the atlas.
+        let a = atlas::get();
+        for out in [
+            hub_text(&["notes.txt"], 1, "text", wide),
+            hub_text(&[long], 1, "text", max),
+            hub_text(&["漢字.txt"], 1, "text", wide),
+            hub_text(&["漢字.txt"], 1, "text", tiny),
+            hub_text(&["a", "b", "c"], 5, "text", wide),
+            hub_text(&[""], 1, "image", wide),
+            hub_text(&[], 0, "text", wide),
+        ] {
+            assert!(a.has_all(&out), "{out:?} has a glyph the atlas lacks");
+        }
     }
 }
