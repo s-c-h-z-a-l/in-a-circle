@@ -52,8 +52,8 @@ pub fn new_job_id() -> JobId {
     ))
 }
 
-fn history_path() -> PathBuf {
-    xdg::state_home().join("inacircle").join("history")
+fn history_path() -> io::Result<PathBuf> {
+    Ok(xdg::state_home()?.join("inacircle").join("history"))
 }
 
 fn jobs_dir() -> Option<PathBuf> {
@@ -71,7 +71,7 @@ fn open_history() -> io::Result<File> {
 }
 
 fn open_history_with(link: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<File> {
-    let path = history_path();
+    let path = history_path()?;
     let dir = path.parent().expect("history path has a parent");
     fs::DirBuilder::new()
         .recursive(true)
@@ -502,7 +502,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     let mut file = OpenOptions::new()
         .read(true)
         .append(true)
-        .open(history_path())?;
+        .open(history_path()?)?;
     // SAFETY: the fd is open for the duration of the call.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(io::Error::last_os_error());
@@ -688,7 +688,7 @@ mod tests {
             let job = new_job_id();
             let mut rec = Recorder::open(&job, "convert");
             rec.outcome(&done("/in/a", &a));
-            let hist = fs::read_to_string(history_path()).unwrap();
+            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             assert!(hist.contains("out\tjob="), "{hist}");
             assert!(!hist.contains("id="), "job line only at the end: {hist}");
             fs::write(&b, "bb").unwrap();
@@ -716,7 +716,7 @@ mod tests {
             });
             let tally = rec.finish(false);
             assert_eq!(tally.counts(), (1, 0, 1));
-            let hist = fs::read_to_string(history_path()).unwrap();
+            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             let last = hist.lines().last().unwrap();
             assert!(last.starts_with(&format!("job\tid={}\t", job.0)), "{last}");
             assert!(
@@ -739,7 +739,7 @@ mod tests {
                 "convert",
                 &report(vec![done("/in/a", &a), done("/in/b", &b)]),
             );
-            let hist = fs::read_to_string(history_path()).unwrap();
+            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             assert!(hist.starts_with("inacircle-history 0\n"));
             assert!(hist.contains("status=done\tsandbox=yes"));
             let r = undo(&job).unwrap();
@@ -919,7 +919,7 @@ mod tests {
             record(&job, "a", &report(vec![done("/i", &f)]));
             let mut h = OpenOptions::new()
                 .append(true)
-                .open(history_path())
+                .open(history_path().unwrap())
                 .unwrap();
             h.write_all(b"garbage\\q\tzz\nundo\tjob=10-1\ttime=5\trem")
                 .unwrap();
@@ -1047,7 +1047,7 @@ mod tests {
                 drop(Running::start(&job, "a", 1));
                 assert!(list_running().is_empty());
                 record(&job, "a", &report(vec![]));
-                assert!(history_path().exists());
+                assert!(history_path().unwrap().exists());
             },
         );
     }
@@ -1094,7 +1094,7 @@ mod tests {
             let (a, b) = (work("a"), work("b"));
             a.join().unwrap();
             b.join().unwrap();
-            let text = fs::read_to_string(history_path()).unwrap();
+            let text = fs::read_to_string(history_path().unwrap()).unwrap();
             let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
             assert_eq!(v, 0);
             assert_eq!(lines.len(), 4000);
@@ -1272,7 +1272,7 @@ mod tests {
                 })
                 .count();
             assert_eq!((ok, dup), (1, 3));
-            let text = fs::read_to_string(history_path()).unwrap();
+            let text = fs::read_to_string(history_path().unwrap()).unwrap();
             assert_eq!(text.lines().filter(|l| l.starts_with("undo\t")).count(), 1);
         });
     }
@@ -1285,7 +1285,7 @@ mod tests {
             fs::write(&f, "d").unwrap();
             let job = JobId("10-1".into());
             record(&job, "a", &report(vec![done("/i", &f)]));
-            let hist = fs::read_to_string(history_path()).unwrap();
+            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             assert!(hist.contains("undo=no"));
             assert!(hist.contains("bad\u{fffd}.png"));
             let r = undo(&job).unwrap();
@@ -1300,7 +1300,7 @@ mod tests {
     fn unsupported_header_version_is_rejected() {
         let t = Tmp::new("version");
         t.env(|| {
-            let p = history_path();
+            let p = history_path().unwrap();
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, "inacircle-history 1\njob\tid=1-1\n").unwrap();
             let e = undo(&JobId("1-1".into())).unwrap_err();
@@ -1315,13 +1315,13 @@ mod tests {
             let f = open_history_with(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM)));
             drop(f.unwrap());
             assert_eq!(
-                fs::read_to_string(history_path()).unwrap(),
+                fs::read_to_string(history_path().unwrap()).unwrap(),
                 "inacircle-history 0\n"
             );
             // And an existing file is just appended to.
             drop(open_history_with(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap());
             assert_eq!(
-                fs::read_to_string(history_path()).unwrap(),
+                fs::read_to_string(history_path().unwrap()).unwrap(),
                 "inacircle-history 0\n"
             );
         });
@@ -1383,14 +1383,20 @@ mod tests {
         };
         let state = dir.join("state");
         let state_s = state.to_str().unwrap().to_owned();
-        with_env(&[("XDG_STATE_HOME", Some(&state_s))], || {
+        // No registry: the env inherited from the parent may name another
+        // test's runtime dir, whose "running" job 10-1 would block the undo.
+        let v = [
+            ("XDG_STATE_HOME", Some(&*state_s)),
+            ("XDG_RUNTIME_DIR", None),
+        ];
+        with_env(&v, || {
             fs::create_dir_all(dir.join("out")).unwrap();
             let f = dir.join("out/x");
             fs::write(&f, "d").unwrap();
             let job = JobId("10-1".into());
             record(&job, "a", &report(vec![done("/i", &f)]));
             // ~50 MB of other jobs' lines in front of ours.
-            let p = history_path();
+            let p = history_path().unwrap();
             let mut w = io::BufWriter::new(OpenOptions::new().append(true).open(&p).unwrap());
             let filler = Line::new("out")
                 .pair("job", "99-9")

@@ -61,15 +61,31 @@ struct Entry {
 
 impl Catalog {
     /// Loads from the standard directories and cache location.
+    /// A refused cache or data dir (see [`crate::xdg`]) is reported and
+    /// not used.
     pub fn load() -> Catalog {
-        let cache = crate::xdg::cache_home().join("inacircle/catalog");
-        Catalog::load_from(&default_dirs(), &cache)
+        let cache = match crate::xdg::cache_home() {
+            Ok(c) => Some(c.join("inacircle/catalog")),
+            Err(e) => {
+                eprintln!("inacircle: no catalog cache: {e}");
+                None
+            }
+        };
+        let data = crate::xdg::data_home()
+            .inspect_err(|e| eprintln!("inacircle: no user actions: {e}"))
+            .ok();
+        let dirs = dirs_from(std::env::var_os("INACIRCLE_ACTIONS_DIR"), data);
+        Catalog::load_with(&dirs, cache.as_deref())
     }
 
     /// Testable core. `dirs` is in priority order; the bool marks built-in.
     pub fn load_from(dirs: &[(PathBuf, bool)], cache: &Path) -> Catalog {
+        Catalog::load_with(dirs, Some(cache))
+    }
+
+    fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>) -> Catalog {
         let bins = scan(dirs);
-        let cached = read_cache(cache).unwrap_or_default();
+        let cached = cache.and_then(read_cache).unwrap_or_default();
         let hit = cached.iter().map(|e| &e.bin).eq(bins.iter());
         let entries: Vec<Entry> = if hit {
             cached
@@ -87,7 +103,9 @@ impl Catalog {
                     Some(Entry { bin, lines })
                 })
                 .collect();
-            write_cache(cache, &entries);
+            if let Some(cache) = cache {
+                write_cache(cache, &entries);
+            }
             entries
         };
         let mut actions: Vec<Action> = Vec::new();
@@ -134,27 +152,22 @@ pub fn missing_tools(a: &Action) -> Vec<String> {
         .collect()
 }
 
-fn default_dirs() -> Vec<(PathBuf, bool)> {
-    dirs_from(
-        std::env::var_os("INACIRCLE_ACTIONS_DIR"),
-        crate::xdg::data_home(),
-    )
-}
-
 /// Action directories: the override (colon-separated, all built-in; empty
-/// segments dropped, relative ones made absolute) or the standard three.
-fn dirs_from(over: Option<std::ffi::OsString>, data_home: PathBuf) -> Vec<(PathBuf, bool)> {
+/// segments dropped, relative ones made absolute) or the standard three
+/// (the user's only with a data home).
+fn dirs_from(over: Option<std::ffi::OsString>, data_home: Option<PathBuf>) -> Vec<(PathBuf, bool)> {
     if let Some(v) = over {
         return std::env::split_paths(&v)
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| (std::path::absolute(&p).unwrap_or(p), true))
             .collect();
     }
-    vec![
+    let mut dirs = vec![
         (PathBuf::from("/usr/lib/inacircle/actions"), true),
         (PathBuf::from("/usr/local/lib/inacircle/actions"), true),
-        (data_home.join("inacircle/actions"), false),
-    ]
+    ];
+    dirs.extend(data_home.map(|d| (d.join("inacircle/actions"), false)));
+    dirs
 }
 
 /// Executable regular files (links resolved) in each dir, sorted by name.
@@ -707,18 +720,20 @@ mod tests {
         let o = |s: &str| Some(std::ffi::OsString::from(s));
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
-            dirs_from(o("/a::rel:/b"), "/d".into()),
+            dirs_from(o("/a::rel:/b"), Some("/d".into())),
             [
                 ("/a".into(), true),
                 (cwd.join("rel"), true),
                 ("/b".into(), true)
             ]
         );
-        assert!(dirs_from(o(""), "/d".into()).is_empty());
-        let d = dirs_from(None, "/d".into());
+        assert!(dirs_from(o(""), Some("/d".into())).is_empty());
+        let d = dirs_from(None, Some("/d".into()));
         assert_eq!(d.len(), 3);
         assert_eq!(d[2], (PathBuf::from("/d/inacircle/actions"), false));
         assert!(d[0].1 && d[1].1);
+        // A refused data home leaves out the user's folder only.
+        assert_eq!(dirs_from(None, None), d[..2]);
     }
 
     #[test]

@@ -252,13 +252,25 @@ pub fn run(
         }
     }
     let batch = route.iter().all(|a| a.batch);
-    let ok_paths: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
-    let mut targets: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let groups = group_by_target(&ok_paths, batch, |dir| {
-        targets
+    // Target folder per source folder; an input without one fails.
+    let mut targets: HashMap<PathBuf, Result<PathBuf, String>> = HashMap::new();
+    ok.retain(|&i| {
+        let dir = uniq[i].parent().unwrap_or(Path::new("/"));
+        let t = targets
             .entry(dir.to_path_buf())
-            .or_insert_with(|| output::writable_target(dir))
-            .clone()
+            .or_insert_with(|| output::writable_target(dir).map_err(|e| e.to_string()));
+        match t {
+            Ok(_) => true,
+            Err(e) => {
+                sink.fail(i, format!("no folder for the output: {e}"));
+                false
+            }
+        }
+    });
+    let ok_paths: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
+    let groups = group_by_target(&ok_paths, batch, |dir| match &targets[dir] {
+        Ok(t) => t.clone(),
+        Err(_) => unreachable!("inputs without a target were dropped"),
     });
     let mut cleaned = HashSet::new();
     for g in groups {

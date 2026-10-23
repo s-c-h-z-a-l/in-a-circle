@@ -3,7 +3,12 @@
 //! When `$HOME` is unset or relative, the home-based defaults do not exist:
 //! cache, state, data and downloads then live under
 //! `/tmp/inacircle-<uid>/{cache,state,data,downloads}`, never a relative path.
+//! That folder is created mode 0700 and used only if it is a real directory
+//! (not a symlink) owned by us with no group or other permissions; anyone
+//! can create it first, so otherwise the lookup fails.
 
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
 
 /// `$HOME`, only when absolute.
@@ -13,19 +18,46 @@ fn home() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
-fn fallback_root() -> PathBuf {
+fn uid() -> libc::uid_t {
     // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/inacircle-{uid}"))
+    unsafe { libc::getuid() }
+}
+
+fn fallback_root() -> io::Result<PathBuf> {
+    private_dir(PathBuf::from(format!("/tmp/inacircle-{}", uid())))
+}
+
+/// `dir`, created mode 0700 if missing; refused unless it is a directory
+/// (not a symlink) owned by this user with no group or other permissions.
+fn private_dir(dir: PathBuf) -> io::Result<PathBuf> {
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let m = std::fs::symlink_metadata(&dir)?;
+    let why = if !m.file_type().is_dir() {
+        "not a directory"
+    } else if m.uid() != uid() {
+        "owned by another user"
+    } else if m.mode() & 0o077 != 0 {
+        "accessible to other users"
+    } else {
+        return Ok(dir);
+    };
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("{}: {why}", dir.display()),
+    ))
 }
 
 /// `$name` when set to an absolute path (relative values are invalid per the
 /// XDG spec), else `$HOME/<under_home>`, else `<fallback_root>/<no_home>`.
-fn base(name: &str, under_home: &str, no_home: &str) -> PathBuf {
-    abs_env(name).unwrap_or_else(|| match home() {
-        Some(h) => h.join(under_home),
-        None => fallback_root().join(no_home),
-    })
+fn base(name: &str, under_home: &str, no_home: &str) -> io::Result<PathBuf> {
+    match (abs_env(name), home()) {
+        (Some(p), _) => Ok(p),
+        (None, Some(h)) => Ok(h.join(under_home)),
+        (None, None) => Ok(fallback_root()?.join(no_home)),
+    }
 }
 
 fn abs_env(name: &str) -> Option<PathBuf> {
@@ -34,15 +66,15 @@ fn abs_env(name: &str) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
-pub fn cache_home() -> PathBuf {
+pub fn cache_home() -> io::Result<PathBuf> {
     base("XDG_CACHE_HOME", ".cache", "cache")
 }
 
-pub fn state_home() -> PathBuf {
+pub fn state_home() -> io::Result<PathBuf> {
     base("XDG_STATE_HOME", ".local/state", "state")
 }
 
-pub fn data_home() -> PathBuf {
+pub fn data_home() -> io::Result<PathBuf> {
     base("XDG_DATA_HOME", ".local/share", "data")
 }
 
@@ -53,12 +85,12 @@ pub fn runtime_dir() -> Option<PathBuf> {
 
 /// `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, else `~/Downloads` (or the
 /// no-home fallback).
-pub fn download_dir() -> PathBuf {
+pub fn download_dir() -> io::Result<PathBuf> {
     let fallback = || match home() {
-        Some(h) => h.join("Downloads"),
-        None => fallback_root().join("downloads"),
+        Some(h) => Ok(h.join("Downloads")),
+        None => Ok(fallback_root()?.join("downloads")),
     };
-    let config = base("XDG_CONFIG_HOME", ".config", "config");
+    let config = base("XDG_CONFIG_HOME", ".config", "config")?;
     let Ok(text) = std::fs::read_to_string(config.join("user-dirs.dirs")) else {
         return fallback();
     };
@@ -75,7 +107,11 @@ pub fn download_dir() -> PathBuf {
             (Some(_), _) => return fallback(),
             (None, _) => PathBuf::from(v),
         };
-        return if path.is_absolute() { path } else { fallback() };
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            fallback()
+        };
     }
     fallback()
 }
@@ -136,9 +172,9 @@ pub(crate) mod tests {
                 .collect()
         };
         with_env(&unset(Some("/h")), || {
-            assert_eq!(cache_home(), PathBuf::from("/h/.cache"));
-            assert_eq!(state_home(), PathBuf::from("/h/.local/state"));
-            assert_eq!(data_home(), PathBuf::from("/h/.local/share"));
+            assert_eq!(cache_home().unwrap(), PathBuf::from("/h/.cache"));
+            assert_eq!(state_home().unwrap(), PathBuf::from("/h/.local/state"));
+            assert_eq!(data_home().unwrap(), PathBuf::from("/h/.local/share"));
             assert_eq!(runtime_dir(), None);
         });
         let mut v = unset(Some("/h"));
@@ -147,9 +183,9 @@ pub(crate) mod tests {
         v[3].1 = Some("/d");
         v[4].1 = Some("/run/u");
         with_env(&v, || {
-            assert_eq!(cache_home(), PathBuf::from("/c"));
-            assert_eq!(state_home(), PathBuf::from("/s"));
-            assert_eq!(data_home(), PathBuf::from("/d"));
+            assert_eq!(cache_home().unwrap(), PathBuf::from("/c"));
+            assert_eq!(state_home().unwrap(), PathBuf::from("/s"));
+            assert_eq!(data_home().unwrap(), PathBuf::from("/d"));
             assert_eq!(runtime_dir(), Some(PathBuf::from("/run/u")));
         });
         // Relative values are ignored, as the XDG spec requires.
@@ -157,7 +193,7 @@ pub(crate) mod tests {
         v[1].1 = Some("rel");
         v[4].1 = Some("rel");
         with_env(&v, || {
-            assert_eq!(cache_home(), PathBuf::from("/h/.cache"));
+            assert_eq!(cache_home().unwrap(), PathBuf::from("/h/.cache"));
             assert_eq!(runtime_dir(), None);
         });
     }
@@ -182,7 +218,7 @@ pub(crate) mod tests {
             }
             let e = env(&cfg);
             let e: Vec<(&str, Option<&str>)> = e.iter().map(|(k, v)| (*k, v.as_deref())).collect();
-            with_env(&e, download_dir)
+            with_env(&e, download_dir).unwrap()
         };
         assert_eq!(
             run(Some(
@@ -220,12 +256,45 @@ pub(crate) mod tests {
                 ("XDG_CONFIG_HOME", None),
             ];
             with_env(&v, || {
-                assert_eq!(cache_home(), root.join("cache"));
-                assert_eq!(state_home(), root.join("state"));
-                assert_eq!(data_home(), root.join("data"));
-                assert_eq!(download_dir(), root.join("downloads"));
+                assert_eq!(cache_home().unwrap(), root.join("cache"));
+                assert_eq!(state_home().unwrap(), root.join("state"));
+                assert_eq!(data_home().unwrap(), root.join("data"));
+                assert_eq!(download_dir().unwrap(), root.join("downloads"));
             });
         }
+    }
+
+    #[test]
+    fn private_dir_is_created_0700_and_refused_unless_ours_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("engine-xdg-p-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fresh = tmp.join("fresh");
+        assert_eq!(private_dir(fresh.clone()).unwrap(), fresh);
+        let m = std::fs::symlink_metadata(&fresh).unwrap();
+        assert!(m.is_dir());
+        assert_eq!(m.mode() & 0o777, 0o700);
+        // Existing and private: used as is.
+        assert_eq!(private_dir(fresh.clone()).unwrap(), fresh);
+        let refused = |p: &std::path::Path| {
+            let e = private_dir(p.to_path_buf()).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        };
+        let open = tmp.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        refused(&open);
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o710)).unwrap();
+        refused(&open);
+        // A symlink, even to a private dir of ours, is not followed.
+        let link = tmp.join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        refused(&link);
+        let file = tmp.join("file");
+        std::fs::write(&file, "").unwrap();
+        refused(&file);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -237,9 +306,9 @@ pub(crate) mod tests {
         let v = [("HOME", Some(h)), ("XDG_CONFIG_HOME", Some(c))];
         let f = cfg.join("user-dirs.dirs");
         std::fs::write(&f, "XDG_DOWNLOAD_DIR=\"$HOMEX/dl\"\n").unwrap();
-        assert_eq!(with_env(&v, download_dir), tmp.join("Downloads"));
+        assert_eq!(with_env(&v, download_dir).unwrap(), tmp.join("Downloads"));
         std::fs::write(&f, "XDG_DOWNLOAD_DIR=\"$HOME\"\n").unwrap();
-        assert_eq!(with_env(&v, download_dir), tmp);
+        assert_eq!(with_env(&v, download_dir).unwrap(), tmp);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

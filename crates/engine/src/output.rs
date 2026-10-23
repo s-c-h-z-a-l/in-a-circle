@@ -253,7 +253,7 @@ pub fn clean_stale(target_dir: &Path) {
 /// The source's folder if a test directory can really be created there
 /// (access(2) alone lies on read-only mounts and ACLs), else the download
 /// folder.
-pub fn writable_target(source_dir: &Path) -> PathBuf {
+pub fn writable_target(source_dir: &Path) -> io::Result<PathBuf> {
     let ok = random_u64().is_ok_and(|r| {
         let probe = source_dir.join(format!("{WORK_PREFIX}{PROBE_PREFIX}{r:016x}"));
         match mkdir_mode(&probe, 0o700) {
@@ -266,7 +266,7 @@ pub fn writable_target(source_dir: &Path) -> PathBuf {
         }
     });
     if ok {
-        source_dir.to_path_buf()
+        Ok(source_dir.to_path_buf())
     } else {
         xdg::download_dir()
     }
@@ -989,8 +989,8 @@ mod tests {
                 ("XDG_CONFIG_HOME", None),
             ],
             || {
-                assert_eq!(writable_target(&ro), home.join("Downloads"));
-                assert_eq!(writable_target(&t.0), t.0);
+                assert_eq!(writable_target(&ro).unwrap(), home.join("Downloads"));
+                assert_eq!(writable_target(&t.0).unwrap(), t.0);
             },
         );
         assert_eq!(fs::read_dir(&t.0).unwrap().count(), 1, "probe left behind");
