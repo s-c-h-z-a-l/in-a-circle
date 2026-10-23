@@ -145,6 +145,18 @@ fn opcodes_match_the_protocol_xmls() {
     }
 }
 
+/// Every interface with opcodes is an `Iface` whose name the XMLs know, so a
+/// typo in `Iface::name` cannot hide behind the "no vendored XML" skip.
+#[test]
+fn every_op_interface_resolves_under_its_iface_name() {
+    let xml = protocols();
+    for &(iface, ..) in wire::op::ALL {
+        let named = Iface::ALL.iter().find(|i| i.name() == iface);
+        let named = named.unwrap_or_else(|| panic!("{iface}: no Iface has this name"));
+        assert!(xml.contains_key(named.name()), "{iface} not in the XMLs");
+    }
+}
+
 #[test]
 fn fd_carrying_events_match_the_protocol_xmls() {
     let xml = protocols();

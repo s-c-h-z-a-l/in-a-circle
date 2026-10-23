@@ -22,6 +22,8 @@ const FDS_PER_MSG: usize = 28;
 const MAX_QUEUED_FDS: usize = 64;
 /// First id the server allocates.
 const SERVER_IDS: u32 = 0xff00_0000;
+/// Bytes read but not yet framed into events, at most.
+const MAX_INB: usize = 2 * MAX_MESSAGE;
 
 pub enum Arg<'a> {
     U(u32),
@@ -341,6 +343,10 @@ impl Conn {
     /// A deadline already passed returns `Ok(false)` without reading.
     /// End of stream, truncated fds and too many unclaimed fds are errors
     /// that break the connection.
+    ///
+    /// The required loop: call `event` until it returns `None`, then
+    /// `read`. Unframed bytes are capped at two messages; a `read` with more
+    /// than one message's worth still unframed breaks the connection.
     pub fn read(&mut self, deadline: Instant) -> io::Result<bool> {
         self.check()?;
         loop {
@@ -360,10 +366,17 @@ impl Conn {
     }
 
     fn recv(&mut self) -> io::Result<()> {
+        // Drained as documented, `inb` holds less than one message, so there
+        // is always room for a full read.
+        let room = MAX_INB.saturating_sub(self.inb.len()).min(MAX_MESSAGE);
+        if room == 0 {
+            self.broken = Some("events not drained before read");
+            return Err(broken_io("events not drained before read"));
+        }
         let mut buf = [0u8; MAX_MESSAGE];
         let mut iov = libc::iovec {
             iov_base: buf.as_mut_ptr().cast(),
-            iov_len: buf.len(),
+            iov_len: room,
         };
         let mut cbuf = [0u64; CTRL_WORDS];
         // SAFETY: a zeroed msghdr is valid; pointers set below outlive recvmsg.
@@ -438,12 +451,17 @@ impl Conn {
 
     /// The next complete event from the bytes read so far, if any. An event
     /// that carries an fd takes it off the queue; it is available from
-    /// `take_fd` until the next call, then closed.
+    /// `take_fd` until the next call, then closed. An event for an object
+    /// this side never allocated or registered breaks the connection, so a
+    /// `new_id` argument must be registered before the next call.
+    ///
+    /// The required loop: `event` until `None`, then `read`.
     pub fn event(&mut self) -> Result<Option<Event>, Error> {
+        // First: a broken connection must not hand out the last event's fd.
+        self.cur_fd = None;
         if let Some(why) = self.broken {
             return Err(Error::Broken(why));
         }
-        self.cur_fd = None;
         let Some(head) = self.inb.get(..8) else {
             return Ok(None);
         };
@@ -457,8 +475,13 @@ impl Conn {
         if self.inb.len() < size {
             return Ok(None);
         }
-        let iface = self.iface_of(obj);
-        let nfds = iface.map_or(0, |i| event_fds(i, op));
+        // An id we never allocated, or a server id never announced, has no
+        // known fds or meaning: the peer and we disagree on the object map.
+        let Some(iface) = self.iface_of(obj) else {
+            self.broken = Some("event for an unknown object");
+            return Err(Error::Broken("event for an unknown object"));
+        };
+        let nfds = event_fds(iface, op);
         if nfds > 0 {
             if self.in_fds.len() < nfds {
                 self.broken = Some("event without its fd");
@@ -738,41 +761,119 @@ mod tests {
         send(&server, &offer[..6], &[]);
 
         let mut e = next(&mut c);
-        assert_eq!((e.obj, e.iface, e.op), (registry, Some(Iface::Registry), 0));
+        assert_eq!((e.obj, e.iface, e.op), (registry, Iface::Registry, 0));
         assert_eq!(e.u32(), Ok(7));
         assert_eq!(e.string().as_deref(), Ok("wl_seat"));
         assert_eq!(e.u32(), Ok(9));
         assert_eq!(e.u32(), Err(Error::Short));
 
         let mut e = next(&mut c);
-        assert_eq!((e.iface, e.op), (Some(Iface::Pointer), 2));
+        assert_eq!((e.iface, e.op), (Iface::Pointer, 2));
         assert_eq!(e.u32(), Ok(1234));
         assert_eq!(e.fixed(), Ok(12.5));
         assert_eq!(e.fixed(), Ok(-1.25));
 
         let mut e = next(&mut c);
-        assert_eq!(e.iface, Some(Iface::Keyboard));
+        assert_eq!(e.iface, Iface::Keyboard);
         assert_eq!((e.u32(), e.u32()), (Ok(5), Ok(6)));
         assert_eq!(e.bytes(), Ok(&words(&[30, 31])[..]));
 
         assert!(c.event().unwrap().is_none());
         send(&server, &offer[6..], &[]);
         let mut e = next(&mut c);
-        assert_eq!(e.iface, Some(Iface::DataDevice));
+        assert_eq!(e.iface, Iface::DataDevice);
         let id = e.u32().unwrap();
         c.register_server_id(id, Iface::DataOffer);
         let mime = wstr("text/uri-list");
         send(&server, &msg(id, op::wl_data_offer::OFFER, &mime), &[]);
         let mut e = next(&mut c);
-        assert_eq!((e.obj, e.iface), (id, Some(Iface::DataOffer)));
+        assert_eq!((e.obj, e.iface), (id, Iface::DataOffer));
         assert_eq!(e.string().as_deref(), Ok("text/uri-list"));
 
-        // Unknown objects still frame; a reused server id takes its new type.
-        send(&server, &msg(99, 0, &[]), &[]);
-        assert_eq!(next(&mut c).iface, None);
+        // A reused server id takes its new type.
         c.register_server_id(id, Iface::PrimaryOffer);
         send(&server, &msg(id, 0, &[]), &[]);
-        assert_eq!(next(&mut c).iface, Some(Iface::PrimaryOffer));
+        assert_eq!(next(&mut c).iface, Iface::PrimaryOffer);
+    }
+
+    /// An event for an id we never allocated, or a server id never
+    /// announced, is a protocol violation: its fds and size cannot be
+    /// trusted to frame the rest of the stream.
+    #[test]
+    fn event_for_an_unknown_object_breaks() {
+        for obj in [0, 99, SERVER_IDS, SERVER_IDS + 7] {
+            let (mut c, server) = pair();
+            let known = c.new_id(Iface::Pointer);
+            send(&server, &msg(known, op::wl_pointer::FRAME, &[]), &[]);
+            send(&server, &msg(obj, 0, &[]), &[]);
+            assert_eq!(next(&mut c).iface, Iface::Pointer);
+            let err = loop {
+                match c.event() {
+                    Ok(Some(_)) => panic!("unknown object {obj:#x} framed"),
+                    Ok(None) => assert!(c.read(after(1000)).unwrap()),
+                    Err(e) => break e,
+                }
+            };
+            assert!(matches!(err, Error::Broken(_)), "{obj:#x}: {err:?}");
+            assert!(c.event().is_err(), "stays broken");
+            assert!(c.flush(after(10)).is_err());
+        }
+    }
+
+    /// The input buffer holds at most two messages' worth: a caller that
+    /// reads without draining the events gets an error, not unbounded growth.
+    #[test]
+    fn input_buffer_is_capped() {
+        let (mut c, server) = pair();
+        let known = c.new_id(Iface::Pointer);
+        let big = msg(known, op::wl_pointer::FRAME, &vec![0; MAX_MESSAGE - 8]);
+        for _ in 0..3 {
+            send(&server, &big, &[]);
+        }
+        let mut reads = 0;
+        let err = loop {
+            match c.read(after(1000)) {
+                Ok(true) => reads += 1,
+                Ok(false) => panic!("deadline"),
+                Err(e) => break e,
+            }
+            assert!(c.inb.len() <= 2 * MAX_MESSAGE, "{}", c.inb.len());
+            assert!(reads < 4, "never refused");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(c.inb.len() <= 2 * MAX_MESSAGE);
+        // The documented loop never hits the cap.
+        let (mut c, server) = pair();
+        assert_eq!(c.new_id(Iface::Pointer), known);
+        for _ in 0..8 {
+            send(&server, &big, &[]);
+        }
+        let mut got = 0;
+        while got < 8 {
+            while c.event().unwrap().is_some() {
+                got += 1;
+            }
+            if got < 8 {
+                assert!(c.read(after(1000)).unwrap());
+            }
+        }
+        assert_eq!(got, 8);
+    }
+
+    /// An fd left behind by the last event is not handed out once the
+    /// connection broke.
+    #[test]
+    fn broken_connection_drops_the_last_fd() {
+        let (mut c, server) = pair();
+        let keyboard = c.new_id(Iface::Keyboard);
+        let a = memfd(b"A");
+        let keymap = msg(keyboard, op::wl_keyboard::KEYMAP, &words(&[1, 1]));
+        send(&server, &keymap, &[a.as_raw_fd()]);
+        assert_eq!(next(&mut c).op, op::wl_keyboard::KEYMAP);
+        // Something breaks the connection before the fd is taken.
+        c.req(5, 0, &[S("a\0b")]);
+        assert!(c.event().is_err());
+        assert!(c.take_fd().is_none());
     }
 
     #[test]
@@ -826,8 +927,9 @@ mod tests {
         }
         // Exactly the limit is fine.
         let (mut c, server) = pair();
-        send(&server, &msg(50, 0, &vec![0; MAX_MESSAGE - 8]), &[]);
-        assert_eq!(next(&mut c).obj, 50);
+        let known = c.new_id(Iface::Pointer);
+        send(&server, &msg(known, 0, &vec![0; MAX_MESSAGE - 8]), &[]);
+        assert_eq!(next(&mut c).obj, known);
 
         // Outgoing: nothing reaches the peer, and the connection reports it.
         let (mut c, server) = pair();

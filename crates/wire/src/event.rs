@@ -6,15 +6,14 @@ use crate::proto::Iface;
 
 pub struct Event {
     pub obj: u32,
-    /// `None` for an object this side does not know.
-    pub iface: Option<Iface>,
+    pub iface: Iface,
     pub op: u16,
     args: Vec<u8>,
     pos: usize,
 }
 
 impl Event {
-    pub(crate) fn new(obj: u32, iface: Option<Iface>, op: u16, args: Vec<u8>) -> Event {
+    pub(crate) fn new(obj: u32, iface: Iface, op: u16, args: Vec<u8>) -> Event {
         Event {
             obj,
             iface,
@@ -84,7 +83,7 @@ mod tests {
     fn ev(words: &[u32], tail: &[u8]) -> Event {
         let mut args: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         args.extend(tail);
-        Event::new(1, None, 0, args)
+        Event::new(1, Iface::Display, 0, args)
     }
 
     #[test]
