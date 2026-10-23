@@ -1,11 +1,14 @@
-//! Minimal D-Bus client: wire format and messages. `libc` only.
+//! Minimal D-Bus client: wire format, messages and a session bus
+//! connection with deadlines. `libc` only.
 
 use std::fmt;
 use std::io;
 
+pub mod conn;
 pub mod marshal;
 pub mod message;
 
+pub use conn::{Address, Conn, parse_address, session_address};
 pub use marshal::{Reader, Value, Writer};
 pub use message::{Kind, Message, decode, encode, frame_len};
 
