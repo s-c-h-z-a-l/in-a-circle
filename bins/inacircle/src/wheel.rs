@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use engine::catalog::Catalog;
 use engine::menu::Tally;
 use ui::wheel::{Hit, Slice, SliceState, Wheel, place};
 
@@ -112,7 +113,7 @@ pub struct GroupChoice {
 }
 
 /// Level 1, made from the early or the dropped list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GroupMenu {
     pub paths: Vec<PathBuf>,
     /// By wheel slice index: the compass, 0 = north, clockwise.
@@ -121,6 +122,9 @@ pub struct GroupMenu {
     pub hub: String,
     /// What level 2 is built from.
     pub tally: Tally,
+    /// The catalog level 1 was built from, kept so level 2 offers the same
+    /// presets (one snapshot, loaded once).
+    pub catalog: Option<Catalog>,
 }
 
 /// One level-2 slice.
@@ -433,6 +437,11 @@ impl Machine {
         }
     }
 
+    /// Whether the early list was accepted and level 1 is built from it.
+    pub fn early_ready(&self) -> bool {
+        self.early == Early::Ready
+    }
+
     /// Level 1 from the list, onto the wheel.
     fn show_groups(&mut self, list: &[u8]) {
         let gm = (self.groups_fn)(list);
@@ -680,6 +689,7 @@ mod tests {
                 slices,
                 hub: NOTHING.into(),
                 tally: Tally::default(),
+                catalog: None,
             };
         }
         slices[0] = group("Zero", "g0", true);
@@ -689,6 +699,7 @@ mod tests {
             slices,
             hub: "x".into(),
             tally: Tally::default(),
+            catalog: None,
         }
     }
 
@@ -725,6 +736,7 @@ mod tests {
             slices,
             hub: "2 files".into(),
             tally: Tally::default(),
+            catalog: None,
         }
     }
 

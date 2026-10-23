@@ -131,25 +131,32 @@ impl Drop for Shm {
     }
 }
 
-/// A list being read: the pipe, the offer and the action negotiated for it
-/// at the drop, what came so far, the read's deadline. The early read's
-/// carries the machine's tag instead of an action.
+/// A list being read: the pipe, the offer it comes from, what came so far,
+/// the read's deadline.
 struct Reading {
     fd: OwnedFd,
     offer: u32,
-    action: u32,
-    seq: u32,
     data: Vec<u8>,
     until: Instant,
 }
 
+/// The drop's read, with the action negotiated at the drop (for `finish`).
+struct DropRead {
+    read: Reading,
+    action: u32,
+}
+
+/// The early read, with the machine's tag of the `enter` that started it.
+struct EarlyRead {
+    read: Reading,
+    seq: u32,
+}
+
 impl Reading {
-    fn new(fd: OwnedFd, offer: u32, action: u32, until: Instant) -> Reading {
+    fn new(fd: OwnedFd, offer: u32, until: Instant) -> Reading {
         Reading {
             fd,
             offer,
-            action,
-            seq: 0,
             // Room for the limit and one more read: never regrown (a
             // doubling would hold two copies). Pages are touched only as
             // data arrives.
@@ -251,9 +258,9 @@ struct Surface {
     dnd_action: u32,
     /// `dnd_action` at the drop, for the dropped offer's `finish`.
     drop_action: u32,
-    reading: Option<Reading>,
+    reading: Option<DropRead>,
     /// The early read of the current drag's list, before the drop.
-    early: Option<Reading>,
+    early: Option<EarlyRead>,
     /// The machine's clock: inputs are timed from here.
     started: Instant,
     busy: [bool; 2],
@@ -705,7 +712,18 @@ impl Surface {
             }
         }
         for i in inputs {
-            for fx in m.on_at(self.started.elapsed(), i) {
+            let list = matches!(i, Input::DragList(..));
+            let was_ready = m.early_ready();
+            let fxs = m.on_at(self.started.elapsed(), i);
+            // Only a list the machine took (right tag, right moment) counts.
+            if list
+                && !was_ready
+                && m.early_ready()
+                && let Some(meter) = &mut self.meter
+            {
+                meter.listed(crate::cpu_us(libc::RUSAGE_SELF));
+            }
+            for fx in fxs {
                 if let Some(end) = self.apply(fx, m)? {
                     return Ok(Some(end));
                 }
@@ -789,12 +807,10 @@ impl Surface {
         self.flush()?;
         // Our copy of the write end must go, or the read never sees EOF.
         drop(w);
-        self.reading = Some(Reading::new(
-            r,
-            offer,
-            self.drop_action,
-            Instant::now() + READ_DROP,
-        ));
+        self.reading = Some(DropRead {
+            read: Reading::new(r, offer, Instant::now() + READ_DROP),
+            action: self.drop_action,
+        });
         Ok(())
     }
 
@@ -858,9 +874,10 @@ impl Surface {
         self.flush()?;
         // Our copy of the write end must go, or the read never sees EOF.
         drop(w);
-        let mut rd = Reading::new(r, offer, 0, Instant::now() + READ_DROP);
-        rd.seq = seq;
-        self.early = Some(rd);
+        self.early = Some(EarlyRead {
+            read: Reading::new(r, offer, Instant::now() + READ_DROP),
+            seq,
+        });
         Ok(())
     }
 
@@ -870,12 +887,9 @@ impl Surface {
         let Some(rd) = &mut self.early else {
             return;
         };
-        if let Some(r) = rd.pump(Instant::now()) {
+        if let Some(r) = rd.read.pump(Instant::now()) {
             let seq = rd.seq;
             self.early = None;
-            if let (Some(meter), true) = (&mut self.meter, r.is_ok()) {
-                meter.listed(crate::cpu_us(libc::RUSAGE_SELF));
-            }
             self.inputs.push(Input::DragList(seq, r));
         }
     }
@@ -886,8 +900,8 @@ impl Surface {
         let Some(rd) = &mut self.reading else {
             return;
         };
-        if let Some(r) = rd.pump(Instant::now()) {
-            let (offer, action) = (rd.offer, rd.action);
+        if let Some(r) = rd.read.pump(Instant::now()) {
+            let (offer, action) = (rd.read.offer, rd.action);
             self.reading = None;
             self.end_offer(offer, r.is_ok() && action == DND_COPY);
             if let Some(meter) = &mut self.meter {
@@ -1025,16 +1039,18 @@ impl Surface {
                 continue;
             }
             // The nearest read deadline: one wakeup for either read.
-            let read_until = [&self.reading, &self.early]
-                .into_iter()
-                .flatten()
-                .map(|r| r.until)
-                .min();
+            let read_until = [
+                self.reading.as_ref().map(|r| r.read.until),
+                self.early.as_ref().map(|r| r.read.until),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let until = read_until.map_or(self.deadline, |u| u.min(self.deadline));
             let mut pfds = [
                 pollfd(self.conn.as_raw_fd()),
-                pollfd(self.reading.as_ref().map_or(-1, |r| r.fd.as_raw_fd())),
-                pollfd(self.early.as_ref().map_or(-1, |r| r.fd.as_raw_fd())),
+                pollfd(self.reading.as_ref().map_or(-1, |r| r.read.fd.as_raw_fd())),
+                pollfd(self.early.as_ref().map_or(-1, |r| r.read.fd.as_raw_fd())),
             ];
             let left = until.saturating_duration_since(now);
             let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
@@ -1214,7 +1230,7 @@ mod tests {
     }
 
     fn reading(r: OwnedFd) -> Reading {
-        Reading::new(r, 7, DND_COPY, Instant::now() + READ_DROP)
+        Reading::new(r, 7, Instant::now() + READ_DROP)
     }
 
     /// Whatever the data, stage 2 has nothing: only the read's result
@@ -1225,6 +1241,7 @@ mod tests {
             slices: Default::default(),
             hub: NOTHING.into(),
             tally: Default::default(),
+            catalog: None,
         }
     }
 
@@ -1609,6 +1626,30 @@ mod tests {
         assert_eq!(requests(&mut s, &server).0, []);
     }
 
+    /// `list_to_level1_cpu_us` starts at a list the machine took: a list
+    /// with a stale tag, or one after a failure, is not counted.
+    #[test]
+    fn the_meter_counts_only_a_list_the_machine_accepted() {
+        let (mut s, _server) = fake_compositor();
+        s.meter = Some(Meter::new(0, Instant::now()));
+        let mut m = Machine::with_menus(empty_groups, empty_targets);
+        let enter = Input::DragEnter {
+            x: 10.0,
+            y: 10.0,
+            mimes: vec![URI_LIST.into()],
+        };
+        m.on(enter);
+        // The enter tagged its read 1; a list tagged 9 is another drag's.
+        s.inputs
+            .push(Input::DragList(9, Ok(b"file:///x\r\n".to_vec())));
+        s.feed(&mut m).unwrap();
+        assert!(!s.meter.as_ref().unwrap().has_list(), "stale tag");
+        s.inputs
+            .push(Input::DragList(1, Ok(b"file:///x\r\n".to_vec())));
+        s.feed(&mut m).unwrap();
+        assert!(s.meter.as_ref().unwrap().has_list(), "taken list");
+    }
+
     /// No offer to read (the null offer): the read fails at once, so the
     /// machine falls back to `Drop here`.
     #[test]
@@ -1630,7 +1671,7 @@ mod tests {
         let (_, fds) = requests(&mut s, &server);
         s.pump_early();
         assert!(s.early.is_some(), "still waiting");
-        s.early.as_mut().unwrap().until = Instant::now() - Duration::from_millis(1);
+        s.early.as_mut().unwrap().read.until = Instant::now() - Duration::from_millis(1);
         s.pump_early();
         assert!(s.early.is_none());
         assert!(matches!(s.inputs.last(), Some(Input::DragList(2, Err(_)))));

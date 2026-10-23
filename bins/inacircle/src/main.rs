@@ -754,9 +754,10 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 }
 
 /// Level 1 for a `text/uri-list` (early or dropped). The list's bytes are
-/// freed by the caller after this; the catalog comes from the cache alone:
-/// no action binary runs while the overlay is up (the cache is refreshed
-/// once the wheel is gone).
+/// freed by the caller after this; the catalog comes from the cache alone,
+/// loaded once here and kept in the menu for level 2: no action binary
+/// runs while the overlay is up (the cache is refreshed once the wheel is
+/// gone).
 fn group_menu(list: &[u8]) -> wheel::GroupMenu {
     group_menu_for(dedup(uri::parse_uri_list(list)), Catalog::load_cached())
 }
@@ -766,13 +767,13 @@ fn group_menu(list: &[u8]) -> wheel::GroupMenu {
 /// they are classified, keeping one name per type, not one per file. The
 /// hub is the source: the file's name (`1 file · text` when the atlas cannot
 /// draw it), or the count.
-// TODO(task 4): the final wiring and its tests.
 fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu {
     let mut gm = wheel::GroupMenu {
         paths: Vec::new(),
         slices: Default::default(),
         hub: String::new(),
         tally: menu::Tally::default(),
+        catalog: None,
     };
     let cat = match cat {
         Some(cat) if !paths.is_empty() => cat,
@@ -807,26 +808,24 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
         _ => gm.tally.source_text(),
     };
     gm.paths = paths;
+    gm.catalog = Some(cat);
     gm
-}
-
-/// Level 2 for one category of `gm`, from the cached catalog.
-fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
-    target_menu_for(gm, group, Catalog::load_cached())
 }
 
 /// Level 2: the category's presets in their own directions (a preset's
 /// compass direction is its slice, 0 = north); the hub is the category.
-fn target_menu_for(gm: &wheel::GroupMenu, group: &str, cat: Option<Catalog>) -> wheel::Menu {
+/// From the catalog level 1 was built with: the drop does no catalog I/O,
+/// and both levels see the same presets.
+fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
     let mut slices: [Option<wheel::Choice>; 8] = Default::default();
-    let Some(cat) = cat else {
+    let Some(cat) = &gm.catalog else {
         return wheel::Menu {
             paths: Vec::new(),
             slices,
             hub: wheel::NO_ACTIONS.into(),
         };
     };
-    let offer = menu::offer_group(&cat, &gm.tally, group);
+    let offer = menu::offer_group(cat, &gm.tally, group);
     for (dir, s) in offer.slices.iter().enumerate() {
         let Some(s) = s else { continue };
         slices[dir] = Some(wheel::Choice {
@@ -938,11 +937,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Level 1 lights the category the files fit; level 2 maps a preset's
-    /// compass direction to its wheel slice (0 = north). The hub names the
-    /// one file.
+    /// Level 1 from a text drop lights the category the files fit, once per
+    /// file even when listed twice; the hub names the one file.
     #[test]
-    fn group_menus_map_categories_and_presets_to_wheel_slices() {
+    fn groups_menu_from_a_text_drop() {
         let (dir, file) = text_file("map", "notes ő.txt");
         let g = groups_of(&format!(
             "# dropped\r\nfile://{}\r\nfile://{}\r\n",
@@ -961,7 +959,19 @@ mod tests {
         );
         assert_eq!(g.slices.iter().flatten().count(), 1);
 
-        let m = target_menu_for(&g, "document", Some(md_catalog()));
+        let none = groups_of("https://example.com/\r\n");
+        assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
+        assert_eq!(none.hub, wheel::NOTHING);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Level 2 maps a preset's compass direction to its wheel slice (0 =
+    /// north); the hub is the category.
+    #[test]
+    fn targets_menu_for_document() {
+        let (dir, file) = text_file("targets", "a.txt");
+        let g = group_menu_for(vec![file.clone()], Some(md_catalog()));
+        let m = target_menu(&g, "document");
         assert_eq!(m.paths, std::slice::from_ref(&file));
         assert_eq!(m.hub, "Document");
         let north = m.slices[0].as_ref().expect("markdown points north");
@@ -975,10 +985,22 @@ mod tests {
         );
         let plain = m.slices[4].as_ref().expect("plain-text points south");
         assert!(!plain.applicable, "no action installed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
-        let none = groups_of("https://example.com/\r\n");
-        assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
-        assert_eq!(none.hub, wheel::NOTHING);
+    /// Level 2 offers what level 1 was built with: the catalog is loaded
+    /// once, and the drop does no catalog I/O (the signature has no way to
+    /// reach the cache; a snapshot-less menu offers nothing).
+    #[test]
+    fn target_menu_uses_the_catalog_of_level_1() {
+        let (dir, file) = text_file("snap", "a.txt");
+        let g = group_menu_for(vec![file], Some(md_catalog()));
+        assert_eq!(g.catalog, Some(md_catalog()));
+        let m = target_menu(&g, "document");
+        assert!(m.slices[0].as_ref().is_some_and(|c| c.applicable));
+        let mut none = g.clone();
+        none.catalog = None;
+        assert_eq!(target_menu(&none, "document").hub, wheel::NO_ACTIONS);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
