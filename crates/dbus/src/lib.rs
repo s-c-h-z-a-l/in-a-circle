@@ -7,6 +7,7 @@ use std::io;
 pub mod conn;
 pub mod marshal;
 pub mod message;
+pub mod notifications;
 
 pub use conn::{Address, Conn, parse_address, session_address};
 pub use marshal::{Reader, Value, Writer};

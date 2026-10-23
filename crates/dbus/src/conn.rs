@@ -23,6 +23,8 @@ const MAX_LINE: usize = 512;
 const MAX_QUEUED_BYTES: usize = 256 << 10;
 /// Control buffer for `recvmsg`, in u64 words for cmsghdr alignment: room
 /// for a few fds, so the ones a peer pushes on us can be received and closed.
+/// Frames `recv_now` looks at per call before it hands control back.
+const NOW_FRAMES: usize = 64;
 const CTRL_WORDS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +208,9 @@ impl Conn {
     }
 
     /// The next signal: queued ones first. `None` when the deadline passes.
+    ///
+    /// A deadline that has passed never reads the socket, so a caller that
+    /// polls the fd must use `recv_now`, not `recv(Instant::now())`.
     pub fn recv(&mut self, deadline: Instant) -> Result<Option<Message>, Error> {
         if let Some(frame) = self.queue.pop_front() {
             self.queued -= frame.len();
@@ -225,6 +230,33 @@ impl Conn {
                 Err(e) => return self.track(Err(e)),
             }
         }
+    }
+
+    /// The next signal without waiting: a queued one, else whatever complete
+    /// frame the socket holds. A partial frame stays buffered and `None` is
+    /// returned; reads stop at the frame, so `POLLIN` clears once the
+    /// socket's data is consumed. At most `NOW_FRAMES` frames are looked at
+    /// per call (`None` then, with the fd still readable).
+    pub fn recv_now(&mut self) -> Result<Option<Message>, Error> {
+        if let Some(frame) = self.queue.pop_front() {
+            self.queued -= frame.len();
+            return decode(&frame).map(Some);
+        }
+        if self.broken {
+            return Err(Error::Closed);
+        }
+        for _ in 0..NOW_FRAMES {
+            match self
+                .try_frame()
+                .and_then(|f| f.map(|f| decode(&f)).transpose())
+            {
+                Ok(Some(m)) if m.kind == Kind::Signal => return Ok(Some(m)),
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(None),
+                Err(e) => return self.track(Err(e)),
+            }
+        }
+        Ok(None)
     }
 
     /// True when a received message waits in the queue, so `poll` on the
@@ -294,6 +326,31 @@ impl Conn {
             self.fill(want - self.buf.len(), deadline)?;
         };
         Ok(self.buf.drain(..total).collect())
+    }
+
+    /// Like `read_frame`, but never waits: `None` when the frame is not
+    /// complete yet.
+    fn try_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        loop {
+            let want = match self.buf.first_chunk::<16>() {
+                Some(head) => frame_len(head)?,
+                None => 16,
+            };
+            if self.buf.len() >= want {
+                return Ok(Some(self.buf.drain(..want).collect()));
+            }
+            let len = self.buf.len();
+            self.buf.resize(want, 0);
+            let r = recv_no_fds(self.fd.as_raw_fd(), &mut self.buf[len..]);
+            self.buf.truncate(len + *r.as_ref().unwrap_or(&0));
+            match r {
+                Ok(0) => return Err(Error::Closed),
+                Ok(_) => {}
+                Err(Error::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Appends up to `max` bytes once the socket is readable.

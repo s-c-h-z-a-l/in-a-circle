@@ -471,3 +471,80 @@ fn partial_write_timeout_breaks_the_connection() {
     drop(c);
     fake.join();
 }
+
+fn readable(fd: i32) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: p is one valid pollfd.
+    unsafe { libc::poll(&mut p, 1, 0) > 0 && p.revents & libc::POLLIN != 0 }
+}
+
+fn wait_readable(fd: i32) {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: p is one valid pollfd.
+    assert!(
+        unsafe { libc::poll(&mut p, 1, 2000) } > 0,
+        "peer sent nothing"
+    );
+}
+
+#[test]
+fn recv_now_does_not_block_and_clears_pollin() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        p.signal("/a", "a.B", "One", vec![Value::U32(1)]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_readable(c.as_raw_fd());
+    let m = c.recv_now().unwrap().expect("a signal is waiting");
+    assert_eq!(m.member.as_deref(), Some("One"));
+    assert!(!readable(c.as_raw_fd()), "POLLIN must clear once consumed");
+    let t = Instant::now();
+    assert!(c.recv_now().unwrap().is_none());
+    assert!(t.elapsed() < Duration::from_millis(50));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn recv_now_keeps_a_partial_frame() {
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel::<()>();
+    let fake = Fake::start(move |p| {
+        p.handshake();
+        let mut m = Peer::reply_msg(&call("x"), vec![Value::U32(9)]);
+        m.kind = dbus::Kind::Signal;
+        m.reply_serial = None;
+        m.path = Some("/a".into());
+        m.interface = Some("a.B".into());
+        m.member = Some("Split".into());
+        m.serial = 1;
+        let bytes = dbus::encode(&m).unwrap();
+        let (head, tail) = bytes.split_at(bytes.len() / 2);
+        p.write(head);
+        sent_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+        p.write(tail);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    sent_rx.recv().unwrap();
+    wait_readable(c.as_raw_fd());
+    assert!(c.recv_now().unwrap().is_none());
+    assert!(!readable(c.as_raw_fd()));
+    go_tx.send(()).unwrap();
+    wait_readable(c.as_raw_fd());
+    let m = c.recv_now().unwrap().expect("the frame is complete now");
+    assert_eq!(m.member.as_deref(), Some("Split"));
+    assert_eq!(m.body, vec![Value::U32(9)]);
+    drop(c);
+    fake.join();
+}
