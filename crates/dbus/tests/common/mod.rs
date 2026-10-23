@@ -21,7 +21,8 @@ const PATIENCE: Duration = Duration::from_secs(5);
 pub struct Fake {
     addr: Address,
     dir: Option<PathBuf>,
-    thread: Option<JoinHandle<()>>,
+    /// Gives the listener back, for `join_counting`.
+    thread: Option<JoinHandle<UnixListener>>,
 }
 
 fn unique() -> String {
@@ -78,6 +79,7 @@ impl Fake {
                 serial: 0,
             };
             scenario(&mut peer);
+            listener
         });
         Fake {
             addr,
@@ -91,10 +93,18 @@ impl Fake {
     }
 
     /// Waits for the scenario to finish; fails the test if it panicked.
-    pub fn join(mut self) {
-        if let Err(e) = self.thread.take().unwrap().join() {
-            std::panic::resume_unwind(e);
-        }
+    pub fn join(self) {
+        self.join_counting();
+    }
+
+    /// `join`, then the number of clients that connected after the first
+    /// (they wait in the backlog, never accepted).
+    pub fn join_counting(mut self) -> usize {
+        let listener = match self.thread.take().unwrap().join() {
+            Ok(l) => l,
+            Err(e) => std::panic::resume_unwind(e),
+        };
+        std::iter::from_fn(|| listener.accept().ok()).count()
     }
 }
 

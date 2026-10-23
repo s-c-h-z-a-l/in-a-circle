@@ -13,6 +13,8 @@ for pkg in $SHIPPED; do
             # The engine binary must stay free of the document model.
             inacircle:doc) echo "$pkg: disallowed dependency: $name"; bad=1 ;;
             *:inacircle|*:inacircle-*|*:manifest|*:doc|*:action|*:engine|*:libc) ;;
+            # Notifications: our own libc-only D-Bus client.
+            inacircle:dbus) ;;
             *) echo "$pkg: disallowed dependency: $name"; bad=1 ;;
         esac
     done

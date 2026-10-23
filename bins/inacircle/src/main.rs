@@ -1,8 +1,8 @@
 //! `inacircle`: the engine's command line (headless mode).
 //!
 //! ```text
-//! inacircle run <preset-id> <files…>          the menu path
-//! inacircle run --action <action-id> <files…> one action directly
+//! inacircle run [--notify] <preset-id> <files…>          the menu path
+//! inacircle run [--notify] --action <action-id> <files…> one action directly
 //! inacircle offer <files…>                    the wheel for these files
 //! inacircle undo <job-id>
 //! inacircle jobs
@@ -20,6 +20,10 @@
 //! empty path) is a message on stderr and exit 2, with nothing on stdout.
 //! The same file (by canonical path) given more than once counts once; the
 //! first spelling wins.
+//!
+//! `--notify` adds desktop notifications: "running" with Cancel after a
+//! second, the result with Undo at the end. The stdout lines are written
+//! before the Undo window starts; the exit code does not depend on them.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -29,13 +33,16 @@ use std::process::ExitCode;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
-use engine::exec::{self, CancelToken, Observer, Outcome};
+use engine::exec::{self, CancelToken, Observer, Outcome, Wake};
 use engine::journal::{self, JobId, Recorder, Running};
 use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
+use notice::Notifier;
 
-const USAGE: &str = "usage: inacircle run <preset-id> <files…>\n       \
-inacircle run --action <action-id> <files…>\n       \
+mod notice;
+
+const USAGE: &str = "usage: inacircle run [--notify] <preset-id> <files…>\n       \
+inacircle run [--notify] --action <action-id> <files…>\n       \
 inacircle offer <files…>\n       \
 inacircle undo <job-id>\n       \
 inacircle jobs\n       \
@@ -136,11 +143,12 @@ enum Target<'a> {
     Action(&'a str),
 }
 
-/// Forwards outcomes to stdout and the history, progress to stdout and the
-/// job registry.
+/// Forwards outcomes to stdout, the history and the notifier, progress to
+/// stdout, the job registry and the notifier.
 struct Printer<'a> {
     running: &'a mut Running,
     rec: &'a mut Recorder,
+    notifier: Option<&'a mut Notifier>,
     last: Option<String>,
 }
 
@@ -148,18 +156,41 @@ impl Observer for Printer<'_> {
     fn event(&mut self, o: &Outcome) {
         print_outcome(o);
         self.rec.outcome(o);
+        if let Some(n) = &mut self.notifier {
+            n.event(o);
+        }
     }
 
     fn dir(&mut self, path: &Path) {
         self.rec.dir(path);
     }
 
-    fn progress(&mut self, done: usize, _total: usize, fraction: f32) {
+    fn progress(&mut self, done: usize, total: usize, fraction: f32) {
         self.running.update(done, fraction);
         let s = format!("{fraction:.2}");
         if self.last.as_deref() != Some(s.as_str()) {
             out(&Line::new("progress").bare(&s));
             self.last = Some(s);
+        }
+        if let Some(n) = &mut self.notifier {
+            // Before a notification can hold it up.
+            let _ = io::stdout().flush();
+            n.progress(done, total, fraction);
+        }
+    }
+
+    fn wake_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.notifier.as_ref().and_then(|n| n.wake_fd())
+    }
+
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        self.notifier.as_ref().and_then(|n| n.wake_at())
+    }
+
+    fn wake(&mut self) -> Wake {
+        match &mut self.notifier {
+            Some(n) => n.wake(),
+            None => Wake::Continue,
         }
     }
 }
@@ -173,6 +204,10 @@ fn cmd_run(args: &[OsString]) -> u8 {
             eprintln!("inacircle: cannot set up cancel handling: {e}");
             return EXIT_FAILED;
         }
+    };
+    let (notify, args) = match args {
+        [flag, rest @ ..] if flag == "--notify" => (true, rest),
+        _ => (false, args),
     };
     let (target, rest) = match args {
         [flag, id, rest @ ..] if flag == "--action" => (id, rest),
@@ -257,6 +292,11 @@ fn cmd_run(args: &[OsString]) -> u8 {
         }
     }
 
+    let mut notifier = notify.then(|| {
+        let label = route.last().map_or(name.as_str(), |a| a.label.as_str());
+        Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
+    });
+
     let job = journal::new_job_id();
     let mut running = Running::start(&job, &name, inputs.len());
     let mut rec = Recorder::open(&job, &name);
@@ -265,6 +305,9 @@ fn cmd_run(args: &[OsString]) -> u8 {
     for o in pre {
         print_outcome(&o);
         rec.outcome(&o);
+        if let Some(n) = &mut notifier {
+            n.event(&o);
+        }
     }
     let sandboxed = if inputs.is_empty() {
         engine::sandbox::landlock_abi().is_some()
@@ -272,6 +315,7 @@ fn cmd_run(args: &[OsString]) -> u8 {
         let mut obs = Printer {
             running: &mut running,
             rec: &mut rec,
+            notifier: notifier.as_mut(),
             last: None,
         };
         exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
@@ -284,13 +328,20 @@ fn cmd_run(args: &[OsString]) -> u8 {
         .pair("done", &done.to_string())
         .pair("skipped", &skipped.to_string())
         .pair("failed", &failed.to_string()));
+    let _ = io::stdout().flush();
     // A cancel that arrived after the run must be consumed here: dropping
     // the token with it pending would kill the process. Inputs it stopped
     // are already failed, so the batch rule covers a cancelled run too.
     let _ = cancel.is_cancelled();
     drop(cancel);
+    // Before the notifications: their cost is measured on its own.
     if std::env::var_os("INACIRCLE_MEASURE").is_some_and(|v| v == "1") {
         measure();
+    }
+    // The job is closed in the history and gone from the registry, so an
+    // Undo click can undo it.
+    if let Some(n) = notifier {
+        n.finish(&job, sandboxed, (done, skipped, failed));
     }
     if done > 0 {
         EXIT_DONE

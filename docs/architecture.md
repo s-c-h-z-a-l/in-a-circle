@@ -3,8 +3,8 @@
 How In.A.Circle is put together, and why. Measurements behind these
 decisions are in [`benchmarks/`](benchmarks); the [spikes](../spikes)
 proved the parts. The engine runs headless today (see
-[Headless CLI](#headless-cli)); the wheel and notifications are not built
-yet.
+[Headless CLI](#headless-cli)), with desktop notifications on request;
+the wheel is not built yet.
 
 ## Overview
 
@@ -249,6 +249,19 @@ Every action runs sandboxed, set up in the child between `fork` and
   longer than a second first get a "running" notification with progress
   and **Cancel**. The supervisor waits for Undo for a bounded time (about
   ten seconds after completion).
+- The bus connection is lazy: made at the one-second mark or at the end,
+  so a quick run connects once. Connect, authenticate and `Hello` have
+  300 ms together, every call 500 ms; while the run goes on, progress
+  updates (at most four a second) have 100 ms. Any error or timeout turns
+  notifications off for the rest of the run with one line on stderr
+  (`inacircle: notifications unavailable: …`); the result, the history and
+  the exit code never depend on them.
+- Cancel arrives on the supervisor's wake point, in the same `poll` as the
+  signalfd and the pidfd: no thread. A click after the last action exited
+  is ignored. Only signals about our own notification ids count.
+- After the Undo window, the result is sent again (same id) without the
+  button, so no dead button stays in the notification centre. A closed
+  notification ends the window at once.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 
@@ -313,9 +326,9 @@ server: that is a resident process, and any web page can reach `localhost`.
 The engine without the wheel, for scripts and tests:
 
 ```
-inacircle run <preset-id> <files…>          the menu path
-inacircle run --action <action-id> <files…> one action directly
-inacircle offer <files…>                    what the wheel would offer
+inacircle run [--notify] <preset-id> <files…>          the menu path
+inacircle run [--notify] --action <action-id> <files…> one action directly
+inacircle offer <files…>                               what the wheel would offer
 inacircle undo <job-id>
 inacircle jobs
 inacircle cancel <job-id>
@@ -334,8 +347,13 @@ inacircle cancel <job-id>
   first.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
+- `--notify` adds the desktop notifications of [Feedback](#feedback). All
+  stdout lines, `summary` included, are written before the Undo window
+  starts; the exit code is the same as without it.
 - `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
-  and its peak RSS on stderr (a measurement switch).
+  and its peak RSS on stderr (a measurement switch), before the
+  notifications at the end.
+- `INACIRCLE_UNDO_WAIT_MS=<n>` shortens the Undo window. Test-only.
 
 ## Configuration
 

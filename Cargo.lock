@@ -43,6 +43,7 @@ dependencies = [
 name = "inacircle"
 version = "0.0.0"
 dependencies = [
+ "dbus",
  "engine",
  "libc",
  "manifest",
