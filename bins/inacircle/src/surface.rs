@@ -878,7 +878,9 @@ impl Surface {
             }
             // After the timings are taken: reading smaps costs tens of µs.
             if started.is_none() {
+                let c0 = crate::cpu_us(libc::RUSAGE_SELF);
                 meter.pss(crate::measure::pss_kb());
+                meter.overhead(crate::cpu_us(libc::RUSAGE_SELF) - c0);
             }
         }
         Ok(())
