@@ -1,8 +1,9 @@
 //! The sandbox every action runs in: Landlock (filesystem, network, scope),
 //! a seccomp filter (sockets, metadata) and resource limits.
 //!
-//! The parent builds the ruleset before spawning ([`build`]); the child
-//! applies everything between fork and exec ([`apply_in_child`], from
+//! The parent builds the ruleset before spawning ([`build`], or [`create`]
+//! then [`allow_read_fd`] and [`add`]); the child applies everything
+//! between fork and exec ([`apply_in_child`], from
 //! `std::process::Command::pre_exec`).
 //!
 //! # What is covered
@@ -115,6 +116,8 @@ struct PathBeneathAttr {
 #[derive(Debug)]
 pub struct Ruleset {
     fd: OwnedFd,
+    /// The filesystem rights it handles.
+    fs: u64,
 }
 
 impl AsFd for Ruleset {
@@ -136,9 +139,9 @@ pub struct Policy<'a> {
     /// Read only, followed if a symlink (the user's inputs: a link to a
     /// file is the file the user meant). Must exist.
     pub read: &'a [PathBuf],
-    /// Read only, made by the engine (intermediate outputs, the
-    /// `--inputs-from` file): a symlink is refused, never followed. Must
-    /// exist.
+    /// Read only, made by the engine (the `--inputs-from` file;
+    /// intermediate outputs go through [`allow_read_fd`]): a symlink is
+    /// refused, never followed. Must exist.
     pub read_exact: &'a [PathBuf],
     /// Full write (the work dir). Must exist.
     pub write: &'a Path,
@@ -197,6 +200,13 @@ fn handled(abi: u32) -> (u64, u64, u64) {
 }
 
 fn build_for_abi(policy: &Policy, abi: u32) -> io::Result<Ruleset> {
+    let ruleset = create_for_abi(abi)?;
+    add(&ruleset, policy)?;
+    Ok(ruleset)
+}
+
+/// A ruleset handling every right `abi` knows, with no rules yet.
+fn create_for_abi(abi: u32) -> io::Result<Ruleset> {
     let (fs, net, scoped) = handled(abi);
     let attr = RulesetAttr {
         handled_access_fs: fs,
@@ -218,25 +228,38 @@ fn build_for_abi(policy: &Policy, abi: u32) -> io::Result<Ruleset> {
     }
     // SAFETY: `fd` was just returned to us (O_CLOEXEC by the kernel) and
     // nothing else owns it.
-    let ruleset = Ruleset {
+    Ok(Ruleset {
         fd: unsafe { OwnedFd::from_raw_fd(fd as RawFd) },
-    };
+        fs,
+    })
+}
+
+/// Adds the rules of `policy` to `ruleset`.
+pub fn add(ruleset: &Ruleset, policy: &Policy) -> io::Result<()> {
+    let fs = ruleset.fs;
     let exec = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
     for p in policy.exec {
-        match allow(&ruleset, p, exec & fs) {
+        match allow(ruleset, p, exec & fs) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             r => r?,
         }
     }
     let read = (ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR) & fs;
     for p in policy.read {
-        allow(&ruleset, p, read)?;
+        allow(ruleset, p, read)?;
     }
     for p in policy.read_exact {
-        allow_at(&ruleset, p, read, libc::O_NOFOLLOW)?;
+        allow_at(ruleset, p, read, libc::O_NOFOLLOW)?;
     }
-    allow(&ruleset, policy.write, fs)?;
-    Ok(ruleset)
+    allow(ruleset, policy.write, fs)
+}
+
+/// Grants reading the file open as `fd` (an `O_PATH` fd the engine has
+/// checked; `path` only names it in errors). The rule is on that inode,
+/// whatever its path resolves to by now.
+pub fn allow_read_fd(ruleset: &Ruleset, fd: BorrowedFd, path: &Path) -> io::Result<()> {
+    let read = (ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR) & ruleset.fs;
+    allow_fd(ruleset, fd, read, path)
 }
 
 /// Adds a rule granting `access` beneath `path`, limited to the
@@ -252,21 +275,32 @@ fn allow_at(ruleset: &Ruleset, path: &Path, access: u64, flags: libc::c_int) -> 
         .read(true)
         .custom_flags(libc::O_PATH | flags)
         .open(path)?;
-    let ft = f.metadata()?.file_type();
-    if ft.is_symlink() {
+    allow_fd(ruleset, f.as_fd(), access, path)
+}
+
+/// [`allow`] for the file open as `fd`; a symlink is refused.
+fn allow_fd(ruleset: &Ruleset, fd: BorrowedFd, access: u64, path: &Path) -> io::Result<()> {
+    // SAFETY: an all-zero stat is a valid value.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is open (O_PATH fds included) and st a writable stat.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFLNK {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("landlock rule for {}: is a symlink", path.display()),
         ));
     }
-    let access = if ft.is_dir() {
+    let access = if kind == libc::S_IFDIR {
         access
     } else {
         access & ACCESS_FS_FILE
     };
     let attr = PathBeneathAttr {
         allowed_access: access,
-        parent_fd: f.as_raw_fd(),
+        parent_fd: fd.as_raw_fd(),
     };
     // SAFETY: both fds are open for the duration of the call and `attr` is
     // a valid PathBeneathAttr; the kernel only reads it.
@@ -287,6 +321,12 @@ fn allow_at(ruleset: &Ruleset, path: &Path, access: u64, flags: libc::c_int) -> 
         ));
     }
     Ok(())
+}
+
+/// An empty ruleset at the best available ABI, for [`add`] and
+/// [`allow_read_fd`]. `Ok(None)` when Landlock is unavailable.
+pub fn create() -> io::Result<Option<Ruleset>> {
+    landlock_abi().map(create_for_abi).transpose()
 }
 
 /// Builds the ruleset for `policy` at the best available ABI. `Ok(None)`

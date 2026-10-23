@@ -4,7 +4,7 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -616,10 +616,28 @@ fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
     Ok((dir, leaf))
 }
 
-/// Checks that `rel` beneath `root` is a regular file reached without any
-/// symlink on the way (see [`resolve_beneath`]).
-pub(crate) fn check_regular_beneath(root: &Path, rel: &Path) -> io::Result<()> {
-    resolve_beneath(root, rel).map(drop)
+/// Opens `rel` beneath `root` (`O_PATH`), resolved as in
+/// [`resolve_beneath`]: a regular file reached without any symlink on the
+/// way. The type is checked on the fd, so it is the file that was opened.
+pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedFd> {
+    let (dir, leaf) = resolve_beneath(root, rel)?;
+    let flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: leaf is NUL-terminated; dir.0 is an open directory fd.
+    let fd = unsafe { libc::openat(dir.0, leaf.as_ptr(), flags) };
+    if fd < 0 {
+        return last_err();
+    }
+    // SAFETY: fd was just returned to us and nothing else owns it.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: zeroed stat is valid storage; fd is open.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return last_err();
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(invalid("output is not a regular file"));
+    }
+    Ok(fd)
 }
 
 /// The placed name must still be the regular file we moved (a leaf swapped

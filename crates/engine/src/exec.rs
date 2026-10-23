@@ -25,7 +25,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read};
 use std::marker::PhantomData;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -519,6 +519,8 @@ fn run_group(
         origin: members.to_vec(),
         intermediate: false,
     };
+    // The next step's ruleset, with the intermediate outputs' rules.
+    let mut pre = None;
     for (s, action) in route.iter().enumerate() {
         sink.step = s;
         let last = s + 1 == route.len();
@@ -527,7 +529,15 @@ fn run_group(
         let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
         let result = match ran {
             Ok(()) => run_step(
-                action, &step_in, &dir, &list, &work.path, landlock, cancel, sink,
+                action,
+                &step_in,
+                pre.take(),
+                &dir,
+                &list,
+                &work.path,
+                landlock,
+                cancel,
+                sink,
             ),
             Err(reason) => {
                 for &o in &step_in.origin {
@@ -545,20 +555,46 @@ fn run_group(
         }
         // Each output was checked when its `done` arrived, but the action
         // could swap it for a symlink afterwards. Its whole process group is
-        // gone now (`outputs` is `None` otherwise) and the next step can
-        // write only its own dir, so what resolves here stays put.
+        // gone now (`outputs` is `None` otherwise), but a descendant that
+        // left the group (`setsid`, where seccomp does not deny it) may still
+        // write its dir. So the next step's read rules are built here, from
+        // the fds this check opens, and no path is resolved again.
+        let rules = if landlock {
+            match sandbox::create() {
+                Ok(r) => r,
+                Err(e) => {
+                    for &o in &step_in.origin {
+                        sink.fail(o, format!("sandbox setup failed: {e}"));
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let mut changed: Vec<usize> = Vec::new();
         for (j, outs) in outputs.iter().enumerate() {
             let o = step_in.origin[j];
-            if !changed.contains(&o)
-                && outs
-                    .iter()
-                    .any(|rel| output::check_regular_beneath(&dir, rel).is_err())
-            {
-                changed.push(o);
-                sink.fail(o, "intermediate output changed".to_owned());
+            if changed.contains(&o) {
+                continue;
+            }
+            for rel in outs {
+                let allowed = output::open_regular_beneath(&dir, rel)
+                    .map_err(|_| "intermediate output changed".to_owned())
+                    .and_then(|fd| match &rules {
+                        Some(r) => sandbox::allow_read_fd(r, fd.as_fd(), &dir.join(rel))
+                            .map_err(|e| format!("sandbox setup failed: {e}")),
+                        None => Ok(()),
+                    });
+                if let Err(reason) = allowed {
+                    changed.push(o);
+                    sink.fail(o, reason);
+                    break;
+                }
             }
         }
+        #[cfg(test)]
+        tests::AFTER_CHECK.with_borrow_mut(|f| f.as_mut().map(|f| f(&dir)));
         let mut next = StepIn {
             paths: Vec::new(),
             origin: Vec::new(),
@@ -578,6 +614,7 @@ fn run_group(
             return;
         }
         step_in = next;
+        pre = rules;
     }
 }
 
@@ -845,11 +882,13 @@ fn last_line(tail: &[u8]) -> String {
 
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
-/// unfinished input is then failed as cancelled).
+/// unfinished input is then failed as cancelled). With Landlock, an
+/// intermediate step's ruleset comes as `pre`, already granting its inputs.
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
     step_in: &StepIn,
+    pre: Option<sandbox::Ruleset>,
     dir: &Path,
     list: &Path,
     root: &Path,
@@ -885,10 +924,10 @@ fn run_step(
         .filter(|p| p.exists())
         .collect();
     exec.push(action.bin.clone());
-    // Intermediate outputs and the list are the engine's: never followed.
-    let mut exact = vec![list.to_path_buf()];
+    // The list is the engine's: never followed. Intermediate outputs are
+    // granted in `pre`, from the fds their check opened.
+    let exact = [list.to_path_buf()];
     let read = if step_in.intermediate {
-        exact.extend_from_slice(&step_in.paths);
         &[][..]
     } else {
         &step_in.paths[..]
@@ -900,7 +939,12 @@ fn run_step(
         write: dir,
     };
     let ruleset = if landlock {
-        match sandbox::build(&policy) {
+        let built = match pre {
+            Some(r) => sandbox::add(&r, &policy).map(|()| Some(r)),
+            None if step_in.intermediate => Err(io::Error::other("no intermediate rules")),
+            None => sandbox::build(&policy),
+        };
+        match built {
             Ok(r) => r,
             Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
         }
@@ -1695,6 +1739,108 @@ mod tests {
         assert_eq!(last_line(b"a\n  b  \n\n"), "b");
         assert_eq!(last_line(b""), "");
         assert_eq!(last_line(b"\xff\xfeoops"), "\u{fffd}\u{fffd}oops");
+    }
+
+    type Hook = Option<Box<dyn FnMut(&Path)>>;
+
+    thread_local! {
+        /// Runs in `run_group` after the intermediate outputs' check (and
+        /// their rules), before the next step's ruleset is finished, with
+        /// the checked step's dir.
+        pub(super) static AFTER_CHECK: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[derive(Default)]
+    struct Seen(Vec<Outcome>);
+    impl Observer for Seen {
+        fn event(&mut self, o: &Outcome) {
+            self.0.push(o.clone());
+        }
+        fn dir(&mut self, _: &Path) {}
+        fn progress(&mut self, _: usize, _: usize, _: f32) {}
+    }
+
+    fn script_action(t: &Tmp, name: &str, body: &str, ext: &str) -> Action {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = t.0.join(name);
+        fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        Action {
+            id: "test.fake".into(),
+            family: "test".into(),
+            bin,
+            input: "text/plain".into(),
+            output: "text/markdown".into(),
+            ext: ext.into(),
+            label: "Fake".into(),
+            group: "test".into(),
+            cost: 1,
+            lossy: false,
+            batch: true,
+            requires: Vec::new(),
+            builtin: true,
+        }
+    }
+
+    #[test]
+    fn intermediate_rule_comes_from_the_checked_fd() {
+        if sandbox::landlock_abi().is_none() {
+            eprintln!("SKIPPED intermediate_rule_comes_from_the_checked_fd: no Landlock");
+            return;
+        }
+        let t = Tmp::new("ruleswap");
+        let docs = t.0.join("docs");
+        let secret = t.0.join("secret");
+        fs::create_dir_all(&docs).unwrap();
+        fs::create_dir_all(&secret).unwrap();
+        fs::write(secret.join("a.mid"), "SECRET\n").unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let s1 = script_action(
+            &t,
+            "copy",
+            "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.mid\"\n\
+             printf 'done\\t%s\\t0/a.mid\\n' \"$in\"",
+            "mid",
+        );
+        let s2 = script_action(
+            &t,
+            "append",
+            "read -r in < \"$6\"; mkdir \"$4/0\"\n\
+             if cat \"$in\" > \"$4/0/out.md\"; then printf 'done\\t%s\\t0/out.md\\n' \"$in\"\n\
+             else printf 'fail\\t%s\\tdenied\\n' \"$in\"; fi",
+            "md",
+        );
+        // Between the check and the next step's rules, `<step1>/0` becomes
+        // a link to the secret's folder, which holds a file of that name.
+        let target = secret.clone();
+        AFTER_CHECK.set(Some(Box::new(move |dir: &Path| {
+            fs::rename(dir.join("0"), dir.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&target, dir.join("0")).unwrap();
+        })));
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        let report = run(&[&s1, &s2], std::slice::from_ref(&input), &mut seen, &tok);
+        AFTER_CHECK.set(None);
+        assert!(report.sandboxed);
+        for e in fs::read_dir(&docs).unwrap().flatten() {
+            let body = fs::read(e.path()).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&body).contains("SECRET"),
+                "secret leaked into {}: {:?}",
+                e.path().display(),
+                seen.0
+            );
+        }
+        // Step 2 ran and the read of the swapped path was denied.
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "denied".to_owned()
+            }]
+        );
     }
 
     #[test]
