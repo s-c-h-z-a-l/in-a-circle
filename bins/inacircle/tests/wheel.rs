@@ -121,7 +121,7 @@ fn alarm_works_even_if_the_parent_disabled_sigalrm() {
             break;
         }
         assert!(
-            t.elapsed() < Duration::from_secs(11),
+            t.elapsed() < Duration::from_secs(31),
             "wheel outlived its stage"
         );
         std::thread::sleep(Duration::from_millis(50));

@@ -706,6 +706,9 @@ impl Surface {
         match fx {
             Effect::Draw | Effect::Hover(_) => self.render(m)?,
             Effect::Accept(yes) => self.accept(yes),
+            // TODO(task 3): receive the list before the drop. Until then no
+            // `DragList` comes, so the machine takes its `Drop here` fallback.
+            Effect::ReadEarly => {}
             Effect::ReadDrop => self.start_read()?,
             Effect::Arm(d) => {
                 self.deadline = Instant::now() + d.saturating_sub(SOFT_MARGIN);
@@ -1096,7 +1099,7 @@ impl Offers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wheel::{Menu, NOTHING};
+    use crate::wheel::{GroupMenu, Menu, NOTHING};
 
     /// Regression (the user's niri log): after the stage-2 swap the first
     /// hover did a full paint inside the event (~150 µs). The free buffer
@@ -1124,7 +1127,16 @@ mod tests {
 
     /// Whatever the data, stage 2 has nothing: only the read's result
     /// matters here.
-    fn empty(_: Vec<u8>) -> Menu {
+    fn empty_groups(_: &[u8]) -> GroupMenu {
+        GroupMenu {
+            paths: Vec::new(),
+            slices: Default::default(),
+            hub: NOTHING.into(),
+            tally: Default::default(),
+        }
+    }
+
+    fn empty_targets(_: &GroupMenu, _: &str) -> Menu {
         Menu {
             paths: Vec::new(),
             slices: Default::default(),
@@ -1134,7 +1146,7 @@ mod tests {
 
     /// A machine waiting for the dropped data.
     fn dropped() -> Machine {
-        let mut m = Machine::with_offer(empty);
+        let mut m = Machine::with_menus(empty_groups, empty_targets);
         m.on(Input::Configured(1920, 1080));
         m.on(Input::DragEnter {
             x: 960.0,

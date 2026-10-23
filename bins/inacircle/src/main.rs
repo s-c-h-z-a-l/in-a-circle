@@ -753,68 +753,93 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
     }
 }
 
-/// Stage 2 for the dropped `text/uri-list`. The list's bytes are freed
-/// before the files are classified, and the catalog comes from the cache
-/// alone: no action binary runs while the overlay is up (the cache is
-/// refreshed once the wheel is gone).
-fn drop_menu(list: Vec<u8>) -> wheel::Menu {
-    let paths = uri::parse_uri_list(&list);
-    drop(list);
-    drop_menu_for(dedup(paths), Catalog::load_cached())
+/// Level 1 for a `text/uri-list` (early or dropped). The list's bytes are
+/// freed by the caller after this; the catalog comes from the cache alone:
+/// no action binary runs while the overlay is up (the cache is refreshed
+/// once the wheel is gone).
+fn group_menu(list: &[u8]) -> wheel::GroupMenu {
+    group_menu_for(dedup(uri::parse_uri_list(list)), Catalog::load_cached())
 }
 
-/// Stage 2 for `paths` (absolute, each once) with catalog `cat` (`None`:
-/// no cache yet, so `No actions yet`). The offer by wheel slice: a
-/// preset's compass direction is its slice (0 = north, clockwise). The
-/// files are tallied by type as they are classified, keeping one name per
-/// type, not one per file. The hub (`ui::text::hub_text`) counts the files
-/// of the offered type, the most common one with presets; when it cannot
-/// show the one file's name, it names that type by its MIME top-level type
-/// (`1 file · text`): short enough for the hub, unlike the type's label.
-fn drop_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::Menu {
-    let mut slices: [Option<wheel::Choice>; 8] = Default::default();
-    let (paths, cat) = match cat {
-        Some(cat) if !paths.is_empty() => (paths, cat),
+/// Level 1 for `paths` (absolute, each once) with catalog `cat` (`None`:
+/// no cache yet, so `No actions yet`). The files are tallied by type as
+/// they are classified, keeping one name per type, not one per file. The
+/// hub is the source: the file's name (`1 file · text` when the atlas cannot
+/// draw it), or the count.
+// TODO(task 4): the final wiring and its tests.
+fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu {
+    let mut gm = wheel::GroupMenu {
+        paths: Vec::new(),
+        slices: Default::default(),
+        hub: String::new(),
+        tally: menu::Tally::default(),
+    };
+    let cat = match cat {
+        Some(cat) if !paths.is_empty() => cat,
         // Nothing is offered, so nothing can be chosen: any click closes.
         _ => {
-            let hub = if paths.is_empty() {
+            gm.hub = if paths.is_empty() {
                 wheel::NOTHING
             } else {
                 wheel::NO_ACTIONS
-            };
-            return wheel::Menu {
-                paths: Vec::new(),
-                slices,
-                hub: hub.into(),
-            };
+            }
+            .into();
+            return gm;
         }
     };
-    let mut tally = menu::Tally::default();
     for p in &paths {
         let (name, kind) = named_kind(p);
-        tally.add(&name, &kind);
+        gm.tally.add(&name, &kind);
     }
-    let offer = menu::offer_tally(&cat, &tally);
-    let mut mime = None;
+    for (dir, g) in menu::groups(&cat, &gm.tally).into_iter().enumerate() {
+        gm.slices[dir] = g.map(|g| wheel::GroupChoice {
+            label: g.label.into(),
+            group: g.group.into(),
+            lit: g.lit,
+        });
+    }
+    // A name the hub cannot show is replaced by the type's top-level name.
+    gm.hub = match (&gm.tally.first_name, gm.tally.types.first()) {
+        (Some(name), Some((mime, ..))) if gm.tally.total == 1 => {
+            let label = mime.split('/').next().unwrap_or(mime);
+            ui::text::hub_text(1, name, 1, label, ui::wheel::HUB_TEXT_W)
+        }
+        _ => gm.tally.source_text(),
+    };
+    gm.paths = paths;
+    gm
+}
+
+/// Level 2 for one category of `gm`, from the cached catalog.
+fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
+    target_menu_for(gm, group, Catalog::load_cached())
+}
+
+/// Level 2: the category's presets in their own directions (a preset's
+/// compass direction is its slice, 0 = north); the hub is the category.
+fn target_menu_for(gm: &wheel::GroupMenu, group: &str, cat: Option<Catalog>) -> wheel::Menu {
+    let mut slices: [Option<wheel::Choice>; 8] = Default::default();
+    let Some(cat) = cat else {
+        return wheel::Menu {
+            paths: Vec::new(),
+            slices,
+            hub: wheel::NO_ACTIONS.into(),
+        };
+    };
+    let offer = menu::offer_group(&cat, &gm.tally, group);
     for (dir, s) in offer.slices.iter().enumerate() {
         let Some(s) = s else { continue };
-        mime = PRESETS.iter().find(|p| p.id == s.preset).map(|p| p.input);
         slices[dir] = Some(wheel::Choice {
             label: s.label.clone(),
             preset: s.preset.into(),
             applicable: s.applicable > 0 && s.disabled.is_none(),
         });
     }
-    let hub = match mime {
-        Some(mime) => {
-            let (count, name) = tally.of(mime);
-            let label = mime.split('/').next().unwrap_or(mime);
-            ui::text::hub_text(count, name, offer.total, label, ui::wheel::HUB_TEXT_W)
-        }
-        None if offer.hub.is_empty() => wheel::NOTHING.into(),
-        None => offer.hub,
-    };
-    wheel::Menu { paths, slices, hub }
+    wheel::Menu {
+        paths: gm.paths.clone(),
+        slices,
+        hub: offer.hub,
+    }
 }
 
 #[cfg(test)]
@@ -883,9 +908,9 @@ mod tests {
         }
     }
 
-    /// Stage 2 for a URI list, with `md_catalog`.
-    fn menu_of(list: &str) -> wheel::Menu {
-        drop_menu_for(
+    /// Level 1 for a URI list, with `md_catalog`.
+    fn groups_of(list: &str) -> wheel::GroupMenu {
+        group_menu_for(
             dedup(uri::parse_uri_list(list.as_bytes())),
             Some(md_catalog()),
         )
@@ -902,23 +927,24 @@ mod tests {
 
     /// One file whose name the atlas cannot draw: its count and type.
     #[test]
-    fn drop_menu_hub_falls_back_to_the_type() {
+    fn group_menu_hub_falls_back_to_the_type() {
         let (dir, file) = text_file("cjk", "日本.txt");
-        let m = menu_of(&format!(
+        let g = groups_of(&format!(
             "file://{}/%E6%97%A5%E6%9C%AC.txt\n",
             dir.display()
         ));
-        assert_eq!(m.paths, [file]);
-        assert_eq!(m.hub, "1 file · text");
+        assert_eq!(g.paths, [file]);
+        assert_eq!(g.hub, "1 file · text");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A preset's compass direction is its wheel slice (0 = north). The hub
-    /// names the one file.
+    /// Level 1 lights the category the files fit; level 2 maps a preset's
+    /// compass direction to its wheel slice (0 = north). The hub names the
+    /// one file.
     #[test]
-    fn drop_menu_maps_presets_to_wheel_slices() {
+    fn group_menus_map_categories_and_presets_to_wheel_slices() {
         let (dir, file) = text_file("map", "notes ő.txt");
-        let m = menu_of(&format!(
+        let g = groups_of(&format!(
             "# dropped\r\nfile://{}\r\nfile://{}\r\n",
             dir.join("notes%20%C5%91.txt").display(),
             file.display()
@@ -926,7 +952,18 @@ mod tests {
                 .replace(' ', "%20")
                 .replace('ő', "%C5%91")
         ));
-        assert_eq!(m.paths, std::slice::from_ref(&file), "the same file once");
+        assert_eq!(g.paths, std::slice::from_ref(&file), "the same file once");
+        assert_eq!(g.hub, "notes ő.txt");
+        let doc = g.slices[0].as_ref().expect("documents point north");
+        assert_eq!(
+            (doc.label.as_str(), doc.group.as_str(), doc.lit),
+            ("Document", "document", true)
+        );
+        assert_eq!(g.slices.iter().flatten().count(), 1);
+
+        let m = target_menu_for(&g, "document", Some(md_catalog()));
+        assert_eq!(m.paths, std::slice::from_ref(&file));
+        assert_eq!(m.hub, "Document");
         let north = m.slices[0].as_ref().expect("markdown points north");
         assert_eq!(
             (
@@ -936,37 +973,39 @@ mod tests {
             ),
             ("Markdown", "markdown", true)
         );
-        assert_eq!(m.slices.iter().flatten().count(), 1);
-        assert_eq!(m.hub, "notes ő.txt");
+        let plain = m.slices[4].as_ref().expect("plain-text points south");
+        assert!(!plain.applicable, "no action installed");
 
-        let none = menu_of("https://example.com/\r\n");
+        let none = groups_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
         assert_eq!(none.hub, wheel::NOTHING);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Before the catalog was ever cached, stage 2 offers nothing (no
-    /// manifest runs under the overlay) and says so; any click closes.
+    /// Before the catalog was ever cached, nothing is offered (no manifest
+    /// runs under the overlay) and the wheel says so; any click closes.
     #[test]
-    fn drop_menu_without_a_cache_offers_nothing() {
+    fn group_menu_without_a_cache_offers_nothing() {
         let (dir, file) = text_file("nocache", "a.txt");
-        let m = drop_menu_for(vec![file], None);
-        assert!(m.paths.is_empty() && m.slices.iter().all(Option::is_none));
-        assert_eq!(m.hub, wheel::NO_ACTIONS);
+        let g = group_menu_for(vec![file], None);
+        assert!(g.paths.is_empty() && g.slices.iter().all(Option::is_none));
+        assert_eq!(g.hub, wheel::NO_ACTIONS);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Several files: the hub counts those of the offered type.
+    /// Several files: the hub counts them; the category is lit when any of
+    /// them fits, and a category nothing fits is dim.
     #[test]
-    fn drop_menu_counts_the_offered_type() {
+    fn group_menu_counts_the_files() {
         let (dir, a) = text_file("count", "a.txt");
-        let b = dir.join("b.txt");
-        std::fs::write(&b, "more words\n").unwrap();
         let pdf = dir.join("c.pdf");
         std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
-        let m = drop_menu_for(vec![a, b, pdf], Some(md_catalog()));
-        assert_eq!(m.paths.len(), 3);
-        assert_eq!(m.hub, "2 / 3 files");
+        let g = group_menu_for(vec![a, pdf.clone()], Some(md_catalog()));
+        assert_eq!(g.paths.len(), 2);
+        assert_eq!(g.hub, "2 files");
+        assert!(g.slices[0].as_ref().is_some_and(|d| d.lit));
+        let g = group_menu_for(vec![pdf], Some(md_catalog()));
+        assert!(g.slices[0].as_ref().is_some_and(|d| !d.lit), "dim");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
