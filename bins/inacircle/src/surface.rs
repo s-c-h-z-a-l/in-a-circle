@@ -250,10 +250,14 @@ struct Surface {
 
 impl Surface {
     fn connect() -> io::Result<Surface> {
-        Ok(Surface {
-            conn: Conn::connect().map_err(|e| {
-                io::Error::new(e.kind(), format!("cannot reach the compositor: {e}"))
-            })?,
+        let conn = Conn::connect()
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot reach the compositor: {e}")))?;
+        Ok(Surface::new(conn))
+    }
+
+    fn new(conn: Conn) -> Surface {
+        Surface {
+            conn,
             id: Ids::default(),
             shm: None,
             deadline: Instant::now() + STAGE.saturating_sub(SOFT_MARGIN),
@@ -271,7 +275,7 @@ impl Surface {
             screen: Screen::new(),
             pending: false,
             inputs: Vec::new(),
-        })
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -601,7 +605,11 @@ impl Surface {
                 Some(Input::DragLeave)
             }
             (Iface::DataDevice, op::wl_data_device::DROP) => {
-                if let Some((offer, _)) = self.dnd {
+                // One drop is read; a later one (refused, but the compositor
+                // may still send it) must not replace the keep.
+                if let Some((offer, _)) = self.dnd
+                    && self.offers.kept().is_none()
+                {
                     self.offers.keep(offer);
                     self.drop_action = self.dnd_action;
                 }
@@ -1071,8 +1079,192 @@ mod tests {
         assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
     }
 
-    /// Regression: the read took the current drag's offer, so an enter
-    /// handled between the drop and the read made it read the new drag.
+    // A fake compositor: the server end of a socketpair under a Surface.
+
+    const DEVICE_OFFER_A: u32 = 0xff00_0001;
+    const DEVICE_OFFER_B: u32 = 0xff00_0002;
+
+    /// A Surface with a data device, and the compositor's end of its socket.
+    fn fake_compositor() -> (Surface, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: valid 2-element out array; checked.
+        let r = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(r, 0);
+        // SAFETY: fresh descriptors we own.
+        let (a, b) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let mut s = Surface::new(Conn::from_fd(a));
+        s.id.data_device = s.conn.new_id(Iface::DataDevice);
+        (s, b)
+    }
+
+    /// One wire message: header, then the argument words.
+    fn msg(obj: u32, op: u16, args: &[u32]) -> Vec<u8> {
+        let size = (8 + 4 * args.len()) as u32;
+        [obj, (size << 16) | u32::from(op)]
+            .iter()
+            .chain(args)
+            .flat_map(|w| w.to_ne_bytes())
+            .collect()
+    }
+
+    /// The events of a drag over us: a new offer with copy negotiated,
+    /// entered at serial `serial`.
+    fn drag_enters(s: &Surface, offer: u32, serial: u32) -> Vec<u8> {
+        let dd = s.id.data_device;
+        let at = 100 * 256; // wl_fixed 100.0
+        let mut m = msg(dd, op::wl_data_device::DATA_OFFER, &[offer]);
+        m.extend(msg(
+            dd,
+            op::wl_data_device::ENTER,
+            &[serial, 1, at, at, offer],
+        ));
+        m.extend(msg(offer, op::wl_data_offer::ACTION, &[DND_COPY]));
+        m
+    }
+
+    /// Hands `events` to the surface and dispatches them.
+    fn deliver(s: &mut Surface, server: &OwnedFd, events: &[u8]) {
+        // SAFETY: writing a valid buffer to a valid fd.
+        let n = unsafe { libc::write(server.as_raw_fd(), events.as_ptr().cast(), events.len()) };
+        assert_eq!(n as usize, events.len());
+        assert!(
+            s.conn
+                .read(Instant::now() + Duration::from_secs(1))
+                .unwrap()
+        );
+        s.dispatch(&Machine::new()).unwrap();
+    }
+
+    /// The requests the surface sent so far, as (object, opcode), and the
+    /// fds that came with them.
+    fn requests(s: &mut Surface, server: &OwnedFd) -> (Vec<(u32, u16)>, Vec<OwnedFd>) {
+        s.flush().unwrap();
+        let (mut bytes, mut fds) = (Vec::new(), Vec::new());
+        loop {
+            let mut buf = [0u8; 4096];
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
+            };
+            let mut cbuf = [0u64; 16];
+            // SAFETY: a zeroed msghdr is valid; its pointers outlive recvmsg.
+            let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
+            mh.msg_iov = &mut iov;
+            mh.msg_iovlen = 1;
+            mh.msg_control = cbuf.as_mut_ptr().cast();
+            mh.msg_controllen = std::mem::size_of_val(&cbuf);
+            // SAFETY: mh describes valid buffers.
+            let n = unsafe {
+                libc::recvmsg(
+                    server.as_raw_fd(),
+                    &mut mh,
+                    libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n as usize]);
+            // SAFETY: walking the cmsgs the kernel wrote; their fds are ours.
+            unsafe {
+                let mut c = libc::CMSG_FIRSTHDR(&mh);
+                while !c.is_null() {
+                    let count = ((*c).cmsg_len - libc::CMSG_LEN(0) as usize) / 4;
+                    let data = libc::CMSG_DATA(c) as *const RawFd;
+                    for i in 0..count {
+                        fds.push(OwnedFd::from_raw_fd(*data.add(i)));
+                    }
+                    c = libc::CMSG_NXTHDR(&mh, c);
+                }
+            }
+        }
+        let word = |i: usize| u32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap());
+        let mut reqs = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let (obj, head) = (word(i), word(i + 4));
+            reqs.push((obj, (head & 0xffff) as u16));
+            i += (head >> 16) as usize;
+        }
+        (reqs, fds)
+    }
+
+    /// The source writes the list and closes its end; the surface reads it.
+    fn source_writes(s: &mut Surface, w: OwnedFd) {
+        let list = b"file:///x\r\n";
+        // SAFETY: writing a valid buffer to a valid fd.
+        let n = unsafe { libc::write(w.as_raw_fd(), list.as_ptr().cast(), list.len()) };
+        assert_eq!(n as usize, list.len());
+        drop(w);
+        s.pump_read();
+        assert!(s.reading.is_none(), "read to EOF");
+    }
+
+    /// Regression: the read took the current drag's offer and `finish`
+    /// required it, with its action, so an enter handled between the drop
+    /// and the read made us read the new drag and never finish the drop.
+    #[test]
+    fn the_dropped_offer_is_read_and_finished_after_a_new_enter() {
+        let (mut s, server) = fake_compositor();
+        let mut ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        ev.extend(msg(s.id.data_device, op::wl_data_device::DROP, &[]));
+        ev.extend(drag_enters(&s, DEVICE_OFFER_B, 2));
+        deliver(&mut s, &server, &ev);
+        s.start_read().unwrap();
+        let (reqs, mut fds) = requests(&mut s, &server);
+        assert_eq!(reqs, [(DEVICE_OFFER_A, op::wl_data_offer::RECEIVE)]);
+        assert_eq!(fds.len(), 1, "the pipe's write end");
+        source_writes(&mut s, fds.remove(0));
+        let (reqs, _) = requests(&mut s, &server);
+        assert_eq!(
+            reqs,
+            [
+                (DEVICE_OFFER_A, op::wl_data_offer::FINISH),
+                (DEVICE_OFFER_A, op::wl_data_offer::DESTROY),
+            ],
+            "nothing to the new drag's offer"
+        );
+        assert_eq!(
+            s.inputs.last(),
+            Some(&Input::DropData(Ok(b"file:///x\r\n".to_vec())))
+        );
+    }
+
+    /// A second drop while the first is read must not replace the keep:
+    /// the first offer is the one read, finished and destroyed.
+    #[test]
+    fn a_drop_during_the_read_keeps_the_first_offer() {
+        let (mut s, server) = fake_compositor();
+        let dd = s.id.data_device;
+        let mut ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+        ev.extend(msg(dd, op::wl_data_device::DROP, &[]));
+        deliver(&mut s, &server, &ev);
+        s.start_read().unwrap();
+        let (_, mut fds) = requests(&mut s, &server);
+        let mut ev = drag_enters(&s, DEVICE_OFFER_B, 2);
+        ev.extend(msg(dd, op::wl_data_device::DROP, &[]));
+        deliver(&mut s, &server, &ev);
+        assert_eq!(s.offers.kept(), Some(DEVICE_OFFER_A));
+        source_writes(&mut s, fds.remove(0));
+        let (reqs, _) = requests(&mut s, &server);
+        assert_eq!(
+            reqs,
+            [
+                (DEVICE_OFFER_A, op::wl_data_offer::FINISH),
+                (DEVICE_OFFER_A, op::wl_data_offer::DESTROY),
+            ]
+        );
+        assert_eq!(s.offers.kept(), None);
+    }
+
+    /// The kept offer is the one to read, never the null offer.
     #[test]
     fn the_dropped_offer_is_read_after_a_new_enter() {
         let mut o = Offers::default();

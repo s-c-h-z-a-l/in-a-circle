@@ -139,8 +139,11 @@ impl Conn {
         Ok(Conn::from_fd(sock))
     }
 
-    /// `sock` must be a connected, non-blocking stream socket.
-    fn from_fd(sock: OwnedFd) -> Conn {
+    /// A connection over `sock`, which must be a connected, non-blocking
+    /// stream socket. For tests that play the compositor on the other end
+    /// of a `socketpair`; real clients use [`Conn::connect`].
+    #[doc(hidden)]
+    pub fn from_fd(sock: OwnedFd) -> Conn {
         Conn {
             sock,
             out: Vec::with_capacity(MAX_MESSAGE),

@@ -1,9 +1,10 @@
 //! `text/uri-list` (RFC 2483) to local paths.
 //!
 //! Lines end in CRLF or LF; a line starting with `#` is a comment. Only
-//! `file://` URIs with an empty or `localhost` host count; `%XX` decodes to
-//! bytes. Anything else, a bad escape, or a NUL in the path drops that
-//! entry alone.
+//! `file://` URIs with an empty or `localhost` host count (scheme and host
+//! in any case); a raw `?query` or `#fragment` is cut off; `%XX` decodes to
+//! bytes, so an encoded `?` or `#` stays in the path. Anything else, a bad
+//! escape, or a NUL in the path drops that entry alone.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
@@ -27,9 +28,15 @@ pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
 }
 
 fn path_of(uri: &[u8]) -> Option<PathBuf> {
-    let rest = uri.strip_prefix(b"file://")?;
+    const SCHEME: &[u8] = b"file://";
+    let (scheme, rest) = uri.split_at_checked(SCHEME.len())?;
+    if !scheme.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
     let slash = rest.iter().position(|&b| b == b'/')?;
     let (host, path) = rest.split_at(slash);
+    // A raw `?` or `#` starts the query or fragment, not part of the path.
+    let path = path.split(|&b| b == b'?' || b == b'#').next()?;
     if !host.is_empty() && !host.eq_ignore_ascii_case(b"localhost") {
         return None;
     }
@@ -86,6 +93,23 @@ mod tests {
             [
                 PathBuf::from(OsString::from_vec(b"/x/\xff\xfe.txt".to_vec())),
                 PathBuf::from("/a/../b"),
+            ]
+        );
+        // The scheme and host are case-insensitive; a raw query or
+        // fragment is not part of the path (an encoded one is).
+        assert_eq!(
+            parse_uri_list(
+                b"FILE:///up\nFile://LocalHost/mixed\nfile:///q?b=c\n\
+                  file:///f#frag\nfile:///both?x#y\nfile:///enc%3Fa%23b\n\
+                  http://x/?file:///no\n"
+            ),
+            [
+                PathBuf::from("/up"),
+                PathBuf::from("/mixed"),
+                PathBuf::from("/q"),
+                PathBuf::from("/f"),
+                PathBuf::from("/both"),
+                PathBuf::from("/enc?a#b"),
             ]
         );
         // At most MAX_URIS entries.
