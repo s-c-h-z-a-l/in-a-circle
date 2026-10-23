@@ -167,6 +167,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   action and every descendant stay in one killable group. A syscall
   through another ABI (i386) kills the process; x32 gets `EPERM`.
 - `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
+- Not covered: no `RLIMIT_NPROC` or memory limit (an action can fork-bomb
+  or exhaust RAM until cancelled).
+- Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
 - Without Landlock, actions from the user or plugin directory do not run
   ("sandbox unavailable"); built-in actions run with a "ran without
   sandbox" warning, and the history records `sandbox=no`.
