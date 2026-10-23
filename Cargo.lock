@@ -33,6 +33,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inacircle"
+version = "0.0.0"
+dependencies = [
+ "engine",
+ "libc",
+ "manifest",
+]
+
+[[package]]
 name = "inacircle-testaction"
 version = "0.0.0"
 dependencies = [

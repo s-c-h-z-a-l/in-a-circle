@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # Members are listed explicitly because cargo rejects globs that match nothing.
-members = ["crates/action", "crates/doc", "crates/engine", "crates/manifest", "bins/inacircle-text", "bins/inacircle-testaction", "tools/gen-entities"]
+members = ["crates/action", "crates/doc", "crates/engine", "crates/manifest", "bins/inacircle", "bins/inacircle-text", "bins/inacircle-testaction", "tools/gen-entities"]
 exclude = ["spikes"]
 
 [workspace.package]
