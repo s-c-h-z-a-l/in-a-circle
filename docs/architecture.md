@@ -329,15 +329,17 @@ choice has run.
 **Life of a run**
 
 1. SIGALRM is reset to its default action and unblocked (an ignored
-   disposition survives `execve`), then `alarm(10)` is armed, before the
+   disposition survives `execve`), then `alarm(30)` is armed, before the
    lock: a slow runtime dir is covered too. The default action kills the
    process, so this is the last guard if everything else hangs.
 2. One instance: `flock` on `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, opened
    `O_NONBLOCK | O_NOFOLLOW` (a symlink or FIFO there is an error, exit 1).
    A held lock makes a second instance exit 0 at once, before touching
    Wayland.
-3. The surface is shown (below). Stage 1 waits for the drop, stage 2 for
-   the choice; each stage has 10 s. The drop re-arms `alarm` (and the
+3. The surface is shown (below). The wheel has two levels: categories,
+   then the chosen category's targets. Each wait (the drop, the category
+   choice after a fallback drop, the target choice) has 30 s. The drop and
+   the category choice re-arm `alarm` (and the
    surface's own deadline, 500 ms shorter so a timeout normally ends in an
    orderly close). The deadline will become configurable.
 4. Closed without a choice (Esc, a click off the wheel, the drag leaving
@@ -376,42 +378,74 @@ compositor.
 
 **The B path (drag, then drop)**
 
-- Stage 1: the wheel appears with the hub `Drop here`, every slice empty
-  and dim, the whole wheel a drop target. With no drag (a plain hotkey
-  press) the hub says `Nothing to do` and any click or Esc closes.
+- Two levels. Level 1 shows **categories** (the `group=` of an action,
+  mapped by the `GROUPS` table in `engine::menu`: today `document` =
+  north, labelled `Document`; an unknown `group` is not shown, one
+  stderr line per run). A category is **lit** when any dragged file has a
+  target in it, dim when it exists but nothing fits, and a direction
+  without a category is empty. The hub shows the source (name or count).
+  Level 2 shows the category's presets in their own directions (`markdown`
+  north, `plain-text` south): lit if applicable, dim otherwise; the hub is
+  the category's label. `inacircle offer --groups <files…>` prints level 1.
+- The **early read**: at `wl_data_device.enter`, if the offer's MIME list
+  has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
+  it into a pipe at once, read in the `poll` loop (500 ms, 64 KiB, 1024
+  URIs). The result carries the tag (seq) of the `enter` that started it; a
+  new `enter` (another offer, or out and back in) closes the pipe and the
+  machine ignores an older tag, so an old list never shows. When the list
+  is in, level 1 replaces the stage and the drag is over live categories.
+  The early read neither `finish`es nor `destroy`s the offer: it lives on
+  until the drop. At the drop, with the list in, there is no second read:
+  the machine emits `EndDrop` (`finish` with the negotiated copy, then
+  `destroy`) and level 2 is shown for the category under the pointer. If
+  the list is not in yet, or the early read failed or timed out, the
+  existing read after the drop runs.
+- **Fallback (`Drop here`)**: with no `text/uri-list` on offer, or when the
+  early read fails or times out, the hub says `Drop here`, every slice is
+  empty and the whole wheel is a drop target (as before). After the drop
+  the list is read, level 1 appears, and a **click** on a lit category
+  shows its targets (that click is not a drop).
+- A swap guard of 200 ms: a click right after the wheel was replaced is
+  ignored (it was aimed at the old wheel).
+- With no drag (a plain hotkey press) the hub says `Nothing to do` and any
+  click or Esc closes.
 - Drag rules: copy only, never a `DELETE` target. Over the wheel with
-  `text/uri-list` on offer, `accept` and `set_actions(copy)`; off it, and
-  for any other drag, `accept(null)` and `set_actions(none)`. `finish` is
+  `text/uri-list` on offer, `accept` and `set_actions(copy)` where a drop
+  would do something; elsewhere, and for any other drag, `accept(null)` and
+  `set_actions(none)`. With level 1 showing during the drag that means
+  only a lit category (not a dim one, an empty direction, or the hub); in
+  the fallback every slice and the hub accept. `finish` is
   sent only if copy was negotiated at the drop. During a drag the position
   comes from `wl_data_device.enter`/`motion`, not `wl_pointer.enter`. A
-  `leave` without a drop closes the wheel. Events that carry an fd take it
+  `leave` without a drop closes the wheel (and closes the early pipe). Events that carry an fd take it
   even when ignored.
 - **Hit** semantics: a point on a slice is `Slice(k)`; inside the wheel's
   outer radius but off every slice (the hub and the gaps) is `Hub`;
   beyond it, `Outside`. `Hub` is a drop target and ignores clicks;
   `Outside` closes on click.
-- The drop's `text/uri-list` is read through a pipe with a 500 ms deadline,
-  at most 64 KiB and 1024 URIs. A source that never writes or never closes
-  times out. A failed read closes the wheel.
+- A `text/uri-list` read (early or after the drop) goes through a pipe with
+  a 500 ms deadline, at most 64 KiB and 1024 URIs. A source that never
+  writes or never closes times out. A failed early read falls back; a
+  failed read after the drop closes the wheel.
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`
   decodes to bytes; a non-`file` URI, another host, a bad escape or a
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
   Paths are kept as given (`..` and non-UTF-8 bytes stay, as on the
   command line). CRLF and LF both end a line; lines starting with `#` are
   comments. If nothing is left, the hub says `Nothing to do`.
-- Stage 2: the files are classified and `menu::offer` fills the slices from
-  the presets: applicable ones normal, others dim, unused ones empty. Only
-  an applicable slice is clickable (left button); that is the choice. The
-  URI bytes are freed before classification, and the files are tallied
-  per type (count and the first name), not kept per file.
-- No action binary runs while the overlay is up: stage 2 takes the
+- Choosing: only an applicable target is clickable (left button); that
+  is the choice. The URI bytes are freed before classification, and the
+  files are tallied per type (count and the first name), not kept per file.
+  Level 2 uses the catalog snapshot level 1 was built with (loaded once),
+  so the drop does no catalog I/O and both levels agree.
+- No action binary runs while the overlay is up: level 1 takes the
   catalog from the cache alone. A cached binary still present is used as
   cached, even if it changed; one the cache does not know is not offered
   this time; with no cache at all the hub says `No actions yet`. Once the
   wheel is gone (surface torn down, lock released), the cache is
   refreshed in the same process with the usual per-binary deadline; a
   choice's run does that refresh itself.
-- A drag that arrives while stage 2 is up is refused.
+- A drag that arrives once a category was chosen is refused.
 
 **The hub text**
 
@@ -444,7 +478,9 @@ hover, dim. Polish comes later.
 
 `INACIRCLE_MEASURE=1` prints one line on stderr when the wheel closes:
 `measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=…
-hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… vm_hwm_kb=…`.
+hover_events=… hover_us_p50=… hover_us_max=… idle_wakeups=… … list_to_level1_cpu_us=… …`
+(`list_to_level1_cpu_us`: from an accepted early list to the lit level-1
+wheel's first commit; -1 when there was none).
 Unset, it costs one `getenv`. Numbers:
 [benchmarks/wheel.md](benchmarks/wheel.md).
 

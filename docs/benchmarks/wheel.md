@@ -71,10 +71,17 @@ The wheel's waiting points, our CPU for one input (the budget is per point):
 |---|---|---|
 | `main` → the wheel's commit | 828 µs | ≤ 1 ms |
 | the drop's data → the stage-2 wheel's commit | 260 µs | ≤ 1 ms |
+| the early list → the lit level-1 wheel's commit (`list_to_level1_cpu_us`) | see below | ≤ 1 ms |
 | the choice → the action's start (`run` start − `choice_abs` + catalog + classify) | 303 µs | ≤ 1 ms |
 | hover repaint, in situ (after the stage-2 prepaint fix; was ~150 µs) | 17–23 µs | ≤ 100 µs |
 | per input event (pointer, drag motion), from 4 runs of 109–941 events | ~4.3 µs | per event |
 | peak memory | 2.6 MB PSS (RSS 5.06 MB) | ≤ 5 MB PSS |
+
+`list_to_level1_cpu_us` counts our CPU from the moment the machine accepts
+the early list (right tag, still dragging) to the first commit of the lit
+level-1 wheel. Release binary against the fake compositor, one file: about
+276–329 µs (budget 1 ms). The niri numbers come from the user's manual
+test and are not recorded here yet.
 
 Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
 same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind
