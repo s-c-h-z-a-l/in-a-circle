@@ -123,12 +123,75 @@ impl Drop for Shm {
     }
 }
 
-/// A drop being read: the pipe, what came so far, the read's deadline.
+/// A drop being read: the pipe, the offer and the action negotiated for it
+/// at the drop, what came so far, the read's deadline.
 struct Reading {
     fd: OwnedFd,
     offer: u32,
+    action: u32,
     data: Vec<u8>,
     until: Instant,
+}
+
+impl Reading {
+    fn new(fd: OwnedFd, offer: u32, action: u32, until: Instant) -> Reading {
+        Reading {
+            fd,
+            offer,
+            action,
+            data: Vec::new(),
+            until,
+        }
+    }
+
+    /// Reads what the (non-blocking) pipe has: the data at EOF, an error
+    /// past `MAX_BYTES`, on a read error or once `now` reaches the
+    /// deadline with the pipe still open; `None` to wait for more.
+    fn pump(&mut self, now: Instant) -> Option<Result<Vec<u8>, String>> {
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: buf is valid for buf.len() bytes.
+            let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            match n {
+                0 => return Some(Ok(std::mem::take(&mut self.data))),
+                n if n > 0 => {
+                    self.data.extend_from_slice(&buf[..n as usize]);
+                    if self.data.len() > MAX_BYTES {
+                        return Some(Err(format!("URI list over {MAX_BYTES} bytes")));
+                    }
+                }
+                _ => {
+                    let e = io::Error::last_os_error();
+                    match e.kind() {
+                        io::ErrorKind::Interrupted => {}
+                        io::ErrorKind::WouldBlock if now < self.until => return None,
+                        io::ErrorKind::WouldBlock => return Some(Err("URI list timed out".into())),
+                        _ => return Some(Err(e.to_string())),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A pipe for a drop's data: the read end non-blocking (ours), the write
+/// end blocking (the source writes as it likes), both close-on-exec.
+fn drop_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: a valid 2-element array; checked.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fresh descriptors we own.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    // SAFETY: fcntl on a valid fd we own.
+    unsafe {
+        let fl = libc::fcntl(r.as_raw_fd(), libc::F_GETFL);
+        if fl < 0 || libc::fcntl(r.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((r, w))
 }
 
 /// What one buffer holds: the wheel generation and hover it was painted
@@ -172,6 +235,8 @@ struct Surface {
     dnd: Option<(u32, u32)>,
     /// The action last negotiated for the drag's offer.
     dnd_action: u32,
+    /// `dnd_action` at the drop, for the dropped offer's `finish`.
+    drop_action: u32,
     reading: Option<Reading>,
     busy: [bool; 2],
     painted: [Painted; 2],
@@ -198,6 +263,7 @@ impl Surface {
             offers: Offers::default(),
             dnd: None,
             dnd_action: 0,
+            drop_action: 0,
             reading: None,
             busy: [false; 2],
             painted: [None; 2],
@@ -537,6 +603,7 @@ impl Surface {
             (Iface::DataDevice, op::wl_data_device::DROP) => {
                 if let Some((offer, _)) = self.dnd {
                     self.offers.keep(offer);
+                    self.drop_action = self.dnd_action;
                 }
                 Some(Input::Drop)
             }
@@ -651,32 +718,17 @@ impl Surface {
         }
     }
 
+    /// Receives the dropped offer's URI list: the offer kept at the drop,
+    /// not the current drag (an enter may have come in between).
     fn start_read(&mut self) -> io::Result<()> {
-        let offer = match self.dnd {
-            Some((offer, _)) if offer != 0 => offer,
-            _ => {
-                if let Some(offer) = self.offers.release() {
-                    self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
-                }
-                self.inputs.push(Input::DropData(Err("no offer".into())));
-                return Ok(());
+        let Some(offer) = self.offers.to_read() else {
+            if let Some(offer) = self.offers.release() {
+                self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
             }
+            self.inputs.push(Input::DropData(Err("no offer".into())));
+            return Ok(());
         };
-        let mut fds = [0; 2];
-        // SAFETY: a valid 2-element array; checked.
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fresh descriptors we own.
-        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        // Only our end is non-blocking; the source writes as it likes.
-        // SAFETY: fcntl on a valid fd we own.
-        unsafe {
-            let fl = libc::fcntl(r.as_raw_fd(), libc::F_GETFL);
-            if fl < 0 || libc::fcntl(r.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
+        let (r, w) = drop_pipe()?;
         self.conn.req(
             offer,
             op::wl_data_offer::RECEIVE,
@@ -685,12 +737,12 @@ impl Surface {
         self.flush()?;
         // Our copy of the write end must go, or the read never sees EOF.
         drop(w);
-        self.reading = Some(Reading {
-            fd: r,
+        self.reading = Some(Reading::new(
+            r,
             offer,
-            data: Vec::new(),
-            until: Instant::now() + READ_DROP,
-        });
+            self.drop_action,
+            Instant::now() + READ_DROP,
+        ));
         Ok(())
     }
 
@@ -700,35 +752,12 @@ impl Surface {
         let Some(rd) = &mut self.reading else {
             return;
         };
-        let mut buf = [0u8; 4096];
-        let result = loop {
-            // SAFETY: buf is valid for buf.len() bytes.
-            let n = unsafe { libc::read(rd.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-            match n {
-                0 => break Some(Ok(std::mem::take(&mut rd.data))),
-                n if n > 0 => {
-                    rd.data.extend_from_slice(&buf[..n as usize]);
-                    if rd.data.len() > MAX_BYTES {
-                        break Some(Err(format!("URI list over {MAX_BYTES} bytes")));
-                    }
-                }
-                _ => {
-                    let e = io::Error::last_os_error();
-                    match e.kind() {
-                        io::ErrorKind::Interrupted => {}
-                        io::ErrorKind::WouldBlock if Instant::now() < rd.until => break None,
-                        io::ErrorKind::WouldBlock => break Some(Err("URI list timed out".into())),
-                        _ => break Some(Err(e.to_string())),
-                    }
-                }
-            }
-        };
-        if let Some(r) = result {
-            let offer = rd.offer;
+        if let Some(r) = rd.pump(Instant::now()) {
+            let (offer, action) = (rd.offer, rd.action);
             self.reading = None;
             // `finish` is a protocol error unless copy was negotiated
             // (niri drops even without it).
-            if r.is_ok() && self.dnd_action == DND_COPY && self.dnd.is_some_and(|d| d.0 == offer) {
+            if r.is_ok() && action == DND_COPY {
                 self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
             }
             // The keep ends with the read, so a reused id is destroyed later.
@@ -936,6 +965,12 @@ impl Offers {
         self.1
     }
 
+    /// The offer whose data to read: the one kept at the drop, if the drag
+    /// had one.
+    fn to_read(&self) -> Option<u32> {
+        self.1.filter(|&id| id != 0)
+    }
+
     /// Ends the keep and retires the kept offer: its id if it must now be
     /// destroyed. A later offer with the same (reused) id is not kept.
     fn release(&mut self) -> Option<u32> {
@@ -958,6 +993,102 @@ impl Offers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wheel::{Menu, NOTHING};
+
+    fn reading(r: OwnedFd) -> Reading {
+        Reading::new(r, 7, DND_COPY, Instant::now() + READ_DROP)
+    }
+
+    /// Whatever the data, stage 2 has nothing: only the read's result
+    /// matters here.
+    fn empty(_: &[u8]) -> Menu {
+        Menu {
+            paths: Vec::new(),
+            slices: Default::default(),
+            hub: NOTHING.into(),
+        }
+    }
+
+    /// A machine waiting for the dropped data.
+    fn dropped() -> Machine {
+        let mut m = Machine::with_offer(empty);
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        assert_eq!(m.on(Input::Drop), [Effect::ReadDrop, Effect::Arm(STAGE)]);
+        m
+    }
+
+    #[test]
+    fn stalled_source_times_out() {
+        // A source that writes a little and never closes its end.
+        let (r, w) = drop_pipe().unwrap();
+        let mut rd = reading(r);
+        // SAFETY: writing 5 bytes from a static buffer to a valid fd.
+        assert_eq!(
+            unsafe { libc::write(w.as_raw_fd(), b"file:".as_ptr().cast(), 5) },
+            5
+        );
+        let start = Instant::now();
+        assert_eq!(rd.pump(start), None, "still within the deadline");
+        assert_eq!(rd.pump(start + READ_DROP / 2), None);
+        let r = rd.pump(start + READ_DROP).expect("past the deadline");
+        assert!(r.as_ref().is_err_and(|e| e.contains("timed out")), "{r:?}");
+        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
+        drop(w);
+    }
+
+    #[test]
+    fn oversized_drop_is_refused() {
+        // Past the pipe's buffer: a writer thread, the reader pumping.
+        let pump_all = |len: usize| {
+            let (r, w) = drop_pipe().unwrap();
+            let mut rd = reading(r);
+            let writer = std::thread::spawn(move || {
+                let mut f = std::fs::File::from(w);
+                // The reader stops at the limit and closes: EPIPE is fine.
+                let _ = io::Write::write_all(&mut f, &vec![b'a'; len]);
+            });
+            let give_up = Instant::now() + Duration::from_secs(5);
+            let r = loop {
+                if let Some(r) = rd.pump(Instant::now()) {
+                    break r;
+                }
+                assert!(Instant::now() < give_up, "no result");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            drop(rd);
+            writer.join().unwrap();
+            r
+        };
+        let r = pump_all(MAX_BYTES).expect("the limit itself is fine");
+        assert_eq!(r.len(), MAX_BYTES);
+        let r = pump_all(MAX_BYTES + 1);
+        assert!(r.as_ref().is_err_and(|e| e.contains("bytes")), "{r:?}");
+        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
+    }
+
+    /// Regression: the read took the current drag's offer, so an enter
+    /// handled between the drop and the read made it read the new drag.
+    #[test]
+    fn the_dropped_offer_is_read_after_a_new_enter() {
+        let mut o = Offers::default();
+        o.add(7).unwrap();
+        o.keep(7);
+        // A new drag enters before the read starts; its enter retires the
+        // old offer, which the keep protects.
+        o.add(8).unwrap();
+        assert!(!o.retire(7));
+        assert_eq!(o.to_read(), Some(7));
+        // Nothing dropped (or a drag without an offer): nothing to read.
+        assert_eq!(Offers::default().to_read(), None);
+        let mut o = Offers::default();
+        o.keep(0);
+        assert_eq!(o.to_read(), None);
+    }
 
     #[test]
     fn globals_are_capped_and_versions_checked() {

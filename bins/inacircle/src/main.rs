@@ -582,18 +582,27 @@ fn cmd_wheel() -> u8 {
     unsafe { libc::alarm(0) };
     match chosen {
         Ok(None) => EXIT_DONE,
-        Ok(Some((files, preset))) => match CancelToken::install() {
-            Ok(cancel) => run(Target::Preset(&preset), dedup(files), true, cancel),
-            Err(e) => {
-                eprintln!("inacircle: cannot set up cancel handling: {e}");
-                EXIT_FAILED
-            }
-        },
+        Ok(Some((files, preset))) => run_choice(files, &preset),
         Err(e) => {
             eprintln!("inacircle: wheel: {e}");
             EXIT_FAILED
         }
     }
+}
+
+/// Runs the wheel's choice exactly as `inacircle run --notify <preset>
+/// <files…>`: the same function, so the same checks, output and exit code.
+fn run_choice(files: Vec<PathBuf>, preset: &str) -> u8 {
+    cmd_run(&choice_args(files, preset))
+}
+
+/// The `run` arguments for a choice. The paths are absolute (from
+/// `file://` URIs), so none reads as a flag.
+fn choice_args(files: Vec<PathBuf>, preset: &str) -> Vec<OsString> {
+    let mut args = Vec::with_capacity(files.len() + 2);
+    args.extend([OsString::from("--notify"), OsString::from(preset)]);
+    args.extend(files.into_iter().map(PathBuf::into_os_string));
+    args
 }
 
 /// SIGALRM back to its default action (terminate) and unblocked: an
@@ -671,9 +680,12 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 
 /// Stage 2 for the dropped `text/uri-list`: the offer for its files, by
 /// wheel slice (the presets' direction 0 is north, the wheel's slice 0
-/// points right).
+/// points right). The hub (`ui::text::hub_text`) counts the files of the
+/// offered type, the most common one with presets; when it cannot show the
+/// one file's name, it names that type by its MIME top-level type
+/// (`1 file · text`): short enough for the hub, unlike the type's label.
 fn drop_menu(list: &[u8]) -> wheel::Menu {
-    let paths = dedup(uri::parse(list));
+    let paths = dedup(uri::parse_uri_list(list));
     let mut slices: [Option<wheel::Choice>; 8] = Default::default();
     if paths.is_empty() {
         return wheel::Menu {
@@ -701,7 +713,7 @@ fn drop_menu(list: &[u8]) -> wheel::Menu {
                 .filter(|(_, k)| k.mime.as_deref() == Some(mime))
                 .collect();
             let names: Vec<&str> = of_type.iter().map(|(n, _)| n.as_str()).collect();
-            let label = of_type.first().map_or("", |(_, k)| k.label.as_str());
+            let label = mime.split('/').next().unwrap_or(mime);
             ui::text::hub_text(&names, offer.total, label, ui::wheel::HUB_TEXT_W)
         }
         None if offer.hub.is_empty() => wheel::NOTHING.into(),
@@ -713,6 +725,37 @@ fn drop_menu(list: &[u8]) -> wheel::Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wheel's choice runs as `inacircle run --notify <preset> <files…>`:
+    /// through `cmd_run` itself, whose contract the CLI tests hold.
+    #[test]
+    fn run_path_is_shared_with_the_cli() {
+        let files = vec![PathBuf::from("/a b"), PathBuf::from("/c")];
+        assert_eq!(
+            choice_args(files, "markdown"),
+            ["--notify", "markdown", "/a b", "/c"].map(OsString::from)
+        );
+        // The CLI's own checks apply: an unknown preset is its usage error,
+        // before anything is run or recorded.
+        assert_eq!(
+            run_choice(vec![PathBuf::from("/a")], "no-such-preset"),
+            EXIT_USAGE
+        );
+    }
+
+    /// One file whose name the atlas cannot draw: its count and type.
+    #[test]
+    fn drop_menu_hub_falls_back_to_the_type() {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-cjk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("日本.txt");
+        std::fs::write(&file, "plain words\n").unwrap();
+        let list = format!("file://{}/%E6%97%A5%E6%9C%AC.txt\n", dir.display());
+        let m = drop_menu(list.as_bytes());
+        assert_eq!(m.paths, [file]);
+        assert_eq!(m.hub, "1 file · text");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Presets point by compass (0 = north); the wheel's slice 0 points
     /// right. The hub names the one file.

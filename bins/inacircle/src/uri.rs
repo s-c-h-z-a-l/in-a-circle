@@ -11,12 +11,14 @@ use std::path::PathBuf;
 
 /// Most bytes read from a drop.
 pub const MAX_BYTES: usize = 64 * 1024;
-/// Most URIs taken from a drop; later ones are ignored.
+/// Most URIs (comments and blank lines aside) looked at in a drop, dropped
+/// entries included; later ones are ignored. The path is kept as given:
+/// non-UTF-8 bytes and `..` stay, as on the command line.
 pub const MAX_URIS: usize = 1024;
 
 /// The local paths of a URI list, in order.
-pub fn parse(list: &[u8]) -> Vec<PathBuf> {
-    list.split(|&b| b == b'\n')
+pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
+    data.split(|&b| b == b'\n')
         .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
         .filter(|l| !l.is_empty() && !l.starts_with(b"#"))
         .take(MAX_URIS)
@@ -61,20 +63,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_file_uris_decode_to_paths() {
+    fn uri_list_edge_cases() {
         let list = b"# from a file manager\r\nfile:///home/u/a%20b.txt\r\n\
             file://localhost/tmp/%C3%A1.md\nhttps://example.com/x\n\
-            file://other-host/etc/passwd\nfile:relative\nfile:///bad%zz\n\
+            file://other-host/etc/passwd\nfile:relative\nfile:/one-slash\n\
+            file://localhost\nfile:///bad%zz\nfile:///cut%2\n\
             file:///nul%00x\nfile:///last";
         assert_eq!(
-            parse(list),
+            parse_uri_list(list),
             [
                 PathBuf::from("/home/u/a b.txt"),
                 PathBuf::from("/tmp/á.md"),
                 PathBuf::from("/last"),
             ]
         );
-        assert!(parse(b"").is_empty());
-        assert!(parse(b"#only\r\n\r\n").is_empty());
+        assert!(parse_uri_list(b"").is_empty());
+        assert!(parse_uri_list(b"#only\r\n\r\n").is_empty());
+        // Not UTF-8: kept as bytes. `..` is kept as given, as on the
+        // command line (resolving it lexically is wrong across symlinks).
+        assert_eq!(
+            parse_uri_list(b"file:///x/%FF\xfe.txt\nfile:///a/../b\n"),
+            [
+                PathBuf::from(OsString::from_vec(b"/x/\xff\xfe.txt".to_vec())),
+                PathBuf::from("/a/../b"),
+            ]
+        );
+        // At most MAX_URIS entries.
+        let many: String = (0..MAX_URIS + 1)
+            .map(|i| format!("file:///f{i}\r\n"))
+            .collect();
+        let paths = parse_uri_list(many.as_bytes());
+        assert_eq!(paths.len(), MAX_URIS);
+        assert_eq!(
+            paths.last(),
+            Some(&PathBuf::from(format!("/f{}", MAX_URIS - 1)))
+        );
     }
 }

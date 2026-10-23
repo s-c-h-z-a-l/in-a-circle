@@ -538,6 +538,73 @@ mod tests {
         assert_eq!(m.on(Input::Click(BTN_LEFT)), []);
     }
 
+    /// Two files; slice 3 runs `p3`, slice 1 is dim.
+    fn two_files(_: &[u8]) -> Menu {
+        let mut slices: [Option<Choice>; 8] = Default::default();
+        slices[3] = Some(Choice {
+            label: "Three".into(),
+            preset: "p3".into(),
+            applicable: true,
+        });
+        slices[1] = Some(Choice {
+            label: "One".into(),
+            preset: "p1".into(),
+            applicable: false,
+        });
+        Menu {
+            paths: vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+            slices,
+            hub: "2 / 2 files".into(),
+        }
+    }
+
+    #[test]
+    fn choose_runs_the_preset() {
+        let mut m = Machine::with_offer(two_files);
+        feed(&mut m, [Input::Configured(W, H), enter(HUB)]);
+        // The drop re-arms the deadline: stage 2 gets its own.
+        assert_eq!(m.on(Input::Drop), [Effect::ReadDrop, Effect::Arm(STAGE)]);
+        assert_eq!(m.on(Input::DropData(Ok(b"x".to_vec()))), [Effect::Draw]);
+        let s = slice(3, 180.0);
+        assert_eq!(m.on(Input::PointerAt(s.0, s.1)), [Effect::Hover(Some(3))]);
+        assert_eq!(
+            m.on(Input::Click(BTN_LEFT)),
+            [Effect::Run(
+                vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+                "p3".into()
+            )]
+        );
+        assert_eq!(m.stage(), Stage::Done);
+        // Nothing after the run: no second choice, no close.
+        assert_eq!(m.on(Input::Click(BTN_LEFT)), []);
+        assert_eq!(m.on(Input::Closed), []);
+    }
+
+    #[test]
+    fn dim_slice_is_not_clickable() {
+        let mut m = Machine::with_offer(two_files);
+        feed(
+            &mut m,
+            [
+                Input::Configured(W, H),
+                enter(HUB),
+                Input::Drop,
+                Input::DropData(Ok(b"x".to_vec())),
+            ],
+        );
+        let d = slice(1, 150.0);
+        assert_eq!(m.on(Input::PointerAt(d.0, d.1)), [], "not lit");
+        for b in [BTN_LEFT, 0x111, 0x112] {
+            assert_eq!(m.on(Input::Click(b)), [], "button {b:#x}");
+        }
+        assert_eq!(m.stage(), Stage::Choosing);
+        // Neither do empty slices.
+        let e = slice(6, 150.0);
+        m.on(Input::PointerAt(e.0, e.1));
+        assert_eq!(m.on(Input::Click(BTN_LEFT)), []);
+        assert_eq!(m.stage(), Stage::Choosing);
+    }
+
     #[test]
     fn escape_closes() {
         for (name, mut m) in every_stage() {
