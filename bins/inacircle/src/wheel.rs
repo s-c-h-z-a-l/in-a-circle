@@ -27,6 +27,8 @@ use ui::wheel::{Hit, Slice, SliceState, Wheel, place};
 /// fallback drop, category to choice). The surface's own deadline and the
 /// `alarm` backstop both use it.
 pub const STAGE: Duration = Duration::from_secs(30);
+/// A choosing click closer than this to the wheel's replacement is ignored.
+pub const SWAP_GUARD: Duration = Duration::from_millis(200);
 pub const KEY_ESC: u32 = 1;
 pub const BTN_LEFT: u32 = 0x110;
 pub const URI_LIST: &str = "text/uri-list";
@@ -57,12 +59,14 @@ pub enum Input {
     /// The dropped `text/uri-list`, or why it could not be read.
     DropData(Result<Vec<u8>, String>),
     /// The early read's `text/uri-list` (started at `enter`), or why it
-    /// could not be read. Not used after the drop.
+    /// could not be read, tagged with the `ReadEarly` tag it was started
+    /// with; one that is not the latest is ignored. Not used after the
+    /// drop.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the surface feeds it from task 3 on")
     )]
-    DragList(Result<Vec<u8>, String>),
+    DragList(u32, Result<Vec<u8>, String>),
     /// The stage's deadline passed.
     Deadline,
     /// The compositor closed the surface or the connection failed.
@@ -81,8 +85,15 @@ pub enum Effect {
     /// and `set_actions(none)`.
     Accept(bool),
     /// Start receiving the offer's `text/uri-list` now, before the drop,
-    /// and feed back `DragList`. A new one replaces the earlier read.
-    ReadEarly,
+    /// and feed back `DragList` with the same tag (the machine's, bumped on
+    /// every `enter`; the surface only echoes it). A new one replaces the
+    /// earlier read.
+    ReadEarly(u32),
+    /// The drop was taken without a second read (the early list was in):
+    /// the surface ends the dropped offer now. `finish` only if the drop's
+    /// action is copy (else a protocol error), then release the keep and
+    /// destroy the offer. Comes first among the drop's effects.
+    EndDrop,
     /// Receive the drop's `text/uri-list` and feed back `DropData`; only
     /// when there is no early list.
     ReadDrop,
@@ -187,6 +198,12 @@ enum Early {
 pub struct Machine {
     phase: Phase,
     early: Early,
+    /// Tag of the latest `enter`'s early read.
+    early_seq: u32,
+    /// The latest time `on_at` was given, if ever.
+    now: Option<Duration>,
+    /// When the wheel was last replaced.
+    swapped_at: Option<Duration>,
     groups_fn: GroupsFn,
     targets_fn: TargetsFn,
     output: Option<(u32, u32)>,
@@ -215,6 +232,9 @@ impl Machine {
         Machine {
             phase: Phase::Pending,
             early: Early::Off,
+            early_seq: 0,
+            now: None,
+            swapped_at: None,
             groups_fn,
             targets_fn,
             output: None,
@@ -269,6 +289,13 @@ impl Machine {
         self.generation
     }
 
+    /// `on` at monotonic time `now` (any origin): a click soon after the
+    /// wheel was replaced is ignored. Without times (`on`) no click is.
+    pub fn on_at(&mut self, now: Duration, i: Input) -> Vec<Effect> {
+        self.now = Some(now);
+        self.on(i)
+    }
+
     pub fn on(&mut self, i: Input) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.phase == Phase::Done {
@@ -308,8 +335,9 @@ impl Machine {
                         self.set_wheel(stage1(DROP_HERE), DROP_HERE.into());
                     }
                     self.groups = None;
+                    self.early_seq = self.early_seq.wrapping_add(1);
                     self.early = if self.uris {
-                        fx.push(Effect::ReadEarly);
+                        fx.push(Effect::ReadEarly(self.early_seq));
                         Early::Pending
                     } else {
                         Early::Off
@@ -333,8 +361,10 @@ impl Machine {
                     self.close(&mut fx);
                 }
             }
-            Input::DragList(r) => {
-                if let (Phase::Dragging { .. }, Early::Pending) = (self.phase, self.early) {
+            Input::DragList(seq, r) => {
+                if let (Phase::Dragging { .. }, Early::Pending) = (self.phase, self.early)
+                    && seq == self.early_seq
+                {
                     match r {
                         Ok(bytes) => {
                             self.show_groups(&bytes);
@@ -352,7 +382,7 @@ impl Machine {
                 } if self.early == Early::Ready => match self.hit_group() {
                     // The list is in: no second read.
                     Some(group) => {
-                        fx.push(Effect::Arm(STAGE));
+                        fx.extend([Effect::EndDrop, Effect::Arm(STAGE)]);
                         self.show_targets(&group);
                         self.settle(&mut fx, true);
                     }
@@ -393,6 +423,7 @@ impl Machine {
     fn set_wheel(&mut self, wheel: Wheel, hub: String) {
         self.wheel = wheel;
         self.hub = hub;
+        self.swapped_at = self.now;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -414,6 +445,7 @@ impl Machine {
     /// Level 2 for `group`, onto the wheel.
     fn show_targets(&mut self, group: &str) {
         let Some(gm) = &self.groups else {
+            debug_assert!(false, "targets of {group} without level 1");
             return;
         };
         let menu = (self.targets_fn)(gm, group);
@@ -505,16 +537,27 @@ impl Machine {
         }
     }
 
+    /// A choosing click this soon after the wheel was replaced is the
+    /// second half of a double click (or the user did not see the new
+    /// wheel): not a choice.
+    fn too_soon(&self) -> bool {
+        match (self.now, self.swapped_at) {
+            (Some(now), Some(at)) => now.saturating_sub(at) < SWAP_GUARD,
+            _ => false,
+        }
+    }
+
     /// Level 1 after a fallback drop: a lit category opens its targets.
     fn click_group(&mut self, fx: &mut Vec<Effect>, button: u32) {
         let Some(gm) = &self.groups else {
             return self.close(fx);
         };
+        let any_lit = gm.slices.iter().flatten().any(|g| g.lit);
         match self.hit() {
             Hit::Outside => self.close(fx),
-            // Nothing to do: any click closes.
-            _ if gm.paths.is_empty() => self.close(fx),
-            Hit::Slice(_) if button == BTN_LEFT => {
+            // Nothing to do or to choose: any click closes.
+            _ if gm.paths.is_empty() || !any_lit => self.close(fx),
+            Hit::Slice(_) if button == BTN_LEFT && !self.too_soon() => {
                 if let Some(group) = self.hit_group() {
                     fx.push(Effect::Arm(STAGE));
                     self.show_targets(&group);
@@ -533,7 +576,7 @@ impl Machine {
             Hit::Outside => self.close(fx),
             // Nothing to do: any click closes.
             _ if menu.paths.is_empty() => self.close(fx),
-            Hit::Slice(k) if button == BTN_LEFT => {
+            Hit::Slice(k) if button == BTN_LEFT && !self.too_soon() => {
                 if let Some(c) = &menu.slices[usize::from(k)]
                     && c.applicable
                 {
@@ -722,8 +765,20 @@ mod tests {
         }
     }
 
+    /// The early list of the first (or `seq`th) `enter`.
     fn list() -> Input {
-        Input::DragList(Ok(b"a".to_vec()))
+        list_n(1)
+    }
+
+    fn list_n(seq: u32) -> Input {
+        Input::DragList(seq, Ok(b"a".to_vec()))
+    }
+
+    /// A group menu with files, none of its categories lit.
+    fn dim_groups(_: &[u8]) -> GroupMenu {
+        let mut gm = fake_groups(b"a");
+        gm.slices[0] = group("Zero", "g0", false);
+        gm
     }
 
     fn feed(m: &mut Machine, inputs: impl IntoIterator<Item = Input>) -> Vec<Effect> {
@@ -803,7 +858,7 @@ mod tests {
         // The early read starts first; the wheel is painted meanwhile.
         assert_eq!(
             m.on(enter(HUB)),
-            [Effect::ReadEarly, Effect::Draw, Effect::Accept(true)]
+            [Effect::ReadEarly(1), Effect::Draw, Effect::Accept(true)]
         );
         let half = (BOX / 2) as i32;
         assert_eq!(m.origin(), Some((960 - half, 540 - half)));
@@ -823,7 +878,11 @@ mod tests {
             [Effect::Hover(Some(0)), Effect::Accept(true)]
         );
         // The drop reads nothing more: the targets of the category.
-        assert_eq!(m.on(Input::Drop), [Effect::Arm(STAGE), Effect::Draw]);
+        // ... and the surface ends the dropped offer (finish, destroy).
+        assert_eq!(
+            m.on(Input::Drop),
+            [Effect::EndDrop, Effect::Arm(STAGE), Effect::Draw]
+        );
         assert_eq!((m.stage(), m.hub()), (Stage::Choosing, "Zero"));
         assert_eq!(m.hover(), Some(0));
         // The compositor's leave right after the drop does not close.
@@ -887,7 +946,10 @@ mod tests {
         feed(&mut m, [Input::Configured(W, H), enter(HUB), list()]);
         let g = slice(3, 180.0);
         m.on(Input::DragMotion(g.0, g.1));
-        assert_eq!(m.on(Input::Drop), [Effect::Arm(STAGE), Effect::Draw]);
+        assert_eq!(
+            m.on(Input::Drop),
+            [Effect::EndDrop, Effect::Arm(STAGE), Effect::Draw]
+        );
         let s = slice(3, 180.0);
         assert_eq!(m.hover(), Some(3));
         assert_eq!(m.on(Input::PointerAt(s.0, s.1)), []);
@@ -976,7 +1038,7 @@ mod tests {
         );
         // So are they after a failed early read.
         let mut m = dragging();
-        m.on(Input::DragList(Err("x".into())));
+        m.on(Input::DragList(1, Err("x".into())));
         assert_eq!(m.on(Input::DragMotion(dim.0, dim.1)), []);
         // Entered in a screen corner: the wheel is pushed onto the output,
         // so the pointer is outside it, and the drag rejected from the start.
@@ -984,7 +1046,7 @@ mod tests {
         m.on(Input::Configured(W, H));
         assert_eq!(
             m.on(enter((0.0, 0.0))),
-            [Effect::ReadEarly, Effect::Draw, Effect::Accept(false)]
+            [Effect::ReadEarly(1), Effect::Draw, Effect::Accept(false)]
         );
         assert_eq!(m.origin(), Some((0, 0)));
         let c = f64::from(BOX / 2);
@@ -1015,7 +1077,7 @@ mod tests {
         // Another offer: back to `Drop here`, a new early read.
         assert_eq!(
             m.on(enter(HUB)),
-            [Effect::ReadEarly, Effect::Draw, Effect::Accept(true)]
+            [Effect::ReadEarly(2), Effect::Draw, Effect::Accept(true)]
         );
         assert_eq!((m.stage(), m.hub()), (Stage::Waiting, DROP_HERE));
         // The old list is gone: a drop reads again, not the old categories.
@@ -1034,14 +1096,95 @@ mod tests {
         // The new offer's own list is read and used.
         let mut m = listed();
         feed(&mut m, [enter(HUB)]);
-        assert_eq!(m.on(list()), [Effect::Draw, Effect::Accept(false)]);
+        assert_eq!(m.on(list_n(2)), [Effect::Draw, Effect::Accept(false)]);
         assert_eq!(m.hub(), "x");
+    }
+
+    /// Regression: an `enter` and the old offer's list in one batch. The
+    /// old list must not be shown, nor run on the new drag.
+    #[test]
+    fn a_stale_list_is_ignored() {
+        let mut m = dragging();
+        assert_eq!(
+            m.on(enter(HUB)),
+            [Effect::ReadEarly(2), Effect::Accept(true)]
+        );
+        assert_eq!(m.on(list_n(1)), [], "the first offer's list");
+        assert_eq!((m.stage(), m.hub()), (Stage::Waiting, DROP_HERE));
+        // A future or repeated tag is no better.
+        assert_eq!(m.on(list_n(3)), []);
+        assert_eq!(m.on(list_n(2)), [Effect::Draw, Effect::Accept(false)]);
+        assert_eq!(m.hub(), "x");
+        // Used once: the same tag again, now Ready, changes nothing.
+        assert_eq!(m.on(list_n(2)), []);
+        // An error for an old offer does not fail the new one.
+        let mut m = dragging();
+        m.on(enter(HUB));
+        assert_eq!(m.on(Input::DragList(1, Err("x".into()))), []);
+        assert_eq!(m.on(list_n(2)), [Effect::Draw, Effect::Accept(false)]);
+    }
+
+    /// Only PDFs, say, and the early read failed: nothing to choose, so a
+    /// click closes (the early path closes on the drop).
+    #[test]
+    fn fallback_without_a_lit_category_closes_on_click() {
+        for p in [HUB, slice(0, 150.0), slice(2, 150.0)] {
+            let mut m = Machine::with_menus(dim_groups, fake_targets);
+            feed(
+                &mut m,
+                [
+                    Input::Configured(W, H),
+                    enter(HUB),
+                    Input::Drop,
+                    Input::DropData(Ok(b"a".to_vec())),
+                    Input::PointerAt(p.0, p.1),
+                ],
+            );
+            assert_eq!(m.stage(), Stage::Grouping);
+            assert_eq!(m.on(Input::Click(BTN_LEFT)), [Effect::Close], "{p:?}");
+        }
+    }
+
+    /// A fast double click must not choose a category and, with the next
+    /// click, the target in the same direction.
+    #[test]
+    fn a_click_right_after_a_swap_is_ignored() {
+        let ms = Duration::from_millis;
+        let s = slice(0, 150.0);
+        let mut m = fake_machine();
+        m.on_at(ms(0), Input::Configured(W, H));
+        m.on_at(ms(0), enter(HUB));
+        m.on_at(ms(10), Input::Drop);
+        // The fallback's level 1 appears at 1000 ms.
+        m.on_at(ms(1000), Input::DropData(Ok(b"a".to_vec())));
+        m.on_at(ms(1010), Input::PointerAt(s.0, s.1));
+        assert_eq!(m.on_at(ms(1100), Input::Click(BTN_LEFT)), [], "too soon");
+        assert_eq!(m.stage(), Stage::Grouping);
+        assert_eq!(
+            m.on_at(ms(1200), Input::Click(BTN_LEFT)),
+            [Effect::Arm(STAGE), Effect::Draw]
+        );
+        // The double click's second half, 50 ms later, is not a choice.
+        assert_eq!(m.on_at(ms(1250), Input::Click(BTN_LEFT)), []);
+        assert_eq!(m.stage(), Stage::Choosing);
+        assert_eq!(
+            m.on_at(ms(1500), Input::Click(BTN_LEFT)),
+            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+        );
+        // The guard does not delay closing outside the wheel.
+        let mut m = fake_machine();
+        m.on_at(ms(0), Input::Configured(W, H));
+        m.on_at(ms(0), enter(HUB));
+        m.on_at(ms(10), Input::Drop);
+        m.on_at(ms(1000), Input::DropData(Ok(b"a".to_vec())));
+        m.on_at(ms(1010), Input::PointerAt(OUT.0, OUT.1));
+        assert_eq!(m.on_at(ms(1020), Input::Click(BTN_LEFT)), [Effect::Close]);
     }
 
     #[test]
     fn early_list_error_falls_back() {
         let mut m = dragging();
-        assert_eq!(m.on(Input::DragList(Err("timed out".into()))), []);
+        assert_eq!(m.on(Input::DragList(1, Err("timed out".into()))), []);
         assert_eq!((m.stage(), m.hub()), (Stage::Waiting, DROP_HERE));
         // A second result does not change that.
         assert_eq!(m.on(list()), []);
@@ -1146,9 +1289,9 @@ mod tests {
                 12 => Input::DropData(Ok(Vec::new())),
                 13 => Input::DropData(Err("x".into())),
                 14 => Input::Closed,
-                15 => Input::DragList(Ok(b"a".to_vec())),
-                16 => Input::DragList(Ok(Vec::new())),
-                17 => Input::DragList(Err("x".into())),
+                15 => Input::DragList(1 + (k / 7 % 3) as u32, Ok(b"a".to_vec())),
+                16 => Input::DragList(1, Ok(Vec::new())),
+                17 => Input::DragList(1, Err("x".into())),
                 18 => Input::Click(BTN_LEFT),
                 _ => Input::PointerAt(f64::NAN, p.1),
             }
@@ -1264,7 +1407,7 @@ mod tests {
         assert_eq!(m.on(Input::Click(BTN_LEFT)), [Effect::Close]);
         let mut m = dragging();
         assert_eq!(
-            m.on(Input::DragList(Ok(Vec::new()))),
+            m.on(Input::DragList(1, Ok(Vec::new()))),
             [Effect::Draw, Effect::Accept(false)]
         );
         assert_eq!(m.hub(), NOTHING);
@@ -1273,7 +1416,7 @@ mod tests {
         let mut m = no_drag();
         assert_eq!(
             m.on(enter(HUB)),
-            [Effect::ReadEarly, Effect::Draw, Effect::Accept(true)]
+            [Effect::ReadEarly(1), Effect::Draw, Effect::Accept(true)]
         );
         assert_eq!(m.hub(), DROP_HERE);
     }

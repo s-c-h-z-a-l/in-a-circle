@@ -249,6 +249,8 @@ struct Surface {
     /// `dnd_action` at the drop, for the dropped offer's `finish`.
     drop_action: u32,
     reading: Option<Reading>,
+    /// The machine's clock: inputs are timed from here.
+    started: Instant,
     busy: [bool; 2],
     painted: [Painted; 2],
     /// What a buffer was repainted with since its last commit, ahead of
@@ -285,6 +287,7 @@ impl Surface {
             dnd_action: 0,
             drop_action: 0,
             reading: None,
+            started: Instant::now(),
             busy: [false; 2],
             painted: [None; 2],
             prepainted: [Rect::EMPTY; 2],
@@ -693,7 +696,7 @@ impl Surface {
             }
         }
         for i in inputs {
-            for fx in m.on(i) {
+            for fx in m.on_at(self.started.elapsed(), i) {
                 if let Some(end) = self.apply(fx, m)? {
                     return Ok(Some(end));
                 }
@@ -706,9 +709,11 @@ impl Surface {
         match fx {
             Effect::Draw | Effect::Hover(_) => self.render(m)?,
             Effect::Accept(yes) => self.accept(yes),
-            // TODO(task 3): receive the list before the drop. Until then no
-            // `DragList` comes, so the machine takes its `Drop here` fallback.
-            Effect::ReadEarly => {}
+            // TODO(task 3): receive the list before the drop, tagged with
+            // `_seq`. Until then no `DragList` comes, so the machine takes
+            // its `Drop here` fallback.
+            Effect::ReadEarly(_seq) => {}
+            Effect::EndDrop => self.end_drop(),
             Effect::ReadDrop => self.start_read()?,
             Effect::Arm(d) => {
                 self.deadline = Instant::now() + d.saturating_sub(SOFT_MARGIN);
@@ -783,6 +788,21 @@ impl Surface {
             Instant::now() + READ_DROP,
         ));
         Ok(())
+    }
+
+    /// The drop was taken without a second read: ends the dropped offer
+    /// like the tail of `pump_read`.
+    fn end_drop(&mut self) {
+        let Some(offer) = self.offers.to_read() else {
+            return;
+        };
+        // `finish` is a protocol error unless copy was negotiated.
+        if self.drop_action == DND_COPY {
+            self.conn.req(offer, op::wl_data_offer::FINISH, &[]);
+        }
+        if self.offers.release() == Some(offer) {
+            self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
+        }
     }
 
     /// Reads what the pipe has; queues `DropData` at EOF, past the size
