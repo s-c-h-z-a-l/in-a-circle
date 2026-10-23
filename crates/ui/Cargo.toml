@@ -1,0 +1,8 @@
+[package]
+name = "ui"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+# No dependencies: pure logic over the embedded glyph atlas.
+[dependencies]

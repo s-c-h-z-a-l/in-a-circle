@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 SHIPPED="inacircle inacircle-text"
 # Libraries the shipped binaries link: libc and our own crates only.
-LIBS="wire"
+LIBS="wire ui"
 bad=0
 for pkg in $SHIPPED; do
     names=$(cargo tree -e normal -p "$pkg" --prefix none | awk '{print $1}' | sort -u)
