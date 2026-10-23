@@ -2,7 +2,7 @@
 //! and the signals about our own.
 
 use std::os::fd::{AsRawFd, RawFd};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::marshal::Value;
 use crate::message::{Kind, Message};
@@ -12,6 +12,8 @@ const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
+/// How long each call after the connection is up may take.
+const CALL_WAIT: Duration = Duration::from_millis(500);
 const APP_NAME: &str = "In.A.Circle";
 /// Frames (queued or read, signals or not) one `poll_event` call looks at
 /// before it hands control back (the fd stays readable, so the caller's
@@ -47,28 +49,16 @@ pub struct Notifications {
 }
 
 impl Notifications {
-    /// Connects, subscribes to the two signals and reads the capabilities,
-    /// all before `deadline`.
+    /// Connects, authenticates and says `Hello` before `deadline`; then
+    /// reads the capabilities, finds the server's unique name and subscribes
+    /// to its signals, each call within `CALL_WAIT` of its start.
     pub fn open(addr: &Address, deadline: Instant) -> Result<Notifications, Error> {
         let mut conn = Conn::connect(addr, deadline)?;
-        let q = Message::call(
-            0,
-            BUS,
-            BUS_PATH,
-            BUS,
-            "GetNameOwner",
-            vec![Value::Str(SERVICE.into())],
-        );
-        let owner = match conn.call(q, deadline)?.body.into_iter().next() {
-            Some(Value::Str(name)) => name,
-            _ => return Err(Error::Malformed("GetNameOwner reply")),
-        };
-        conn.keep_signals_from(&owner);
-        conn.add_match(
-            &format!("type='signal',sender='{owner}',interface='{SERVICE}',path='{PATH}'"),
-            deadline,
-        )?;
-        let r = conn.call(call("GetCapabilities", vec![]), deadline)?;
+        // To the well-known name, so a D-Bus activated daemon gets started.
+        // Activation may take longer than the connect deadline: every call
+        // from here on has its own `CALL_WAIT`.
+        let wait = || Instant::now() + CALL_WAIT;
+        let r = conn.call(call("GetCapabilities", vec![]), wait())?;
         let caps = match r.body.into_iter().next() {
             Some(Value::Array(_, items)) => items
                 .into_iter()
@@ -79,6 +69,25 @@ impl Notifications {
                 .collect(),
             _ => return Err(Error::Malformed("GetCapabilities reply")),
         };
+        let q = Message::call(
+            0,
+            BUS,
+            BUS_PATH,
+            BUS,
+            "GetNameOwner",
+            vec![Value::Str(SERVICE.into())],
+        );
+        let owner = match conn.call(q, wait())?.body.into_iter().next() {
+            Some(Value::Str(name)) if is_unique_name(&name) => name,
+            _ => return Err(Error::Malformed("GetNameOwner reply")),
+        };
+        conn.add_match(
+            &format!("type='signal',sender='{owner}',interface='{SERVICE}',path='{PATH}'"),
+            wait(),
+        )?;
+        // Nothing can concern us before our first `Notify`, so no signal
+        // that arrived before this point is lost.
+        conn.keep_signals_from(&owner);
         Ok(Notifications { conn, owner, caps })
     }
 
@@ -166,6 +175,13 @@ impl AsRawFd for Notifications {
     fn as_raw_fd(&self) -> RawFd {
         self.conn.as_raw_fd()
     }
+}
+
+/// A bus-assigned name (`:1.42`): safe to put in a match rule.
+fn is_unique_name(s: &str) -> bool {
+    s.starts_with(':')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
 }
 
 fn call(member: &str, body: Vec<Value>) -> Message {

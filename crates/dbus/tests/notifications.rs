@@ -26,9 +26,15 @@ fn strings(v: &[&str]) -> Value {
     )
 }
 
-/// Handshake, `GetNameOwner`, the `AddMatch` and `GetCapabilities`.
+/// Handshake, `GetCapabilities` (which activates a service on a real bus),
+/// `GetNameOwner` and the `AddMatch`.
 fn serve_open(p: &mut Peer, caps: &[&str]) {
     p.handshake();
+    let m = p.recv();
+    assert_eq!(m.destination.as_deref(), Some(IFACE));
+    assert_eq!(m.path.as_deref(), Some(PATH));
+    assert_eq!(m.member.as_deref(), Some("GetCapabilities"));
+    p.reply(&m, vec![strings(caps)]);
     let m = p.recv();
     assert_eq!(m.destination.as_deref(), Some("org.freedesktop.DBus"));
     assert_eq!(m.member.as_deref(), Some("GetNameOwner"));
@@ -43,11 +49,6 @@ fn serve_open(p: &mut Peer, caps: &[&str]) {
         ))]
     );
     p.reply(&m, vec![]);
-    let m = p.recv();
-    assert_eq!(m.destination.as_deref(), Some(IFACE));
-    assert_eq!(m.path.as_deref(), Some(PATH));
-    assert_eq!(m.member.as_deref(), Some("GetCapabilities"));
-    p.reply(&m, vec![strings(caps)]);
 }
 
 fn expect_notify(p: &mut Peer) -> Message {
@@ -306,18 +307,75 @@ fn spoofed_signals_are_ignored() {
     fake.join();
 }
 
+const NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner";
+
+#[test]
+fn activation_then_owner() {
+    // Like a D-Bus activated daemon: no owner until the first call to the
+    // well-known name started it.
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let mut started = false;
+        loop {
+            let m = p.recv();
+            match m.member.as_deref().unwrap() {
+                "GetCapabilities" => {
+                    started = true;
+                    p.reply(&m, vec![strings(&["actions"])]);
+                }
+                "GetNameOwner" if !started => p.error(&m, NO_OWNER, "no owner"),
+                "GetNameOwner" => p.reply(&m, vec![Value::Str(OWNER.into())]),
+                "AddMatch" => {
+                    p.reply(&m, vec![]);
+                    break;
+                }
+                other => panic!("{other}"),
+            }
+        }
+        p.drain();
+    });
+    let n = Notifications::open(&fake.address(), after(300)).unwrap();
+    assert!(n.has("actions"));
+    drop(n);
+    fake.join();
+}
+
 #[test]
 fn open_fails_without_a_name_owner() {
     let fake = Fake::start(|p| {
         p.handshake();
         let m = p.recv();
+        assert_eq!(m.member.as_deref(), Some("GetCapabilities"));
+        p.reply(&m, vec![strings(&[])]);
+        let m = p.recv();
         assert_eq!(m.member.as_deref(), Some("GetNameOwner"));
-        p.error(&m, "org.freedesktop.DBus.Error.NameHasNoOwner", "no owner");
+        p.error(&m, NO_OWNER, "no owner");
         p.drain();
     });
     let r = Notifications::open(&fake.address(), after(300));
     assert!(matches!(r, Err(dbus::Error::Remote(..))), "{:?}", r.err());
     fake.join();
+}
+
+#[test]
+fn owner_name_is_validated() {
+    for bad in [":1.7',sender='x", "1.7", "", ":1.7 ", ":1,7", ":1.7\\"] {
+        let fake = Fake::start(move |p| {
+            p.handshake();
+            let m = p.recv();
+            p.reply(&m, vec![strings(&[])]);
+            let m = p.recv();
+            p.reply(&m, vec![Value::Str(bad.into())]);
+            p.drain();
+        });
+        let r = Notifications::open(&fake.address(), after(300));
+        assert!(
+            matches!(r, Err(dbus::Error::Malformed("GetNameOwner reply"))),
+            "{bad:?}: {:?}",
+            r.err()
+        );
+        fake.join();
+    }
 }
 
 #[test]
