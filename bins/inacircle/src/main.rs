@@ -14,9 +14,12 @@
 //! outcome as it happens (plus `progress <fraction>` of the whole run), and
 //! ends with `summary done=<n> skipped=<n> failed=<n>`, counted per input.
 //! Its exit code follows the batch rule: 0 if any input is done, else 1 if
-//! any failed, else 3 (all unsupported); 1 also when the run was cancelled.
-//! An invocation error (unknown subcommand, preset or action, no files) is
-//! a message on stderr and exit 2, with nothing on stdout.
+//! any failed, else 3 (all unsupported). A cancel fails the inputs that had
+//! not finished (`cancelled`); the batch rule then applies as usual.
+//! An invocation error (unknown subcommand, preset or action, no files, an
+//! empty path) is a message on stderr and exit 2, with nothing on stdout.
+//! The same file (by canonical path) given more than once counts once; the
+//! first spelling wins.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -96,18 +99,28 @@ fn absolute(p: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
     Some(joined.components().collect())
 }
 
-/// The files of a command as absolute paths; `None` after reporting an
-/// invocation error.
+/// The files of a command as absolute paths, each file (by canonical path)
+/// once, first spelling kept; `None` after reporting an invocation error.
 fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     if args.is_empty() {
         usage("no files");
         return None;
     }
+    if args.iter().any(|a| a.is_empty()) {
+        usage("empty path");
+        return None;
+    }
     let cwd = std::env::current_dir().ok();
     let mut files = Vec::with_capacity(args.len());
+    let mut seen = HashSet::with_capacity(args.len());
     for a in args {
         match absolute(Path::new(a), cwd.as_deref()) {
-            Some(p) => files.push(p),
+            Some(p) => {
+                let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+                if seen.insert(key) {
+                    files.push(p);
+                }
+            }
             None => {
                 usage("relative path without a current directory");
                 return None;
@@ -206,15 +219,10 @@ fn cmd_run(args: &[OsString]) -> u8 {
         (true, Target::Preset(id) | Target::Action(id)) => id.to_owned(),
     };
 
-    // Classify before routing; the same file (by canonical path) only once.
+    // Classify before routing.
     let mut pre = Vec::new();
     let mut inputs = Vec::new();
-    let mut seen = HashSet::new();
     for f in files {
-        let key = std::fs::canonicalize(&f).unwrap_or_else(|_| f.clone());
-        if !seen.insert(key) {
-            continue;
-        }
         match classify(&f) {
             Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
                 input: f,
@@ -276,12 +284,11 @@ fn cmd_run(args: &[OsString]) -> u8 {
         .pair("skipped", &skipped.to_string())
         .pair("failed", &failed.to_string()));
     // A cancel that arrived after the run must be consumed here: dropping
-    // the token with it pending would kill the process.
-    let cancelled = cancel.is_cancelled();
+    // the token with it pending would kill the process. Inputs it stopped
+    // are already failed, so the batch rule covers a cancelled run too.
+    let _ = cancel.is_cancelled();
     drop(cancel);
-    if cancelled {
-        EXIT_FAILED
-    } else if done > 0 {
+    if done > 0 {
         EXIT_DONE
     } else if failed > 0 {
         EXIT_FAILED

@@ -745,6 +745,53 @@ fn cancel_end_to_end() {
 }
 
 #[test]
+fn cancel_after_some_done_exits_0() {
+    let e = Env::new("cancel-partial");
+    // Two source folders: two processes, the first finishes before the cancel.
+    let a = e.test_input("d1/a.test", &["events=done"]);
+    let b = e.test_input("d2/b.test", &["sleep_ms=10000", "events=done"]);
+    let mut child = e
+        .cmd(&[
+            OsStr::new("run"),
+            OsStr::new("--action"),
+            OsStr::new("test.script"),
+            a.as_os_str(),
+            b.as_os_str(),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut rd = BufReader::new(child.stdout.take().unwrap());
+    let mut seen = String::new();
+    let mut id = None;
+    loop {
+        let mut l = String::new();
+        assert!(rd.read_line(&mut l).unwrap() > 0, "eof before done: {seen}");
+        seen.push_str(&l);
+        let line = parse_line(&l).unwrap();
+        match line.kind.as_str() {
+            "job" => id = Some(line.bare_at(0).unwrap().to_owned()),
+            "done" => break,
+            _ => {}
+        }
+    }
+    let c = e.run(&["cancel", &id.unwrap()]);
+    assert_eq!(c.code, Some(0), "{}", c.stderr);
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut rd, &mut rest).unwrap();
+    let st = child.wait().unwrap();
+    let o = parse_out(std::process::Output {
+        status: st,
+        stdout: format!("{seen}{rest}").into_bytes(),
+        stderr: Vec::new(),
+    });
+    assert_eq!(o.pairs("done").len(), 1, "{}", o.stdout);
+    assert_eq!(o.pairs("fail"), [(b, "cancelled".to_owned())]);
+    assert_eq!(o.summary(), (1, 0, 1));
+    assert_eq!(o.code, Some(0), "{}", o.stdout);
+}
+
+#[test]
 fn work_dirs_never_left_behind() {
     let e = Env::new("workdirs");
     let ok = e.test_input("ok/a.test", &["events=done"]);
@@ -779,6 +826,18 @@ fn offer_output() {
         "slice\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\nhub\t2 / 3 files\n"
     );
     let o = e.run(&["offer", "a.txt"]);
+    assert_eq!(
+        o.stdout,
+        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
+    );
+}
+
+#[test]
+fn offer_counts_the_same_file_once() {
+    let e = Env::new("offer-dedup");
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["offer", "a.txt", "./a.txt"]);
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
         "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
@@ -853,6 +912,11 @@ fn invocation_errors_exit_2() {
         &["cancel"],
         &["cancel", "1-1"],
         &["jobs", "extra"],
+        &["run", "markdown", ""],
+        &["run", "markdown", "a.txt", ""],
+        &["run", "--action", "text.txt-to-md", ""],
+        &["offer", ""],
+        &["offer", "a.txt", ""],
     ];
     for args in cases {
         let o = e.run(args);

@@ -227,7 +227,10 @@ impl Running {
         r
     }
 
-    /// Rewrites the file, at most four times a second.
+    /// Rewrites the file, at most four times a second. A call inside the
+    /// interval is dropped; every call carries the whole run's current
+    /// state, so the next call after the interval writes a value at least
+    /// as new as any dropped one, with no pending copy and no timer.
     pub fn update(&mut self, done: usize, progress: f32) {
         if self.last.elapsed() < UPDATE_EVERY {
             return;
@@ -854,6 +857,23 @@ mod tests {
             }
             assert!(!path.exists());
             assert!(list_running().is_empty());
+        });
+    }
+
+    #[test]
+    fn throttled_update_is_written_by_the_next_call_after_the_interval() {
+        let t = Tmp::new("throttle");
+        t.env(|| {
+            let job = JobId("10-2".into());
+            let mut r = Running::start(&job, "convert", 4);
+            r.update(1, 0.25); // dropped: too soon after start
+            r.update(2, 0.5); // dropped
+            assert_eq!(list_running()[0].3, 0.0);
+            std::thread::sleep(UPDATE_EVERY + Duration::from_millis(20));
+            r.update(3, 0.75);
+            let f = fs::read_to_string(jobs_dir().unwrap().join("10-2")).unwrap();
+            assert!(f.contains("\tdone=3\t"), "{f}");
+            assert_eq!(list_running()[0].3, 0.75);
         });
     }
 
