@@ -244,27 +244,44 @@ Every action runs sandboxed, set up in the child between `fork` and
 - Desktop notifications through **our own `libc`-only D-Bus client**
   (`org.freedesktop.Notifications`), so they appear in whatever
   notification centre the user runs.
-- Every action ends in a notification ("18 done, 2 skipped: …"), with
-  **Undo** where the server supports action buttons. Actions running
-  longer than a second first get a "running" notification with progress
-  and **Cancel**. The supervisor waits for Undo for a bounded time (about
-  ten seconds after completion).
+- Every action ends in a notification, with **Undo** where the server
+  lists the `actions` capability. Actions running longer than a second
+  (`RUNNING_AFTER`) first get a "running" notification (label, `n / m
+  files`, a progress hint from the engine's fraction, at most four updates
+  a second, same id) with **Cancel**. The supervisor then waits for Undo
+  for ten seconds after completion.
+- The final text is fixed English. One input, one output: the output's file
+  name (plus `Saved to Downloads (source folder is read-only)` when it went
+  there). Several: `<n> done[, <m> skipped][, <k> failed]` and up to three
+  problem lines `<input>: <reason>` (failures first), then `… and <r>
+  more`. Nothing finished: `Nothing converted`. Cancelled: `Cancelled`,
+  `<n> done, <r> not converted`. A lossy action that produced output starts
+  the body with `Formatting was lost.`; a run without the sandbox ends it
+  with `Ran without sandbox.`. Text is cut to 200 characters on a UTF-8
+  boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
-  so a quick run connects once. At the end, connect, authenticate and
-  `Hello` have 300 ms together and every call 500 ms (activation may start
-  the server). While the run goes on the supervisor waits for each call,
-  so the whole open has 500 ms, a progress update (at most four a second)
-  100 ms, and one wake reads at most 256 frames; more than 64 events about
-  our notification in one wake mean a broken server. Any error or timeout turns
-  notifications off for the rest of the run with one line on stderr
-  (`inacircle: notifications unavailable: …`); the result, the history and
-  the exit code never depend on them.
+  so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`
+  (the first `unix:` path or abstract address that works) or
+  `$XDG_RUNTIME_DIR/bus`; the server is D-Bus activated if it is not
+  running. At the end, connect, authenticate and `Hello` have 300 ms
+  together and every call 500 ms (activation may start the server). While
+  the run goes on the supervisor waits for each call, so the whole open has
+  500 ms and a progress update 100 ms. One wake reads at most 256 frames.
+  More than 64 events about our notification in one wake, or four wakes in
+  a row that spend all 256 frames, mean a broken server. Any error or
+  timeout turns notifications off for the rest of the run with one line on
+  stderr (`inacircle: notifications unavailable: …`); the result, the
+  history and the exit code never depend on them.
 - Cancel arrives on the supervisor's wake point, in the same `poll` as the
   signalfd and the pidfd: no thread. A click after the last action exited
-  is ignored. Only signals about our own notification ids count.
+  is ignored. Signals count only from the server's unique name, on its
+  object path, and about our own notification id; everything else on the
+  bus is ignored.
 - After the Undo window, the result is sent again (same id) without the
   button, so no dead button stays in the notification centre. A closed
-  notification ends the window at once.
+  notification ends the window at once. An Undo click undoes the job and
+  shows `Undone` with `<n> removed[, <k> kept (<reason>)]`, or
+  `Undo failed` with the cause.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 
@@ -355,7 +372,9 @@ inacircle cancel <job-id>
   starts; the exit code is the same as without it.
 - `INACIRCLE_MEASURE=1` makes `run` print its CPU time, its children's,
   and its peak RSS on stderr (a measurement switch), before the
-  notifications at the end.
+  notifications at the end; with `--notify` a further line
+  `measure notify_cpu_us=<n>` gives our CPU spent on the final notice (open
+  and `Notify`) before the Undo window.
 - `INACIRCLE_UNDO_WAIT_MS=<n>` shortens the Undo window. Test-only.
 
 ## Configuration
@@ -372,6 +391,8 @@ inacircle cancel <job-id>
 
 ```
 crates/   wire, dbus, ui, engine, manifest, action, toml, doc
+          (dbus: the notifications client, libc only; the shipped
+          `inacircle` links it, never `doc`)
 bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
 tools/    gen-entities (dev tool)
 scripts/  checks and helpers
