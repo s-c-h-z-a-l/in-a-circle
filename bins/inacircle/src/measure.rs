@@ -15,6 +15,16 @@ pub struct Meter {
     idle_wakeups: u64,
     /// Highest proportional set size sampled, in kB (-1 before a sample).
     pss_kb: i64,
+    /// Inputs fed to the machine (pointer, drag, key...): the per-event work.
+    events: u64,
+    /// CPU the meter itself spent (reading smaps for PSS), in µs.
+    overhead_us: i64,
+    /// Process CPU when the drop's data was in.
+    drop_cpu: Option<i64>,
+    /// CPU from the drop's data to the stage-2 wheel's first commit.
+    stage2_us: Option<i64>,
+    /// Process CPU at the choice (absolute, like the run's marks).
+    choice_cpu: Option<i64>,
 }
 
 impl Meter {
@@ -27,6 +37,11 @@ impl Meter {
             hover_us: Vec::new(),
             idle_wakeups: 0,
             pss_kb: -1,
+            events: 0,
+            overhead_us: 0,
+            drop_cpu: None,
+            stage2_us: None,
+            choice_cpu: None,
         }
     }
 
@@ -48,6 +63,33 @@ impl Meter {
         self.pss_kb = self.pss_kb.max(kb);
     }
 
+    /// The drop's data is in (stage 2 starts).
+    pub fn dropped(&mut self, cpu_us: i64) {
+        self.drop_cpu.get_or_insert(cpu_us);
+    }
+
+    /// A new wheel's first commit; after a drop, that is stage 2 shown.
+    pub fn swapped(&mut self, cpu_us: i64) {
+        if let (Some(d), None) = (self.drop_cpu, self.stage2_us) {
+            self.stage2_us = Some(cpu_us - d);
+        }
+    }
+
+    /// The user chose a slice.
+    pub fn chose(&mut self, cpu_us: i64) {
+        self.choice_cpu.get_or_insert(cpu_us);
+    }
+
+    /// CPU the meter spent on itself, to subtract from the wheel's.
+    pub fn overhead(&mut self, us: i64) {
+        self.overhead_us += us.max(0);
+    }
+
+    /// One input fed to the machine.
+    pub fn event(&mut self) {
+        self.events += 1;
+    }
+
     /// `poll` returned with nothing to do while the wheel waited.
     pub fn idle_wakeup(&mut self) {
         self.idle_wakeups += 1;
@@ -55,7 +97,9 @@ impl Meter {
 
     /// The report line (without a newline). `-1` marks a value that was
     /// never taken (no commit) or is unavailable.
-    pub fn report(&self, vm_hwm_kb: i64) -> String {
+    /// `exit_cpu_us` is the process's CPU when the surface is gone, so the
+    /// run's own share is the later `measure self_cpu_us` minus it.
+    pub fn report(&self, vm_hwm_kb: i64, exit_cpu_us: i64) -> String {
         let (cpu, wall) = self
             .commit
             .map_or((-1, -1), |(c, w)| (c, w.as_micros() as i64));
@@ -65,11 +109,20 @@ impl Meter {
         let max = sorted.last().copied();
         format!(
             "measure wheel main_to_commit_cpu_us={cpu} main_to_commit_wall_us={wall} \
-             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
+             hover_events={} hover_us_p50={} hover_us_max={} idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} drop_to_stage2_cpu_us={} choice_abs_cpu_us={} pss_kb={} vm_hwm_kb={vm_hwm_kb}",
             sorted.len(),
             p50.unwrap_or(0),
             max.unwrap_or(0),
             self.idle_wakeups,
+            self.events,
+            if exit_cpu_us < 0 {
+                -1
+            } else {
+                exit_cpu_us - self.cpu0_us
+            },
+            self.overhead_us,
+            self.stage2_us.unwrap_or(-1),
+            self.choice_cpu.unwrap_or(-1),
             self.pss_kb
         )
     }
@@ -123,10 +176,18 @@ mod tests {
         m.committed(9_999, t0 + ms(9_999));
         m.pss(2_100);
         m.pss(1_900);
+        m.event();
+        m.event();
+        m.event();
+        m.dropped(3_000);
+        m.dropped(9_000);
+        m.swapped(3_400);
+        m.swapped(9_999);
+        m.chose(3_800);
         assert_eq!(
-            m.report(2_840),
+            m.report(2_840, 4_000),
             "measure wheel main_to_commit_cpu_us=700 main_to_commit_wall_us=2500 \
-             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 pss_kb=2100 vm_hwm_kb=2840"
+             hover_events=5 hover_us_p50=30 hover_us_max=50 idle_wakeups=2 events=3 wheel_cpu_us=3000 meter_cpu_us=0 drop_to_stage2_cpu_us=400 choice_abs_cpu_us=3800 pss_kb=2100 vm_hwm_kb=2840"
         );
     }
 
@@ -134,9 +195,9 @@ mod tests {
     fn report_of_a_wheel_that_never_mapped() {
         let m = Meter::new(0, Instant::now());
         assert_eq!(
-            m.report(-1),
+            m.report(-1, -1),
             "measure wheel main_to_commit_cpu_us=-1 main_to_commit_wall_us=-1 \
-             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 pss_kb=-1 vm_hwm_kb=-1"
+             hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=0 wheel_cpu_us=-1 meter_cpu_us=0 drop_to_stage2_cpu_us=-1 choice_abs_cpu_us=-1 pss_kb=-1 vm_hwm_kb=-1"
         );
     }
 
@@ -146,6 +207,6 @@ mod tests {
         for us in [4, 1, 3, 2] {
             m.hover(ms(us));
         }
-        assert!(m.report(0).contains("hover_us_p50=2 hover_us_max=4"));
+        assert!(m.report(0, -1).contains("hover_us_p50=2 hover_us_max=4"));
     }
 }

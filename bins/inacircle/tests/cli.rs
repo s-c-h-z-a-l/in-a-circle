@@ -559,7 +559,18 @@ fn catalog_from_actions_dir_list() {
         .unwrap(),
     );
     assert_eq!(o.pairs("skip"), [(t, "skipped on request".to_owned())]);
-    let cache = fs::read_to_string(e.root.join("cache/inacircle/catalog")).unwrap();
+    // One cache per set of action dirs: `catalog-<hash>` for this list.
+    let cache = fs::read_dir(e.root.join("cache/inacircle"))
+        .unwrap()
+        .map(|d| d.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("catalog-")
+        })
+        .map(|p| fs::read_to_string(p).unwrap())
+        .expect("a catalog-<hash> cache");
     assert!(cache.contains("text.txt-to-md") && cache.contains("test.script"));
     // Without the env list, nothing is found.
     let o = parse_out(

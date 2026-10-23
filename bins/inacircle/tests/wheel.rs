@@ -255,7 +255,16 @@ impl Root {
         assert!(out.status.success(), "{out:?}");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("preset=markdown"), "{stdout}");
-        assert!(self.0.join("cache/inacircle/catalog").is_file());
+        // The override's own cache (`catalog-<hash>`), primed by `offer`.
+        assert!(
+            fs::read_dir(self.0.join("cache/inacircle"))
+                .unwrap()
+                .any(|d| d
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("catalog-"))
+        );
         fs::remove_file(f).unwrap();
     }
 

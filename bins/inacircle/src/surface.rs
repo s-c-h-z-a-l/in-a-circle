@@ -251,6 +251,9 @@ struct Surface {
     reading: Option<Reading>,
     busy: [bool; 2],
     painted: [Painted; 2],
+    /// What a buffer was repainted with since its last commit, ahead of
+    /// time (`prepaint`); its next commit damages this too.
+    prepainted: [Rect; 2],
     /// What the screen shows; `None` before the wheel's first commit.
     shown: Painted,
     screen: Screen,
@@ -284,6 +287,7 @@ impl Surface {
             reading: None,
             busy: [false; 2],
             painted: [None; 2],
+            prepainted: [Rect::EMPTY; 2],
             shown: None,
             screen: Screen::new(),
             pending: false,
@@ -683,6 +687,11 @@ impl Surface {
     /// `Some` once the machine closed or chose.
     fn feed(&mut self, m: &mut Machine) -> io::Result<Option<Chosen>> {
         let inputs = std::mem::take(&mut self.inputs);
+        if let Some(meter) = &mut self.meter {
+            for _ in &inputs {
+                meter.event();
+            }
+        }
         for i in inputs {
             for fx in m.on(i) {
                 if let Some(end) = self.apply(fx, m)? {
@@ -704,7 +713,12 @@ impl Surface {
                 unsafe { libc::alarm(d.as_secs().max(1) as u32) };
             }
             Effect::Close => return Ok(Some(None)),
-            Effect::Run(files, preset) => return Ok(Some(Some((files, preset)))),
+            Effect::Run(files, preset) => {
+                if let Some(meter) = &mut self.meter {
+                    meter.chose(crate::cpu_us(libc::RUSAGE_SELF));
+                }
+                return Ok(Some(Some((files, preset))));
+            }
         }
         Ok(None)
     }
@@ -786,6 +800,9 @@ impl Surface {
             if self.offers.release() == Some(offer) {
                 self.conn.req(offer, op::wl_data_offer::DESTROY, &[]);
             }
+            if let Some(meter) = &mut self.meter {
+                meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
+            }
             self.inputs.push(Input::DropData(r));
         }
     }
@@ -821,6 +838,7 @@ impl Surface {
             Some((g, old)) if g == m.generation() => m.wheel().paint_hover(canvas, old, m.hover()),
             _ => m.wheel().paint_full(canvas, m.hover()),
         };
+        let painted = painted.union(std::mem::replace(&mut self.prepainted[i], Rect::EMPTY));
         self.painted[i] = want;
         let full = Rect {
             x: 0,
@@ -858,6 +876,7 @@ impl Surface {
         // A synced subsurface: the parent's commit applies it.
         c.req(id.surface, op::wl_surface::COMMIT, &[]);
         self.busy[i] = true;
+        let swapped = !first && self.shown.is_some_and(|(g, _)| g != m.generation());
         self.shown = want;
         if let Some(meter) = &mut self.meter {
             if let Some(t) = started {
@@ -866,12 +885,34 @@ impl Surface {
             if first {
                 meter.committed(crate::cpu_us(libc::RUSAGE_SELF), Instant::now());
             }
+            if swapped {
+                meter.swapped(crate::cpu_us(libc::RUSAGE_SELF));
+            }
             // After the timings are taken: reading smaps costs tens of µs.
             if started.is_none() {
+                let c0 = crate::cpu_us(libc::RUSAGE_SELF);
                 meter.pss(crate::measure::pss_kb());
+                meter.overhead(crate::cpu_us(libc::RUSAGE_SELF) - c0);
             }
         }
         Ok(())
+    }
+
+    /// Before waiting: a free buffer that still holds an older wheel (the
+    /// stage-2 swap) is painted in full now, so the next hover on it is a
+    /// cheap `paint_hover` and not a full paint inside the event.
+    fn prepaint(&mut self, m: &Machine) {
+        if self.shown.is_none() {
+            return;
+        }
+        for i in to_prepaint(&self.painted, &self.busy, m.generation()) {
+            {
+                let shm = self.shm.as_mut().expect("built in setup");
+                let r = m.wheel().paint_full(shm.canvas(i), m.hover());
+                self.painted[i] = Some((m.generation(), m.hover()));
+                self.prepainted[i] = self.prepainted[i].union(r);
+            }
+        }
     }
 
     fn event_loop(&mut self, m: &mut Machine) -> io::Result<Chosen> {
@@ -886,6 +927,7 @@ impl Surface {
                 continue;
             }
             self.flush()?;
+            self.prepaint(m);
             let now = Instant::now();
             if now >= self.deadline {
                 self.inputs.push(Input::Deadline);
@@ -928,6 +970,13 @@ impl Surface {
             }
         }
     }
+}
+
+/// The free buffers that still hold an older wheel than `generation`.
+fn to_prepaint(painted: &[Painted; 2], busy: &[bool; 2], generation: u32) -> Vec<usize> {
+    (0..2)
+        .filter(|&i| !busy[i] && !matches!(painted[i], Some((g, _)) if g == generation))
+        .collect()
 }
 
 /// Whether a `poll` return is an idle wakeup for the meter: nothing
@@ -1048,6 +1097,26 @@ impl Offers {
 mod tests {
     use super::*;
     use crate::wheel::{Menu, NOTHING};
+
+    /// Regression (the user's niri log): after the stage-2 swap the first
+    /// hover did a full paint inside the event (~150 µs). The free buffer
+    /// that still holds the old wheel is now painted before the wait.
+    #[test]
+    fn a_free_buffer_with_an_older_wheel_is_prepainted() {
+        // Stage 2 (generation 2) is on buffer 0; buffer 1 still holds stage 1.
+        let painted = [Some((2, None)), Some((1, None))];
+        assert_eq!(to_prepaint(&painted, &[true, false], 2), [1]);
+        // Held by the compositor: not touched until released.
+        assert!(to_prepaint(&painted, &[true, true], 2).is_empty());
+        // Both current: nothing to do, so no repeated work per loop.
+        let current = [Some((2, None)), Some((2, Some(3)))];
+        assert!(to_prepaint(&current, &[false, false], 2).is_empty());
+        // Never painted counts as older.
+        assert_eq!(
+            to_prepaint(&[Some((2, None)), None], &[true, false], 2),
+            [1]
+        );
+    }
 
     fn reading(r: OwnedFd) -> Reading {
         Reading::new(r, 7, DND_COPY, Instant::now() + READ_DROP)
