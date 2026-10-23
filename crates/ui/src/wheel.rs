@@ -1,25 +1,28 @@
 //! Wheel rasterizer: analytic coverage, computed for one octant only.
 //!
-//! The 8 slices are 45 degrees each, and their boundaries lie on the
-//! pixel grid's mirror axes (horizontal, vertical, diagonal). So every
-//! pixel's coverage equals that of its mirror image in octant 0, and
-//! octant k is exactly slice k. The octant is computed once, at compile
-//! time (no atan2: the two boundaries are the lines v = 0 and u = v),
-//! mirrored into a dense quadrant table, and painted row by row into the 4
-//! quadrants, so writes stay contiguous. A hover change rewrites one
-//! half-quadrant per slice, and the slice's label on top of it.
+//! The 8 slices are 45 degrees each, centred on the compass directions:
+//! slice 0 points north (up) and the index grows clockwise on screen, so a
+//! preset's compass direction is its slice. The borders lie at 22.5° +
+//! k·45°. That set is symmetric about the pixel grid's mirror axes
+//! (horizontal, vertical, diagonal), so every pixel's coverage equals that
+//! of its mirror image in octant 0, which holds one border: the line at
+//! 22.5° from the horizontal axis. The octant is computed once, at compile
+//! time (no atan2), mirrored into a dense quadrant table, and painted row
+//! by row into the 4 quadrants, so writes stay contiguous. Each quadrant
+//! row splits at the two borders it crosses into three runs: a horizontal
+//! slice (E or W), a diagonal one, a vertical one (N or S). A hover change
+//! rewrites one slice's runs, and its label on top of them.
 //!
-//! Slice 0 points right and the index grows clockwise on screen (y down).
 //! Everything here is in the coordinates of the wheel's square box.
 //!
 //! The tables depend only on the constants below, so they are built by
 //! `const` evaluation: `.rodata` holds `REACH * REACH` bytes of coverage
-//! (48.8 KB), 4 KB of colour tables and about 1.5 KB of row extents, and
-//! `Wheel::new` computes nothing but the label layout. A test recomputes
-//! them at run time and compares.
+//! (48.8 KB), 4 KB of colour tables and about 2.5 KB of row extents and
+//! splits, and `Wheel::new` computes nothing but the label layout. A test
+//! recomputes them at run time and compares.
 
 use crate::text;
-use std::f32::consts::{FRAC_1_SQRT_2, TAU};
+use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_8, TAU};
 
 /// Side of the wheel's square buffer, in pixels. Even, so the center is
 /// on a pixel corner and the mirrors map pixels onto pixels.
@@ -33,9 +36,13 @@ const C: u32 = BOX / 2;
 /// Pixels from the center the ring reaches (plus the anti-aliased edge):
 /// the coverage table is cut to this.
 const REACH: usize = R_OUT as usize + 1;
-// Diagonal pixels (a == b) sit on a slice boundary and are painted with
-// one side's color only. That is invisible only while the gap covers them.
+// Pixels whose center is near a border are painted with one side's color
+// only (the side of their center). That is invisible only while the gap
+// covers them.
 const _: () = assert!(GAP >= 0.5);
+/// sin and cos of 22.5°: the border in octant 0.
+const S22: f32 = 0.382_683_43;
+const C22: f32 = 0.923_879_5;
 const _: () = assert!(R_OUT == (R_OUT as usize) as f32 && REACH <= C as usize);
 
 /// Length in bytes of the canvas the wheel paints: BOX rows of BOX BGRA
@@ -158,26 +165,13 @@ pub enum Hit {
     Outside,
 }
 
-/// Segment of quadrant `q` pixels, by side of the diagonal: [a >= b, a < b].
-/// Quadrants: 0 = right-down, 1 = left-down, 2 = left-up, 3 = right-up
-/// (y grows down, angle grows clockwise from the right).
-const SEG_OF: [[u32; 2]; 4] = [[0, 1], [3, 2], [4, 5], [7, 6]];
-
-/// Which quadrant and side of its diagonal slice `s` occupies.
-const fn quadrant_side(s: u32) -> (usize, usize) {
-    let mut q = 0;
-    while q < 4 {
-        let mut d = 0;
-        while d < 2 {
-            if SEG_OF[q][d] == s {
-                return (q, d);
-            }
-            d += 1;
-        }
-        q += 1;
-    }
-    panic!("slice index out of range")
-}
+/// The slice of each run of quadrant `q`: [horizontal, diagonal,
+/// vertical], i.e. quadrant offsets a > b·tan 67.5°, between, and
+/// a < b·tan 22.5°. Quadrants: 0 = right-down, 1 = left-down, 2 = left-up,
+/// 3 = right-up (y grows down). Slices: 0 = N, 1 = NE, ... 7 = NW.
+const SEG_OF: [[u32; 3]; 4] = [[2, 3, 4], [6, 5, 4], [6, 7, 0], [2, 1, 0]];
+/// The runs of a quadrant row, in `SEG_OF` order.
+const RUNS: usize = 3;
 
 /// Pixel index of quadrant offset (a, b) in quadrant `q`.
 const fn qpos(q: usize, a: u32, b: u32) -> usize {
@@ -239,12 +233,9 @@ const fn coverage(a: u32, b: u32) -> (bool, f32) {
         let r = sqrt32(r2);
         clamp01(R_OUT - r + 0.5) * clamp01(r - R_IN + 0.5)
     };
-    // Distance to the nearer slice boundary: the line v = 0 or u = v.
-    let d = if v < (u - v) * FRAC_1_SQRT_2 {
-        v
-    } else {
-        (u - v) * FRAC_1_SQRT_2
-    };
+    // Distance to the octant's slice border, the line at 22.5°.
+    let d = u * S22 - v * C22;
+    let d = if d < 0.0 { -d } else { d };
     (false, ring * clamp01(d - GAP + 0.5))
 }
 
@@ -258,30 +249,66 @@ struct Geo {
     /// hub_end[b] <= a < row_end[b]; 0 beyond the ring.
     hub_end: [u16; C as usize],
     row_end: [u16; C as usize],
+    /// Per quadrant row b: the vertical run is a < split[0][b], the diagonal
+    /// one split[0][b] <= a < split[1][b], the horizontal one beyond (each
+    /// clamped to the ring). By the pixel center's side of each border.
+    split: [[u16; C as usize]; 2],
     /// Bounding box of each slice's ring pixels.
     bboxes: [Rect; SEGMENTS as usize],
 }
 
+/// Which run (`SEG_OF` order) quadrant pixel (a, b) is in.
+const fn run_of(split: &[[u16; C as usize]; 2], a: u32, b: u32) -> usize {
+    if a < split[0][b as usize] as u32 {
+        2
+    } else if a < split[1][b as usize] as u32 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Bounding box of quadrant offsets `a0..=a1`, `b0..=b1` in quadrant `q`.
+const fn quadrant_rect(q: usize, (a0, a1, b0, b1): (u32, u32, u32, u32)) -> Rect {
+    let (i0, i1) = (qpos(q, a0, b0) as u32, qpos(q, a1, b1) as u32);
+    let (xa, ya, xb, yb) = (i0 % BOX, i0 / BOX, i1 % BOX, i1 / BOX);
+    Rect {
+        x: if xa < xb { xa } else { xb },
+        y: if ya < yb { ya } else { yb },
+        w: xa.abs_diff(xb) + 1,
+        h: ya.abs_diff(yb) + 1,
+    }
+}
+
+const fn union_const(r: Rect, o: Rect) -> Rect {
+    if r.is_empty() {
+        return o;
+    }
+    if o.is_empty() {
+        return r;
+    }
+    let (x, y) = (
+        if r.x < o.x { r.x } else { o.x },
+        if r.y < o.y { r.y } else { o.y },
+    );
+    let (rx, ox) = (r.x + r.w, o.x + o.w);
+    let (ry, oy) = (r.y + r.h, o.y + o.h);
+    Rect {
+        x,
+        y,
+        w: if rx > ox { rx } else { ox } - x,
+        h: if ry > oy { ry } else { oy } - y,
+    }
+}
+
 const fn build() -> Geo {
     let mut cov = [0u8; REACH * REACH];
-    let (mut a0, mut a1, mut b1) = (u32::MAX, 0u32, 0u32);
     let mut a = 0;
     while a < REACH {
         let mut b = 0;
         while b <= a {
-            let (is_hub, c) = coverage(a as u32, b as u32);
+            let (_, c) = coverage(a as u32, b as u32);
             let q = (c * 255.0 + 0.5) as u8;
-            if !is_hub && q != 0 {
-                if (a as u32) < a0 {
-                    a0 = a as u32;
-                }
-                if (a as u32) > a1 {
-                    a1 = a as u32;
-                }
-                if (b as u32) > b1 {
-                    b1 = b as u32;
-                }
-            }
             cov[b * REACH + a] = q;
             cov[a * REACH + b] = q;
             b += 1;
@@ -307,36 +334,73 @@ const fn build() -> Geo {
         row_end[b as usize] = e as u16;
         b += 1;
     }
-    // Quadrant extents of each side's ring: side 0 is a in [a0, a1],
-    // b in [0, b1]; side 1 is its mirror across the diagonal.
+    // Run splits: the first a whose center is on or past each border, by
+    // `a + 0.5 >= v * tan`. Both only grow with b: walk them up.
+    let tans = [S22 / C22, C22 / S22];
+    let mut split = [[0u16; C as usize]; 2];
+    let mut t = 0;
+    while t < 2 {
+        let mut a = 0u32;
+        let mut b = 0;
+        while b < C {
+            let lim = (b as f32 + 0.5) * tans[t];
+            while (a as f32 + 0.5) < lim && a < C {
+                a += 1;
+            }
+            split[t][b as usize] = a as u16;
+            b += 1;
+        }
+        t += 1;
+    }
+    // Each run's extent in quadrant offsets (the same in every quadrant by
+    // symmetry), then each slice's box from its runs.
+    let mut ext = [(u32::MAX, 0u32, u32::MAX, 0u32); RUNS];
+    let mut b = 0;
+    while b < REACH as u32 {
+        let mut a = hub_end[b as usize] as u32;
+        while a < REACH as u32 {
+            if cov[b as usize * REACH + a as usize] != 0 {
+                let r = run_of(&split, a, b);
+                let e = &mut ext[r];
+                if a < e.0 {
+                    e.0 = a;
+                }
+                if a > e.1 {
+                    e.1 = a;
+                }
+                if b < e.2 {
+                    e.2 = b;
+                }
+                if b > e.3 {
+                    e.3 = b;
+                }
+            }
+            a += 1;
+        }
+        b += 1;
+    }
     let mut bboxes = [Rect::EMPTY; SEGMENTS as usize];
-    let mut s = 0;
-    while s < SEGMENTS {
-        let (q, side) = quadrant_side(s);
-        let ((ax0, ax1), (by0, by1)) = if side == 0 {
-            ((a0, a1), (0, b1))
-        } else {
-            ((0, b1), (a0, a1))
-        };
-        let (i0, i1) = (qpos(q, ax0, by0) as u32, qpos(q, ax1, by1) as u32);
-        let (xa, ya, xb, yb) = (i0 % BOX, i0 / BOX, i1 % BOX, i1 / BOX);
-        bboxes[s as usize] = Rect {
-            x: if xa < xb { xa } else { xb },
-            y: if ya < yb { ya } else { yb },
-            w: xa.abs_diff(xb) + 1,
-            h: ya.abs_diff(yb) + 1,
-        };
-        s += 1;
+    let mut q = 0;
+    while q < 4 {
+        let mut r = 0;
+        while r < RUNS {
+            let s = SEG_OF[q][r] as usize;
+            bboxes[s] = union_const(bboxes[s], quadrant_rect(q, ext[r]));
+            r += 1;
+        }
+        q += 1;
     }
     Geo {
         cov,
         hub_end,
         row_end,
+        split,
         bboxes,
     }
 }
 
-// About 25 k coverage evaluations: more than the default const-eval budget.
+// About 25 k coverage evaluations and a 48 k-pixel scan: more than the
+// default const-eval budget.
 #[allow(long_running_const_eval)]
 static GEO: Geo = build();
 
@@ -383,18 +447,19 @@ fn fast_atan2(y: f32, x: f32) -> f32 {
     if y < 0.0 { -a } else { a }
 }
 
-/// (sin, cos) of the slice borders `k * 45°`, k in 0..=8 (y down, clockwise).
-const S: f32 = FRAC_1_SQRT_2;
+/// (sin, cos) of the slice borders, screen angles `-112.5° + k·45°`, k in
+/// 0..=8 (y down, clockwise from the right): slice k lies between border k
+/// and border k + 1.
 const BORDER: [(f32, f32); 9] = [
-    (0.0, 1.0),
-    (S, S),
-    (1.0, 0.0),
-    (S, -S),
-    (0.0, -1.0),
-    (-S, -S),
-    (-1.0, 0.0),
-    (-S, S),
-    (0.0, 1.0),
+    (-C22, -S22),
+    (-C22, S22),
+    (-S22, C22),
+    (S22, C22),
+    (C22, S22),
+    (C22, -S22),
+    (S22, -C22),
+    (-S22, -C22),
+    (-C22, -S22),
 ];
 
 /// Signed distances from point (`px`, `py`) (relative to the center) to the
@@ -434,16 +499,9 @@ const fn box_fits(k: usize, cx: f32, cy: f32, w: f32, h: f32) -> bool {
     true
 }
 
-/// Widest label for slice `k` (0 or 1), found by search.
-const fn max_label_w(k: usize) -> u32 {
-    // Label center: radius R_MID at the slice's middle angle, 22.5° and 67.5°.
-    const COS_22_5: f32 = 0.923_879_5;
-    const SIN_22_5: f32 = 0.382_683_43;
-    let (cx, cy) = if k == 0 {
-        (R_MID * COS_22_5, R_MID * SIN_22_5)
-    } else {
-        (R_MID * SIN_22_5, R_MID * COS_22_5)
-    };
+/// Widest label for slice `k`, found by search. Its center: radius R_MID
+/// at the slice's middle angle.
+const fn max_label_w(k: usize, cx: f32, cy: f32) -> u32 {
     let mut w = R_OUT as u32;
     while w > 0 && !box_fits(k, cx, cy, w as f32, LABEL_H as f32) {
         w -= 1;
@@ -451,10 +509,23 @@ const fn max_label_w(k: usize) -> u32 {
     w
 }
 
-/// Widest label per slice class. By the wheel's symmetry (a label box is
-/// symmetric about both axes) slices 0, 3, 4, 7 share one value and
-/// 1, 2, 5, 6 the other.
-const LABEL_W: [u32; 2] = [max_label_w(0), max_label_w(1)];
+/// Widest label per slice class (`label_class`). A label box is symmetric
+/// about both axes but wider than tall, so E and W share one value, N and
+/// S another, and the four diagonal slices a third. Measured on E, N, SE.
+const LABEL_W: [u32; 3] = [
+    max_label_w(2, R_MID, 0.0),
+    max_label_w(0, 0.0, -R_MID),
+    max_label_w(3, R_MID * FRAC_1_SQRT_2, R_MID * FRAC_1_SQRT_2),
+];
+
+/// Index into `LABEL_W` of slice `k`.
+const fn label_class(k: u32) -> usize {
+    match k % 4 {
+        2 => 0,
+        0 => 1,
+        _ => 2,
+    }
+}
 
 /// Text placed by its line box's top-left corner.
 struct Label {
@@ -467,8 +538,8 @@ fn slice_label(k: u32, label: &str) -> Option<Label> {
     if label.is_empty() {
         return None;
     }
-    let max_w = LABEL_W[if matches!(k % 4, 0 | 3) { 0 } else { 1 }];
-    let mid = (k as f32 + 0.5) * (TAU / SEGMENTS as f32);
+    let max_w = LABEL_W[label_class(k)];
+    let mid = k as f32 * (TAU / SEGMENTS as f32) - FRAC_PI_2;
     let (cx, cy) = (R_MID * mid.cos(), R_MID * mid.sin());
     let text = text::fit(label, max_w);
     if text.is_empty() {
@@ -533,9 +604,13 @@ impl Wheel {
         if r2 < R_IN * R_IN {
             return Hit::Hub;
         }
-        let mut a = fast_atan2(py, px);
+        // Clockwise from slice 0's first border (north minus 22.5°).
+        let mut a = fast_atan2(py, px) + FRAC_PI_2 + FRAC_PI_8;
         if a < 0.0 {
             a += TAU;
+        }
+        if a >= TAU {
+            a -= TAU;
         }
         let k = ((a / (TAU / SEGMENTS as f32)) as usize).min(SEGMENTS as usize - 1);
         let (d0, d1) = border_dist(k, px, py);
@@ -628,16 +703,14 @@ impl Wheel {
         }
         let px = canvas.as_chunks_mut::<4>().0;
         for (q, segs) in SEG_OF.iter().enumerate() {
-            let (lo, hi) = (self.fill(segs[0], lit), self.fill(segs[1], lit));
+            let luts = segs.map(|s| self.fill(s, lit));
             for b in 0..C {
-                let (h, e) = (
-                    GEO.hub_end[b as usize] as u32,
-                    GEO.row_end[b as usize] as u32,
-                );
+                let h = GEO.hub_end[b as usize] as u32;
                 Self::span(px, q, b, 0, h, &LUT_HUB);
-                // a < b is side 1, a >= b side 0.
-                Self::span(px, q, b, h, b.clamp(h, e), hi);
-                Self::span(px, q, b, b.clamp(h, e), e, lo);
+                for (r, lut) in luts.iter().enumerate() {
+                    let (a0, a1) = Self::run(r, b);
+                    Self::span(px, q, b, a0, a1, lut);
+                }
             }
         }
         for s in 0..SEGMENTS {
@@ -654,18 +727,34 @@ impl Wheel {
         }
     }
 
+    /// The offsets `a0..a1` of run `r` (`SEG_OF` order) in quadrant row `b`.
+    #[inline(always)]
+    fn run(r: usize, b: u32) -> (u32, u32) {
+        let (h, e) = (
+            GEO.hub_end[b as usize] as u32,
+            GEO.row_end[b as usize] as u32,
+        );
+        let m0 = (GEO.split[0][b as usize] as u32).clamp(h, e);
+        let m1 = (GEO.split[1][b as usize] as u32).clamp(h, e);
+        match r {
+            0 => (m1, e),
+            1 => (m0, m1),
+            _ => (h, m0),
+        }
+    }
+
+    /// Repaint slice `s`: its runs (one quadrant for a diagonal slice, two
+    /// for a compass one) and its label.
     fn paint_segment(&self, canvas: &mut [u8], s: u32, lit: Option<u8>) {
-        let (q, side) = quadrant_side(s);
         let lut = self.fill(s, lit);
         let px = canvas.as_chunks_mut::<4>().0;
-        for b in 0..C {
-            let (h, e) = (
-                GEO.hub_end[b as usize] as u32,
-                GEO.row_end[b as usize] as u32,
-            );
-            let m = b.clamp(h, e);
-            let (a0, a1) = if side == 0 { (m, e) } else { (h, m) };
-            Self::span(px, q, b, a0, a1, lut);
+        for (q, segs) in SEG_OF.iter().enumerate() {
+            for (r, _) in segs.iter().enumerate().filter(|&(_, &x)| x == s) {
+                for b in 0..C {
+                    let (a0, a1) = Self::run(r, b);
+                    Self::span(px, q, b, a0, a1, lut);
+                }
+            }
         }
         self.draw_label(canvas, s, lit);
     }
@@ -779,9 +868,13 @@ mod tests {
             return (None, q((R_HUB - r + 0.5).clamp(0.0, 1.0)));
         }
         let ring = (R_OUT - r + 0.5).clamp(0.0, 1.0) * (r - R_IN + 0.5).clamp(0.0, 1.0);
-        let mut a = fast_atan2(py, px);
-        if a < 0.0 {
+        // Clockwise from slice 0's first border, at north minus 22.5°.
+        let mut a = py.atan2(px) + FRAC_PI_2 + FRAC_PI_8;
+        while a < 0.0 {
             a += TAU;
+        }
+        while a >= TAU {
+            a -= TAU;
         }
         let seg = TAU / SEGMENTS as f32;
         let idx = ((a / seg) as u32).min(SEGMENTS - 1);
@@ -847,22 +940,32 @@ mod tests {
         }
     }
 
+    /// Slices sit on the compass: a click straight up hits slice 0 (north),
+    /// straight right slice 2 (east), and so on clockwise; the diagonals
+    /// hit their own slices, and a slice spans 22.5° either way.
     #[test]
     fn hit_follows_the_compass() {
         let w = bare();
         let c = BOX as f64 / 2.0;
-        // 0 = right, growing clockwise on screen (y down).
-        for (s, (dx, dy)) in [
-            (0, (150.0, 20.0)),
-            (1, (20.0, 150.0)),
-            (2, (-20.0, 150.0)),
-            (3, (-150.0, 20.0)),
-            (4, (-150.0, -20.0)),
-            (5, (-20.0, -150.0)),
-            (6, (20.0, -150.0)),
-            (7, (150.0, -20.0)),
+        let d = 150.0 / std::f64::consts::SQRT_2;
+        for (s, name, (dx, dy)) in [
+            (0, "N", (0.0, -150.0)),
+            (1, "NE", (d, -d)),
+            (2, "E", (150.0, 0.0)),
+            (3, "SE", (d, d)),
+            (4, "S", (0.0, 150.0)),
+            (5, "SW", (-d, d)),
+            (6, "W", (-150.0, 0.0)),
+            (7, "NW", (-d, -d)),
         ] {
-            assert_eq!(w.hit(c + dx, c + dy), Hit::Slice(s), "{dx},{dy}");
+            assert_eq!(w.hit(c + dx, c + dy), Hit::Slice(s), "{name}");
+            // 20° either side of the slice's direction is still the slice.
+            let mid = f64::from(s) * std::f64::consts::FRAC_PI_4 - std::f64::consts::FRAC_PI_2;
+            for off in [-20f64, 20.0] {
+                let a = mid + off.to_radians();
+                let at = w.hit(c + 150.0 * a.cos(), c + 150.0 * a.sin());
+                assert_eq!(at, Hit::Slice(s), "{name} {off}°");
+            }
         }
     }
 
@@ -878,19 +981,28 @@ mod tests {
         assert_eq!(w.hit(c + 70.0, c), Hit::Hub);
         assert_eq!(w.hit(c + 79.0, c), Hit::Hub);
         assert_eq!(w.hit(c + 64.5, c), Hit::Hub);
-        // ... and the ring's edge, up to the outer radius.
-        assert_eq!(w.hit(c + 220.0, c), Hit::Hub);
+        // ... and the ring's edge, up to the outer radius (here mid-slice,
+        // so the slice).
+        assert_eq!(w.hit(c + 220.0, c), Hit::Slice(2));
         // Beyond the outer radius is outside.
         assert_eq!(w.hit(c + 220.5, c), Hit::Outside);
         assert_eq!(w.hit(c + 221.0, c), Hit::Outside);
         assert_eq!(w.hit(0.0, 0.0), Hit::Outside);
-        // On a slice border (the gap) it is the hub; 3 px off it, a slice is.
-        assert_eq!(w.hit(c + 150.0, c), Hit::Hub);
-        assert_eq!(w.hit(c + 150.0, c + 1.9), Hit::Hub);
-        assert_eq!(w.hit(c + 150.0, c + 3.0), Hit::Slice(0));
-        assert_eq!(w.hit(c + 150.0, c - 3.0), Hit::Slice(7));
+        // On a slice border (the gap) it is the hub; 3 px off it, a slice
+        // is. The E/SE border runs at 22.5° below the horizontal; its normal
+        // (pointing into SE) is (-sin, cos).
+        let (s22, c22) = std::f64::consts::FRAC_PI_8.sin_cos();
+        let on = (c + 150.0 * c22, c + 150.0 * s22);
+        assert_eq!(w.hit(on.0, on.1), Hit::Hub);
+        let off = |k: f64| w.hit(on.0 - k * s22, on.1 + k * c22);
+        assert_eq!(off(1.9), Hit::Hub);
+        assert_eq!(off(-1.9), Hit::Hub);
+        assert_eq!(off(3.0), Hit::Slice(3));
+        assert_eq!(off(-3.0), Hit::Slice(2));
+        // The axes and diagonals are mid-slice now, not borders.
         let d = 150.0 / std::f64::consts::SQRT_2;
-        assert_eq!(w.hit(c + d, c + d), Hit::Hub); // the 0/1 diagonal
+        assert_eq!(w.hit(c + d, c + d), Hit::Slice(3));
+        assert_eq!(w.hit(c, c - 150.0), Hit::Slice(0));
         // Non-finite and absurd points are outside, never a panic.
         for v in [
             f64::NAN,
@@ -976,7 +1088,7 @@ mod tests {
         let w = sample();
         let before = full(&w, Some(3));
         let mut after = before.clone();
-        let r = w.paint_hover(&mut after, Some(3), Some(0));
+        let r = w.paint_hover(&mut after, Some(3), Some(1));
         for (x, y, p) in pixels(&after) {
             let inside = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
             assert!(inside || p == px(&before, x, y), "{x},{y} outside {r:?}");
@@ -1207,7 +1319,7 @@ mod tests {
         let c = full(&w, None);
         let at = |s: u8| {
             // A ring pixel at mid radius, off the label, on the slice's axis.
-            let a = (s as f64 + 0.5) * std::f64::consts::FRAC_PI_4;
+            let a = s as f64 * std::f64::consts::FRAC_PI_4 - std::f64::consts::FRAC_PI_2;
             let (x, y) = (
                 (BOX / 2) as f64 + 100.0 * a.cos(),
                 (BOX / 2) as f64 + 100.0 * a.sin(),
@@ -1317,20 +1429,18 @@ mod tests {
                 let r = r2.sqrt();
                 (R_OUT - r + 0.5).clamp(0.0, 1.0) * (r - R_IN + 0.5).clamp(0.0, 1.0)
             };
-            let d = v.min((u - v) * FRAC_1_SQRT_2);
+            let d = (u * S22 - v * C22).abs();
             (false, ring * (d - GAP + 0.5).clamp(0.0, 1.0))
         }
         let reach = ((R_OUT + 1.0).ceil() as u32).min(C);
         assert_eq!(reach as usize, REACH);
+        assert!((S22 - std::f32::consts::FRAC_PI_8.sin()).abs() < 1e-7);
+        assert!((C22 - std::f32::consts::FRAC_PI_8.cos()).abs() < 1e-7);
         let mut cov = vec![0u8; REACH * REACH];
-        let (mut a0, mut a1, mut b1) = (u32::MAX, 0, 0);
         for a in 0..reach {
             for b in 0..=a {
-                let (is_hub, c) = coverage(a, b);
+                let (_, c) = coverage(a, b);
                 let q = (c * 255.0 + 0.5) as u8;
-                if !is_hub && q != 0 {
-                    (a0, a1, b1) = (a0.min(a), a1.max(a), b1.max(b));
-                }
                 cov[b as usize * REACH + a as usize] = q;
                 cov[a as usize * REACH + b as usize] = q;
             }
@@ -1352,23 +1462,29 @@ mod tests {
         }
         // The table is cut to the reach: nothing beyond it is ever read.
         assert!(GEO.row_end.iter().all(|&e| (e as usize) < REACH));
-        for s in 0..8u32 {
-            let (q, side) = quadrant_side(s);
-            let ((ax0, ax1), (by0, by1)) = if side == 0 {
-                ((a0, a1), (0, b1))
-            } else {
-                ((0, b1), (a0, a1))
-            };
-            let (i0, i1) = (qpos(q, ax0, by0) as u32, qpos(q, ax1, by1) as u32);
-            let (xa, ya, xb, yb) = (i0 % BOX, i0 / BOX, i1 % BOX, i1 / BOX);
-            let want = Rect {
-                x: xa.min(xb),
-                y: ya.min(yb),
-                w: xa.abs_diff(xb) + 1,
-                h: ya.abs_diff(yb) + 1,
-            };
-            assert_eq!(GEO.bboxes[s as usize], want, "bbox {s}");
+        // Splits: the first offset whose center is past each border.
+        for b in 0..C {
+            let v = b as f32 + 0.5;
+            for (t, tan) in [S22 / C22, C22 / S22].into_iter().enumerate() {
+                let want = (0..C).find(|&a| a as f32 + 0.5 >= v * tan).unwrap_or(C);
+                assert_eq!(GEO.split[t][b as usize] as u32, want, "split[{t}][{b}]");
+            }
         }
+        // Boxes: every ring pixel of a slice (by the paint's runs) inside its
+        // box, and the box no bigger than those pixels.
+        let mut boxes = [Rect::EMPTY; 8];
+        for (q, segs) in SEG_OF.iter().enumerate() {
+            for b in 0..reach {
+                for a in GEO.hub_end[b as usize] as u32..reach {
+                    if cov[b as usize * REACH + a as usize] != 0 {
+                        let s = segs[run_of(&GEO.split, a, b)] as usize;
+                        let r = quadrant_rect(q, (a, a, b, b));
+                        boxes[s] = boxes[s].union(r);
+                    }
+                }
+            }
+        }
+        assert_eq!(GEO.bboxes, boxes);
         for (name, t, c) in [
             ("seg", &LUT_SEG, SEG),
             ("hov", &LUT_HOV, HOVER),
@@ -1383,17 +1499,17 @@ mod tests {
         }
     }
 
-    /// The label room is a constant by symmetry: two values cover all eight
-    /// slices, equal to a search with real trigonometry.
+    /// The label room is a constant by symmetry: three values cover all
+    /// eight slices, equal to a search with real trigonometry.
     #[test]
     fn label_room_consts_match_a_runtime_search_in_every_slice() {
         assert_eq!(LABEL_H, atlas::get().line_height());
         for k in 0..8u32 {
             let step = TAU / 8.0;
-            let mid = (k as f32 + 0.5) * step;
+            let mid = k as f32 * step - FRAC_PI_2;
             let (cx, cy) = (R_MID * mid.cos(), R_MID * mid.sin());
-            let (s0, c0) = (k as f32 * step).sin_cos();
-            let (s1, c1) = ((k + 1) as f32 * step).sin_cos();
+            let (s0, c0) = (mid - step / 2.0).sin_cos();
+            let (s1, c1) = (mid + step / 2.0).sin_cos();
             let clear = GAP + LABEL_MARGIN;
             let fits = |w: f32| {
                 let (hw, hh) = (w / 2.0, LABEL_H as f32 / 2.0);
@@ -1417,8 +1533,7 @@ mod tests {
                 })
             };
             let want = (0..=R_OUT as u32).rev().find(|&w| fits(w as f32)).unwrap();
-            let class = if matches!(k % 4, 0 | 3) { 0 } else { 1 };
-            assert_eq!(LABEL_W[class], want, "slice {k}");
+            assert_eq!(LABEL_W[label_class(k)], want, "slice {k}");
         }
     }
 

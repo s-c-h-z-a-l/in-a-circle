@@ -85,7 +85,7 @@ pub struct Choice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
     pub paths: Vec<PathBuf>,
-    /// By wheel slice index (0 = right, clockwise).
+    /// By wheel slice index: the compass, 0 = north, clockwise.
     pub slices: [Option<Choice>; 8],
     pub hub: String,
 }
@@ -423,7 +423,7 @@ mod tests {
 
     /// A point `r` from the center at slice `k`'s middle angle.
     fn slice(k: u8, r: f64) -> (f64, f64) {
-        let a = (f64::from(k) + 0.5) * std::f64::consts::FRAC_PI_4;
+        let a = f64::from(k) * std::f64::consts::FRAC_PI_4 - std::f64::consts::FRAC_PI_2;
         (AT.0 + r * a.cos(), AT.1 + r * a.sin())
     }
     const HUB: (f64, f64) = AT;

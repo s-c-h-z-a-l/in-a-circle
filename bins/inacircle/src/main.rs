@@ -718,8 +718,8 @@ fn drop_menu(list: Vec<u8>) -> wheel::Menu {
 }
 
 /// Stage 2 for `paths` (absolute, each once) with catalog `cat` (`None`:
-/// no cache yet, so `No actions yet`). The offer by wheel slice (the
-/// presets' direction 0 is north, the wheel's slice 0 points right). The
+/// no cache yet, so `No actions yet`). The offer by wheel slice: a
+/// preset's compass direction is its slice (0 = north, clockwise). The
 /// files are tallied by type as they are classified, keeping one name per
 /// type, not one per file. The hub (`ui::text::hub_text`) counts the files
 /// of the offered type, the most common one with presets; when it cannot
@@ -753,7 +753,7 @@ fn drop_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::Menu {
     for (dir, s) in offer.slices.iter().enumerate() {
         let Some(s) = s else { continue };
         mime = PRESETS.iter().find(|p| p.id == s.preset).map(|p| p.input);
-        slices[(dir + 6) % 8] = Some(wheel::Choice {
+        slices[dir] = Some(wheel::Choice {
             label: s.label.clone(),
             preset: s.preset.into(),
             applicable: s.applicable > 0 && s.disabled.is_none(),
@@ -867,8 +867,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Presets point by compass (0 = north); the wheel's slice 0 points
-    /// right. The hub names the one file.
+    /// A preset's compass direction is its wheel slice (0 = north). The hub
+    /// names the one file.
     #[test]
     fn drop_menu_maps_presets_to_wheel_slices() {
         let (dir, file) = text_file("map", "notes ő.txt");
@@ -881,7 +881,7 @@ mod tests {
                 .replace('ő', "%C5%91")
         ));
         assert_eq!(m.paths, std::slice::from_ref(&file), "the same file once");
-        let north = m.slices[6].as_ref().expect("markdown points north");
+        let north = m.slices[0].as_ref().expect("markdown points north");
         assert_eq!(
             (
                 north.label.as_str(),
