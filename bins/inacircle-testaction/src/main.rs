@@ -5,12 +5,16 @@
 //!
 //! Behavior is selected with `--opt key=value`, executed in command-line
 //! order (all options are validated first, so a usage error has no side
-//! effects). Events are always reported for the first input.
+//! effects). The engine passes no `--opt`, so options also come from the
+//! first input's content: when it starts with the `INACIRCLE-TEST` magic
+//! line, every following non-empty line is one `key=value`, run after the
+//! command-line ones. Events are always reported for the first input.
 //!
 //! A step that fails (a `fail` event from an I/O error, not `events=fail`)
 //! ends the run at once with exit 1, regardless of a later `exit=`. The one
-//! exception is `write_outside`: it emits `fail` and the run continues (exit
-//! 0 or the `exit=` value), so a sandbox test can observe the denial.
+//! exceptions are `write_outside` and `connect`: they emit `fail` and the run
+//! continues (exit 0 or the `exit=` value), so a sandbox test can observe the
+//! denial.
 //!
 //! - `events=<list>`: comma-separated `progress:<f>`, `done`, `skip`,
 //!   `fail`, `warn`. `done` writes the output via `output_path` first.
@@ -21,9 +25,15 @@
 //!   error is reported as `fail` and ends the run with exit 1.
 //! - `write_outside=<absolute path>`: try to create that file.
 //! - `on_sigterm=exit|ignore`: SIGTERM disposition (default: kernel default).
+//! - `bad_done=<string>`: a raw `done` event with that output path, no file
+//!   written (for contract violation tests).
+//! - `kill_self=<signal>`: raise that signal (1-64).
+//! - `connect=<ipv4>:<port>`: a TCP connect (2 s timeout); `warn … connected`
+//!   on success, `fail … <error with errno>` otherwise.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::net::{SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -50,6 +60,9 @@ enum Step {
     BigOutput(u64),
     WriteOutside(PathBuf),
     IgnoreSigterm(bool),
+    BadDone(PathBuf),
+    KillSelf(libc::c_int),
+    Connect(SocketAddrV4),
 }
 
 fn parse_step(key: &str, value: &str) -> Result<Step, String> {
@@ -90,6 +103,15 @@ fn parse_step(key: &str, value: &str) -> Result<Step, String> {
             "exit" => Ok(Step::IgnoreSigterm(false)),
             _ => Err(num("disposition")),
         },
+        "bad_done" => Ok(Step::BadDone(PathBuf::from(value))),
+        "kill_self" => match value.parse() {
+            Ok(n @ 1..=64) => Ok(Step::KillSelf(n)),
+            _ => Err(num("signal")),
+        },
+        "connect" => value
+            .parse()
+            .map(Step::Connect)
+            .map_err(|_| num("address (ipv4:port)")),
         _ => Err(format!("unknown option `{key}`")),
     }
 }
@@ -118,6 +140,22 @@ fn write_big(path: &Path, size: u64) -> io::Result<()> {
         left -= n as u64;
     }
     f.flush()
+}
+
+/// Option lines from the input's content (see the module doc); none when
+/// the file cannot be read or lacks the magic line.
+fn input_opts(input: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(input) else {
+        return Vec::new();
+    };
+    match text.strip_prefix("INACIRCLE-TEST\n") {
+        Some(rest) => rest
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
@@ -178,6 +216,18 @@ fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
                 Err(e) => ev.fail(input, &e.to_string()),
             },
             Step::IgnoreSigterm(ignore) => set_signal(libc::SIGTERM, ignore),
+            Step::BadDone(rel) => ev.done(input, &rel),
+            Step::KillSelf(sig) => {
+                let _ = io::stdout().flush();
+                // SAFETY: raise only takes a signal number (validated 1-64).
+                unsafe { libc::raise(sig) };
+            }
+            Step::Connect(addr) => {
+                match TcpStream::connect_timeout(&addr.into(), Duration::from_secs(2)) {
+                    Ok(_) => ev.warn(input, "connected"),
+                    Err(e) => ev.fail(input, &e.to_string()),
+                }
+            }
         }
     }
     code
@@ -199,7 +249,16 @@ fn main() -> ExitCode {
         eprintln!("inacircle-testaction: unknown action {}", inv.action);
         return ExitCode::from(action::EXIT_USAGE as u8);
     }
-    let steps: Result<Vec<Step>, String> = inv.opts.iter().map(|(k, v)| parse_step(k, v)).collect();
+    let from_file = input_opts(&inv.inputs[0]);
+    let steps: Result<Vec<Step>, String> = inv
+        .opts
+        .iter()
+        .map(|(k, v)| parse_step(k, v))
+        .chain(from_file.iter().map(|l| match l.split_once('=') {
+            Some((k, v)) => parse_step(k, v),
+            None => Err(format!("option without `=`: `{l}`")),
+        }))
+        .collect();
     match steps {
         Ok(steps) => ExitCode::from(run(&inv, steps)),
         Err(msg) => {

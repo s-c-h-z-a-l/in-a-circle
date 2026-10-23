@@ -259,3 +259,98 @@ fn big_output_fails_under_fsize_limit() {
     assert_eq!(l.len(), 1, "{l:?}");
     assert!(l[0].starts_with("fail\t/in/a.bin\t"), "{}", l[0]);
 }
+
+#[test]
+fn bad_done_emits_raw_done_line() {
+    let w = tmp("baddone");
+    let o = run(&w, &["bad_done=../x\ty"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(out_lines(&o), ["done\t/in/a.bin\t../x\\ty"]);
+    assert_eq!(fs::read_dir(&*w).unwrap().count(), 0);
+}
+
+#[test]
+fn kill_self_raises_the_signal() {
+    let w = tmp("killself");
+    let o = run(&w, &["events=warn", "kill_self=9", "events=skip"]);
+    assert_eq!(o.status.signal(), Some(libc::SIGKILL));
+    assert_eq!(out_lines(&o), ["warn\t/in/a.bin\twarning on request"]);
+    for bad in ["kill_self=abc", "kill_self=0", "kill_self=65"] {
+        assert_eq!(run(&w, &[bad]).status.code(), Some(2), "{bad}");
+    }
+}
+
+#[test]
+fn connect_reports_and_continues() {
+    let w = tmp("connect");
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let o = run(&w, &[&format!("connect=127.0.0.1:{port}"), "events=skip"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(
+        out_lines(&o),
+        [
+            "warn\t/in/a.bin\tconnected",
+            "skip\t/in/a.bin\tskipped on request"
+        ]
+    );
+    drop(l);
+
+    // Nothing listens on the port any more: refused, reported, and the run
+    // goes on.
+    let o = run(&w, &[&format!("connect=127.0.0.1:{port}"), "events=skip"]);
+    assert_eq!(o.status.code(), Some(0));
+    let lines = out_lines(&o);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("fail\t/in/a.bin\t"), "{}", lines[0]);
+    assert!(lines[0].contains("os error 111"), "{}", lines[0]);
+    assert_eq!(lines[1], "skip\t/in/a.bin\tskipped on request");
+
+    for bad in ["connect=nope", "connect=127.0.0.1", "connect=::1:80"] {
+        assert_eq!(run(&w, &[bad]).status.code(), Some(2), "{bad}");
+    }
+}
+
+/// The engine passes no `--opt`: the first input's content carries them.
+#[test]
+fn options_from_the_first_input_after_command_line_ones() {
+    let w = tmp("fileopts");
+    let input = w.join("a.test");
+    fs::write(&input, "INACIRCLE-TEST\nevents=warn\n\nexit=3\n").unwrap();
+    let o = Command::new(BIN)
+        .args(["run", "test.script", "--work"])
+        .arg(&*w)
+        .args(["--opt", "events=skip", "--"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(3));
+    let l = out_lines(&o);
+    assert_eq!(l.len(), 2, "{l:?}");
+    assert!(l[0].starts_with("skip\t"), "{}", l[0]);
+    assert!(l[1].starts_with("warn\t"), "{}", l[1]);
+
+    // A bad option in the file is a usage error, before any side effect.
+    fs::write(&input, "INACIRCLE-TEST\nevents=warn\nbogus=1\n").unwrap();
+    let o = Command::new(BIN)
+        .args(["run", "test.script", "--work"])
+        .arg(&*w)
+        .arg("--")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(o.stdout.is_empty());
+
+    // Content without the magic line carries no options.
+    fs::write(&input, "events=warn\n").unwrap();
+    let o = Command::new(BIN)
+        .args(["run", "test.script", "--work"])
+        .arg(&*w)
+        .arg("--")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    assert!(o.stdout.is_empty());
+}
