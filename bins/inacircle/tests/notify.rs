@@ -239,7 +239,10 @@ fn plain_run(c: Command) -> Run {
     run(c, &Arc::new(Mutex::new(String::new())))
 }
 
-/// One `Notify` the server got, and when.
+/// The summary of a `Got` that records a `CloseNotification`.
+const CLOSED: &str = "<closed>";
+
+/// One `Notify` the server got (or a `CloseNotification`), and when.
 struct Got {
     at: Instant,
     id: u32,
@@ -366,6 +369,21 @@ fn servers(
                 }
                 Some("CloseNotification") => {
                     p.try_send(Peer::reply_msg(&m, vec![]));
+                    // Recorded as a pseudo notice with the closed id.
+                    let Value::U32(id) = m.body[0] else {
+                        panic!("CloseNotification without an id");
+                    };
+                    tx.send(Got {
+                        at: Instant::now(),
+                        id,
+                        replaces: 0,
+                        summary: CLOSED.into(),
+                        body: String::new(),
+                        actions: Vec::new(),
+                        hints: Value::Bool(false),
+                        conn,
+                    })
+                    .unwrap();
                 }
                 other => panic!("unexpected call {other:?}"),
             }
@@ -501,7 +519,7 @@ fn undo_button_keeps_a_changed_output() {
 }
 
 #[test]
-fn undo_window_ends_without_buttons() {
+fn undo_window_ends_by_closing_the_notice() {
     let e = Env::new("window");
     e.file("a.txt", "hello\n");
     let (fake, rx) = server(|_, _| {});
@@ -517,9 +535,8 @@ fn undo_window_ends_without_buttons() {
     assert!(e.files().join("a.md").exists());
     assert_eq!(n.len(), 2);
     assert_eq!(n[0].actions, ["undo", "Undo"]);
-    assert_eq!(n[1].replaces, n[0].id);
-    assert!(n[1].actions.is_empty());
-    assert_eq!((n[1].summary.as_str(), &n[1].body), ("a.md", &n[0].body));
+    // Closed, not resent: a resend pops up again on common servers.
+    assert_eq!((n[1].summary.as_str(), n[1].id), (CLOSED, n[0].id));
     let gap = n[1].at - n[0].at;
     assert!(gap >= Duration::from_millis(250), "{gap:?}");
     assert!(r.elapsed < Duration::from_secs(5), "{:?}", r.elapsed);
@@ -965,8 +982,7 @@ fn sigterm_in_the_undo_window_keeps_the_exit_code() {
     assert!(after < Duration::from_millis(600), "{after:?}");
     assert_eq!(n.len(), 2);
     assert_eq!(n[0].actions, ["undo", "Undo"]);
-    assert_eq!(n[1].replaces, n[0].id);
-    assert!(n[1].actions.is_empty());
+    assert_eq!((n[1].summary.as_str(), n[1].id), (CLOSED, n[0].id));
     assert!(e.files().join("a.md").exists());
 }
 
