@@ -145,15 +145,16 @@ pub struct Slice<'a> {
     pub state: SliceState,
 }
 
-/// What is under a point. Follows the paint: only visible pixels hit.
+/// What is under a point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     /// Inside slice `0..8`, clear of its borders.
     Slice(u8),
-    /// The central disc.
+    /// Inside the wheel (`r <= R_OUT`) but not on a slice: the hub disc, the
+    /// transparent annulus between hub and ring, the gaps along the slice
+    /// borders. A drop target in stage 1, a no-op click in stage 2.
     Hub,
-    /// Anywhere that is transparent: beyond the ring, in the annulus between
-    /// hub and ring, on the gaps between slices, or a non-finite point.
+    /// Beyond the outer radius, or a non-finite point: what closes the wheel.
     Outside,
 }
 
@@ -519,18 +520,18 @@ impl Wheel {
         wheel
     }
 
-    /// What is under a point in box coordinates. Matches the paint: the
-    /// hub disc, the ring between its radii minus the gaps along the slice
-    /// borders, and nothing else (a non-finite point is `Outside`).
+    /// What is under a point in box coordinates: a slice (clear of its
+    /// borders), else `Hub` anywhere within the outer radius, else `Outside`
+    /// (including every non-finite point).
     pub fn hit(&self, x: f64, y: f64) -> Hit {
         let (px, py) = (x as f32 - C as f32, y as f32 - C as f32);
         let r2 = px * px + py * py;
-        if r2 <= R_HUB * R_HUB {
-            return Hit::Hub;
-        }
         // NaN fails every comparison, so it lands in `Outside` too.
-        if !(R_IN * R_IN..=R_OUT * R_OUT).contains(&r2) {
+        if !(0.0..=R_OUT * R_OUT).contains(&r2) {
             return Hit::Outside;
+        }
+        if r2 < R_IN * R_IN {
+            return Hit::Hub;
         }
         let mut a = fast_atan2(py, px);
         if a < 0.0 {
@@ -539,7 +540,7 @@ impl Wheel {
         let k = ((a / (TAU / SEGMENTS as f32)) as usize).min(SEGMENTS as usize - 1);
         let (d0, d1) = border_dist(k, px, py);
         if d0 < GAP || d1 < GAP {
-            return Hit::Outside;
+            return Hit::Hub;
         }
         Hit::Slice(k as u8)
     }
@@ -865,24 +866,30 @@ mod tests {
     }
 
     #[test]
-    fn hit_tells_hub_from_outside() {
+    fn hit_tells_the_wheel_from_outside() {
         let w = bare();
         let c = BOX as f64 / 2.0;
         assert_eq!(w.hit(c, c), Hit::Hub);
         assert_eq!(w.hit(c + 63.0, c), Hit::Hub);
         assert_eq!(w.hit(c, c - 63.0), Hit::Hub);
-        // The transparent annulus between the hub and the ring is outside.
-        assert_eq!(w.hit(c + 70.0, c), Hit::Outside);
-        assert_eq!(w.hit(c + 79.0, c), Hit::Outside);
+        // Inside the wheel but not on a slice is the hub: the transparent
+        // annulus between hub and ring ...
+        assert_eq!(w.hit(c + 70.0, c), Hit::Hub);
+        assert_eq!(w.hit(c + 79.0, c), Hit::Hub);
+        assert_eq!(w.hit(c + 64.5, c), Hit::Hub);
+        // ... and the ring's edge, up to the outer radius.
+        assert_eq!(w.hit(c + 220.0, c), Hit::Hub);
+        // Beyond the outer radius is outside.
+        assert_eq!(w.hit(c + 220.5, c), Hit::Outside);
         assert_eq!(w.hit(c + 221.0, c), Hit::Outside);
         assert_eq!(w.hit(0.0, 0.0), Hit::Outside);
-        // On a slice border (the gap) nothing is hit; 3 px off it, a slice is.
-        assert_eq!(w.hit(c + 150.0, c), Hit::Outside);
-        assert_eq!(w.hit(c + 150.0, c + 1.9), Hit::Outside);
+        // On a slice border (the gap) it is the hub; 3 px off it, a slice is.
+        assert_eq!(w.hit(c + 150.0, c), Hit::Hub);
+        assert_eq!(w.hit(c + 150.0, c + 1.9), Hit::Hub);
         assert_eq!(w.hit(c + 150.0, c + 3.0), Hit::Slice(0));
         assert_eq!(w.hit(c + 150.0, c - 3.0), Hit::Slice(7));
         let d = 150.0 / std::f64::consts::SQRT_2;
-        assert_eq!(w.hit(c + d, c + d), Hit::Outside); // the 0/1 diagonal
+        assert_eq!(w.hit(c + d, c + d), Hit::Hub); // the 0/1 diagonal
         // Non-finite and absurd points are outside, never a panic.
         for v in [
             f64::NAN,
@@ -917,7 +924,15 @@ mod tests {
                 }
             } else if a == 0 {
                 clear += 1;
-                assert_eq!(at, Hit::Outside, "{x},{y}");
+                // Transparent: the wheel's hub area up to the outer radius,
+                // outside beyond it.
+                let (dx, dy) = (x as f32 + 0.5 - C as f32, y as f32 + 0.5 - C as f32);
+                let want = if dx * dx + dy * dy <= R_OUT * R_OUT {
+                    Hit::Hub
+                } else {
+                    Hit::Outside
+                };
+                assert_eq!(at, want, "{x},{y}");
             }
         }
         assert!(solid > 100_000 && clear > 50_000, "{solid} {clear}");
