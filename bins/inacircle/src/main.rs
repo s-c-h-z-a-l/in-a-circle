@@ -288,6 +288,9 @@ fn cmd_run(args: &[OsString]) -> u8 {
     // are already failed, so the batch rule covers a cancelled run too.
     let _ = cancel.is_cancelled();
     drop(cancel);
+    if std::env::var_os("INACIRCLE_MEASURE").is_some_and(|v| v == "1") {
+        measure();
+    }
     if done > 0 {
         EXIT_DONE
     } else if failed > 0 {
@@ -297,6 +300,34 @@ fn cmd_run(args: &[OsString]) -> u8 {
     } else {
         EXIT_FAILED
     }
+}
+
+/// Measurement switch (`INACIRCLE_MEASURE=1`): our CPU time, the reaped
+/// children's, and peak RSS, on stderr.
+fn measure() {
+    fn cpu_us(who: libc::c_int) -> i64 {
+        // SAFETY: rusage is plain integers, so all-zero is a valid value.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: getrusage writes one rusage into `ru`, which outlives it.
+        if unsafe { libc::getrusage(who, &mut ru) } != 0 {
+            return -1;
+        }
+        let us = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec;
+        us(ru.ru_utime) + us(ru.ru_stime)
+    }
+    let hwm = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmHWM:"))
+                .map(|v| v.trim().to_owned())
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "inacircle: measure self_cpu_us={} children_cpu_us={} vm_hwm={hwm}",
+        cpu_us(libc::RUSAGE_SELF),
+        cpu_us(libc::RUSAGE_CHILDREN)
+    );
 }
 
 /// Inputs that are done (any output), else failed, else skipped.
