@@ -73,7 +73,9 @@ are in `CLAUDE.md`.
   collects the answers into a cache and reruns a binary only when it
   changed (a few `stat` calls per start). The binary is the single source
   of truth; the same pattern as fontconfig's or gdk-pixbuf's caches.
-- The cache, `$XDG_CACHE_HOME/inacircle/catalog`, is a manifest-style file
+- The cache, `$XDG_CACHE_HOME/inacircle/catalog` (with an
+  `INACIRCLE_ACTIONS_DIR` override: `catalog-<FNV-1a of the list>`, one file
+  per set of directories), is a manifest-style file
   (header `inacircle-catalog 0`): per binary a `bin` line (path, mtime,
   size, built in or not) followed by its `action` lines; it is valid only
   while the set of binaries and their mtime and size match it exactly.

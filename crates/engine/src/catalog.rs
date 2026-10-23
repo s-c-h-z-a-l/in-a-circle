@@ -167,8 +167,9 @@ pub fn missing_tools(a: &Action) -> Vec<String> {
 
 /// The standard action directories and cache path.
 fn standard() -> (Vec<(PathBuf, bool)>, Option<PathBuf>) {
+    let over = std::env::var_os("INACIRCLE_ACTIONS_DIR");
     let cache = match crate::xdg::cache_home() {
-        Ok(c) => Some(c.join("inacircle/catalog")),
+        Ok(c) => Some(c.join("inacircle").join(cache_name(over.as_deref()))),
         Err(e) => {
             eprintln!("inacircle: no catalog cache: {e}");
             None
@@ -177,10 +178,23 @@ fn standard() -> (Vec<(PathBuf, bool)>, Option<PathBuf>) {
     let data = crate::xdg::data_home()
         .inspect_err(|e| eprintln!("inacircle: no user actions: {e}"))
         .ok();
-    (
-        dirs_from(std::env::var_os("INACIRCLE_ACTIONS_DIR"), data),
-        cache,
-    )
+    (dirs_from(over, data), cache)
+}
+
+/// The cache file for a set of action directories: `catalog` for the
+/// standard ones, `catalog-<hash>` for an `INACIRCLE_ACTIONS_DIR` override.
+/// One file per set: a run with another set (a test, a shell without the
+/// variable) must not overwrite the catalog the wheel reads from the cache.
+fn cache_name(over: Option<&std::ffi::OsStr>) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(v) = over else {
+        return "catalog".to_owned();
+    };
+    // FNV-1a, 64 bit: stable across runs and builds (unlike std's hasher).
+    let h = v.as_bytes().iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("catalog-{h:016x}")
 }
 
 /// Action directories: the override (colon-separated, all built-in; empty
@@ -471,6 +485,25 @@ fn write_cache(path: &Path, entries: &[Entry]) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Regression: a run without `INACIRCLE_ACTIONS_DIR` (other dirs, no
+    /// binaries) wrote an empty catalog over the one the wheel reads from
+    /// the cache, so its Markdown slice came up dim.
+    #[test]
+    fn each_set_of_action_dirs_has_its_own_cache() {
+        use std::ffi::OsStr;
+        assert_eq!(cache_name(None), "catalog");
+        let a = cache_name(Some(OsStr::new("/a/actions")));
+        let b = cache_name(Some(OsStr::new("/b/actions")));
+        assert!(
+            a.starts_with("catalog-") && a.len() == "catalog-".len() + 16,
+            "{a}"
+        );
+        assert_ne!(a, b);
+        assert_ne!(a, "catalog");
+        assert_eq!(a, cache_name(Some(OsStr::new("/a/actions"))), "stable");
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
