@@ -397,6 +397,27 @@ fn final_notice_after_a_run() {
 }
 
 #[test]
+fn measure_reports_the_notification_cpu_before_the_undo_window() {
+    let e = Env::new("measure");
+    e.file("a.txt", "hello\n");
+    let (fake, _rx) = server(|p, g| close(p, g.id));
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "a.txt"],
+    );
+    c.env("INACIRCLE_MEASURE", "1");
+    let r = plain_run(c);
+    fake.join();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    let l = r
+        .stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("inacircle: measure notify_cpu_us="))
+        .unwrap_or_else(|| panic!("no notify line: {}", r.stderr));
+    assert!(l.parse::<i64>().is_ok_and(|n| n >= 0), "{l}");
+}
+
+#[test]
 fn undo_button_removes_the_output() {
     let e = Env::new("undo");
     e.file("a.txt", "hello\n");

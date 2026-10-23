@@ -337,7 +337,7 @@ fn cmd_run(args: &[OsString]) -> u8 {
     let _ = cancel.is_cancelled();
     drop(cancel);
     // Before the notifications: their cost is measured on its own.
-    if std::env::var_os("INACIRCLE_MEASURE").is_some_and(|v| v == "1") {
+    if measuring() {
         measure();
     }
     // The job is closed in the history and gone from the registry, so an
@@ -356,19 +356,27 @@ fn cmd_run(args: &[OsString]) -> u8 {
     }
 }
 
+/// Whether the measurement switch `INACIRCLE_MEASURE=1` is set.
+fn measuring() -> bool {
+    std::env::var_os("INACIRCLE_MEASURE").is_some_and(|v| v == "1")
+}
+
+/// User + system CPU time of `who` (`RUSAGE_SELF` or `RUSAGE_CHILDREN`) in
+/// microseconds, -1 if unavailable.
+fn cpu_us(who: libc::c_int) -> i64 {
+    // SAFETY: rusage is plain integers, so all-zero is a valid value.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage writes one rusage into `ru`, which outlives it.
+    if unsafe { libc::getrusage(who, &mut ru) } != 0 {
+        return -1;
+    }
+    let us = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec;
+    us(ru.ru_utime) + us(ru.ru_stime)
+}
+
 /// Measurement switch (`INACIRCLE_MEASURE=1`): our CPU time, the reaped
 /// children's, and peak RSS, on stderr.
 fn measure() {
-    fn cpu_us(who: libc::c_int) -> i64 {
-        // SAFETY: rusage is plain integers, so all-zero is a valid value.
-        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-        // SAFETY: getrusage writes one rusage into `ru`, which outlives it.
-        if unsafe { libc::getrusage(who, &mut ru) } != 0 {
-            return -1;
-        }
-        let us = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec;
-        us(ru.ru_utime) + us(ru.ru_stime)
-    }
     let hwm = std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {

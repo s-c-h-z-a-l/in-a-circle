@@ -431,9 +431,17 @@ impl Notifier {
         counts: (usize, usize, usize),
         cancelled: bool,
     ) {
+        // Own CPU of the final notice (open + Notify), for the measurement.
+        let t0 = crate::measuring().then(|| crate::cpu_us(libc::RUSAGE_SELF));
+        let lap = || {
+            if let Some(t0) = t0 {
+                let t = crate::cpu_us(libc::RUSAGE_SELF) - t0;
+                eprintln!("inacircle: measure notify_cpu_us={t}");
+            }
+        };
         self.connect(false);
         let Bus::On(bus) = &self.bus else {
-            return;
+            return lap();
         };
         let markup = bus.has("body-markup");
         let mut s = std::mem::take(&mut self.summary);
@@ -453,7 +461,9 @@ impl Notifier {
             actions: undo,
             progress: None,
         };
-        let Some(id) = self.show(&n, CALL_WAIT) else {
+        let shown = self.show(&n, CALL_WAIT);
+        lap();
+        let Some(id) = shown else {
             return;
         };
         let Bus::On(bus) = &mut self.bus else {
