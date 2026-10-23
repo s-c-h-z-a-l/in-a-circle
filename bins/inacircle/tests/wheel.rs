@@ -315,9 +315,11 @@ fn drag_to_stage2(c: &mut Compositor, list: &[u8]) {
     source_writes(w, list);
     // Attached so far: `Drop here`, then the categories.
     c.attached(2, Duration::from_secs(5));
+    c.release_held();
     c.drag_motion(960, 390);
     // The hover on the lit Document slice.
     c.attached(3, Duration::from_secs(2));
+    c.release_held();
     c.drop_it();
     c.attached(4, Duration::from_secs(5));
 }
@@ -500,13 +502,14 @@ fn silent_early_source_falls_back_to_drop_here() {
     let root = Root::new("silent");
     root.markdown_action_cached();
     let list = root.files(1);
-    let (mut c, child) = start(&root, false);
+    let (mut c, child) = start(&root, true);
     // The pipe stays open and silent.
-    let _silent = c
+    let silent = c
         .drag_enters(0, Duration::from_secs(2))
         .expect("early receive");
     c.pump(Duration::from_millis(900));
     assert_eq!(c.attaches(), 1, "still Drop here");
+    assert!(reader_gone(&silent), "the early read timed out and closed");
     c.drop_it();
     let w = c
         .next_receive(0, Duration::from_secs(2))
@@ -521,11 +524,12 @@ fn silent_early_source_falls_back_to_drop_here() {
         .filter(|r| ![ACCEPT, SET_ACTIONS].contains(r))
         .collect();
     assert_eq!(ours, [RECEIVE, RECEIVE, FINISH, DESTROY]);
-    finish(c, child);
+    let err = finish(c, child);
+    assert!(err.contains(" idle_wakeups=0 "), "{err}");
 }
 
-/// A second enter (the user pulls the drag out and back, or brings
-/// another file) closes the first early pipe; only the new list counts.
+/// A second enter (another file is brought) closes the first early pipe
+/// and retires the first offer; only the new list counts.
 #[test]
 fn reenter_closes_the_early_pipe() {
     let root = Root::new("reenter");
@@ -540,9 +544,30 @@ fn reenter_closes_the_early_pipe() {
         .drag_enters(1, Duration::from_secs(2))
         .expect("second receive");
     assert!(reader_gone(&first), "the first early pipe is still open");
+    c.offer_destroyed(0, Duration::from_secs(2));
+    assert_eq!(c.offer_requests(0).last(), Some(&DESTROY));
     source_writes(second, &list);
     c.attached(2, Duration::from_secs(5));
     finish(c, child);
+}
+
+/// The drag leaves without a drop (Esc, or out of the output): the early
+/// pipe closes and the wheel exits cleanly.
+#[test]
+fn a_leave_closes_the_early_pipe_and_the_wheel() {
+    let root = Root::new("leave");
+    root.markdown_action_cached();
+    let (mut c, mut child) = start(&root, false);
+    let early = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    c.drag_leaves();
+    // The wheel closes; its connection takes the offer with it.
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).code(),
+        Some(0)
+    );
+    assert!(reader_gone(&early));
 }
 
 /// Level 1 from the early list within the per-point CPU budget (release

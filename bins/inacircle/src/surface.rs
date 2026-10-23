@@ -826,8 +826,9 @@ impl Surface {
 
     /// Receives the current drag's URI list now, before the drop, tagged
     /// `seq`. The offer is neither finished nor destroyed: it lives on to
-    /// the drop. No offer or a failing pipe fails the read at once (the
-    /// machine falls back to `Drop here`).
+    /// the drop. No offer, an offer without the list or a pipe that cannot
+    /// be made fails the read at once (the machine falls back to `Drop
+    /// here`); only a connection error ends the wheel.
     fn start_early(&mut self, seq: u32) -> io::Result<()> {
         self.early = None;
         let Some(offer) = self.dnd.map(|d| d.0).filter(|&o| o != 0) else {
@@ -835,7 +836,20 @@ impl Surface {
                 .push(Input::DragList(seq, Err("no offer".into())));
             return Ok(());
         };
-        let (r, w) = drop_pipe()?;
+        // Two enters handled in one go leave the first one's read for the
+        // second one's offer, which may not carry a list.
+        if !self.offers.mimes(offer).iter().any(|m| m == URI_LIST) {
+            self.inputs
+                .push(Input::DragList(seq, Err("no uri-list".into())));
+            return Ok(());
+        }
+        let (r, w) = match drop_pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.inputs.push(Input::DragList(seq, Err(e.to_string())));
+                return Ok(());
+            }
+        };
         self.conn.req(
             offer,
             op::wl_data_offer::RECEIVE,
@@ -1351,9 +1365,27 @@ mod tests {
 
     /// `drag_enters`, with `action` negotiated instead of copy.
     fn drag_enters_with(s: &Surface, offer: u32, serial: u32, action: u32) -> Vec<u8> {
+        drag_enters_as(s, offer, serial, action, URI_LIST)
+    }
+
+    /// `drag_enters_with`, the offer advertising `mime`.
+    fn drag_enters_as(s: &Surface, offer: u32, serial: u32, action: u32, mime: &str) -> Vec<u8> {
         let dd = s.id.data_device;
         let at = 100 * 256; // wl_fixed 100.0
         let mut m = msg(dd, op::wl_data_device::DATA_OFFER, &[offer]);
+        // The OFFER event: a string (length with NUL, bytes, NUL, padding).
+        let mut str_words: Vec<u32> = vec![mime.len() as u32 + 1];
+        let mut bytes = mime.as_bytes().to_vec();
+        bytes.push(0);
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        str_words.extend(
+            bytes
+                .chunks(4)
+                .map(|c| u32::from_ne_bytes(c.try_into().unwrap())),
+        );
+        m.extend(msg(offer, op::wl_data_offer::OFFER, &str_words));
         m.extend(msg(
             dd,
             op::wl_data_device::ENTER,
@@ -1365,6 +1397,11 @@ mod tests {
 
     /// Hands `events` to the surface and dispatches them.
     fn deliver(s: &mut Surface, server: &OwnedFd, events: &[u8]) {
+        deliver_to(s, server, events, &Machine::new());
+    }
+
+    /// `deliver`, dispatched against machine `m`.
+    fn deliver_to(s: &mut Surface, server: &OwnedFd, events: &[u8], m: &Machine) {
         // SAFETY: writing a valid buffer to a valid fd.
         let n = unsafe { libc::write(server.as_raw_fd(), events.as_ptr().cast(), events.len()) };
         assert_eq!(n as usize, events.len());
@@ -1373,7 +1410,7 @@ mod tests {
                 .read(Instant::now() + Duration::from_secs(1))
                 .unwrap()
         );
-        s.dispatch(&Machine::new()).unwrap();
+        s.dispatch(m).unwrap();
     }
 
     /// The requests the surface sent so far, as (object, opcode), and the
@@ -1665,6 +1702,69 @@ mod tests {
                 (DEVICE_OFFER_A, op::wl_data_offer::DESTROY),
             ]
         );
+    }
+
+    /// An early read only asks for what the offer advertised: a source
+    /// that never offered `text/uri-list` is not sent a `receive` for it
+    /// (it matters when two enters are handled before the first one's
+    /// read is applied).
+    #[test]
+    fn an_early_read_needs_the_offer_to_advertise_the_list() {
+        let (mut s, server) = fake_compositor();
+        let ev = drag_enters_as(&s, DEVICE_OFFER_A, 1, DND_COPY, "text/plain");
+        deliver(&mut s, &server, &ev);
+        s.apply(Effect::ReadEarly(4), &Machine::new()).unwrap();
+        assert!(s.early.is_none());
+        assert_eq!(requests(&mut s, &server).0, []);
+        assert_eq!(
+            s.inputs.last(),
+            Some(&Input::DragList(4, Err("no uri-list".into())))
+        );
+    }
+
+    /// Both buffers held by the compositor: a repaint sends nothing and
+    /// waits; the release brings exactly one attach and commit of the
+    /// current wheel. (A real compositor releases a buffer only after
+    /// the next one is on screen, so this is the everyday path.)
+    #[test]
+    fn a_repaint_with_both_buffers_busy_waits_for_the_release() {
+        let (mut s, server) = fake_compositor();
+        s.shm = Some(Shm::new().unwrap());
+        s.id.surface = s.conn.new_id(Iface::Surface);
+        s.id.wheel = s.conn.new_id(Iface::Surface);
+        s.id.sub = s.conn.new_id(Iface::Subsurface);
+        for i in 0..2 {
+            s.id.bufs[i] = s.conn.new_id(Iface::Buffer);
+        }
+        let mut m = Machine::with_menus(empty_groups, empty_targets);
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::PointerAt(960.0, 540.0));
+        s.render(&m).unwrap();
+        // Another wheel: the second buffer.
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        s.render(&m).unwrap();
+        assert!(s.busy[0] && s.busy[1]);
+        requests(&mut s, &server);
+        // A third wheel while neither is released.
+        m.on(Input::DragList(1, Ok(b"a".to_vec())));
+        s.render(&m).unwrap();
+        assert!(s.pending);
+        assert_eq!(requests(&mut s, &server).0, [], "nothing sent while busy");
+
+        let release = msg(s.id.bufs[0], op::wl_buffer::RELEASE, &[]);
+        deliver_to(&mut s, &server, &release, &m);
+        assert!(!s.pending);
+        let (reqs, _) = requests(&mut s, &server);
+        let (wheel, surface) = (s.id.wheel, s.id.surface);
+        let count = |r: (u32, u16)| reqs.iter().filter(|&&x| x == r).count();
+        assert_eq!(count((wheel, op::wl_surface::ATTACH)), 1, "{reqs:?}");
+        assert_eq!(count((wheel, op::wl_surface::COMMIT)), 1, "{reqs:?}");
+        assert_eq!(count((surface, op::wl_surface::COMMIT)), 1, "{reqs:?}");
+        assert_eq!(s.shown, Some((m.generation(), m.hover())));
     }
 
     /// The kept offer is the one to read, never the null offer.

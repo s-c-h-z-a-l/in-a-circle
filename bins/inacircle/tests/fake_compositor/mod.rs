@@ -69,6 +69,8 @@ pub struct Compositor {
     attaches: usize,
     /// The wheel buffer on screen.
     shown: Option<u32>,
+    /// Buffers replaced on screen, not yet released to the client.
+    held: Vec<u32>,
 }
 
 impl Compositor {
@@ -99,6 +101,7 @@ impl Compositor {
             offer_log: Vec::new(),
             attaches: 0,
             shown: None,
+            held: Vec::new(),
         }
     }
 
@@ -329,6 +332,19 @@ impl Compositor {
         self.attaches
     }
 
+    /// A frame passed: releases the buffers a newer one replaced.
+    pub fn release_held(&mut self) {
+        for b in std::mem::take(&mut self.held) {
+            self.send(b, op::wl_buffer::RELEASE, &[]);
+        }
+    }
+
+    /// The drag leaves without a drop.
+    pub fn drag_leaves(&mut self) {
+        let dd = self.data_device;
+        self.send(dd, op::wl_data_device::LEAVE, &[]);
+    }
+
     /// Handles the client's requests for `d`.
     pub fn pump(&mut self, d: Duration) {
         let _ = self.until_or_timeout(d, |_, _| None::<()>);
@@ -370,13 +386,13 @@ impl Compositor {
         }
         if self.surfaces.get(1) == Some(&r.obj) && r.op == op::wl_surface::ATTACH {
             self.attaches += 1;
-            // Like a compositor that shows the new buffer: the one shown
-            // before is released.
+            // Like a compositor: the buffer shown before is released only
+            // later, when the test says a frame passed (`release_held`).
             let buf = r.word(0);
             if buf != 0
                 && let Some(prev) = self.shown.replace(buf)
             {
-                self.send(prev, op::wl_buffer::RELEASE, &[]);
+                self.held.push(prev);
             }
         }
     }
