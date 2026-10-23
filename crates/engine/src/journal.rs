@@ -176,7 +176,8 @@ fn outcome_line(job: &str, o: &Outcome) -> Option<Line> {
 /// buffer), and the `job` line with the final status at [`finish`]. A run
 /// that dies midway leaves its lines so far, all of placed files, and undo
 /// still finds them. Holds one tally entry per input, nothing per outcome.
-/// History failures are ignored: the history must never fail the action.
+/// History failures are reported once on stderr and otherwise ignored: the
+/// history must never fail the action.
 ///
 /// [`finish`]: Recorder::finish
 pub struct Recorder {
@@ -188,8 +189,11 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn open(job: &JobId, action: &str) -> Recorder {
+        let file = open_history()
+            .inspect_err(|e| eprintln!("inacircle: history not written: {e}"))
+            .ok();
         Recorder {
-            file: open_history().ok(),
+            file,
             job: job.0.clone(),
             action: action.to_owned(),
             tally: Tally::default(),
