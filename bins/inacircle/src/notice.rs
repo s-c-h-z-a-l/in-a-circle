@@ -488,7 +488,7 @@ impl Notifier {
         } else {
             &[]
         };
-        let mut n = Notice {
+        let n = Notice {
             replaces: self.id,
             summary: &summary,
             body: &body,
@@ -515,10 +515,12 @@ impl Notifier {
                 Ok(Event::Closed(_)) => return,
                 // The window is over, or a cancel signal ended it.
                 Ok(Event::Timeout) => {
-                    // No dead button left in the notification centre.
-                    n.replaces = id;
-                    n.actions = &[];
-                    self.show(&n, CALL_WAIT);
+                    // No dead button left in the notification centre. A
+                    // resend without the button pops up again on common
+                    // servers (noctalia), so the notice is closed instead.
+                    if let Err(e) = bus.close(id, Instant::now() + CALL_WAIT) {
+                        self.off(&e);
+                    }
                     return;
                 }
                 Err(e) => return self.off(&e),
