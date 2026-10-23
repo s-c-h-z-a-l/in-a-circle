@@ -96,22 +96,18 @@ fn div255(x: u32) -> u32 {
     (x + 127) / 255
 }
 
-/// What the hub shows for the dropped files. One file: its name, cut to
-/// `max_w`, unless the atlas lacks a character of it, then
-/// `1 file · <type_label>`; an empty name counts as unrenderable. Several: `n / total files`. No names: `Nothing to do`.
-pub fn hub_text(names: &[&str], total: usize, type_label: &str, max_w: u32) -> String {
-    debug_assert!(
-        names.len() <= total,
-        "{} names for {total} files",
-        names.len()
-    );
-    let text = match names {
-        [] => return "Nothing to do".to_string(),
-        [name] if total == 1 && !name.is_empty() && atlas::get().has_all(name) => {
-            (*name).to_string()
-        }
-        [_] if total == 1 => format!("1 file · {type_label}"),
-        _ => format!("{} / {total} files", names.len()),
+/// What the hub shows for `count` dropped files of `total`. One file of
+/// one: its `name`, cut to `max_w`, unless the atlas lacks a character of
+/// it, then `1 file · <type_label>`; an empty name counts as unrenderable.
+/// Otherwise `count / total files`. None: `Nothing to do`. Only one name is
+/// ever shown, so callers keep only one.
+pub fn hub_text(count: usize, name: &str, total: usize, type_label: &str, max_w: u32) -> String {
+    debug_assert!(count <= total, "{count} of {total} files");
+    let text = match count {
+        0 => return "Nothing to do".to_string(),
+        1 if total == 1 && !name.is_empty() && atlas::get().has_all(name) => name.to_string(),
+        1 if total == 1 => format!("1 file · {type_label}"),
+        _ => format!("{count} / {total} files"),
     };
     fit(&text, max_w).into_owned()
 }
@@ -308,35 +304,35 @@ mod tests {
     #[test]
     fn hub_text_fits_and_falls_back() {
         let wide = 10_000;
-        assert_eq!(hub_text(&["notes.txt"], 1, "text", wide), "notes.txt");
+        assert_eq!(hub_text(1, "notes.txt", 1, "text", wide), "notes.txt");
         // Long accented name is cut with an ellipsis to the hub width.
         let long = "Árvíztűrő tükörfúrógép hosszú jegyzetek 2026.txt";
         let max = 128;
-        let t = hub_text(&[long], 1, "text", max);
+        let t = hub_text(1, long, 1, "text", max);
         assert!(t.ends_with('…') && width(&t) <= max, "{t}");
         // Characters outside the atlas: count and type instead of the name.
-        assert_eq!(hub_text(&["漢字.txt"], 1, "text", wide), "1 file · text");
+        assert_eq!(hub_text(1, "漢字.txt", 1, "text", wide), "1 file · text");
         // Several files: how many of how many.
-        assert_eq!(hub_text(&["a", "b", "c"], 5, "text", wide), "3 / 5 files");
-        assert_eq!(hub_text(&["a", "b"], 2, "image", wide), "2 / 2 files");
+        assert_eq!(hub_text(3, "a", 5, "text", wide), "3 / 5 files");
+        assert_eq!(hub_text(2, "a", 2, "image", wide), "2 / 2 files");
         // Nothing usable.
-        assert_eq!(hub_text(&[], 0, "text", wide), "Nothing to do");
+        assert_eq!(hub_text(0, "", 0, "text", wide), "Nothing to do");
         // Even the fallback is cut to the width.
         let tiny = width("1 fi…");
-        let t = hub_text(&["漢字.txt"], 1, "text", tiny);
+        let t = hub_text(1, "漢字.txt", 1, "text", tiny);
         assert!(t.ends_with('…') && width(&t) <= tiny, "{t}");
         // An empty name is as unrenderable as a missing glyph.
-        assert_eq!(hub_text(&[""], 1, "text", wide), "1 file · text");
+        assert_eq!(hub_text(1, "", 1, "text", wide), "1 file · text");
         // Whatever the hub shows must be drawable: every glyph is in the atlas.
         let a = atlas::get();
         for out in [
-            hub_text(&["notes.txt"], 1, "text", wide),
-            hub_text(&[long], 1, "text", max),
-            hub_text(&["漢字.txt"], 1, "text", wide),
-            hub_text(&["漢字.txt"], 1, "text", tiny),
-            hub_text(&["a", "b", "c"], 5, "text", wide),
-            hub_text(&[""], 1, "image", wide),
-            hub_text(&[], 0, "text", wide),
+            hub_text(1, "notes.txt", 1, "text", wide),
+            hub_text(1, long, 1, "text", max),
+            hub_text(1, "漢字.txt", 1, "text", wide),
+            hub_text(1, "漢字.txt", 1, "text", tiny),
+            hub_text(3, "a", 5, "text", wide),
+            hub_text(1, "", 1, "image", wide),
+            hub_text(0, "", 0, "text", wide),
         ] {
             assert!(a.has_all(&out), "{out:?} has a glyph the atlas lacks");
         }

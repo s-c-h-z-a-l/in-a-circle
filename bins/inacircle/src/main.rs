@@ -149,13 +149,29 @@ fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     Some(dedup(files))
 }
 
-/// Each file (by canonical path) once, first spelling kept.
+/// Each file (by canonical path) once, first spelling kept. Only a hash
+/// of each kept file's canonical path is held, not the path: a hash match
+/// is confirmed by canonicalizing the kept file again.
 fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let state = std::hash::RandomState::new();
     let mut seen = HashSet::with_capacity(paths.len());
-    paths
-        .into_iter()
-        .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
-        .collect()
+    let mut hashes: Vec<u64> = Vec::with_capacity(paths.len());
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let c = canon(&p);
+        let h = std::hash::BuildHasher::hash_one(&state, &c);
+        let dup = !seen.insert(h)
+            && kept
+                .iter()
+                .zip(&hashes)
+                .any(|(k, &kh)| kh == h && canon(k) == c);
+        if !dup {
+            hashes.push(h);
+            kept.push(p);
+        }
+    }
+    kept
 }
 
 #[derive(Clone, Copy)]
@@ -445,28 +461,26 @@ fn cmd_offer(args: &[OsString]) -> u8 {
 
 /// Each file's name and what it is, as the offer needs them.
 fn named_kinds(files: &[PathBuf]) -> Vec<(String, Kind)> {
-    files
-        .iter()
-        .map(|p| {
-            let name = p
-                .file_name()
-                .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
-            let unknown = |label: &str| Kind {
-                mime: None,
-                label: label.into(),
-            };
-            let kind = match classify(p) {
-                Ok(Classified::File(k)) => k,
-                Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
-                Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => {
-                    unknown("broken link")
-                }
-                Ok(Classified::NotRegular) => unknown("special file"),
-                Err(_) => unknown("unreadable file"),
-            };
-            (name, kind)
-        })
-        .collect()
+    files.iter().map(|p| named_kind(p)).collect()
+}
+
+/// A file's name and what it is.
+fn named_kind(p: &Path) -> (String, Kind) {
+    let name = p
+        .file_name()
+        .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
+    let unknown = |label: &str| Kind {
+        mime: None,
+        label: label.into(),
+    };
+    let kind = match classify(p) {
+        Ok(Classified::File(k)) => k,
+        Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
+        Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => unknown("broken link"),
+        Ok(Classified::NotRegular) => unknown("special file"),
+        Err(_) => unknown("unreadable file"),
+    };
+    (name, kind)
 }
 
 fn one_job_id(args: &[OsString], cmd: &str) -> Result<JobId, u8> {
@@ -587,11 +601,19 @@ fn cmd_wheel() -> u8 {
     }
     // SAFETY: as above; 0 cancels the pending alarm.
     unsafe { libc::alarm(0) };
+    // Stage 2 read the catalog from the cache only; now that the overlay
+    // is gone, bring the cache up to date (manifests run with their usual
+    // deadline and group kill). A choice's run loads the catalog itself,
+    // which is that refresh.
     match chosen {
-        Ok(None) => EXIT_DONE,
         Ok(Some((files, preset))) => run_choice(files, &preset),
+        Ok(None) => {
+            Catalog::load();
+            EXIT_DONE
+        }
         Err(e) => {
             eprintln!("inacircle: wheel: {e}");
+            Catalog::load();
             EXIT_FAILED
         }
     }
@@ -685,24 +707,48 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
     }
 }
 
-/// Stage 2 for the dropped `text/uri-list`: the offer for its files, by
-/// wheel slice (the presets' direction 0 is north, the wheel's slice 0
-/// points right). The hub (`ui::text::hub_text`) counts the files of the
-/// offered type, the most common one with presets; when it cannot show the
-/// one file's name, it names that type by its MIME top-level type
+/// Stage 2 for the dropped `text/uri-list`. The list's bytes are freed
+/// before the files are classified, and the catalog comes from the cache
+/// alone: no action binary runs while the overlay is up (the cache is
+/// refreshed once the wheel is gone).
+fn drop_menu(list: Vec<u8>) -> wheel::Menu {
+    let paths = uri::parse_uri_list(&list);
+    drop(list);
+    drop_menu_for(dedup(paths), Catalog::load_cached())
+}
+
+/// Stage 2 for `paths` (absolute, each once) with catalog `cat` (`None`:
+/// no cache yet, so `No actions yet`). The offer by wheel slice (the
+/// presets' direction 0 is north, the wheel's slice 0 points right). The
+/// files are tallied by type as they are classified, keeping one name per
+/// type, not one per file. The hub (`ui::text::hub_text`) counts the files
+/// of the offered type, the most common one with presets; when it cannot
+/// show the one file's name, it names that type by its MIME top-level type
 /// (`1 file · text`): short enough for the hub, unlike the type's label.
-fn drop_menu(list: &[u8]) -> wheel::Menu {
-    let paths = dedup(uri::parse_uri_list(list));
+fn drop_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::Menu {
     let mut slices: [Option<wheel::Choice>; 8] = Default::default();
-    if paths.is_empty() {
-        return wheel::Menu {
-            paths,
-            slices,
-            hub: wheel::NOTHING.into(),
-        };
+    let (paths, cat) = match cat {
+        Some(cat) if !paths.is_empty() => (paths, cat),
+        // Nothing is offered, so nothing can be chosen: any click closes.
+        _ => {
+            let hub = if paths.is_empty() {
+                wheel::NOTHING
+            } else {
+                wheel::NO_ACTIONS
+            };
+            return wheel::Menu {
+                paths: Vec::new(),
+                slices,
+                hub: hub.into(),
+            };
+        }
+    };
+    let mut tally = menu::Tally::default();
+    for p in &paths {
+        let (name, kind) = named_kind(p);
+        tally.add(&name, &kind);
     }
-    let named = named_kinds(&paths);
-    let offer = menu::offer(&Catalog::load(), &named);
+    let offer = menu::offer_tally(&cat, &tally);
     let mut mime = None;
     for (dir, s) in offer.slices.iter().enumerate() {
         let Some(s) = s else { continue };
@@ -715,13 +761,9 @@ fn drop_menu(list: &[u8]) -> wheel::Menu {
     }
     let hub = match mime {
         Some(mime) => {
-            let of_type: Vec<&(String, Kind)> = named
-                .iter()
-                .filter(|(_, k)| k.mime.as_deref() == Some(mime))
-                .collect();
-            let names: Vec<&str> = of_type.iter().map(|(n, _)| n.as_str()).collect();
+            let (count, name) = tally.of(mime);
             let label = mime.split('/').next().unwrap_or(mime);
-            ui::text::hub_text(&names, offer.total, label, ui::wheel::HUB_TEXT_W)
+            ui::text::hub_text(count, name, offer.total, label, ui::wheel::HUB_TEXT_W)
         }
         None if offer.hub.is_empty() => wheel::NOTHING.into(),
         None => offer.hub,
@@ -750,15 +792,76 @@ mod tests {
         );
     }
 
+    /// Each file once by canonical path, first spelling kept: another
+    /// spelling or a symlink of a kept file is dropped; a missing file is
+    /// matched by its path as given.
+    #[test]
+    fn dedup_keeps_each_file_once() {
+        let (dir, a) = text_file("dedup", "a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&b, "b\n").unwrap();
+        std::os::unix::fs::symlink(&a, dir.join("link")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let missing = dir.join("gone.txt");
+        let kept = dedup(vec![
+            dir.join("./a.txt"),
+            b.clone(),
+            dir.join("link"),
+            a.clone(),
+            missing.clone(),
+            dir.join("sub/../b.txt"),
+            missing.clone(),
+        ]);
+        assert_eq!(kept, [dir.join("./a.txt"), b, missing]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A catalog with one plain-text-to-Markdown action.
+    fn md_catalog() -> Catalog {
+        Catalog {
+            actions: vec![engine::catalog::Action {
+                id: "t.md".into(),
+                family: "t".into(),
+                bin: "/bin/true".into(),
+                input: "text/plain".into(),
+                output: "text/markdown".into(),
+                ext: "md".into(),
+                label: "Markdown".into(),
+                group: "g".into(),
+                cost: 1,
+                lossy: false,
+                batch: true,
+                requires: Vec::new(),
+                builtin: true,
+            }],
+        }
+    }
+
+    /// Stage 2 for a URI list, with `md_catalog`.
+    fn menu_of(list: &str) -> wheel::Menu {
+        drop_menu_for(
+            dedup(uri::parse_uri_list(list.as_bytes())),
+            Some(md_catalog()),
+        )
+    }
+
+    /// A private dir with one plain-text file named `name`.
+    fn text_file(tag: &str, name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, "plain words\n").unwrap();
+        (dir, file)
+    }
+
     /// One file whose name the atlas cannot draw: its count and type.
     #[test]
     fn drop_menu_hub_falls_back_to_the_type() {
-        let dir = std::env::temp_dir().join(format!("inacircle-drop-cjk-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("日本.txt");
-        std::fs::write(&file, "plain words\n").unwrap();
-        let list = format!("file://{}/%E6%97%A5%E6%9C%AC.txt\n", dir.display());
-        let m = drop_menu(list.as_bytes());
+        let (dir, file) = text_file("cjk", "日本.txt");
+        let m = menu_of(&format!(
+            "file://{}/%E6%97%A5%E6%9C%AC.txt\n",
+            dir.display()
+        ));
         assert_eq!(m.paths, [file]);
         assert_eq!(m.hub, "1 file · text");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -768,31 +871,56 @@ mod tests {
     /// right. The hub names the one file.
     #[test]
     fn drop_menu_maps_presets_to_wheel_slices() {
-        let dir = std::env::temp_dir().join(format!("inacircle-drop-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("notes ő.txt");
-        std::fs::write(&file, "plain words\n").unwrap();
-        let list = format!(
+        let (dir, file) = text_file("map", "notes ő.txt");
+        let m = menu_of(&format!(
             "# dropped\r\nfile://{}\r\nfile://{}\r\n",
             dir.join("notes%20%C5%91.txt").display(),
             file.display()
                 .to_string()
                 .replace(' ', "%20")
                 .replace('ő', "%C5%91")
-        );
-        let m = drop_menu(list.as_bytes());
+        ));
         assert_eq!(m.paths, std::slice::from_ref(&file), "the same file once");
         let north = m.slices[6].as_ref().expect("markdown points north");
         assert_eq!(
-            (north.label.as_str(), north.preset.as_str()),
-            ("Markdown", "markdown")
+            (
+                north.label.as_str(),
+                north.preset.as_str(),
+                north.applicable
+            ),
+            ("Markdown", "markdown", true)
         );
         assert_eq!(m.slices.iter().flatten().count(), 1);
         assert_eq!(m.hub, "notes ő.txt");
 
-        let none = drop_menu(b"https://example.com/\r\n");
+        let none = menu_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
         assert_eq!(none.hub, wheel::NOTHING);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Before the catalog was ever cached, stage 2 offers nothing (no
+    /// manifest runs under the overlay) and says so; any click closes.
+    #[test]
+    fn drop_menu_without_a_cache_offers_nothing() {
+        let (dir, file) = text_file("nocache", "a.txt");
+        let m = drop_menu_for(vec![file], None);
+        assert!(m.paths.is_empty() && m.slices.iter().all(Option::is_none));
+        assert_eq!(m.hub, wheel::NO_ACTIONS);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Several files: the hub counts those of the offered type.
+    #[test]
+    fn drop_menu_counts_the_offered_type() {
+        let (dir, a) = text_file("count", "a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&b, "more words\n").unwrap();
+        let pdf = dir.join("c.pdf");
+        std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
+        let m = drop_menu_for(vec![a, b, pdf], Some(md_catalog()));
+        assert_eq!(m.paths.len(), 3);
+        assert_eq!(m.hub, "2 / 3 files");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -43,6 +43,8 @@ const POOL: usize = 2 * FRAME + 4;
 const MAP_FLAGS: libc::c_int = libc::MAP_SHARED; // | libc::MAP_POPULATE
 /// Longest wait for the drag source to write and close the URI list.
 const READ_DROP: Duration = Duration::from_millis(500);
+/// One read from the drop pipe.
+const READ_CHUNK: usize = 4096;
 /// The surface gives up this much before the `alarm` would kill us, so a
 /// timeout normally ends in an orderly close.
 const SOFT_MARGIN: Duration = Duration::from_millis(500);
@@ -145,7 +147,10 @@ impl Reading {
             fd,
             offer,
             action,
-            data: Vec::new(),
+            // Room for the limit and one more read: never regrown (a
+            // doubling would hold two copies). Pages are touched only as
+            // data arrives.
+            data: Vec::with_capacity(MAX_BYTES + READ_CHUNK),
             until,
         }
     }
@@ -154,7 +159,7 @@ impl Reading {
     /// past `MAX_BYTES`, on a read error or once `now` reaches the
     /// deadline with the pipe still open; `None` to wait for more.
     fn pump(&mut self, now: Instant) -> Option<Result<Vec<u8>, String>> {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; READ_CHUNK];
         loop {
             // SAFETY: buf is valid for buf.len() bytes.
             let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -1035,7 +1040,7 @@ mod tests {
 
     /// Whatever the data, stage 2 has nothing: only the read's result
     /// matters here.
-    fn empty(_: &[u8]) -> Menu {
+    fn empty(_: Vec<u8>) -> Menu {
         Menu {
             paths: Vec::new(),
             slices: Default::default(),
@@ -1052,7 +1057,7 @@ mod tests {
             y: 540.0,
             mimes: vec![URI_LIST.into()],
         });
-        assert_eq!(m.on(Input::Drop), [Effect::ReadDrop, Effect::Arm(STAGE)]);
+        assert_eq!(m.on(Input::Drop), [Effect::Arm(STAGE), Effect::ReadDrop]);
         m
     }
 

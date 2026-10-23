@@ -22,6 +22,8 @@ pub const URI_LIST: &str = "text/uri-list";
 
 pub const DROP_HERE: &str = "Drop here";
 pub const NOTHING: &str = "Nothing to do";
+/// Stage 2 before the catalog was ever cached: nothing can be offered.
+pub const NO_ACTIONS: &str = "No actions yet";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
@@ -88,9 +90,9 @@ pub struct Menu {
     pub hub: String,
 }
 
-/// Builds stage 2 from the dropped bytes. The real one classifies files;
-/// tests pass a pure one.
-pub type OfferFn = fn(&[u8]) -> Menu;
+/// Builds stage 2 from the dropped bytes, which it owns (and may free
+/// early). The real one classifies files; tests pass a pure one.
+pub type OfferFn = fn(Vec<u8>) -> Menu;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
@@ -256,7 +258,7 @@ impl Machine {
                     accepted: Some(true),
                 } => {
                     self.phase = Phase::Reading;
-                    fx.extend([Effect::ReadDrop, Effect::Arm(STAGE)]);
+                    fx.extend([Effect::Arm(STAGE), Effect::ReadDrop]);
                 }
                 // Dropped off target: the compositor cancels the drag.
                 Phase::Dragging { .. } => self.close(&mut fx),
@@ -266,7 +268,7 @@ impl Machine {
                 if self.phase == Phase::Reading {
                     match r {
                         Ok(bytes) => {
-                            let menu = (self.offer)(&bytes);
+                            let menu = (self.offer)(bytes);
                             self.set_wheel(stage2(&menu), menu.hub.clone());
                             self.menu = Some(menu);
                             self.phase = Phase::Choosing;
@@ -428,7 +430,7 @@ mod tests {
     const OUT: (f64, f64) = (AT.0 + 300.0, AT.1);
 
     /// `a`: one file, slice 0 applies, slice 4 does not. Empty: nothing.
-    fn fake(bytes: &[u8]) -> Menu {
+    fn fake(bytes: Vec<u8>) -> Menu {
         let mut slices: [Option<Choice>; 8] = Default::default();
         if bytes.is_empty() {
             return Menu {
@@ -521,7 +523,7 @@ mod tests {
         let s = slice(2, 150.0);
         assert_eq!(m.on(Input::DragMotion(s.0, s.1)), []);
         assert_eq!(m.hover(), None);
-        assert_eq!(m.on(Input::Drop), [Effect::ReadDrop, Effect::Arm(STAGE)]);
+        assert_eq!(m.on(Input::Drop), [Effect::Arm(STAGE), Effect::ReadDrop]);
         assert_eq!(m.stage(), Stage::Waiting);
         // The compositor's leave right after the drop does not close.
         assert_eq!(m.on(Input::DragLeave), []);
@@ -539,7 +541,7 @@ mod tests {
     }
 
     /// Two files; slice 3 runs `p3`, slice 1 is dim.
-    fn two_files(_: &[u8]) -> Menu {
+    fn two_files(_: Vec<u8>) -> Menu {
         let mut slices: [Option<Choice>; 8] = Default::default();
         slices[3] = Some(Choice {
             label: "Three".into(),
@@ -563,7 +565,7 @@ mod tests {
         let mut m = Machine::with_offer(two_files);
         feed(&mut m, [Input::Configured(W, H), enter(HUB)]);
         // The drop re-arms the deadline: stage 2 gets its own.
-        assert_eq!(m.on(Input::Drop), [Effect::ReadDrop, Effect::Arm(STAGE)]);
+        assert_eq!(m.on(Input::Drop), [Effect::Arm(STAGE), Effect::ReadDrop]);
         assert_eq!(m.on(Input::DropData(Ok(b"x".to_vec()))), [Effect::Draw]);
         let s = slice(3, 180.0);
         assert_eq!(m.on(Input::PointerAt(s.0, s.1)), [Effect::Hover(Some(3))]);
