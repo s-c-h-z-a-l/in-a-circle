@@ -488,11 +488,36 @@ fn parse_out(l: &Line) -> Option<Out> {
     })
 }
 
+/// How long `undo` waits for the history lock before giving up.
+const UNDO_LOCK_WAIT: Duration = Duration::from_secs(2);
+const UNDO_LOCK_STEP: Duration = Duration::from_millis(50);
+
+/// Takes the exclusive `flock` without ever blocking for good: retries
+/// every 50 ms until `wait` has passed, then `WouldBlock` "history is busy".
+fn lock_with_deadline(file: &File, wait: Duration) -> io::Result<()> {
+    let end = Instant::now() + wait;
+    loop {
+        // SAFETY: the fd is open for the duration of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EWOULDBLOCK) && e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+        if Instant::now() >= end {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "history is busy"));
+        }
+        std::thread::sleep(UNDO_LOCK_STEP);
+    }
+}
+
 /// Undoes a job: deletes the files it created, but only those still having
 /// the recorded identity (dev, inode, size, mtime, ctime); the rest are kept
 /// with the reason. Folders recorded as made for this job are removed if
 /// empty afterwards. The history is held under an exclusive `flock` for the
-/// whole undo, so two undos of one job cannot both run. A job that is
+/// whole undo (waiting at most 2 s for it), so two undos of one job cannot
+/// both run. A job that is
 /// still running is refused (`ResourceBusy`): it could place more files.
 ///
 /// The history is streamed: only lines that mention the job are parsed.
@@ -507,10 +532,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .read(true)
         .append(true)
         .open(history_path()?)?;
-    // SAFETY: the fd is open for the duration of the call.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    lock_with_deadline(&file, UNDO_LOCK_WAIT)?;
     let (mut known, mut undone) = (false, false);
     let (mut outs, mut dirs) = (Vec::new(), Vec::new());
     {
@@ -1017,6 +1039,32 @@ mod tests {
             drop(rec.finish(true));
             assert_eq!(undo(&job).unwrap().removed, std::slice::from_ref(&f));
             assert!(!f.exists());
+        });
+    }
+
+    #[test]
+    fn undo_gives_up_on_a_held_history_lock() {
+        let t = Tmp::new("undolock");
+        t.env(|| {
+            let f = t.0.join("out/x");
+            fs::write(&f, "x").unwrap();
+            let job = JobId("10-3".into());
+            let mut rec = Recorder::open(&job, "a");
+            rec.outcome(&done("/i", &f));
+            drop(rec.finish(true));
+            // A second open file description conflicts even in-process.
+            let holder = File::open(history_path().unwrap()).unwrap();
+            // SAFETY: the fd is open for the duration of the call.
+            assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
+            let start = Instant::now();
+            let e = undo(&job).unwrap_err();
+            let took = start.elapsed();
+            assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(e.to_string(), "history is busy");
+            assert!(took <= Duration::from_millis(2100), "took {took:?}");
+            assert!(f.exists(), "nothing is deleted without the lock");
+            drop(holder);
+            assert_eq!(undo(&job).unwrap().removed, std::slice::from_ref(&f));
         });
     }
 
