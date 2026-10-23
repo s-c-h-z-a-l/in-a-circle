@@ -42,6 +42,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
@@ -51,6 +52,7 @@ use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
 use notice::Notifier;
 
+mod measure;
 mod notice;
 mod surface;
 mod uri;
@@ -557,6 +559,8 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
 
 /// The wheel: lock, deadline, surface; then the chosen preset, if any.
 fn cmd_wheel() -> u8 {
+    let mut meter =
+        measuring().then(|| measure::Meter::new(cpu_us(libc::RUSAGE_SELF), Instant::now()));
     // The deadline first: it covers the lock too (a slow runtime dir).
     if let Err(e) = default_sigalrm() {
         eprintln!("inacircle: cannot arm the deadline: {e}");
@@ -575,9 +579,12 @@ fn cmd_wheel() -> u8 {
         }
     };
     let mut machine = wheel::Machine::new();
-    let chosen = surface::run(&mut machine);
+    let chosen = surface::run(&mut machine, &mut meter);
     // The surface is gone (its connection closed); free the hotkey.
     drop(lock);
+    if let Some(meter) = meter {
+        eprintln!("inacircle: {}", meter.report(measure::vm_hwm_kb()));
+    }
     // SAFETY: as above; 0 cancels the pending alarm.
     unsafe { libc::alarm(0) };
     match chosen {

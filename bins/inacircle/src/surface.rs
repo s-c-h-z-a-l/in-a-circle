@@ -30,6 +30,7 @@ use ui::damage::Screen;
 use ui::wheel::{BOX, Rect};
 use wire::{Arg::*, Conn, DISPLAY, Event, Iface, op};
 
+use crate::measure::Meter;
 use crate::uri::MAX_BYTES;
 use crate::wheel::{Effect, Input, Machine, STAGE, URI_LIST};
 
@@ -59,10 +60,15 @@ const SEAT_KEYBOARD: u32 = 2;
 pub type Chosen = Option<(Vec<PathBuf>, String)>;
 
 /// Shows the wheel and runs `m` until it closes or chooses.
-pub fn run(m: &mut Machine) -> io::Result<Chosen> {
+///
+/// With a `meter` (the measurement switch) the surface feeds it and hands it
+/// back, on every path.
+pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> io::Result<Chosen> {
     let mut s = Surface::connect()?;
-    s.setup(m)?;
-    s.event_loop(m)
+    s.meter = meter.take();
+    let r = s.setup(m).and_then(|()| s.event_loop(m));
+    *meter = s.meter.take();
+    r
 }
 
 fn other(msg: impl Into<String>) -> io::Error {
@@ -246,6 +252,8 @@ struct Surface {
     /// A render waits for a free buffer.
     pending: bool,
     inputs: Vec<Input>,
+    /// The measurement switch's meter; `None` unless it is on.
+    meter: Option<Meter>,
 }
 
 impl Surface {
@@ -275,6 +283,7 @@ impl Surface {
             screen: Screen::new(),
             pending: false,
             inputs: Vec::new(),
+            meter: None,
         }
     }
 
@@ -799,6 +808,8 @@ impl Surface {
             return Ok(());
         };
         self.pending = false;
+        let hover_repaint = !first && self.shown.is_some_and(|(g, _)| g == m.generation());
+        let started = (hover_repaint && self.meter.is_some()).then(Instant::now);
         let shm = self.shm.as_mut().expect("built in setup");
         let canvas = shm.canvas(i);
         let painted = match self.painted[i] {
@@ -843,6 +854,14 @@ impl Surface {
         c.req(id.surface, op::wl_surface::COMMIT, &[]);
         self.busy[i] = true;
         self.shown = want;
+        if let Some(meter) = &mut self.meter {
+            if let Some(t) = started {
+                meter.hover(t.elapsed());
+            }
+            if first {
+                meter.committed(crate::cpu_us(libc::RUSAGE_SELF), Instant::now());
+            }
+        }
         Ok(())
     }
 
@@ -875,6 +894,13 @@ impl Surface {
             let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
             // SAFETY: two valid pollfds (a negative fd is ignored).
             let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, ms) };
+            if r >= 0
+                && pfds.iter().all(|p| p.revents == 0)
+                && Instant::now() < self.deadline
+                && let Some(meter) = &mut self.meter
+            {
+                meter.idle_wakeup();
+            }
             if r < 0 {
                 let e = io::Error::last_os_error();
                 if e.kind() == io::ErrorKind::Interrupted {
