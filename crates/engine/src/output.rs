@@ -89,6 +89,11 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     }
     // mutants: equivalent — `^` as above; and `fd < 0` as `fd <= 0`: `p`
     // is still open and was the lowest free fd, so this open cannot get 0.
+    // mutants: equivalent — `^` as above; `|` as `&` on the last flag
+    // (`NOFOLLOW & NONBLOCK`, by precedence) drops both: O_DIRECTORY already
+    // makes a FIFO or file fail at once without blocking, and any symlink or
+    // directory swapped in is refused by the device/inode comparison below
+    // (a symlink to the very same inode is the directory we opened).
     // SAFETY: as for the O_PATH open.
     let fd = unsafe {
         libc::openat(
