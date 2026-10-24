@@ -19,7 +19,18 @@ use std::time::{Duration, Instant};
 
 const MANIFEST_MAGIC: &str = "inacircle-manifest";
 const CACHE_MAGIC: &str = "inacircle-catalog";
+/// One manifest's deadline: it prints a few lines and exits in milliseconds,
+/// so 2 s is far above a healthy run and short enough to cut a hang.
 const DEADLINE: Duration = Duration::from_secs(2);
+/// The whole refresh's budget, shared by all manifests it runs. Only new or
+/// changed binaries run a manifest, each in milliseconds, so a healthy
+/// refresh uses a tiny part of it; 10 s cuts in after five hanging binaries
+/// in a row (5 x `DEADLINE`) instead of N x 2 s. What is left unrun is
+/// transient (not cached) and retried at the next start. Not `alarm`: SIGALRM
+/// would kill only our process, and the manifest child, in its own process
+/// group, would be orphaned; each step's deadline instead ends in
+/// `kill_group`.
+const REFRESH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +103,7 @@ impl Catalog {
     }
 
     fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>) -> Catalog {
+        let refresh_end = Instant::now() + REFRESH_BUDGET;
         let bins = scan(dirs);
         let cached = cache.and_then(read_cache).unwrap_or_default();
         let hit = cached.iter().map(|e| &e.bin).eq(bins.iter());
@@ -107,7 +119,7 @@ impl Catalog {
                     if let Some(i) = cached.iter().position(|e| e.bin == bin) {
                         return Some(cached.swap_remove(i));
                     }
-                    let lines = run_manifest(&bin.path, bin.builtin)?;
+                    let lines = run_manifest(&bin.path, bin.builtin, refresh_end)?;
                     Some(Entry { bin, lines })
                 })
                 .collect();
@@ -292,8 +304,8 @@ enum Fail {
 /// Runs `<bin> --manifest` and returns its valid `action` lines. A broken
 /// binary yields no lines (message on stderr); `None` means a transient
 /// failure that must not be cached.
-fn run_manifest(bin: &Path, builtin: bool) -> Option<Vec<Line>> {
-    match manifest_lines(bin, builtin) {
+fn run_manifest(bin: &Path, builtin: bool, refresh_end: Instant) -> Option<Vec<Line>> {
+    match manifest_lines(bin, builtin, refresh_end) {
         Ok(lines) => Some(lines),
         Err(Fail::Deterministic(why)) => {
             eprintln!("inacircle: {}: {why}; skipped", bin.display());
@@ -306,8 +318,16 @@ fn run_manifest(bin: &Path, builtin: bool) -> Option<Vec<Line>> {
     }
 }
 
-fn manifest_lines(bin: &Path, builtin: bool) -> Result<Vec<Line>, Fail> {
-    let out = capture(bin, builtin, Instant::now() + DEADLINE)?;
+/// The deadline of one manifest: `DEADLINE`, but not past the refresh's end;
+/// `None` when the refresh has no time left.
+fn step_deadline(now: Instant, refresh_end: Instant) -> Option<Instant> {
+    (now < refresh_end).then(|| (now + DEADLINE).min(refresh_end))
+}
+
+fn manifest_lines(bin: &Path, builtin: bool, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
+    let deadline = step_deadline(Instant::now(), refresh_end)
+        .ok_or_else(|| Fail::Transient("refresh budget spent".to_owned()))?;
+    let out = capture(bin, builtin, deadline)?;
     let bad = |why: String| Fail::Deterministic(why);
     let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
     match manifest::parse(&text, MANIFEST_MAGIC) {
@@ -816,6 +836,61 @@ mod tests {
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert_eq!(c.actions.len(), 1);
         assert_eq!(c.actions[0].id, "x.a");
+    }
+
+    #[test]
+    fn step_deadline_takes_the_smaller() {
+        let now = Instant::now();
+        assert_eq!(
+            step_deadline(now, now + Duration::from_secs(9)),
+            Some(now + DEADLINE)
+        );
+        let end = now + Duration::from_secs(1);
+        assert_eq!(step_deadline(now, end), Some(end));
+        assert_eq!(step_deadline(now, now), None);
+        assert_eq!(step_deadline(now + Duration::from_secs(1), now), None);
+    }
+
+    /// Pids whose command line mentions `marker` (a unique fixture path).
+    fn procs_with(marker: &str) -> Vec<u32> {
+        let mut found = Vec::new();
+        for e in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if let Ok(cmd) = std::fs::read(e.path().join("cmdline"))
+                && String::from_utf8_lossy(&cmd).contains(marker)
+            {
+                found.push(pid);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn refresh_budget_leaves_no_child() {
+        let f = Fix::new("budget");
+        let d = f.dir("a");
+        // Six manifests of 1.9 s each: every one fits its own 2 s, together
+        // they exceed the 10 s budget, so the last is cut while running.
+        for (i, n) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+            let body = manifest_body("sleep 1.9", &[act(&format!("x.{n}"), "L")]);
+            script(&d.join(format!("s{i}")), &body);
+        }
+        let dirs = [(d.clone(), true)];
+        let t = Instant::now();
+        let c = Catalog::load_from(&dirs, &f.cache());
+        assert!(t.elapsed() < Duration::from_secs(11), "{:?}", t.elapsed());
+        for n in ["a", "b", "c", "d", "e"] {
+            assert!(c.get(&format!("x.{n}")).is_some(), "x.{n} missing");
+        }
+        assert!(c.get("x.f").is_none(), "the cut one is in the catalog");
+        // The scripts run by path, so a surviving shell shows the fixture dir.
+        let left = procs_with(&d.to_string_lossy());
+        assert!(left.is_empty(), "children left alive: {left:?}");
+        // Not cached: the next load retries it (and now it has its 2 s).
+        let c = Catalog::load_from(&dirs, &f.cache());
+        assert!(c.get("x.f").is_some(), "the cut one was cached");
     }
 
     #[test]
