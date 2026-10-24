@@ -1,0 +1,5 @@
+inacircle-history 0
+out	job=10-1	-n=/i	path=/o/a	size=1	min/a	si-history =1	mtime=	ctime=3	dev=4	ino=5
+dir15-0-o
+y? 0
+out	job=10-1	i/i	path=/o/a	size=1	mtime=2	ctime=3	dev=0758501	dev=57	ino=16328648342169

@@ -1,0 +1,9 @@
+![foo *bar*][foo]
+
+[foo *bar*]:
+
+[foo *bar*]: train.jpg "tra*]
+
+[foo *bar*]:
+
+[foo *bar*]: train.jpg "in & tracks"

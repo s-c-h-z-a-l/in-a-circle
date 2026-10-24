@@ -1,0 +1,12 @@
+inacircle-history 0
+out	joth=/ozen=/o
+skip	job=	job=10-14	in=/o
+skip	job=10-1	reson=exists
+fail	
+skip	=10-1	in=timejob=10-14	in=/o
+skip	job=10-1	iioom
+j=/o
+skip	job=10/o
+skip	job=10-1	in=/i20-1ev==4	in=/o
+skip	job=10-14	in=/o
+skip	job=10-0

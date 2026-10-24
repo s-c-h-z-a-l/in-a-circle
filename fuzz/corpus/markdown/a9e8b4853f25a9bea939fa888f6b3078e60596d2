@@ -1,0 +1,93 @@
+bar]:][bar]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar
+[foo]: /url1
+[bar]: /[foo][bar]
+
+[foo]: /url1
+[bar]:][bar]
+
+[foo]: /qrl1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foar]:][bar]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: r]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url1
+[bar]: /ur[fooo][bar]
+
+[foo]: /url1
+[bar]: /[foo][bar]
+
+[foo]: /url1
+[bar]:][bar]
+
+[foo]: /qrl1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foar]:][bar]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url1
+[bar]: /ur[fooo][bar]
+
+[foo]: /url1
+[bar]: /[foo][bar]
+
+[foo]: /url1
+[bar]:][bar]
+
+[foo]: /qrl1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url`1
+[bo]: /url[bar]
+
+[foo]: /url`1
+[ba/url[bar]
+
+[foo]: /url1
+[bar]: /ur[fooo][bar]
+
+[foo]: /url1
+[bar]: /[foo][bar]
+
+[foo]: /url1
+[bar]:][bar]
+
+[foo]: /qrl1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url`1
+[bo]: /url[bar]
+
+[foo]: /url`1
+[bar]: /url<!

@@ -1,0 +1,26 @@
+[foo]
+
+[foo "f&o](foolink](fo`\(and\\*empha\(bauoo]6
+
+[foo]
+
+[foo]ouml; "f&ouCoo]6
+
+[foo]
+
+[foo]: /f&o "f
+
+[ffoo]
+
+[foo]: /nbspml;&ouml; "f&ouoo]6
+
+[foo]
+
+[foo]: /f&oumb;&ouml"f&ouo: <b    [e
+f]
+
+a]c
+; &#XD03c&'# ouo[e
+f]
+
+[foo]: /nbspml;&ouml; "foo]:; ml;"

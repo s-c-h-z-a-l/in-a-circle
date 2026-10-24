@@ -1,0 +1,5 @@
+inacircle-history 0
+out	job=10-1		dev=1	path=/o
+skip	job=09-1	in=i/2	(ut	job=10-1o
+skip	job=09-1	in=i/2job=10-1isteason=e=exists
+

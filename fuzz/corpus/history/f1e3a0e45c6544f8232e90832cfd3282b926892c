@@ -1,0 +1,8 @@
+inacircle-history 0
+out	job=10-1	in=/i	pjobob-1	path=/o
+skip	job=09-1	in=i/2	ut	job=10-1	in=/iah	tptimepath=/o
+skip	job=09-1	in=i/2	ut	job=10-1	in=/i	path=/o
+skip	job=09-1		undo	job=10-1	tin=ex1-1	path=/o
+skip	job=09-1		job=10-1	timq	zrtory 0
+
+ou84

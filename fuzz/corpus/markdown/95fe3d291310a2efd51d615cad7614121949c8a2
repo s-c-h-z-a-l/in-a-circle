@@ -1,0 +1,11 @@
+![far*]:
+
+[foo *bar*]: train.jpg "trr*][foo]
+
+[foo *bar*]:
+
+[foo *bar*]: train.jpg "train &t racks *bar*]
+
+[foo *bar*]:
+
+[foo *bar*]: train.jpg "train & tracks"

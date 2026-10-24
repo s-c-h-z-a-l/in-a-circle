@@ -1,0 +1,4 @@
+inacircle-history 0
+out	job=1792864834-684071-b2654707	in=/home/u/docs/a.txt	path=/home/u/docs/a.md	size=3	mtime=17928648320748501	dev=57	ino=1634939
+out	job=1792864834-684071-b2654707	in=/home/utab\tname.txt	path=tab\tname.md	size=4	mtime=1792864834220605741	ctime=1792864834220748501	dev=57	ino=1634941
+job	i-txt	status=done	sandbox=yes

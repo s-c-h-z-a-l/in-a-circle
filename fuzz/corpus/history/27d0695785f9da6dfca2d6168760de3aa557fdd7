@@ -1,0 +1,6 @@
+inacircle-history 0
+out	job=10-1	in=/i	path0
+out	job=10-1	in=/i/	path=/a	size=2	mtime=2	ctime=-3th=/o/a	size==2	=-3	dev=4	ino=5
+dirh0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-3th=/o/a	size=2	mtime=-3	dev=4	ino=5
+	ksocs/

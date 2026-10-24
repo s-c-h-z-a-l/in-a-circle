@@ -1,7 +1,0 @@
-inacircle-history 0
-out	job=10-1	in=/i	path=/o/a	size=1	mtime=2	ctime=3	dev=4	ino=5
-dir	job=10-1	path=/o
-skip	job=10-1	in=/i2	reason=exists
-fail	job=10-1	in=/i3	reason=boom
-job	id=10-1	time=5	action=a	status=partial	sandbox=no
-undo	job=10-1	time=6	removed=1	kept=0

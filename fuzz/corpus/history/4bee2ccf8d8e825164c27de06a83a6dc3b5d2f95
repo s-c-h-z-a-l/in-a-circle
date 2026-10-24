@@ -1,0 +1,4 @@
+inacircle-history 0
+out	job=10-1	il=/i	pno
+updo	job=10-1	timq	zz
+undo	jem

@@ -1,6 +1,0 @@
-inacircle-catalog 0
-bin	path=/usr/lib/inacircle/inacircle-testaction	mtime=1792864713987578007	size=5905936	builtin=yes
-action	test.script	family=test	in=application/x-inacircle-test	out=application/octet-stream	ext=bin	label=Test	group=test	cost=10	lossy=no	batch=yes
-bin	path=/usr/lib/inacircle/inacircle-text	mtime=1792864713989578001	size=8337720	builtin=yes
-action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=no	batch=yes
-action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes

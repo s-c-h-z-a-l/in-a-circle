@@ -1,0 +1,15 @@
+[
+foo
+]: l
+$a[
+foo
+]: /url[
+foo
+]:$a: /url
+$a[
+foo
+]: /url[
+foo
+]--
+ar
+r

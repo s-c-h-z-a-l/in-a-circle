@@ -1,0 +1,10 @@
+[[bar]
+
+[foo]:
+[bo][bar]
+
+[foo]: /url1
+[]
+
+[foo]:
+2

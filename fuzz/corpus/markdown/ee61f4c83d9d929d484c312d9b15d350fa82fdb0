@@ -1,0 +1,15 @@
+[Foo*bar\]]:my_(url) 'title (with parens)'
+- a
+  - b
+  - b
+     - c
+
+- d
+  - e
+  -    - c
+
+- 
+[Foo*bar\]]d
+  - e
+ 
+- f

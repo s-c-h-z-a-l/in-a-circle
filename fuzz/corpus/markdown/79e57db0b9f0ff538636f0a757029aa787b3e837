@@ -1,0 +1,5 @@
+\*not emph]: /uba[foo]
+
+[foo]: /f&ouml;&ouml; "f&ouml;&ouml;"
+t a h[foo]+: /f
+#; not anoo [ba

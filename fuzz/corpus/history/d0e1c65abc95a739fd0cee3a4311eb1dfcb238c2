@@ -1,0 +1,4 @@
+inacircle-history 0
+out	job=10-1	i=	o=5 0
+out	job=10-1	in=/i	pjob=0-0athfail	j1==1	kept=tory 0
+out	job=10-1	injo5

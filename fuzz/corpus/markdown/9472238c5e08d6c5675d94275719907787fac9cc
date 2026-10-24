@@ -1,0 +1,25 @@
+bar]:][bar]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url1
+[bar]: oo][bar]
+
+[foo]: /url1
+[bar]: /[foo][bar]
+
+[foo]: /url2
+[bar]:][bar]
+
+[foo]: /url1
+[bar]: /[foo]rl2
+[bar]:][bar]
+
+[foo]: /url[bar]
+
+[foo]: /url1
+[bar]: /url2

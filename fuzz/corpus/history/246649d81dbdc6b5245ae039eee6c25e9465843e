@@ -1,0 +1,4 @@
+inacircle-history 0
+ut	in2sts
+fail	job=10-1	in
+fail	job=10-1	 1

@@ -1,0 +1,17 @@
+inacircle-history 0
+out	job=10-1	in/o/a	size=1	mtime=0-1	in=/i3	reaonsb	i-1	path=/o
+sry 0
+out	job=10-1	abagen=exists
+fail	job=10-1	1	in=/i2	reason=exists
+fail	job=10-1	/ibagen=exists
+fail	job=10-1	1	in=/i2	reason=exists
+fail	job=10-1	/2	ctime=3	lev=4	ino=5
+dirIjob=10-1	patexistin=/om
+jskip	job/i2	rxis
+fail	job=10-1	ail	job=10-1	in==exists
+fail	job=10-1	in=/i3	reason=boom
+jobirIjob=10-1	patexistin=/om
+jskip	job/i2	rxis
+fail	job=10-1	ail	job=10-1	in==exists
+fail	job=10-1	in=/i3	reason=boom
+job	i-1~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ept=

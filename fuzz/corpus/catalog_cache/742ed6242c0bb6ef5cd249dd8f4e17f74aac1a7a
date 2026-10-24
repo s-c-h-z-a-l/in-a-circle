@@ -1,0 +1,2 @@
+inacircle-catalog 0
+bin	path=/usr/lib/family=test	in=application/x-inacircle-tesou	tt=application/octet-stream	ext=bin	label=Test	group=test	cost=10	lossy=no	batch=yamily=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	gsoup=document	cost=11	d-to-txt	famin/x-inacircle-tesou	tt=application/octet-stream	ext=bin	label=Test	group=test	cost=10	lossy=no	batch=yamily=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	gsoup=document	label=Plain text	group=docu-ment	cost=10	lossy=yes	batch=yes

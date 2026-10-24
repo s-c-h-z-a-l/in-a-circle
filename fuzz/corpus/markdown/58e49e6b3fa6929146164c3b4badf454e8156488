@@ -1,0 +1,45 @@
+a
+   -a
+~~
+ - foo
+   
+~~
+ - foo
+</pr   bar
+	 - - f `~
+-o bar
+	 - baz
+baz
+bar
+	 - - f `~
+-o bar
+	 - baz- foo
+</pr   bar
+	 - - f `~
+baz
+bar
+	 - - f `~
+-o bar
+	 - baz- foo
+</pr   bar
+	 - - f `~
+-o bar
+	 - baz
+baz
+bar
+	 - - f,ra -o bar
+	 - baz
+baz
+bar
+	 - - f<r - f `~
+baz
+bar
+	 - - f `~
+-o bar
+	 - baz- foo
+</pr   bar
+	 - - f `~
+-o bara -o bar
+	 - baz
+
+baz
