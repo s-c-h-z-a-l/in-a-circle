@@ -26,10 +26,11 @@ const DEADLINE: Duration = Duration::from_secs(2);
 /// changed binaries run a manifest, each in milliseconds, so a healthy
 /// refresh uses a tiny part of it; 10 s cuts in after five hanging binaries
 /// in a row (5 x `DEADLINE`) instead of N x 2 s. What is left unrun is
-/// transient (not cached) and retried at the next start. Not `alarm`: SIGALRM
-/// would kill only our process, and the manifest child, in its own process
-/// group, would be orphaned; each step's deadline instead ends in
-/// `kill_group`.
+/// transient: a binary with an old cache entry keeps it (so its family stays
+/// on the wheel), one without stays out, and either is retried at the next
+/// start. Not `alarm`: SIGALRM would kill only our process, and the manifest
+/// child, in its own process group, would be orphaned; each step's deadline
+/// instead ends in `kill_group`.
 const REFRESH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: usize = 64 * 1024;
 
@@ -110,8 +111,12 @@ impl Catalog {
         let entries: Vec<Entry> = if hit {
             cached
         } else {
-            // Rerun only binaries that are new or changed; a transient
-            // failure leaves the binary out, so the next start retries it.
+            // Rerun only binaries that are new or changed. When the rerun
+            // fails transiently, the binary's old entry (same path, old
+            // mtime and size) stays, so its family stays on the wheel,
+            // which reads the cache alone, until a rerun succeeds; the old
+            // mtime/size differ from the file on disk, so the next start
+            // reruns it. A binary with no old entry stays out.
             let mut cached = cached;
             let entries: Vec<Entry> = bins
                 .into_iter()
@@ -119,8 +124,13 @@ impl Catalog {
                     if let Some(i) = cached.iter().position(|e| e.bin == bin) {
                         return Some(cached.swap_remove(i));
                     }
-                    let lines = run_manifest(&bin.path, bin.builtin, refresh_end)?;
-                    Some(Entry { bin, lines })
+                    match run_manifest(&bin.path, bin.builtin, refresh_end) {
+                        Some(lines) => Some(Entry { bin, lines }),
+                        None => cached
+                            .iter()
+                            .position(|e| e.bin.path == bin.path)
+                            .map(|i| cached.swap_remove(i)),
+                    }
                 })
                 .collect();
             if let Some(cache) = cache {
@@ -303,7 +313,8 @@ enum Fail {
 
 /// Runs `<bin> --manifest` and returns its valid `action` lines. A broken
 /// binary yields no lines (message on stderr); `None` means a transient
-/// failure that must not be cached.
+/// failure: nothing new is cached, and the caller keeps the binary's old
+/// entry, if any.
 fn run_manifest(bin: &Path, builtin: bool, refresh_end: Instant) -> Option<Vec<Line>> {
     match manifest_lines(bin, builtin, refresh_end) {
         Ok(lines) => Some(lines),
@@ -1030,6 +1041,33 @@ mod tests {
             "the deterministic failure was rerun"
         );
         assert!(c.get("x.a").is_some());
+    }
+
+    #[test]
+    fn transient_rerun_failure_keeps_the_old_entry() {
+        let f = Fix::new("keep-old");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        manifest_script(&d.join("tool"), &[act("x.a", "old")]);
+        manifest_script(&d.join("other"), &[act("y.a", "Y")]);
+        let c = Catalog::load_from(&dirs, &f.cache());
+        assert_eq!(c.get("x.a").unwrap().label, "old");
+        // The binary changes and its manifest now fails transiently (exit 1
+        // is a crash, not a broken manifest). A new binary that fails the
+        // same way has no old entry and stays out.
+        script(&d.join("tool"), "exit 1");
+        script(&d.join("fresh"), "exit 1");
+        let c = Catalog::load_from(&dirs, &f.cache());
+        assert_eq!(c.get("x.a").map(|a| a.label.as_str()), Some("old"));
+        assert!(c.get("y.a").is_some());
+        // The wheel reads the cache alone and still offers the family.
+        let w = Catalog::load_cached_from(&dirs, &f.cache()).expect("a cache");
+        assert_eq!(w.get("x.a").map(|a| a.label.as_str()), Some("old"));
+        assert_eq!(w.actions.len(), 2);
+        // The old entry kept its old mtime/size, so the next start reruns it.
+        manifest_script(&d.join("tool"), &[act("x.a", "new")]);
+        let c = Catalog::load_from(&dirs, &f.cache());
+        assert_eq!(c.get("x.a").unwrap().label, "new");
     }
 
     #[test]
