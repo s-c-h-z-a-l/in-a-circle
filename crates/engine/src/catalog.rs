@@ -871,26 +871,42 @@ mod tests {
     fn refresh_budget_leaves_no_child() {
         let f = Fix::new("budget");
         let d = f.dir("a");
-        // Six manifests of 1.9 s each: every one fits its own 2 s, together
-        // they exceed the 10 s budget, so the last is cut while running.
-        for (i, n) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
-            let body = manifest_body("sleep 1.9", &[act(&format!("x.{n}"), "L")]);
+        // Eight manifests of 1.5 s each: every one fits its own 2 s with
+        // margin, six fit the 10 s budget, the seventh is cut while running
+        // and the eighth finds the budget spent.
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        // A sleep duration unique to this process (1.50<pid> s), so the
+        // sleep itself, not just its shell, can be found in /proc.
+        let sleep_marker = format!("1.50{}", std::process::id());
+        for (i, n) in names.iter().enumerate() {
+            let pre = format!("sleep {sleep_marker}");
+            let body = manifest_body(&pre, &[act(&format!("x.{n}"), "L")]);
             script(&d.join(format!("s{i}")), &body);
         }
         let dirs = [(d.clone(), true)];
         let t = Instant::now();
         let c = Catalog::load_from(&dirs, &f.cache());
         assert!(t.elapsed() < Duration::from_secs(11), "{:?}", t.elapsed());
-        for n in ["a", "b", "c", "d", "e"] {
+        for n in &names[..6] {
             assert!(c.get(&format!("x.{n}")).is_some(), "x.{n} missing");
         }
-        assert!(c.get("x.f").is_none(), "the cut one is in the catalog");
-        // The scripts run by path, so a surviving shell shows the fixture dir.
-        let left = procs_with(&d.to_string_lossy());
+        for n in &names[6..] {
+            assert!(
+                c.get(&format!("x.{n}")).is_none(),
+                "x.{n} is in the catalog"
+            );
+        }
+        // The sleep, not just the shell, must be gone: the shell's command
+        // line holds the fixture dir (scripts run by path), the sleep's its
+        // unique duration.
+        let mut left = procs_with(&d.to_string_lossy());
+        left.extend(procs_with(&sleep_marker));
         assert!(left.is_empty(), "children left alive: {left:?}");
-        // Not cached: the next load retries it (and now it has its 2 s).
+        // Not cached: the next load retries them (each with its own 2 s).
         let c = Catalog::load_from(&dirs, &f.cache());
-        assert!(c.get("x.f").is_some(), "the cut one was cached");
+        for n in &names[6..] {
+            assert!(c.get(&format!("x.{n}")).is_some(), "x.{n} was cached");
+        }
     }
 
     #[test]
