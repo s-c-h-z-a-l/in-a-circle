@@ -854,6 +854,12 @@ fn unreported_reason(violation: Option<&str>, end: End, stderr_tail: &[u8]) -> S
     }
     match end {
         End::Signal(libc::SIGXFSZ) => "output too large".to_owned(),
+        // A Rust action whose allocation fails under the RLIMIT_DATA net
+        // prints this line to stderr and aborts.
+        End::Signal(libc::SIGABRT) if has_alloc_failure(stderr_tail) => {
+            let mib = sandbox::data_cap(sandbox::total_ram()) >> 20;
+            format!("out of memory (limit {mib} MiB)")
+        }
         End::Signal(n) => format!("killed by signal {n}"),
         End::Exit(action::EXIT_USAGE) => match last_line(stderr_tail) {
             l if l.is_empty() => "action invocation error".to_owned(),
@@ -875,6 +881,13 @@ fn offender_of(line: &str, inputs: &[PathBuf]) -> Option<usize> {
     }
     let first = l.bare_at(0)?;
     inputs.iter().position(|p| p.to_str() == Some(first))
+}
+
+/// Whether `tail` holds Rust's allocation-failure line
+/// (`memory allocation of N bytes failed`).
+fn has_alloc_failure(tail: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b"memory allocation of ";
+    tail.windows(NEEDLE.len()).any(|w| w == NEEDLE)
 }
 
 /// The last non-empty line of `tail`, trimmed.
@@ -1712,6 +1725,20 @@ mod tests {
         assert_eq!(
             unreported_reason(None, End::Signal(libc::SIGSEGV), tail),
             format!("killed by signal {}", libc::SIGSEGV)
+        );
+        let mib = sandbox::data_cap(sandbox::total_ram()) >> 20;
+        assert_eq!(
+            unreported_reason(
+                None,
+                End::Signal(libc::SIGABRT),
+                b"memory allocation of 99 bytes failed\n"
+            ),
+            format!("out of memory (limit {mib} MiB)")
+        );
+        // An abort for any other reason stays a plain signal.
+        assert_eq!(
+            unreported_reason(None, End::Signal(libc::SIGABRT), tail),
+            format!("killed by signal {}", libc::SIGABRT)
         );
         assert_eq!(
             unreported_reason(None, End::Exit(2), tail),

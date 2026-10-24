@@ -769,6 +769,55 @@ fn fsize_limit_reports_output_too_large_or_fail() {
     );
 }
 
+// ---- the RLIMIT_DATA memory net ----
+
+const MIB: u64 = 1 << 20;
+
+/// This machine's `RLIMIT_DATA` for an action.
+fn data_cap() -> u64 {
+    engine::sandbox::data_cap(engine::sandbox::total_ram())
+}
+
+#[test]
+fn alloc_over_cap_fails() {
+    let e = Env::new("alloc-over");
+    // 256 MiB past the cap: the allocation must fail, the machine must not
+    // notice (this test itself still runs).
+    let t = e.test_input("t.test", &[&format!("alloc={}", data_cap() + 256 * MIB)]);
+    let o = run_test_action(&e, &[&t]);
+    assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
+    let f = o.pairs("fail");
+    assert_eq!(f.len(), 1, "{}", o.stdout);
+    assert_eq!(
+        f[0].1,
+        format!("out of memory (limit {} MiB)", data_cap() / MIB)
+    );
+    assert!(o.pairs("done").is_empty());
+}
+
+#[test]
+fn alloc_under_cap_passes() {
+    let e = Env::new("alloc-under");
+    let t = e.test_input("t.test", &[&format!("alloc={}", 64 * MIB), "events=done"]);
+    let o = run_test_action(&e, &[&t]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.pairs("done").len(), 1, "{}", o.stdout);
+}
+
+/// glibc reserves a 64 MB arena per thread virtually; `RLIMIT_DATA` must
+/// not count that (`RLIMIT_AS` would).
+#[test]
+fn threaded_small_alloc_passes() {
+    let e = Env::new("alloc-threads");
+    let t = e.test_input(
+        "t.test",
+        &["threads=8", &format!("alloc={}", 64 * MIB), "events=done"],
+    );
+    let o = run_test_action(&e, &[&t]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.pairs("done").len(), 1, "{}", o.stdout);
+}
+
 #[test]
 fn killed_by_signal_fails_inputs() {
     let e = Env::new("killed");

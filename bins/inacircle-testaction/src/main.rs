@@ -28,6 +28,12 @@
 //! - `bad_done=<string>`: a raw `done` event with that output path, no file
 //!   written (for contract violation tests).
 //! - `kill_self=<signal>`: raise that signal (1-64).
+//! - `threads=<n>`: the next `alloc` is split equally across `n` threads
+//!   (default 1; applies to the one `alloc` that follows).
+//! - `alloc=<bytes>`: allocate that many bytes and write every page, so the
+//!   memory is really committed. If the allocation fails (the sandbox's
+//!   `RLIMIT_DATA`), Rust prints `memory allocation of N bytes failed` and
+//!   aborts: the expected over-cap behavior.
 //! - `connect=<ipv4>:<port>`: a TCP connect (2 s timeout); `warn … connected`
 //!   on success, `fail … <error with errno>` otherwise.
 
@@ -63,6 +69,8 @@ enum Step {
     BadDone(PathBuf),
     KillSelf(libc::c_int),
     Connect(SocketAddrV4),
+    Threads(usize),
+    Alloc(u64),
 }
 
 fn parse_step(key: &str, value: &str) -> Result<Step, String> {
@@ -112,6 +120,14 @@ fn parse_step(key: &str, value: &str) -> Result<Step, String> {
             .parse()
             .map(Step::Connect)
             .map_err(|_| num("address (ipv4:port)")),
+        "threads" => match value.parse() {
+            Ok(n @ 1..=256) => Ok(Step::Threads(n)),
+            _ => Err(num("thread count (1-256)")),
+        },
+        "alloc" => value
+            .parse()
+            .map(Step::Alloc)
+            .map_err(|_| num("byte count")),
         _ => Err(format!("unknown option `{key}`")),
     }
 }
@@ -142,6 +158,30 @@ fn write_big(path: &Path, size: u64) -> io::Result<()> {
     f.flush()
 }
 
+/// Page size used to touch every page of an allocation.
+const PAGE: usize = 4096;
+
+/// Allocates `total` bytes split equally across `threads` threads, each
+/// allocating one buffer and writing every page, so the kernel really
+/// commits it; all shares are alive at once. A failed allocation aborts
+/// the process (Rust's default), which is what the over-cap test expects.
+fn alloc_threads(total: u64, threads: usize) {
+    let share = (total / threads as u64) as usize;
+    let all_alive = std::sync::Barrier::new(threads);
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                let mut v = vec![0u8; share];
+                for i in (0..v.len()).step_by(PAGE) {
+                    v[i] = 1;
+                }
+                std::hint::black_box(&v);
+                all_alive.wait();
+            });
+        }
+    });
+}
+
 /// Option lines from the input's content (see the module doc); none when
 /// the file cannot be read or lacks the magic line.
 fn input_opts(input: &Path) -> Vec<String> {
@@ -162,6 +202,7 @@ fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
     let input = &inv.inputs[0];
     let mut ev = Events::new(io::stdout());
     let mut code = 0u8;
+    let mut threads = 1usize;
     for step in steps {
         match step {
             Step::Events(list) => {
@@ -221,6 +262,11 @@ fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
                 let _ = io::stdout().flush();
                 // SAFETY: raise only takes a signal number (validated 1-64).
                 unsafe { libc::raise(sig) };
+            }
+            Step::Threads(n) => threads = n,
+            Step::Alloc(bytes) => {
+                alloc_threads(bytes, threads);
+                threads = 1;
             }
             Step::Connect(addr) => {
                 match TcpStream::connect_timeout(&addr.into(), Duration::from_secs(2)) {

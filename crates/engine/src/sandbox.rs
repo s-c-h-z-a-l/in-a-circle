@@ -33,7 +33,8 @@
 //!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
 //!   opened before the sandbox reaches the action.
-//! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`.
+//! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`, and
+//!   the memory net `RLIMIT_DATA` (see [`data_cap`]), with or without Landlock.
 //!
 //! # What is not covered
 //!
@@ -52,8 +53,10 @@
 //!   fill a disk.
 //! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
 //!   installs none (sockets and metadata are then not restricted).
-//! - No `RLIMIT_NPROC` or memory limit: an action can fork-bomb or exhaust
-//!   RAM until it is cancelled.
+//! - No `RLIMIT_NPROC`: an action can fork-bomb until it is cancelled.
+//! - `RLIMIT_DATA` is per process, not per process tree: a forking action
+//!   gets the cap once per child. File mmaps and shared memory are not
+//!   counted.
 //! - Keyring syscalls (`keyctl`, `add_key`, `request_key`) are allowed.
 
 use std::fs::OpenOptions;
@@ -152,6 +155,8 @@ pub struct Policy<'a> {
 pub struct Limits {
     /// `RLIMIT_FSIZE` in bytes.
     pub fsize: u64,
+    /// `RLIMIT_DATA` in bytes (soft = hard), see [`data_cap`].
+    pub data: u64,
 }
 
 /// The highest Landlock ABI the running kernel supports, or `None` when
@@ -339,12 +344,73 @@ pub fn build(policy: &Policy) -> io::Result<Option<Ruleset>> {
 }
 
 /// `RLIMIT_FSIZE`: 16 x the total input size, at least 256 MiB, at most 16 GiB.
+/// `RLIMIT_DATA`: [`data_cap`] of this machine's RAM (read once per call).
 pub fn limits_for(inputs_total: u64) -> Limits {
     const MIN: u64 = 256 << 20;
     const MAX: u64 = 16 << 30;
     Limits {
         fsize: inputs_total.saturating_mul(16).clamp(MIN, MAX),
+        data: data_cap(total_ram()),
     }
+}
+
+/// The lower bound of [`data_cap`]: 1 GiB. The Phase 6 pixel limit is
+/// 180 MP (Pillow rejects above 179 MP as a decompression bomb); 180 MP
+/// as RGBA8 is 720 MB, and the simplest operation (a format change) must
+/// fit even on the smallest machine we support (8 GB RAM, where 1/8 is
+/// exactly 1 GiB).
+const DATA_CAP_MIN: u64 = 1 << 30;
+
+/// The upper bound of [`data_cap`]: 4 GiB. A need beyond it signals a bug
+/// in our own per-family limits, not a legitimate use (the largest
+/// legitimate user, a 300 MP stitched panorama as RGBA8, is 1.2 GB; even
+/// with 16-bit channels and a 2x operation factor it stays near 4 GiB),
+/// and the net must not let a bug grow to most of a big machine's RAM.
+const DATA_CAP_MAX: u64 = 4 << 30;
+
+/// The divisor of [`data_cap`]: an action gets 1/8 of the machine's RAM.
+/// Spawn-per-use means several actions can run at once, so one must not be
+/// able to take a large share of the RAM. 1/8 is 1 GiB on 8 GB (12.5%),
+/// 2 GiB on 16 GB and reaches the 4 GiB bound at 32 GB.
+const DATA_CAP_RAM_DIVISOR: u64 = 8;
+
+/// The `RLIMIT_DATA` of a sandboxed action on a machine with `total_ram`
+/// bytes of RAM: `total_ram / 8`, clamped to 1 GiB ..= 4 GiB.
+///
+/// This is the last net against a faulty or missing per-family limit
+/// (Phase 6 and 7 set those), not the protection itself.
+///
+/// - Why `DATA`, not `AS`: `RLIMIT_AS` caps the virtual address space, and
+///   glibc reserves a 64 MB malloc arena per thread virtually, so a
+///   multi-threaded action would fail long before it uses real memory.
+///   `RLIMIT_DATA` (Linux 4.7 and later) counts the heap and private
+///   writable anonymous mappings: what we want to bound. File mmaps and
+///   the code of shared libraries do not count.
+/// - Why a fixed, machine-dependent cap and not one derived from the
+///   input: memory use does not follow the input size. A 3 MB JPEG is 48
+///   MB decoded; a 50 KB PNG can be gigabytes of pixels.
+/// - Why 1/8 and 1 GiB to 4 GiB: see the constants. A user with a 12 MP
+///   phone photo needs 48 MB, a 61 MP DSLR frame 244 MB (488 MB at 16
+///   bit), a 139 MP 1200 dpi A4 scan 557 MB (1.1 GB at 16 bit), a 200 MP
+///   phone 800 MB. On 8 GB, a 180 MP progressive JPEG (about 1.26 GB)
+///   does not fit and fails cleanly; from 16 GB it does.
+///
+/// Over the cap an allocation fails (`ENOMEM`), and the action fails with a
+/// clear message; the machine stays up.
+pub fn data_cap(total_ram: u64) -> u64 {
+    (total_ram / DATA_CAP_RAM_DIVISOR).clamp(DATA_CAP_MIN, DATA_CAP_MAX)
+}
+
+/// The machine's RAM in bytes (`sysinfo(2)`: `totalram * mem_unit`), or 0
+/// when the call fails (then [`data_cap`] gives its lower bound).
+pub fn total_ram() -> u64 {
+    // SAFETY: an all-zero sysinfo is a valid value.
+    let mut si: libc::sysinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `si` is a writable sysinfo.
+    if unsafe { libc::sysinfo(&mut si) } != 0 {
+        return 0;
+    }
+    (si.totalram as u64).saturating_mul(u64::from(si.mem_unit))
 }
 
 /// The seccomp filter: deny non-unix sockets, metadata writes and io_uring.
@@ -512,6 +578,10 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
         rlim_cur: limits.fsize,
         rlim_max: limits.fsize,
     };
+    let data = libc::rlimit {
+        rlim_cur: limits.data,
+        rlim_max: limits.data,
+    };
     let core = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -523,6 +593,7 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
     unsafe {
         check(libc::setsid().into())?;
         check(libc::setrlimit(libc::RLIMIT_FSIZE, &fsize).into())?;
+        check(libc::setrlimit(libc::RLIMIT_DATA, &data).into())?;
         check(libc::setrlimit(libc::RLIMIT_CORE, &core).into())?;
         check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).into())?;
         if let Some(fd) = ruleset {
@@ -619,6 +690,7 @@ pub(crate) mod tests {
 
     const NO_LIMIT: Limits = Limits {
         fsize: 1 << 40, // far above anything a test writes
+        data: 1 << 44,  // far above any test's heap
     };
 
     /// Runs `/bin/sh -c script` under `ruleset` and `limits`.
@@ -734,6 +806,18 @@ pub(crate) mod tests {
         assert_eq!(limits_for(GIB).fsize, 16 * GIB);
         assert_eq!(limits_for(2 * GIB).fsize, 16 * GIB);
         assert_eq!(limits_for(u64::MAX).fsize, 16 * GIB);
+    }
+
+    #[test]
+    fn data_cap_bounds() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(data_cap(0), GIB);
+        assert_eq!(data_cap(4 * GIB), GIB);
+        assert_eq!(data_cap(8 * GIB), GIB);
+        assert_eq!(data_cap(16 * GIB), 2 * GIB);
+        assert_eq!(data_cap(32 * GIB), 4 * GIB);
+        assert_eq!(data_cap(96 * GIB), 4 * GIB);
+        assert_eq!(data_cap(u64::MAX), 4 * GIB);
     }
 
     #[test]
@@ -958,7 +1042,10 @@ pub(crate) mod tests {
     fn fsize_limit_gives_efbig() {
         let work = Tmp::new("work");
         let out = work.0.join("big");
-        let limits = Limits { fsize: 1 << 20 };
+        let limits = Limits {
+            fsize: 1 << 20,
+            ..NO_LIMIT
+        };
         let script = format!(
             "trap '' XFSZ; dd if=/dev/zero of='{}' bs=64k count=32 2>&1",
             out.display()
@@ -968,6 +1055,18 @@ pub(crate) mod tests {
         let msg = String::from_utf8_lossy(&o.stdout);
         assert!(msg.contains("File too large"), "{msg}");
         assert_eq!(fs::metadata(&out).unwrap().len(), 1 << 20);
+    }
+
+    #[test]
+    fn data_limit_is_set_soft_and_hard() {
+        let limits = Limits {
+            data: 2 << 30,
+            ..NO_LIMIT
+        };
+        // Without Landlock: the net does not depend on it. `ulimit` is in KiB.
+        let o = sh(None, limits, "ulimit -d; ulimit -H -d");
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(o.stdout, b"2097152\n2097152\n");
     }
 
     #[test]

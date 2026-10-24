@@ -171,8 +171,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   action and every descendant stay in one killable group. A syscall
   through another ABI (i386) kills the process; x32 gets `EPERM`.
 - `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
-- Not covered: no `RLIMIT_NPROC` or memory limit (an action can fork-bomb
-  or exhaust RAM until cancelled).
+- **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB,
+  with or without Landlock. It is the last net against a faulty or missing
+  per-family limit, not the protection itself; over it an allocation fails
+  and the input fails with `out of memory (limit N MiB)`. The numbers and
+  why `DATA` and not `AS` are in [resource-limits.md](resource-limits.md).
+- Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
+  `RLIMIT_DATA` is per process, so each child of a forking action gets the
+  cap again.
 - Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
 - Without Landlock, actions from the user or plugin directory do not run
   ("sandbox unavailable"); built-in actions run with a "ran without
