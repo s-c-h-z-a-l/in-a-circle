@@ -54,3 +54,54 @@ jobs:
 
       - name: Binary sizes
         run: scripts/check-sizes.sh
+
+  # Fuzz smoke: every target runs a short libFuzzer pass on a temporary copy
+  # of its corpus (scripts/fuzz.sh never writes back to the committed one).
+  # Separate from `check`: it needs a nightly, and its caches must never mix
+  # with the stable job's.
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    # Seven targets at 30 s each run one after another (~4 min), plus a cold
+    # build of the fuzz crate and of cargo-fuzz (~10 min). 30 minutes leaves
+    # headroom for a slow runner and still stops a hung job well before the
+    # six-hour default.
+    timeout-minutes: 30
+    env:
+      # Must match NIGHTLY and FUZZ_VERSION in scripts/fuzz.sh.
+      FUZZ_NIGHTLY: nightly-2026-09-01
+      FUZZ_VERSION: 0.13.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly
+        run: rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal -c rust-src
+
+      # The key carries the nightly date and fuzz/Cargo.lock, and the prefix
+      # differs from the stable job's, so the two never share an entry.
+      # ~/.cargo/bin/cargo-fuzz is cached so the tool is not rebuilt from
+      # source on every run (a cold `cargo install` takes minutes).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin/cargo-fuzz
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-
+
+      - name: Install cargo-fuzz
+        run: |
+          if ! cargo-fuzz --version 2>/dev/null | grep -q "cargo-fuzz $FUZZ_VERSION"; then
+            cargo install --locked "cargo-fuzz@$FUZZ_VERSION"
+          fi
+
+      - name: Fuzz smoke
+        run: scripts/fuzz.sh smoke
+
+      # Logs and any crash, timeout or OOM input of this run.
+      - name: Upload fuzz runs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-runs
+          path: fuzz/runs/**
