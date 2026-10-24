@@ -72,6 +72,34 @@ SKIP_STAGE1=(
   hanging_manifest_killed_after_deadline
 )
 
+# Memory caps (incident: the first stage-1 run, 8 jobs, took the machine to
+# 99.5 of 101 GB RAM plus the swap, and systemd-oomd killed the whole terminal
+# scope. A mutant turned a bounded loop into an endless one that pushes into a
+# Vec, e.g. `+=` to `*=` in marshal.rs parse_type leaves `pos` at 0; nothing
+# capped memory and the 60 s timeout came far too late). Two layers:
+#
+# 1. RLIMIT_DATA per process (hard, so no child can raise it): a runaway test
+#    aborts on allocation failure within seconds, and cargo-mutants counts the
+#    mutant as caught (it changed behavior). 6 GiB = the 4 GiB top of the
+#    sandbox's own data_cap (crates/engine/src/sandbox.rs: RAM/8 clamped to
+#    1-4 GiB; the alloc_* tests in bins/inacircle run an action up to that cap,
+#    and a child clamps to the inherited hard limit, so the cap must be >= 4 GiB
+#    for alloc_over_cap_fails to see its documented limit) plus 2 GiB for the
+#    harness. Measured (debug, this repo): the largest process of a clean
+#    `cargo test --workspace --no-run` peaks at 386 MiB RSS, the test
+#    binaries at <= 66 MiB RSS, and the whole workspace builds and tests under
+#    `ulimit -d` 1 GiB (and the inacircle suite passes under 6 GiB), so 2 GiB of
+#    margin is 5x what any legitimate process needs.
+DATA_CAP_KIB=$((6 * 1024 * 1024))
+# 2. A cgroup for the whole run (systemd-run --user --scope): MemoryMax kills
+#    only this scope, never the terminal, and MemorySwapMax=0 keeps a runaway
+#    from thrashing the swap first. Half of MemTotal (read at run time): jobs
+#    are 8 x (rustc 0.4 GiB + tests, or up to 4 GiB + a little in the alloc
+#    tests) = ~36 GiB worst legitimate case, which fits; the rest stays for the
+#    desktop. A multi-process runaway still dies at DATA_CAP_KIB each.
+MEM_TOTAL_KIB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+SCOPE_MAX_KIB=$((MEM_TOTAL_KIB / 2))
+
 # Landlock must be real in every run: a mutant that survives only without it
 # must not exist (the tests would skip the sandbox checks).
 export INACIRCLE_REQUIRE_LANDLOCK=1
@@ -136,8 +164,19 @@ run() { # <outdir> <cargo-mutants args...> [-- <test binary args...>]
   # cargo-mutants exits 2 when mutants were missed and 3 when some timed out;
   # those are results, not failures. Anything else is a real error.
   local rc=0
+  # Never run uncapped: without a user systemd scope there is no whole-run cap.
+  if ! systemd-run --user --scope --quiet -p MemoryMax=1G -- true 2>/dev/null; then
+    echo "systemd-run --user --scope is unavailable; refusing to run mutation tests without a memory cap" >&2
+    exit 1
+  fi
   stage_tree
-  cargo mutants -d "$TREE" "${common[@]}" -o "$PWD/$out" "${pre[@]}" "${EXTRA[@]}" "${post[@]}" || rc=$?
+  # The subshell sets the hard RLIMIT_DATA only for the run; the scope's
+  # processes inherit it from systemd-run.
+  (
+    ulimit -S -H -d "$DATA_CAP_KIB"
+    exec systemd-run --user --scope --quiet -p "MemoryMax=${SCOPE_MAX_KIB}K" -p MemorySwapMax=0 -- \
+      cargo mutants -d "$TREE" "${common[@]}" -o "$PWD/$out" "${pre[@]}" "${EXTRA[@]}" "${post[@]}"
+  ) || rc=$?
   case $rc in 0 | 2 | 3) ;; *) echo "cargo mutants failed ($rc)" >&2; exit "$rc" ;; esac
   summary "$out"
 }
