@@ -6,5 +6,8 @@ license.workspace = true
 publish = false
 
 # Development tool: generates tables for the doc crate. Never shipped.
+[lints]
+workspace = true
+
 [dependencies]
 serde_json = "=1.0.154"

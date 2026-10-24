@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	test.script	family=test	in=application/x-inacircle-test	out=application/octet-stream	ext=bin	label=Test	group=test	cost=10	lossy=no	batch=yes

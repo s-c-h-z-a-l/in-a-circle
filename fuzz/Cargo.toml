@@ -1,0 +1,31 @@
+[package]
+name = "inacircle-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+manifest = { path = "../crates/manifest" }
+doc = { path = "../crates/doc" }
+
+# Not part of the root workspace (it is excluded there): the fuzz crate
+# builds on a pinned nightly and must not touch the shipped dependency tree.
+[workspace]
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false
