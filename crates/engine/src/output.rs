@@ -74,11 +74,13 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     // below refuses anything that is not that directory (a regular file or
     // FIFO swapped in is opened O_NONBLOCK and then refused there).
     let read_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
-    // mutants: equivalent — `== 0` as `!= 0` swaps the two routes to an fd:
-    // the magic link, or the name opened again. Both end at the inode of the
-    // O_PATH fd (the second is checked below, by device and inode, before
-    // anything is changed), so a swap of the name cannot redirect either; the
-    // result is the same fd target and the same mode change.
+    // mutants: `== 0` as `!= 0` is NOT equivalent and is killed by the
+    // `swap_magic` case: a successful chmod would send the mutant to the
+    // fallback, which opens the name again (the swapped-in impostor is only
+    // refused afterwards, by the inode check) instead of using the magic
+    // link to the opened inode; and with chmod refused on a readable,
+    // non-writable directory the mutant would skip the fchmod's route
+    // entirely. The real route is pinned by the original-inode assertion.
     // SAFETY: magic is a valid NUL-terminated path naming our O_PATH fd.
     if unsafe { libc::chmod(magic.as_ptr(), 0o700) } == 0 {
         // SAFETY: as above; the magic link resolves to the opened inode.
