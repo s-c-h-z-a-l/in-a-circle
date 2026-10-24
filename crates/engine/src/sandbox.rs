@@ -490,8 +490,11 @@ mod seccomp {
     // and `program()` leaves the gap as `stmt(0, 0)` (a load of 0 into the
     // accumulator, no jump), which every path that reaches it runs through
     // before the next real instruction. No syscall gets another verdict; the
-    // filter only gets longer. (`EPERM = ALLOW + 1` and the other `+ 1`/`+ 4`
-    // forms differ from `*` only in a few instructions, same argument.)
+    // filter only gets longer. The other layout mutants are not equivalent:
+    // `EPERM = ALLOW * 1` would overwrite ALLOW's slot, `SOCKET = EPERM * 1`
+    // collides with EPERM, and `LEN = IOCTL_EPERM * 1` leaves no room for the
+    // last instruction (the build fails); `jump` also refuses, at compile
+    // time, an offset that does not fit its u8.
     // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
     // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
     // [ioctl: load arg1, 4 x cmd?, ALLOW, EPERM].
@@ -521,6 +524,11 @@ mod seccomp {
     // change an opcode (`W & ABS`, `JMP & JEQ`, ...) is killed by the seccomp
     // tests below, which would see the wrong verdict.
     const fn jump(at: usize, code: u32, k: u32, to: usize) -> sock_filter {
+        // `jt` is a u8 and a BPF jump goes forward only: a layout whose
+        // offset does not fit would truncate silently into a jump to the
+        // wrong instruction. `program()` is evaluated at compile time, so
+        // this stops the build instead.
+        assert!(to > at && to - at - 1 <= u8::MAX as usize);
         sock_filter {
             code: (BPF_JMP | code | BPF_K) as u16,
             jt: (to - at - 1) as u8,
@@ -2337,5 +2345,25 @@ pub(crate) mod tests {
         let o = sh(Some(&rs), NO_LIMIT, &script);
         assert!(o.status.success(), "{}", stderr(&o));
         assert_eq!(o.stdout, b"hi\n");
+    }
+
+    /// The refusal side: a link from the work dir into a directory the
+    /// ruleset does not grant is refused (and nothing appears there).
+    #[test]
+    fn link_out_of_the_work_dir_refused() {
+        if abi_or_skip("link_out_of_the_work_dir_refused", 2).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let outside = Tmp::new("outside");
+        let rs = ruleset(&[], &work.0);
+        let script = format!(
+            "cd '{}'; echo hi > f; if ln f '{}/g'; then echo LINKED; else echo REFUSED; fi",
+            work.0.display(),
+            outside.0.display()
+        );
+        let o = sh(Some(&rs), NO_LIMIT, &script);
+        assert_eq!(o.stdout, b"REFUSED\n", "{}", stderr(&o));
+        assert!(!outside.0.join("g").exists());
     }
 }

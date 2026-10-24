@@ -43,9 +43,9 @@ const MAX_LINE: usize = 64 * 1024;
 /// Time between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Work dir mtime refresh period (stale dirs are those older than a day).
-// mutants: equivalent — for the safety property (an active job's work dir
-// never looks stale, i.e. older than a day) any period below a day holds;
-// `60 + 60` (2 min) and `60 / 60` (1 s) only refresh more often.
+// mutants: not equivalent — a shorter period (`60 + 60`, `60 / 60`) only adds
+// wakeups and utimensat calls during an action (resource cost); the safety
+// property (an active work dir never looks stale) holds; accepted.
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Warnings kept per input; the rest are only counted.
 const MAX_WARNINGS: u32 = 16;
@@ -2066,5 +2066,95 @@ mod tests {
         );
         let left: Vec<_> = fs::read_dir(&t.0).unwrap().flatten().collect();
         assert_eq!(left.len(), 2, "only the input and the script: {left:?}");
+    }
+
+    /// Child side of the no-Landlock wiring tests; a no-op without the env.
+    #[test]
+    fn helper_no_landlock() {
+        let (Some(dir), Some(case)) = (
+            std::env::var_os("INACIRCLE_HELPER"),
+            std::env::var_os("INACIRCLE_CASE"),
+        ) else {
+            return;
+        };
+        // SAFETY: alarm has no preconditions; a watchdog against a hang.
+        unsafe { libc::alarm(20) };
+        // Landlock "does not exist" for this process and its children.
+        crate::output::tests::deny_syscalls(
+            &[libc::SYS_landlock_create_ruleset],
+            libc::ENOSYS as u32,
+        );
+        assert!(sandbox::landlock_abi().is_none());
+        let t = Tmp(PathBuf::from(dir));
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let mut action = script_action(
+            &t,
+            "act",
+            "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
+             printf 'done\\t%s\\t0/a.md\\n' \"$in\"",
+            "md",
+        );
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        match case.to_str().unwrap() {
+            "plugin" => {
+                action.builtin = false;
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                assert!(!r.sandboxed);
+                assert_eq!(
+                    seen.0,
+                    [Outcome::Failed {
+                        input: input.clone(),
+                        reason: "sandbox unavailable".to_owned()
+                    }]
+                );
+                assert!(!t.0.join("a.md").exists(), "a plugin ran unconfined");
+            }
+            "builtin" => {
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                assert!(!r.sandboxed);
+                assert_eq!(
+                    seen.0[0],
+                    Outcome::Warned {
+                        input: input.clone(),
+                        message: "ran without sandbox".to_owned()
+                    }
+                );
+                assert!(matches!(seen.0[1], Outcome::Done { .. }), "{:?}", seen.0);
+                assert_eq!(fs::read_to_string(t.0.join("a.md")).unwrap(), "a\n");
+            }
+            other => panic!("unknown case {other}"),
+        }
+        // SAFETY: skips the harness' teardown, which the filter may affect.
+        unsafe { libc::_exit(0) };
+    }
+
+    #[test]
+    fn without_landlock_plugins_are_refused_and_builtins_warn() {
+        if !crate::sandbox::tests::seccomp_or_skip("without_landlock") {
+            return;
+        }
+        for case in ["plugin", "builtin"] {
+            let t = Tmp::new("no-landlock");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "exec::tests::helper_no_landlock",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("INACIRCLE_HELPER", &t.0)
+                .env("INACIRCLE_CASE", case)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "case {case}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

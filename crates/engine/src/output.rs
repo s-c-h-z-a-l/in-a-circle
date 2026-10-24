@@ -47,8 +47,12 @@ impl Drop for Fd {
 /// refusing to follow a symlink in the last component, and gives it owner
 /// rwx first: a 0o000 or 0o300 directory can be neither opened for reading
 /// nor emptied. The chmod goes through an `O_PATH` fd (`/proc/self/fd/<n>`),
-/// so it hits exactly the inode that was opened. Without `/proc` it falls
-/// back to opening directly, which fails for a directory without `r`.
+/// so it hits exactly the inode that was opened. Without `/proc` (or when
+/// chmod is refused) it falls back to opening the name again, which fails
+/// for a directory without `r`; that open is `O_NONBLOCK` (a FIFO swapped in
+/// cannot block it) and its fd must be the very inode of the `O_PATH` fd, or
+/// the directory is refused and left alone: both routes end at the verified
+/// inode.
 fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     let at = at.unwrap_or(libc::AT_FDCWD);
     // mutants: equivalent — the flags are distinct single bits, so `|` and
@@ -61,20 +65,20 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
         return last_err();
     }
     let p = Fd(p);
+    #[cfg(test)]
+    tests::AFTER_OPATH.with_borrow_mut(|h| h.as_mut().map(|f| f()));
     let magic = CString::new(format!("/proc/self/fd/{}", p.0)).expect("no NUL in a number");
     // mutants: equivalent — `^` as above; and `O_RDONLY | O_DIRECTORY` as
-    // `&` only drops O_DIRECTORY, which the magic link cannot need: it
-    // names the inode the O_PATH open above already proved is a directory.
+    // `&` only drops O_DIRECTORY: on the magic link the inode is already
+    // proved a directory, and on the fallback the device/inode comparison
+    // below refuses anything that is not that directory (a regular file or
+    // FIFO swapped in is opened O_NONBLOCK and then refused there).
     let read_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
-    // mutants: not equivalent — `== 0` as `!= 0` sends a successful chmod to
-    // the fallback, which opens the NAME again: if the name is swapped for
-    // another directory between the O_PATH open and that re-open, the
-    // fallback (O_NOFOLLOW stops a symlink, not a directory) fchmods and
-    // empties the other directory, while the magic link always names the
-    // inode already opened. Not deterministically testable: it needs a
-    // swap between two adjacent syscalls and no production hook exists (the
-    // fd-0 and seccomp cases cannot interpose there); accepted-untestable,
-    // see the area 2 report.
+    // mutants: equivalent — `== 0` as `!= 0` swaps the two routes to an fd:
+    // the magic link, or the name opened again. Both end at the inode of the
+    // O_PATH fd (the second is checked below, by device and inode, before
+    // anything is changed), so a swap of the name cannot redirect either; the
+    // result is the same fd target and the same mode change.
     // SAFETY: magic is a valid NUL-terminated path naming our O_PATH fd.
     if unsafe { libc::chmod(magic.as_ptr(), 0o700) } == 0 {
         // SAFETY: as above; the magic link resolves to the opened inode.
@@ -86,14 +90,33 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     // mutants: equivalent — `^` as above; and `fd < 0` as `fd <= 0`: `p`
     // is still open and was the lowest free fd, so this open cannot get 0.
     // SAFETY: as for the O_PATH open.
-    let fd = unsafe { libc::openat(at, name.as_ptr(), read_flags | libc::O_NOFOLLOW) };
+    let fd = unsafe {
+        libc::openat(
+            at,
+            name.as_ptr(),
+            read_flags | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
     if fd < 0 {
         return last_err();
     }
     let fd = Fd(fd);
+    if !same_inode(p.0, fd.0) {
+        return Err(io::Error::other("directory changed while being opened"));
+    }
     // SAFETY: fd.0 is an open fd.
     unsafe { libc::fchmod(fd.0, 0o700) };
     Ok(fd)
+}
+
+/// Whether the two open fds name the same file (device and inode).
+fn same_inode(a: RawFd, b: RawFd) -> bool {
+    let id = |fd: RawFd| {
+        // SAFETY: zeroed stat is valid storage; fd is an open fd.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+    };
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Entry names of the directory open as `dir` (without `.` and `..`).
@@ -739,10 +762,19 @@ pub fn place_many_beneath(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::xdg::tests::with_env;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    type Hook = Option<Box<dyn FnMut()>>;
+
+    thread_local! {
+        /// Runs in `open_dir_for_removal` right after the `O_PATH` open:
+        /// the window in which a swap of the name must not matter.
+        pub(super) static AFTER_OPATH: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -1383,7 +1415,7 @@ mod tests {
     /// seccomp filter; `errno` 0 makes them "succeed" with 0). Child-side
     /// only: the filter cannot be removed again. Native architecture, so
     /// no arch check.
-    fn deny_syscalls(nrs: &[libc::c_long], errno: u32) {
+    pub(crate) fn deny_syscalls(nrs: &[libc::c_long], errno: u32) {
         use libc::{
             BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
             SECCOMP_RET_ERRNO, sock_filter, sock_fprog,
@@ -1541,6 +1573,59 @@ mod tests {
                 let e = open_regular_beneath(&root, Path::new("leaf")).unwrap_err();
                 assert_eq!(e.raw_os_error(), Some(libc::EMFILE), "{e:?}");
             }
+            "swap_magic" | "swap_fallback_dir" | "swap_fallback_fifo" | "swap_fallback_file" => {
+                let fallback = case != "swap_magic";
+                if fallback {
+                    // chmod (the magic-link route) refused, fchmod allowed:
+                    // a mode change of the impostor stays visible.
+                    let mut nrs = vec![libc::SYS_fchmodat];
+                    #[cfg(target_arch = "x86_64")]
+                    nrs.push(libc::SYS_chmod);
+                    deny_syscalls(&nrs, libc::EPERM as u32);
+                }
+                let d = dir.join("d");
+                fs::create_dir(&d).unwrap();
+                let original = fs::metadata(&d).unwrap().ino();
+                let (d2, moved) = (d.clone(), dir.join("moved"));
+                let kind = case.to_str().unwrap().to_owned();
+                let impostor = std::rc::Rc::new(std::cell::Cell::new(0u32));
+                let seen = impostor.clone();
+                AFTER_OPATH.set(Some(Box::new(move || {
+                    fs::rename(&d2, &moved).unwrap();
+                    let c = cstr(&d2).unwrap();
+                    match kind.as_str() {
+                        "swap_fallback_fifo" => {
+                            // SAFETY: c is a valid path.
+                            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+                        }
+                        "swap_fallback_file" => fs::write(&d2, "x").unwrap(),
+                        _ => {
+                            fs::create_dir(&d2).unwrap();
+                            fs::write(d2.join("keep"), "k").unwrap();
+                        }
+                    }
+                    seen.set(fs::symlink_metadata(&d2).unwrap().mode());
+                })));
+                let c = cstr(&d).unwrap();
+                let r = open_dir_for_removal(None, &c);
+                AFTER_OPATH.set(None);
+                if fallback {
+                    let e = r.err().expect("opened a swapped-in name");
+                    assert!(
+                        e.kind() == io::ErrorKind::Other || e.raw_os_error() == Some(libc::ENOTDIR),
+                        "{e:?}"
+                    );
+                    // Left alone: still the mode it was made with.
+                    assert_eq!(fs::symlink_metadata(&d).unwrap().mode(), impostor.get());
+                } else {
+                    let fd = r.expect("the magic link names the opened inode");
+                    // SAFETY: zeroed stat is valid storage; fd is open.
+                    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                    assert_eq!(unsafe { libc::fstat(fd.0, &mut st) }, 0);
+                    assert_eq!(st.st_ino as u64, original, "not the original directory");
+                    assert_eq!(fs::symlink_metadata(&d).unwrap().mode(), impostor.get());
+                }
+            }
             "getrandom_eperm" => {
                 deny_syscalls(&[libc::SYS_getrandom], libc::EPERM as u32);
                 let e = random_u64().unwrap_err();
@@ -1602,6 +1687,27 @@ mod tests {
     fn place_beneath_works_with_fd_0_closed() {
         let t = Tmp::new("fd0-place");
         assert_case_ok("fd0_place_beneath", &t.0);
+    }
+
+    #[test]
+    fn removal_open_survives_a_swapped_name_on_both_routes() {
+        // Magic-link route: the opened inode is used, the impostor untouched.
+        let t = Tmp::new("swap-magic");
+        assert_case_ok("swap_magic", &t.0);
+        // Fallback route (chmod refused): a directory, a FIFO or a file
+        // swapped in after the O_PATH open is refused, neither blocked on
+        // (the child's watchdog would fire) nor chmod-ed.
+        if !crate::sandbox::tests::seccomp_or_skip("removal_open_swapped_name_fallback") {
+            return;
+        }
+        for case in [
+            "swap_fallback_dir",
+            "swap_fallback_fifo",
+            "swap_fallback_file",
+        ] {
+            let t = Tmp::new("swap-fallback");
+            assert_case_ok(case, &t.0);
+        }
     }
 
     #[test]
