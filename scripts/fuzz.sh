@@ -7,8 +7,9 @@
 #   scripts/fuzz.sh baseline [target...]   3600 s per target, in parallel
 #   scripts/fuzz.sh cmin     [target...]   minimize the committed corpus
 #
-# No target given means all of them. Exit 1 if any target left a crash,
-# timeout or OOM artifact in fuzz/artifacts/<target>/.
+# No target given means all of them. Exit 1 if libFuzzer did not really run for a
+# target, or left a crash, timeout or OOM artifact in this run. Logs and
+# artifacts: fuzz/runs/<mode>-<time>/<target>/ (gitignored).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -90,27 +91,44 @@ WORKERS=$((NPROC / count))
 cargo +"$NIGHTLY" fuzz build >&2
 BIN_DIR=fuzz/target/x86_64-unknown-linux-gnu/release
 
+# Every run gets its own directory, fuzz/runs/<mode>-<time>/<target>/, holding
+# the libFuzzer logs and the artifacts (crash-*, timeout-*, oom-*) of that run
+# only. It is gitignored and kept, so crash details survive the run; an old
+# run's artifacts can never fail a later one.
+RUN_DIR=fuzz/runs/$mode-$(date +%Y%m%d-%H%M%S)
+
 # run_one <target> <secs> <workers> <corpus-dir>
+# Returns 0 only if libFuzzer really ran (a "Done N runs" line in its log) and
+# left no artifact in this run's directory. A missing or non-executable
+# binary, a startup failure or a killed process leave no such line and fail.
 run_one() {
     local t=$1 secs=$2 workers=$3 corpus=$4 max_len timeout rss
     read -r max_len timeout rss <<<"$(limits "$t")"
-    mkdir -p "fuzz/artifacts/$t"
-    local work
-    work=$(mktemp -d) # libFuzzer's -jobs mode writes fuzz-N.log into the cwd
+    local dir=$PWD/$RUN_DIR/$t
+    mkdir -p "$dir/artifacts"
     local args=("-max_total_time=$secs" "-max_len=$max_len" "-timeout=$timeout"
-        "-rss_limit_mb=$rss" "-artifact_prefix=$PWD/fuzz/artifacts/$t/")
+        "-rss_limit_mb=$rss" "-artifact_prefix=$dir/artifacts/")
     if [ "$workers" -gt 1 ]; then
-        args+=("-jobs=$workers" "-workers=$workers")
+        args+=("-jobs=$workers" "-workers=$workers") # writes fuzz-N.log into the cwd
     fi
-    (cd "$work" && "$OLDPWD/$BIN_DIR/$t" "${args[@]}" "$corpus") >"$work/out.log" 2>&1 || true
-    tail -n 3 "$work/out.log" | sed "s/^/[$t] /" >&2
-    cat "$work"/fuzz-*.log 2>/dev/null | grep -E "ERROR|SUMMARY|crash-|timeout-|oom-" | sed "s/^/[$t] /" >&2 || true
-    rm -rf "$work"
+    (cd "$dir" && "$PWD/../../../../$BIN_DIR/$t" "${args[@]}" "$corpus") >"$dir/out.log" 2>&1 || true
+    local ran=0 crashed=0
+    # (grep on the files, not a pipe: grep -q closing early would fail a pipefail pipeline)
+    if grep -qE '^Done [0-9]+ runs' "$dir"/out.log "$dir"/fuzz-*.log 2>/dev/null; then ran=1; fi
+    if [ -n "$(find "$dir/artifacts" -type f)" ]; then crashed=1; fi
+    tail -n 2 "$dir/out.log" | sed "s/^/[$t] /" >&2
+    echo "[$t] logs: $RUN_DIR/$t" >&2
+    if [ "$crashed" = 1 ]; then
+        echo "FAIL $t: artifacts:" >&2
+        find "$dir/artifacts" -type f >&2
+        return 1
+    fi
+    if [ "$ran" = 0 ]; then
+        echo "FAIL $t: libFuzzer did not complete a run; log tail:" >&2
+        tail -n 20 "$dir/out.log" >&2
+        return 1
+    fi
 }
-
-# Artifacts are the verdict: -jobs mode does not reliably turn a worker's
-# crash into a non-zero exit.
-artifacts_of() { find "fuzz/artifacts/$1" -type f 2>/dev/null; }
 
 case "$mode" in
 smoke)
@@ -119,35 +137,28 @@ smoke)
         # A temporary copy: the smoke run must never grow the committed corpus.
         tmp=$(mktemp -d)
         cp -r "fuzz/corpus/$t/." "$tmp/" 2>/dev/null || true
-        run_one "$t" "$SMOKE_SECS" 1 "$tmp"
+        run_one "$t" "$SMOKE_SECS" 1 "$tmp" || bad=1
         rm -rf "$tmp"
-        if [ -n "$(artifacts_of "$t")" ]; then
-            echo "FAIL $t:" >&2
-            artifacts_of "$t" >&2
-            bad=1
-        fi
     done
     exit $bad
     ;;
 close | baseline)
     secs=$CLOSE_SECS
     [ "$mode" = baseline ] && secs=$BASELINE_SECS
-    pids=()
+    declare -A pid before
     for t in $TARGETS; do
         mkdir -p "fuzz/corpus/$t"
+        before[$t]=$(find "fuzz/corpus/$t" -type f | wc -l)
         run_one "$t" "$secs" "$WORKERS" "$PWD/fuzz/corpus/$t" &
-        pids+=($!)
+        pid[$t]=$!
     done
-    wait "${pids[@]}"
     bad=0
     for t in $TARGETS; do
-        if [ -n "$(artifacts_of "$t")" ]; then
-            echo "FAIL $t:" >&2
-            artifacts_of "$t" >&2
-            bad=1
-        fi
+        wait "${pid[$t]}" || bad=1
+        after=$(find "fuzz/corpus/$t" -type f | wc -l)
+        [ "$after" -gt "${before[$t]}" ] &&
+            echo "[$t] corpus grew ${before[$t]} -> $after files; run: scripts/fuzz.sh cmin $t" >&2
     done
-    echo "corpus grew unminimized; run: scripts/fuzz.sh cmin" >&2
     exit $bad
     ;;
 cmin)
