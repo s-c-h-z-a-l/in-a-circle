@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "=0.4.13"
 manifest = { path = "../crates/manifest" }
 doc = { path = "../crates/doc" }
+dbus = { path = "../crates/dbus" }
 
 # Not part of the root workspace (it is excluded there): the fuzz crate
 # builds on a pinned nightly and must not touch the shipped dependency tree.
@@ -26,6 +27,20 @@ bench = false
 [[bin]]
 name = "markdown"
 path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbus_message"
+path = "fuzz_targets/dbus_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri_list"
+path = "fuzz_targets/uri_list.rs"
 test = false
 doc = false
 bench = false

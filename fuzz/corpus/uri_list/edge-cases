@@ -1,0 +1,12 @@
+# from a file manager
+file:///home/u/a%20b.txt
+file://localhost/tmp/%C3%A1.md
+https://example.com/x
+file://other-host/etc/passwd
+file:relative
+file:/one-slash
+file://localhost
+file:///bad%zz
+file:///cut%2
+file:///nul%00x
+file:///last
