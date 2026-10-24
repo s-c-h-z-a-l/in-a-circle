@@ -397,6 +397,7 @@ pub struct UndoResult {
     pub kept: Vec<(PathBuf, String)>,
 }
 
+#[derive(Debug)]
 struct Out {
     path: PathBuf,
     id: FileId,
@@ -488,6 +489,81 @@ fn parse_out(l: &Line) -> Option<Out> {
     })
 }
 
+/// What the history says about one job.
+#[derive(Debug, Default)]
+struct JobRecords {
+    known: bool,
+    undone: bool,
+    outs: Vec<Out>,
+    dirs: Vec<PathBuf>,
+}
+
+/// Reads a history stream (header, then lines) and collects the records of
+/// one job. Pure: no file, no lock. It streams (only lines that mention the
+/// job are parsed), so `undo` hands it the locked file and the fuzz target
+/// a byte slice. A bad or unsupported header is `InvalidData`; a last line
+/// without its newline (cut off mid-write), a line that is not UTF-8 and a
+/// line that does not parse are skipped.
+fn job_records(mut rd: impl BufRead, job: &JobId) -> io::Result<JobRecords> {
+    let mut r = JobRecords::default();
+    let mut buf = Vec::new();
+    rd.read_until(b'\n', &mut buf)?;
+    let head = String::from_utf8_lossy(&buf);
+    let head = head.trim_end_matches('\n');
+    let ok = head
+        .split_once(' ')
+        .is_some_and(|(m, v)| m == MAGIC && v.parse::<u32>().is_ok_and(|v| v == VERSION));
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad or unsupported history header",
+        ));
+    }
+    let needle = format!("job={}", job.0);
+    let id_needle = format!("id={}", job.0);
+    loop {
+        buf.clear();
+        if rd.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        // A last line cut off mid-write has no newline: skip it.
+        if buf.pop() != Some(b'\n') {
+            break;
+        }
+        if !(contains(&buf, needle.as_bytes()) || contains(&buf, id_needle.as_bytes())) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(l) = parse_line(text) else { continue };
+        match l.kind.as_str() {
+            "job" if l.get("id") == Some(&job.0) => r.known = true,
+            "undo" if l.get("job") == Some(&job.0) => r.undone = true,
+            "out" if l.get("job") == Some(&job.0) => {
+                r.known = true;
+                r.outs.extend(parse_out(&l));
+            }
+            "dir" if l.get("job") == Some(&job.0) => {
+                r.known = true;
+                r.dirs.extend(l.get("path").map(PathBuf::from));
+            }
+            "skip" | "fail" if l.get("job") == Some(&job.0) => r.known = true,
+            _ => {}
+        }
+    }
+    Ok(r)
+}
+
+/// Fuzz entry point: the history reader on arbitrary bytes, for the job ids
+/// the history can really name.
+#[cfg(fuzzing)]
+pub fn fuzz_history(bytes: &[u8]) {
+    for id in ["1-1", "10-1", ""] {
+        let _ = job_records(bytes, &JobId(id.to_owned()));
+    }
+}
+
 /// How long `undo` waits for the history lock before giving up.
 const UNDO_LOCK_WAIT: Duration = Duration::from_secs(2);
 const UNDO_LOCK_STEP: Duration = Duration::from_millis(50);
@@ -533,57 +609,12 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .append(true)
         .open(history_path()?)?;
     lock_with_deadline(&file, UNDO_LOCK_WAIT)?;
-    let (mut known, mut undone) = (false, false);
-    let (mut outs, mut dirs) = (Vec::new(), Vec::new());
-    {
-        let mut rd = BufReader::new(&file);
-        let mut buf = Vec::new();
-        rd.read_until(b'\n', &mut buf)?;
-        let head = String::from_utf8_lossy(&buf);
-        let head = head.trim_end_matches('\n');
-        let ok = head
-            .split_once(' ')
-            .is_some_and(|(m, v)| m == MAGIC && v.parse::<u32>().is_ok_and(|v| v == VERSION));
-        if !ok {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad or unsupported history header",
-            ));
-        }
-        let needle = format!("job={}", job.0);
-        let id_needle = format!("id={}", job.0);
-        loop {
-            buf.clear();
-            if rd.read_until(b'\n', &mut buf)? == 0 {
-                break;
-            }
-            // A last line cut off mid-write has no newline: skip it.
-            if buf.pop() != Some(b'\n') {
-                break;
-            }
-            if !(contains(&buf, needle.as_bytes()) || contains(&buf, id_needle.as_bytes())) {
-                continue;
-            }
-            let Ok(text) = std::str::from_utf8(&buf) else {
-                continue;
-            };
-            let Ok(l) = parse_line(text) else { continue };
-            match l.kind.as_str() {
-                "job" if l.get("id") == Some(&job.0) => known = true,
-                "undo" if l.get("job") == Some(&job.0) => undone = true,
-                "out" if l.get("job") == Some(&job.0) => {
-                    known = true;
-                    outs.extend(parse_out(&l));
-                }
-                "dir" if l.get("job") == Some(&job.0) => {
-                    known = true;
-                    dirs.extend(l.get("path").map(PathBuf::from));
-                }
-                "skip" | "fail" if l.get("job") == Some(&job.0) => known = true,
-                _ => {}
-            }
-        }
-    }
+    let JobRecords {
+        known,
+        undone,
+        outs,
+        dirs,
+    } = job_records(BufReader::new(&file), job)?;
     if !known {
         return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
     }
@@ -952,6 +983,50 @@ mod tests {
             let r = undo(&job).unwrap();
             assert_eq!(r.removed, vec![f]);
         });
+    }
+
+    const OUT: &str = "out\tjob=10-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n";
+
+    #[test]
+    fn job_records_collects_one_jobs_lines() {
+        let h = format!(
+            "inacircle-history 0\n{OUT}out\tjob=11-1\tin=/i\tpath=/o/b\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\ndir\tjob=10-1\tpath=/o\n"
+        );
+        let r = job_records(h.as_bytes(), &JobId("10-1".into())).unwrap();
+        assert!(r.known && !r.undone);
+        assert_eq!(r.outs.len(), 1);
+        assert_eq!(r.outs[0].path, Path::new("/o/a"));
+        assert_eq!(r.dirs, vec![PathBuf::from("/o")]);
+        let r = job_records(
+            &b"inacircle-history 0\nundo\tjob=10-1\ttime=5\n"[..],
+            &JobId("10-1".into()),
+        )
+        .unwrap();
+        assert!(r.undone && !r.known);
+        let none = job_records(h.as_bytes(), &JobId("99-9".into())).unwrap();
+        assert!(!none.known && none.outs.is_empty());
+    }
+
+    #[test]
+    fn job_records_skips_truncated_and_garbled_lines_and_rejects_a_bad_header() {
+        let job = JobId("10-1".into());
+        // The last line has no newline: skipped.
+        let cut = format!("inacircle-history 0\n{OUT}out\tjob=10-1\tin=/i\tpa");
+        assert_eq!(job_records(cut.as_bytes(), &job).unwrap().outs.len(), 1);
+        // Not UTF-8 and unparsable lines naming the job: skipped.
+        let mut bad = b"inacircle-history 0\nout\tjob=10-1\t\xff\ngarbage job=10-1\\q\n".to_vec();
+        bad.extend(OUT.as_bytes());
+        assert_eq!(job_records(&bad[..], &job).unwrap().outs.len(), 1);
+        for head in [
+            &b""[..],
+            b"inacircle-history",
+            b"inacircle-history 1\n",
+            b"other 0\n",
+            b"\xff\n",
+        ] {
+            let e = job_records(head, &job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{head:?}");
+        }
     }
 
     #[test]

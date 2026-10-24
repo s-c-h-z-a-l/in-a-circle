@@ -51,6 +51,76 @@ pub struct Conn {
     broken: Option<&'static str>,
 }
 
+/// The header of one framed message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Frame {
+    obj: u32,
+    op: u16,
+    /// Header and arguments, in bytes: 8..=`MAX_MESSAGE`, a multiple of 4.
+    size: usize,
+}
+
+/// Reads the header of the first message in `buf`. `None`: the header or
+/// the body is not all there yet. A size below 8, above [`MAX_MESSAGE`] or
+/// not a multiple of 4 is `BadSize`: the stream is out of sync. Pure: the
+/// connection state (known objects, fds) is checked by the caller.
+fn frame(buf: &[u8]) -> Result<Option<Frame>, Error> {
+    let Some(head) = buf.get(..8) else {
+        return Ok(None);
+    };
+    let obj = u32::from_ne_bytes([head[0], head[1], head[2], head[3]]);
+    let word = u32::from_ne_bytes([head[4], head[5], head[6], head[7]]);
+    let (size, op) = ((word >> 16) as usize, word as u16);
+    if !(8..=MAX_MESSAGE).contains(&size) || !size.is_multiple_of(4) {
+        return Err(Error::BadSize(size));
+    }
+    if buf.len() < size {
+        return Ok(None);
+    }
+    Ok(Some(Frame { obj, op, size }))
+}
+
+/// Fuzz entry point: the events a compositor could send, as bytes. Runs the
+/// real `Conn::event` over every object kind (client ids 2.. and server ids
+/// from `SERVER_IDS`, one per interface) and every argument reader on what
+/// comes out. Fds are not modelled: a message that claims one is refused as
+/// `MissingFd`, which is the path a peer sending no fd takes.
+#[cfg(fuzzing)]
+pub fn fuzz_events(bytes: &[u8]) {
+    use crate::proto::Iface;
+    // SAFETY: plain open(2) of /dev/null; the result is checked.
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: fresh fd we own.
+    let mut c = Conn::from_fd(unsafe { OwnedFd::from_raw_fd(fd) });
+    for i in Iface::ALL.iter().skip(2) {
+        c.new_id(*i);
+    }
+    for (n, i) in Iface::ALL.iter().enumerate() {
+        c.register_server_id(SERVER_IDS + n as u32, *i);
+    }
+    // `read` never grows `inb` past this, so neither may the fuzz input.
+    c.inb.extend_from_slice(&bytes[..bytes.len().min(MAX_INB)]);
+    while let Ok(Some(mut ev)) = c.event() {
+        // Each reader on the whole argument block, then the readers as a
+        // consumer chains them, until one fails.
+        let all = ev.clone_args();
+        for kind in 0..5u8 {
+            let mut e = Event::new(ev.obj, ev.iface, ev.op, all.clone());
+            while match kind {
+                0 => e.u32().is_ok(),
+                1 => e.i32().is_ok(),
+                2 => e.fixed().is_ok(),
+                3 => e.bytes().is_ok(),
+                _ => e.string().is_ok(),
+            } {}
+        }
+        let _ = (ev.u32(), ev.string(), ev.fixed(), ev.bytes());
+    }
+}
+
 /// `$WAYLAND_DISPLAY` (default `wayland-0`): an absolute path, or a name
 /// under `$XDG_RUNTIME_DIR`.
 fn socket_path(display: Option<&OsStr>, runtime_dir: Option<&OsStr>) -> io::Result<PathBuf> {
@@ -471,19 +541,15 @@ impl Conn {
         if let Some(why) = self.broken {
             return Err(Error::Broken(why));
         }
-        let Some(head) = self.inb.get(..8) else {
-            return Ok(None);
+        let frame = match frame(&self.inb) {
+            Ok(Some(f)) => f,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                self.broken = Some("bad message size");
+                return Err(e);
+            }
         };
-        let obj = u32::from_ne_bytes([head[0], head[1], head[2], head[3]]);
-        let word = u32::from_ne_bytes([head[4], head[5], head[6], head[7]]);
-        let (size, op) = ((word >> 16) as usize, word as u16);
-        if !(8..=MAX_MESSAGE).contains(&size) || !size.is_multiple_of(4) {
-            self.broken = Some("bad message size");
-            return Err(Error::BadSize(size));
-        }
-        if self.inb.len() < size {
-            return Ok(None);
-        }
+        let Frame { obj, op, size } = frame;
         // An id we never allocated, or a server id never announced, has no
         // known fds or meaning: the peer and we disagree on the object map.
         let Some(iface) = self.iface_of(obj) else {
@@ -737,6 +803,52 @@ mod tests {
         want.extend(words(&[8, (16 << 16), 9, 4]));
         want.extend(words(&[9, (8 << 16) | 6]));
         assert_eq!(received(&server), (want, 1));
+    }
+
+    fn header(obj: u32, size: u32, op: u16) -> Vec<u8> {
+        let mut h = obj.to_ne_bytes().to_vec();
+        h.extend(((size << 16) | op as u32).to_ne_bytes());
+        h
+    }
+
+    #[test]
+    fn frame_reads_a_complete_header() {
+        let mut m = header(7, 12, 3);
+        m.extend([0; 4]);
+        assert_eq!(
+            frame(&m),
+            Ok(Some(Frame {
+                obj: 7,
+                op: 3,
+                size: 12
+            }))
+        );
+        // Bytes of the next message do not matter.
+        m.extend([9; 5]);
+        assert_eq!(frame(&m).unwrap().unwrap().size, 12);
+        let max = MAX_MESSAGE as u32;
+        let mut m = header(1, max, 0);
+        m.resize(MAX_MESSAGE, 0);
+        assert_eq!(frame(&m).unwrap().unwrap().size, MAX_MESSAGE);
+    }
+
+    #[test]
+    fn frame_waits_for_a_truncated_message() {
+        assert_eq!(frame(&[]), Ok(None));
+        assert_eq!(frame(&header(7, 12, 3)[..7]), Ok(None));
+        // Header complete, body not.
+        assert_eq!(frame(&header(7, 12, 3)), Ok(None));
+    }
+
+    #[test]
+    fn frame_rejects_a_bad_size() {
+        for size in [0u32, 4, 7, 9, 4097, 0xffff] {
+            assert_eq!(
+                frame(&header(7, size, 0)),
+                Err(Error::BadSize(size as usize)),
+                "{size}"
+            );
+        }
     }
 
     #[test]

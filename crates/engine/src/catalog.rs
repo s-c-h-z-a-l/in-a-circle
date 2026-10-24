@@ -513,8 +513,16 @@ fn wait_until(
 }
 
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let (0, lines) = manifest::parse(&text, CACHE_MAGIC).ok()? else {
+    parse_cache(&std::fs::read(path).ok()?)
+}
+
+/// The cache file's content as entries; `None` for anything that is not
+/// exactly what `write_cache` writes (not UTF-8, wrong header or version,
+/// a line of an unknown kind or with a field missing or malformed, an
+/// action before any bin). Pure: no file.
+fn parse_cache(bytes: &[u8]) -> Option<Vec<Entry>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let (0, lines) = manifest::parse(text, CACHE_MAGIC).ok()? else {
         return None;
     };
     let mut entries: Vec<Entry> = Vec::new();
@@ -538,6 +546,12 @@ fn read_cache(path: &Path) -> Option<Vec<Entry>> {
         }
     }
     Some(entries)
+}
+
+/// Fuzz entry point: the cache parser on arbitrary bytes.
+#[cfg(fuzzing)]
+pub fn fuzz_read_cache(bytes: &[u8]) {
+    let _ = parse_cache(bytes);
 }
 
 /// Atomic (temp file + rename); any failure just means no cache.
@@ -825,6 +839,38 @@ mod tests {
         std::fs::write(f.root.join("blocker"), "").unwrap();
         let c = Catalog::load_from(&[(d, true)], &f.root.join("blocker/inacircle/catalog"));
         assert_eq!(c.actions.len(), 1);
+    }
+
+    const CACHE_OK: &str = "inacircle-catalog 0\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes\n";
+
+    #[test]
+    fn parse_cache_reads_what_write_cache_writes() {
+        let text = format!("{CACHE_OK}{}\n", act("x.a", "A"));
+        let e = parse_cache(text.as_bytes()).unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].bin.path, Path::new("/a/one"));
+        assert_eq!(
+            (e[0].bin.mtime, e[0].bin.size, e[0].bin.builtin),
+            (5, 7, true)
+        );
+        assert_eq!(e[0].lines.len(), 1);
+        assert_eq!(parse_cache(b"inacircle-catalog 0\n").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_cache_refuses_truncated_and_bad_input() {
+        // Cut mid-field and mid-header.
+        assert!(parse_cache(&CACHE_OK.as_bytes()[..CACHE_OK.len() - 9]).is_none());
+        assert!(parse_cache(b"inacircle-cat").is_none());
+        assert!(parse_cache(b"").is_none());
+        // Wrong magic, unsupported version, not UTF-8, an action before any
+        // bin, an unknown line kind.
+        assert!(parse_cache(b"other 0\n").is_none());
+        assert!(parse_cache(b"inacircle-catalog 1\n").is_none());
+        assert!(parse_cache(b"inacircle-catalog 0\n\xff\n").is_none());
+        let orphan = format!("inacircle-catalog 0\n{}\n", act("x.a", "A"));
+        assert!(parse_cache(orphan.as_bytes()).is_none());
+        assert!(parse_cache(b"inacircle-catalog 0\nzzz\n").is_none());
     }
 
     #[test]
