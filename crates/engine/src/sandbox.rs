@@ -362,10 +362,8 @@ pub fn limits_for(inputs_total: u64) -> Limits {
 const DATA_CAP_MIN: u64 = 1 << 30;
 
 /// The upper bound of [`data_cap`]: 4 GiB. A need beyond it signals a bug
-/// in our own per-family limits, not a legitimate use (the largest
-/// legitimate user, a 300 MP stitched panorama as RGBA8, is 1.2 GB; even
-/// with 16-bit channels and a 2x operation factor it stays near 4 GiB),
-/// and the net must not let a bug grow to most of a big machine's RAM.
+/// in our own per-family limits, not a legitimate use, and the net must
+/// not let such a bug grow into most of a big machine's RAM.
 const DATA_CAP_MAX: u64 = 4 << 30;
 
 /// The divisor of [`data_cap`]: an action gets 1/8 of the machine's RAM.
@@ -574,14 +572,26 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
             Ok(())
         }
     }
-    let fsize = libc::rlimit {
-        rlim_cur: limits.fsize,
-        rlim_max: limits.fsize,
-    };
-    let data = libc::rlimit {
-        rlim_cur: limits.data,
-        rlim_max: limits.data,
-    };
+    // A limit is never raised: if the supervisor itself runs under a lower
+    // hard limit (`ulimit -d` / `-f`), raising the hard limit would fail
+    // with EPERM and every spawn would fail. Lowering is always allowed, so
+    // each is clamped to the inherited hard limit (getrlimit is
+    // async-signal-safe; RLIM_INFINITY is the largest value).
+    fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
+        let mut cur = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `cur` is a writable rlimit.
+        check(unsafe { libc::getrlimit(resource, &mut cur) }.into())?;
+        let n = want.min(cur.rlim_max);
+        Ok(libc::rlimit {
+            rlim_cur: n,
+            rlim_max: n,
+        })
+    }
+    let fsize = clamped(libc::RLIMIT_FSIZE, limits.fsize)?;
+    let data = clamped(libc::RLIMIT_DATA, limits.data)?;
     let core = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -1067,6 +1077,44 @@ pub(crate) mod tests {
         let o = sh(None, limits, "ulimit -d; ulimit -H -d");
         assert!(o.status.success(), "{}", stderr(&o));
         assert_eq!(o.stdout, b"2097152\n2097152\n");
+    }
+
+    /// A supervisor under a lower hard limit than ours must not make the
+    /// spawn fail: the inherited (lower) limit stays in force.
+    #[test]
+    fn inherited_lower_hard_limits_are_kept() {
+        const DATA: u64 = 512 << 20;
+        const FSIZE: u64 = 100 << 20;
+        let mut cmd = Command::new("/bin/true");
+        cmd.stdin(Stdio::null());
+        // SAFETY: only setrlimit, getrlimit and apply_in_child (all
+        // async-signal-safe) on stack data.
+        unsafe {
+            cmd.pre_exec(|| {
+                let lower = |res, v: u64| {
+                    let r = libc::rlimit {
+                        rlim_cur: v,
+                        rlim_max: v,
+                    };
+                    cvt(libc::setrlimit(res, &r))
+                };
+                lower(libc::RLIMIT_DATA, DATA)?;
+                lower(libc::RLIMIT_FSIZE, FSIZE)?;
+                apply_in_child(None, &NO_LIMIT)?;
+                for (res, want) in [(libc::RLIMIT_DATA, DATA), (libc::RLIMIT_FSIZE, FSIZE)] {
+                    let mut r = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    cvt(libc::getrlimit(res, &mut r))?;
+                    if r.rlim_cur != want || r.rlim_max != want {
+                        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+                    }
+                }
+                Ok(())
+            });
+        }
+        assert!(cmd.spawn().unwrap().wait().unwrap().success());
     }
 
     #[test]

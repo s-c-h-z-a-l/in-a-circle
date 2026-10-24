@@ -804,8 +804,7 @@ fn alloc_under_cap_passes() {
     assert_eq!(o.pairs("done").len(), 1, "{}", o.stdout);
 }
 
-/// glibc reserves a 64 MB arena per thread virtually; `RLIMIT_DATA` must
-/// not count that (`RLIMIT_AS` would).
+/// A multi-threaded action allocating under the cap passes.
 #[test]
 fn threaded_small_alloc_passes() {
     let e = Env::new("alloc-threads");

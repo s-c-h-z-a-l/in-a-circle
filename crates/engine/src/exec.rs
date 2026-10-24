@@ -848,7 +848,15 @@ impl From<ExitStatus> for End {
 }
 
 /// The failure reason for an input the process reported nothing about.
-fn unreported_reason(violation: Option<&str>, end: End, stderr_tail: &[u8]) -> String {
+///
+/// `data_limit` is the `RLIMIT_DATA` the action ran under, named in the
+/// out-of-memory message.
+fn unreported_reason(
+    violation: Option<&str>,
+    end: End,
+    stderr_tail: &[u8],
+    data_limit: u64,
+) -> String {
     if let Some(v) = violation {
         return format!("contract violation: {v}");
     }
@@ -857,7 +865,7 @@ fn unreported_reason(violation: Option<&str>, end: End, stderr_tail: &[u8]) -> S
         // A Rust action whose allocation fails under the RLIMIT_DATA net
         // prints this line to stderr and aborts.
         End::Signal(libc::SIGABRT) if has_alloc_failure(stderr_tail) => {
-            let mib = sandbox::data_cap(sandbox::total_ram()) >> 20;
+            let mib = data_limit >> 20;
             format!("out of memory (limit {mib} MiB)")
         }
         End::Signal(n) => format!("killed by signal {n}"),
@@ -1023,7 +1031,7 @@ fn run_step(
         Err(e) => return fail_all(sink, &format!("cannot start action: {e}")),
     };
     drop(ruleset);
-    let mut sup = Supervisor::new(child, step_in, dir, root, cancel);
+    let mut sup = Supervisor::new(child, step_in, dir, root, cancel, limits.data);
     sup.run(sink);
     sup.finish(sink)
 }
@@ -1040,6 +1048,8 @@ enum Reported {
 
 /// The state of one running process.
 struct Supervisor<'a> {
+    /// The `RLIMIT_DATA` the child was started with.
+    data_limit: u64,
     child: Child,
     /// The child's pid, which is also its process group id (it calls
     /// `setsid` in `apply_in_child`).
@@ -1161,6 +1171,7 @@ impl<'a> Supervisor<'a> {
         dir: &'a Path,
         root: &'a Path,
         cancel: &'a CancelToken,
+        data_limit: u64,
     ) -> Supervisor<'a> {
         let mut child = child;
         let stdout = child.stdout.take();
@@ -1186,6 +1197,7 @@ impl<'a> Supervisor<'a> {
             dir,
             root,
             cancel,
+            data_limit,
             reported: vec![Reported::Nothing; n],
             outputs: Vec::new(),
             output_hashes: HashSet::new(),
@@ -1521,7 +1533,7 @@ impl<'a> Supervisor<'a> {
             }
             sink.fail(o, why);
         }
-        let reason = unreported_reason(self.violation.as_deref(), end, &self.tail);
+        let reason = unreported_reason(self.violation.as_deref(), end, &self.tail, self.data_limit);
         for (j, &o) in origin.iter().enumerate() {
             if self.reported[j] == Reported::Nothing {
                 sink.fail(o, reason.clone());
@@ -1709,48 +1721,50 @@ mod tests {
 
     #[test]
     fn reason_for_unreported_inputs() {
+        const LIMIT: u64 = 1 << 30;
         let tail = b"warming up\nerror: bad option --frob\n\n";
         assert_eq!(
             unreported_reason(
                 Some("unknown event kind bogus"),
                 End::Signal(libc::SIGTERM),
-                tail
+                tail,
+                LIMIT
             ),
             "contract violation: unknown event kind bogus"
         );
         assert_eq!(
-            unreported_reason(None, End::Signal(libc::SIGXFSZ), tail),
+            unreported_reason(None, End::Signal(libc::SIGXFSZ), tail, LIMIT),
             "output too large"
         );
         assert_eq!(
-            unreported_reason(None, End::Signal(libc::SIGSEGV), tail),
+            unreported_reason(None, End::Signal(libc::SIGSEGV), tail, LIMIT),
             format!("killed by signal {}", libc::SIGSEGV)
         );
-        let mib = sandbox::data_cap(sandbox::total_ram()) >> 20;
         assert_eq!(
             unreported_reason(
                 None,
                 End::Signal(libc::SIGABRT),
-                b"memory allocation of 99 bytes failed\n"
+                b"memory allocation of 99 bytes failed\n",
+                LIMIT
             ),
-            format!("out of memory (limit {mib} MiB)")
+            "out of memory (limit 1024 MiB)"
         );
         // An abort for any other reason stays a plain signal.
         assert_eq!(
-            unreported_reason(None, End::Signal(libc::SIGABRT), tail),
+            unreported_reason(None, End::Signal(libc::SIGABRT), tail, LIMIT),
             format!("killed by signal {}", libc::SIGABRT)
         );
         assert_eq!(
-            unreported_reason(None, End::Exit(2), tail),
+            unreported_reason(None, End::Exit(2), tail, LIMIT),
             "action invocation error: error: bad option --frob"
         );
         assert_eq!(
-            unreported_reason(None, End::Exit(2), b""),
+            unreported_reason(None, End::Exit(2), b"", LIMIT),
             "action invocation error"
         );
         for code in [0, 1, 3] {
             assert_eq!(
-                unreported_reason(None, End::Exit(code), tail),
+                unreported_reason(None, End::Exit(code), tail, LIMIT),
                 "no result reported"
             );
         }

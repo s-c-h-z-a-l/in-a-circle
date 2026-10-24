@@ -12,7 +12,9 @@ the sum.
 ## RLIMIT_DATA: the memory net
 
 `RLIMIT_DATA` = RAM / 8, clamped to 1 GiB ..= 4 GiB. RAM comes from
-`sysinfo(2)` (`totalram * mem_unit`), read once per action start. Soft and
+`sysinfo(2)` (`totalram * mem_unit`), read once per action start. `totalram` is slightly below the nominal RAM (the kernel
+and firmware keep a part), so a 16 GB machine gets about 1.94 GiB, not 2.
+Soft and
 hard limit are equal, so the action cannot raise it. It applies with or
 without Landlock.
 
