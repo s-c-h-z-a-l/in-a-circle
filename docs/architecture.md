@@ -81,6 +81,12 @@ are in `CLAUDE.md`.
   unchanged. Without Landlock a plugin's manifest does not run ("sandbox
   unavailable"; not cached, so a later start retries); a built-in one runs
   under seccomp and the rlimits.
+- A whole catalog refresh shares one 10 s budget: each manifest gets
+  min(2 s, the rest of the budget), so a run of hanging binaries cannot
+  hold a start for N x 2 s. A binary cut by it keeps its old cache entry
+  (its family stays on the wheel) and is retried at the next start; one
+  with no old entry stays out until then. The same budget applies when a
+  refresh runs before an action starts on the choice path.
 - The cache, `$XDG_CACHE_HOME/inacircle/catalog` (with an
   `INACIRCLE_ACTIONS_DIR` override: `catalog-<FNV-1a of the list>`, one file
   per set of directories), is a manifest-style file
@@ -182,8 +188,9 @@ Every action runs sandboxed, set up in the child between `fork` and
 - **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB,
   with or without Landlock. It is the last net against a faulty or missing
   per-family limit, not the protection itself; over it an allocation fails
-  and the input fails with `out of memory (limit N MiB)`. The numbers and
-  why `DATA` and not `AS` are in [resource-limits.md](resource-limits.md).
+  and the input fails: a Rust action (allocation-failure line, then
+  `SIGABRT`) with `out of memory (limit N MiB)`, any other action with its
+  own error or the signal. The numbers and why `DATA` and not `AS` are in [resource-limits.md](resource-limits.md).
 - Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
   `RLIMIT_DATA` is per process, so each child of a forking action gets the
   cap again.
@@ -457,8 +464,9 @@ compositor.
   cached, even if it changed; one the cache does not know is not offered
   this time; with no cache at all the hub says `No actions yet`. Once the
   wheel is gone (surface torn down, lock released), the cache is
-  refreshed in the same process with the usual per-binary deadline; a
-  choice's run does that refresh itself.
+  refreshed in the same process within the refresh budget (10 s in all,
+  min(2 s, the rest) per manifest, see Manifest); a choice's run does that
+  refresh itself, before the action starts.
 - A drag that arrives once the drop was taken is refused.
 
 **The hub text**
