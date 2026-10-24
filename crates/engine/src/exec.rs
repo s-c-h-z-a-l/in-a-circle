@@ -1910,4 +1910,96 @@ mod tests {
         assert!(t.is_cancelled());
         assert!(t.is_cancelled(), "stays cancelled");
     }
+
+    #[test]
+    fn done_index_accepts_only_canonical_decimals_below_the_batch_size() {
+        assert_eq!(done_index("0/a.md", 2), Ok(0));
+        assert_eq!(done_index("1/a.md", 2), Ok(1));
+        assert_eq!(done_index("10/a.md", 11), Ok(10));
+        for bad in [
+            "00/a.md",
+            "01/a.md",
+            "+1/a.md",
+            "-1/a.md",
+            "1a/a.md",
+            "a/a.md",
+            "2/a.md",
+            "/1/a.md",
+            "1",
+            "1//a.md",
+            "1/../a.md",
+        ] {
+            assert!(done_index(bad, 2).is_err(), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn touch_refreshes_the_work_dir_mtime() {
+        let t = Tmp::new("touch");
+        let old = libc::timespec {
+            tv_sec: 1_000_000,
+            tv_nsec: 0,
+        };
+        let times = [old, old];
+        let c = CString::new(t.0.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c is a valid path, times points to two timespecs.
+        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(r, 0);
+        touch(&t.0);
+        let age = fs::metadata(&t.0)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(
+            age < Duration::from_secs(60),
+            "mtime not refreshed: {age:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_of_no_or_three_steps_fails_every_input() {
+        let t = Tmp::new("route-len");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let a = script_action(&t, "act", "exit 0", "md");
+        for route in [&[][..], &[&a, &a, &a][..]] {
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(route, std::slice::from_ref(&input), &mut seen, &tok);
+            assert_eq!(
+                seen.0,
+                [Outcome::Failed {
+                    input: input.clone(),
+                    reason: "invalid route".to_owned()
+                }]
+            );
+        }
+        assert_eq!(
+            fs::read_dir(&t.0).unwrap().count(),
+            2,
+            "nothing was created"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_an_input_and_nothing_is_placed_for_it() {
+        let t = Tmp::new("dir-input");
+        let dir_input = t.0.join("folder.txt");
+        fs::create_dir(&dir_input).unwrap();
+        let a = script_action(&t, "act", "echo ran > \"$4/ran\"", "md");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&a], std::slice::from_ref(&dir_input), &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: dir_input.clone(),
+                reason: "not a regular file".to_owned()
+            }]
+        );
+        let left: Vec<_> = fs::read_dir(&t.0).unwrap().flatten().collect();
+        assert_eq!(left.len(), 2, "only the input and the script: {left:?}");
+    }
 }
