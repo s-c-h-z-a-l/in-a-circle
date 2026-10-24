@@ -555,12 +555,28 @@ fn job_records(mut rd: impl BufRead, job: &JobId) -> io::Result<JobRecords> {
     Ok(r)
 }
 
-/// Fuzz entry point: the history reader on arbitrary bytes, for the job ids
-/// the history can really name.
+/// Fuzz entry point: the history reader on arbitrary bytes. The job id is
+/// the first one the input names (`job=<id>` up to the next tab or newline),
+/// so the matching branches run; the empty id and a foreign one run too.
 #[cfg(fuzzing)]
 pub fn fuzz_history(bytes: &[u8]) {
-    for id in ["1-1", "10-1", ""] {
-        let _ = job_records(bytes, &JobId(id.to_owned()));
+    let named = bytes
+        .windows(4)
+        .position(|w| w == b"job=")
+        .map(|i| &bytes[i + 4..])
+        .map(|t| {
+            &t[..t
+                .iter()
+                .position(|&b| b == b'\t' || b == b'\n')
+                .unwrap_or(t.len())]
+        });
+    let ids = [
+        String::from_utf8_lossy(named.unwrap_or_default()).into_owned(),
+        String::new(),
+        "0-0".to_owned(),
+    ];
+    for id in ids {
+        let _ = job_records(bytes, &JobId(id));
     }
 }
 

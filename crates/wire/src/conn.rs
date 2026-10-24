@@ -81,10 +81,11 @@ fn frame(buf: &[u8]) -> Result<Option<Frame>, Error> {
 }
 
 /// Fuzz entry point: the events a compositor could send, as bytes. Runs the
-/// real `Conn::event` over every object kind (client ids 2.. and server ids
-/// from `SERVER_IDS`, one per interface) and every argument reader on what
-/// comes out. Fds are not modelled: a message that claims one is refused as
-/// `MissingFd`, which is the path a peer sending no fd takes.
+/// real `Conn::event` over every object kind (client id `n + 1` and server
+/// id `SERVER_IDS + n` for the interface at index `n` of `Iface::ALL`) and
+/// every argument reader on what comes out. One fd is queued, so the first
+/// `wl_keyboard.keymap` finds its fd and a second one is refused as
+/// `MissingFd`.
 #[cfg(fuzzing)]
 pub fn fuzz_events(bytes: &[u8]) {
     use crate::proto::Iface;
@@ -95,11 +96,17 @@ pub fn fuzz_events(bytes: &[u8]) {
     }
     // SAFETY: fresh fd we own.
     let mut c = Conn::from_fd(unsafe { OwnedFd::from_raw_fd(fd) });
-    for i in Iface::ALL.iter().skip(2) {
+    for i in Iface::ALL.iter().skip(1) {
         c.new_id(*i);
     }
     for (n, i) in Iface::ALL.iter().enumerate() {
         c.register_server_id(SERVER_IDS + n as u32, *i);
+    }
+    // SAFETY: as above.
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd >= 0 {
+        // SAFETY: fresh fd we own.
+        c.in_fds.push_back(unsafe { OwnedFd::from_raw_fd(fd) });
     }
     // `read` never grows `inb` past this, so neither may the fuzz input.
     c.inb.extend_from_slice(&bytes[..bytes.len().min(MAX_INB)]);
