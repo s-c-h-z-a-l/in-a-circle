@@ -965,7 +965,7 @@ fn run_step(
         exec: &exec,
         read,
         read_exact: &exact,
-        write: dir,
+        write: Some(dir),
     };
     let ruleset = if landlock {
         let built = match pre {

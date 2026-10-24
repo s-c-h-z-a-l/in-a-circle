@@ -146,8 +146,9 @@ pub struct Policy<'a> {
     /// intermediate outputs go through [`allow_read_fd`]): a symlink is
     /// refused, never followed. Must exist.
     pub read_exact: &'a [PathBuf],
-    /// Full write (the work dir). Must exist.
-    pub write: &'a Path,
+    /// Full write (the work dir). Must exist. `None`: nothing is
+    /// writable (the manifest run).
+    pub write: Option<&'a Path>,
 }
 
 /// Resource limits for the child. `RLIMIT_CORE` is always 0.
@@ -256,7 +257,10 @@ pub fn add(ruleset: &Ruleset, policy: &Policy) -> io::Result<()> {
     for p in policy.read_exact {
         allow_at(ruleset, p, read, libc::O_NOFOLLOW)?;
     }
-    allow(ruleset, policy.write, fs)
+    match policy.write {
+        Some(dir) => allow(ruleset, dir, fs),
+        None => Ok(()),
+    }
 }
 
 /// Grants reading the file open as `fd` (an `O_PATH` fd the engine has
@@ -656,7 +660,7 @@ pub(crate) mod tests {
     }
 
     /// The running ABI, or `None` after saying the test is skipped.
-    fn abi_or_skip(test: &str, min: u32) -> Option<u32> {
+    pub(crate) fn abi_or_skip(test: &str, min: u32) -> Option<u32> {
         match landlock_abi() {
             Some(abi) if abi >= min => Some(abi),
             Some(abi) => {
@@ -693,7 +697,7 @@ pub(crate) mod tests {
             exec: &exec,
             read,
             read_exact: &[],
-            write,
+            write: Some(write),
         };
         build(&policy).unwrap().expect("Landlock available")
     }
@@ -931,7 +935,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &exact,
-            write: &other.0,
+            write: Some(&other.0),
         };
         let e = build(&policy).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
@@ -941,7 +945,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &exact,
-            write: &work.0,
+            write: Some(&work.0),
         };
         let rs = build(&policy).unwrap().unwrap();
         let o = sh(Some(&rs), NO_LIMIT, &format!("cat '{}'", secret.display()));
@@ -986,7 +990,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         let rs = build(&policy).unwrap().unwrap();
         let o = sh(Some(&rs), NO_LIMIT, "echo ok");
@@ -1005,7 +1009,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &read,
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         let e = build(&policy).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
@@ -1014,7 +1018,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &gone,
+            write: Some(&gone),
         };
         assert_eq!(build(&policy).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
@@ -1031,7 +1035,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         for abi in 1..=top {
             let rs = build_for_abi(&policy, abi).unwrap();

@@ -73,6 +73,14 @@ are in `CLAUDE.md`.
   collects the answers into a cache and reruns a binary only when it
   changed (a few `stat` calls per start). The binary is the single source
   of truth; the same pattern as fontconfig's or gdk-pixbuf's caches.
+- `--manifest` runs in the sandbox of `run` (see Sandbox), narrower: no
+  input, no writable directory (Landlock grants only reading and executing
+  the system directories and the binary), and `RLIMIT_FSIZE` 0 (a manifest
+  writes only to its stdout pipe, which `FSIZE` does not cover, and may
+  write no file). Its deadline, 64 KiB output limit and group kill are
+  unchanged. Without Landlock a plugin's manifest does not run ("sandbox
+  unavailable"; not cached, so a later start retries); a built-in one runs
+  under seccomp and the rlimits.
 - The cache, `$XDG_CACHE_HOME/inacircle/catalog` (with an
   `INACIRCLE_ACTIONS_DIR` override: `catalog-<FNV-1a of the list>`, one file
   per set of directories), is a manifest-style file
@@ -182,7 +190,8 @@ Every action runs sandboxed, set up in the child between `fork` and
 - Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
 - Without Landlock, actions from the user or plugin directory do not run
   ("sandbox unavailable"); built-in actions run with a "ran without
-  sandbox" warning, and the history records `sandbox=no`.
+  sandbox" warning, and the history records `sandbox=no`. The same holds
+  for `--manifest`: a plugin's does not run, a built-in one does.
 
 ## Classifier
 

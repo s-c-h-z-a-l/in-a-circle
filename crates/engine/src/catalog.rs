@@ -107,7 +107,7 @@ impl Catalog {
                     if let Some(i) = cached.iter().position(|e| e.bin == bin) {
                         return Some(cached.swap_remove(i));
                     }
-                    let lines = run_manifest(&bin.path)?;
+                    let lines = run_manifest(&bin.path, bin.builtin)?;
                     Some(Entry { bin, lines })
                 })
                 .collect();
@@ -292,8 +292,8 @@ enum Fail {
 /// Runs `<bin> --manifest` and returns its valid `action` lines. A broken
 /// binary yields no lines (message on stderr); `None` means a transient
 /// failure that must not be cached.
-fn run_manifest(bin: &Path) -> Option<Vec<Line>> {
-    match manifest_lines(bin) {
+fn run_manifest(bin: &Path, builtin: bool) -> Option<Vec<Line>> {
+    match manifest_lines(bin, builtin) {
         Ok(lines) => Some(lines),
         Err(Fail::Deterministic(why)) => {
             eprintln!("inacircle: {}: {why}; skipped", bin.display());
@@ -306,8 +306,8 @@ fn run_manifest(bin: &Path) -> Option<Vec<Line>> {
     }
 }
 
-fn manifest_lines(bin: &Path) -> Result<Vec<Line>, Fail> {
-    let out = capture(bin)?;
+fn manifest_lines(bin: &Path, builtin: bool) -> Result<Vec<Line>, Fail> {
+    let out = capture(bin, builtin, Instant::now() + DEADLINE)?;
     let bad = |why: String| Fail::Deterministic(why);
     let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
     match manifest::parse(&text, MANIFEST_MAGIC) {
@@ -327,19 +327,60 @@ fn manifest_lines(bin: &Path) -> Result<Vec<Line>, Fail> {
     }
 }
 
-/// Stdout of `<bin> --manifest` within one shared deadline and the size
-/// limit. The child's whole process group is killed and reaped on failure.
-fn capture(bin: &Path) -> Result<Vec<u8>, Fail> {
+/// Stdout of `<bin> --manifest` within `deadline` and the size limit, run
+/// in the sandbox of `run` but narrower: Landlock lets it read and execute
+/// only the system directories and the binary, with no input and no
+/// writable directory. A plugin's code is not trusted, so without Landlock
+/// its manifest does not run (transient: a later start retries); a
+/// built-in one then runs under seccomp and the rlimits only, as a built-in
+/// `run` does. The child's whole process group is killed and reaped on
+/// failure.
+fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail> {
+    use crate::sandbox::{self, Limits, Policy};
     use std::os::unix::process::CommandExt;
-    let mut child = Command::new(bin)
-        .arg("--manifest")
+    // Paths that do not exist are skipped by the ruleset builder.
+    let mut exec: Vec<PathBuf> = sandbox::SYSTEM_EXEC_PATHS
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    exec.push(bin.to_path_buf());
+    let policy = Policy {
+        exec: &exec,
+        read: &[],
+        read_exact: &[],
+        write: None,
+    };
+    let ruleset = sandbox::build(&policy)
+        .map_err(|e| Fail::Transient(format!("sandbox setup failed: {e}")))?;
+    if !manifest_policy_allows(builtin, ruleset.is_some()) {
+        return Err(Fail::Transient("sandbox unavailable".to_owned()));
+    }
+    // A manifest writes only to its stdout pipe, to which RLIMIT_FSIZE does
+    // not apply, and may write no file: 0 makes any file write fail.
+    let limits = Limits {
+        fsize: 0,
+        data: sandbox::data_cap(sandbox::total_ram()),
+    };
+    let fd = ruleset.as_ref().map(|r| r.as_raw_fd());
+    let mut cmd = Command::new(bin);
+    cmd.arg("--manifest")
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
+        .stderr(Stdio::null());
+    // No `process_group(0)`: std applies it before pre_exec, and the
+    // child's `setsid` in `apply_in_child` (which also makes it a group
+    // leader, so `kill_group` still reaches its descendants) would fail.
+    // SAFETY: the closure makes only the async-signal-safe calls of
+    // `apply_in_child`; the ruleset fd stays open until spawn returns
+    // (`ruleset` lives to the end of this function).
+    unsafe {
+        cmd.pre_exec(move || sandbox::apply_in_child(fd, &limits));
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| Fail::Transient(format!("cannot run: {e}")))?;
-    let deadline = Instant::now() + DEADLINE;
+    drop(ruleset);
     let result = read_limited(&mut child, deadline);
     if result.is_err() {
         kill_group(&child);
@@ -353,9 +394,17 @@ fn capture(bin: &Path) -> Result<Vec<u8>, Fail> {
     }
 }
 
+/// Whether a manifest may run: a plugin's only inside Landlock (its code is
+/// not trusted, like its `run`); a built-in one also without it, under
+/// seccomp and the rlimits only, as a built-in `run` does.
+fn manifest_policy_allows(builtin: bool, landlock: bool) -> bool {
+    builtin || landlock
+}
+
 fn kill_group(child: &std::process::Child) {
     // SAFETY: kill has no memory-safety preconditions. The child leads its own
-    // process group (process_group(0)), so -pid addresses only its group.
+    // process group (it calls `setsid` in `apply_in_child`), so -pid
+    // addresses only its group.
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
@@ -582,15 +631,69 @@ mod tests {
     }
 
     fn manifest_script(path: &Path, lines: &[String]) {
-        let mut body =
-            String::from("[ \"$1\" = --manifest ] || exit 1\nprintf 'inacircle-manifest 0\\n'\n");
+        script(path, &manifest_body("", lines));
+    }
+
+    /// The shell body of a manifest: `pre` (shell), then the header and `lines`.
+    fn manifest_body(pre: &str, lines: &[String]) -> String {
+        let mut body = format!("[ \"$1\" = --manifest ] || exit 1\n{pre}\n");
+        body.push_str("printf 'inacircle-manifest 0\\n'\n");
         for l in lines {
             body.push_str(&format!(
                 "printf '%s\\n' '{}'\n",
                 l.replace('\t', "'\"\t\"'")
             ));
         }
-        script(path, &body);
+        body
+    }
+
+    // The sandbox is applied by the same `apply_in_child` and ruleset
+    // builder as `run`, whose tests cover the network denial; denied writes
+    // and reads here prove it is applied to the manifest too.
+    #[test]
+    fn manifest_cannot_write_outside() {
+        if crate::sandbox::tests::abi_or_skip("manifest_cannot_write_outside", 1).is_none() {
+            return;
+        }
+        let f = Fix::new("mf-write");
+        let d = f.dir("a");
+        let outside = f.root.join("outside");
+        let pre = format!("echo x > '{}' 2>/dev/null", outside.display());
+        script(&d.join("one"), &manifest_body(&pre, &[act("x.a", "A")]));
+        let c = Catalog::load_from(&[(d, false)], &f.cache());
+        assert!(c.get("x.a").is_some(), "the manifest itself still loads");
+        assert!(!outside.exists(), "the manifest wrote outside the sandbox");
+    }
+
+    #[test]
+    fn manifest_cannot_read_outside() {
+        if crate::sandbox::tests::abi_or_skip("manifest_cannot_read_outside", 1).is_none() {
+            return;
+        }
+        let f = Fix::new("mf-read");
+        let d = f.dir("a");
+        let secret = f.root.join("secret");
+        std::fs::write(&secret, "topsecret-4711").unwrap();
+        // The secret goes into a label, so any leak shows in the catalog.
+        let body = format!(
+            "[ \"$1\" = --manifest ] || exit 1\nprintf 'inacircle-manifest 0\\n'\n\
+             printf 'action\\tx.s\\tfamily=f\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=%s\\tgroup=g\\tcost=10\\tlossy=no\\tbatch=yes\\n' \"$(cat '{}' 2>/dev/null)\"\n\
+             printf 'action\\tx.a\\tfamily=f\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=A\\tgroup=g\\tcost=10\\tlossy=no\\tbatch=yes\\n'\n",
+            secret.display()
+        );
+        script(&d.join("one"), &body);
+        let c = Catalog::load_from(&[(d, false)], &f.cache());
+        assert!(c.get("x.a").is_some(), "the manifest itself still loads");
+        for a in &c.actions {
+            assert!(!a.label.contains("topsecret"), "read outside: {a:?}");
+        }
+    }
+
+    #[test]
+    fn manifest_policy_without_landlock() {
+        assert!(manifest_policy_allows(true, false));
+        assert!(!manifest_policy_allows(false, false));
+        assert!(manifest_policy_allows(false, true));
     }
 
     #[test]
@@ -637,20 +740,20 @@ mod tests {
     fn cache_reused_when_unchanged() {
         let f = Fix::new("reuse");
         let d = f.dir("a");
-        let marker = f.root.join("marker");
-        let mut body = act("x.a", "A");
-        body = format!(
-            "echo run >> {}\nprintf 'inacircle-manifest 0\\n%s\\n' '{}'",
-            marker.display(),
-            body.replace('\t', "'\"\t\"'")
-        );
-        script(&d.join("one"), &body);
+        manifest_script(&d.join("one"), &[act("x.a", "A")]);
         let first = Catalog::load_from(&[(d.clone(), true)], &f.cache());
         assert_eq!(first.actions.len(), 1);
         assert!(f.cache().exists());
+        // The manifest cannot leave a run marker (it is sandboxed): change
+        // its output behind the cache's back instead (same size and mtime).
+        let mtime = std::fs::metadata(d.join("one"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        manifest_script(&d.join("one"), &[act("x.a", "B")]);
+        set_mtime(&d.join("one"), mtime);
         let second = Catalog::load_from(&[(d, true)], &f.cache());
-        assert_eq!(second.actions, first.actions);
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run\n");
+        assert_eq!(second.actions, first.actions, "the manifest ran again");
     }
 
     #[test]
@@ -796,22 +899,34 @@ mod tests {
     fn transient_failure_retried_deterministic_cached() {
         let f = Fix::new("transient");
         let d = f.dir("a");
-        let (m1, m2) = (f.root.join("m1"), f.root.join("m2"));
-        script(
-            &d.join("a-fails"),
-            &format!("echo run >> {}\nexit 1", m1.display()),
-        );
-        script(
-            &d.join("b-garbage"),
-            &format!("echo run >> {}\necho nonsense", m2.display()),
-        );
+        // A manifest cannot leave a run marker (it is sandboxed), so reruns
+        // are told by a changed outcome: `a-fails` exits 1 now and is fixed
+        // after the first load; `b-garbage` has a malformed header and is
+        // fixed after it with the same size and mtime.
+        script(&d.join("a-fails"), "exit 1");
+        let good_b = manifest_body("", &[act("x.b", "B")]);
+        let garbage = good_b.replace("inacircle-manifest 0", "inacircle-garbage-00");
+        script(&d.join("b-garbage"), &garbage);
         manifest_script(&d.join("c-good"), &[act("x.a", "A")]);
-        for _ in 0..2 {
-            let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
-            assert_eq!(c.actions.len(), 1);
-        }
-        assert_eq!(std::fs::read_to_string(&m1).unwrap(), "run\nrun\n");
-        assert_eq!(std::fs::read_to_string(&m2).unwrap(), "run\n");
+        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+        assert_eq!(c.actions.len(), 1);
+        manifest_script(&d.join("a-fails"), &[act("y.a", "Y")]);
+        let mtime = std::fs::metadata(d.join("b-garbage"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        script(&d.join("b-garbage"), &good_b);
+        set_mtime(&d.join("b-garbage"), mtime);
+        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+        assert!(
+            c.get("y.a").is_some(),
+            "the transient failure was not retried"
+        );
+        assert!(
+            c.get("x.b").is_none(),
+            "the deterministic failure was rerun"
+        );
+        assert!(c.get("x.a").is_some());
     }
 
     #[test]
