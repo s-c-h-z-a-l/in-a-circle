@@ -169,14 +169,21 @@ run() { # <outdir> <cargo-mutants args...> [-- <test binary args...>]
     echo "systemd-run --user --scope is unavailable; refusing to run mutation tests without a memory cap" >&2
     exit 1
   fi
+  local unit=inacircle-mutants-$$-$RANDOM
   stage_tree
   # The subshell sets the hard RLIMIT_DATA only for the run; the scope's
   # processes inherit it from systemd-run.
   (
     ulimit -S -H -d "$DATA_CAP_KIB"
-    exec systemd-run --user --scope --quiet -p "MemoryMax=${SCOPE_MAX_KIB}K" -p MemorySwapMax=0 -- \
+    exec systemd-run --user --scope --quiet --unit "$unit" -p "MemoryMax=${SCOPE_MAX_KIB}K" -p MemorySwapMax=0 -- \
       cargo mutants -d "$TREE" "${common[@]}" -o "$PWD/$out" "${pre[@]}" "${EXTRA[@]}" "${post[@]}"
   ) || rc=$?
+  # A timed-out mutant's test helper (a child that called setsid, e.g. the
+  # sandbox tests' seccomp helpers) escapes cargo-mutants' process-group kill
+  # and outlived the run as an orphan (two were found sleeping for over an
+  # hour). A scope lives while any process is in it, so stopping it here
+  # kills whatever is left; harmless if it already ended.
+  systemctl --user stop "$unit.scope" 2>/dev/null || true
   case $rc in 0 | 2 | 3) ;; *) echo "cargo mutants failed ($rc)" >&2; exit "$rc" ;; esac
   summary "$out"
 }

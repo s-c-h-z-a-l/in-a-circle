@@ -43,6 +43,9 @@ const MAX_LINE: usize = 64 * 1024;
 /// Time between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Work dir mtime refresh period (stale dirs are those older than a day).
+// mutants: equivalent — for the safety property (an active job's work dir
+// never looks stale, i.e. older than a day) any period below a day holds;
+// `60 + 60` (2 min) and `60 / 60` (1 s) only refresh more often.
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Warnings kept per input; the rest are only counted.
 const MAX_WARNINGS: u32 = 16;
@@ -267,7 +270,7 @@ pub fn run(
         all(&mut sink, "invalid route");
         return sink.report(false);
     }
-    if abi.is_none() && route.iter().any(|a| !a.builtin) {
+    if refuse_without_landlock(abi.is_some(), route) {
         all(&mut sink, "sandbox unavailable");
         return sink.report(false);
     }
@@ -909,6 +912,40 @@ fn last_line(tail: &[u8]) -> String {
         .to_owned()
 }
 
+/// Whether a route must be refused because Landlock is unavailable: only
+/// built-in actions (code we ship and trust) may run without it; a plugin
+/// anywhere in the route would run unconfined.
+fn refuse_without_landlock(landlock: bool, route: &[&Action]) -> bool {
+    !landlock && route.iter().any(|a| !a.builtin)
+}
+
+/// Where a step's Landlock ruleset comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum RuleSource {
+    /// The pre-built ruleset (it already grants an intermediate step's
+    /// inputs, from the fds their check opened) gets this step's rules.
+    Extend,
+    /// An intermediate step without its pre-built ruleset: building one
+    /// from paths would re-resolve them (a swap race), so the step fails.
+    Refuse,
+    /// A first step builds its ruleset from its input paths.
+    Build,
+}
+
+fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
+    match (has_pre, intermediate) {
+        (true, _) => RuleSource::Extend,
+        (false, true) => RuleSource::Refuse,
+        (false, false) => RuleSource::Build,
+    }
+}
+
+/// Whether a step must fail because it ended up without a ruleset: only
+/// built-in actions may run unconfined.
+fn refuse_unsandboxed(has_ruleset: bool, builtin: bool) -> bool {
+    !has_ruleset && !builtin
+}
+
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
 /// unfinished input is then failed as cancelled). With Landlock, an
@@ -968,10 +1005,11 @@ fn run_step(
         write: Some(dir),
     };
     let ruleset = if landlock {
-        let built = match pre {
-            Some(r) => sandbox::add(&r, &policy).map(|()| Some(r)),
-            None if step_in.intermediate => Err(io::Error::other("no intermediate rules")),
-            None => sandbox::build(&policy),
+        let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
+            (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| Some(r)),
+            (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
+            (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
+            (RuleSource::Build, _) => sandbox::build(&policy),
         };
         match built {
             Ok(r) => r,
@@ -980,7 +1018,7 @@ fn run_step(
     } else {
         None
     };
-    if ruleset.is_none() && !action.builtin {
+    if refuse_unsandboxed(ruleset.is_some(), action.builtin) {
         return fail_all(sink, "sandbox unavailable");
     }
     let total: u64 = step_in
@@ -1909,6 +1947,33 @@ mod tests {
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         assert!(t.is_cancelled());
         assert!(t.is_cancelled(), "stays cancelled");
+    }
+
+    #[test]
+    fn only_builtins_may_run_without_the_sandbox() {
+        let t = Tmp::new("decisions");
+        let builtin = script_action(&t, "b", "exit 0", "md");
+        let mut plugin = script_action(&t, "p", "exit 0", "md");
+        plugin.builtin = false;
+        assert!(!refuse_without_landlock(true, &[&builtin]));
+        assert!(!refuse_without_landlock(true, &[&plugin]));
+        assert!(!refuse_without_landlock(false, &[&builtin, &builtin]));
+        assert!(refuse_without_landlock(false, &[&plugin]));
+        assert!(refuse_without_landlock(false, &[&builtin, &plugin]));
+        assert!(refuse_without_landlock(false, &[&plugin, &builtin]));
+        // The same rule, once a step has (or lacks) its ruleset.
+        assert!(!refuse_unsandboxed(true, true));
+        assert!(!refuse_unsandboxed(true, false));
+        assert!(!refuse_unsandboxed(false, true));
+        assert!(refuse_unsandboxed(false, false));
+    }
+
+    #[test]
+    fn an_intermediate_step_never_builds_its_own_ruleset() {
+        assert_eq!(rule_source(true, true), RuleSource::Extend);
+        assert_eq!(rule_source(true, false), RuleSource::Extend);
+        assert_eq!(rule_source(false, true), RuleSource::Refuse);
+        assert_eq!(rule_source(false, false), RuleSource::Build);
     }
 
     #[test]

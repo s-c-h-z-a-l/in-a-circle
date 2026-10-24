@@ -66,10 +66,15 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     // `&` only drops O_DIRECTORY, which the magic link cannot need: it
     // names the inode the O_PATH open above already proved is a directory.
     let read_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
-    // mutants: equivalent — `== 0` as `!= 0` swaps the two routes to an fd
-    // for the same inode (via the magic link, or by opening the name again
-    // with O_NOFOLLOW after an fchmod); they differ only against a
-    // concurrent swap of the name, which no test can time.
+    // mutants: not equivalent — `== 0` as `!= 0` sends a successful chmod to
+    // the fallback, which opens the NAME again: if the name is swapped for
+    // another directory between the O_PATH open and that re-open, the
+    // fallback (O_NOFOLLOW stops a symlink, not a directory) fchmods and
+    // empties the other directory, while the magic link always names the
+    // inode already opened. Not deterministically testable: it needs a
+    // swap between two adjacent syscalls and no production hook exists (the
+    // fd-0 and seccomp cases cannot interpose there); accepted-untestable,
+    // see the area 2 report.
     // SAFETY: magic is a valid NUL-terminated path naming our O_PATH fd.
     if unsafe { libc::chmod(magic.as_ptr(), 0o700) } == 0 {
         // SAFETY: as above; the magic link resolves to the opened inode.
