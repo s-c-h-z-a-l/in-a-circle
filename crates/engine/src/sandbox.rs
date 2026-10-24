@@ -557,6 +557,38 @@ fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
     return None;
 }
 
+/// `want` clamped to the inherited hard limit of `resource`, as a rlimit
+/// with soft = hard. A limit is never raised: if the supervisor itself runs
+/// under a lower hard limit (`ulimit -d` / `-f`), raising the hard limit
+/// would fail with EPERM and every spawn would fail. Lowering is always
+/// allowed. `RLIM_INFINITY` is the largest value.
+///
+/// Also called between fork and exec: getrlimit is not on the POSIX
+/// async-signal-safe list, but in glibc it is a plain `prlimit64` syscall,
+/// with no locks or allocation, so it is safe there.
+fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
+    let mut cur = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `cur` is a writable rlimit.
+    if unsafe { libc::getrlimit(resource, &mut cur) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let n = want.min(cur.rlim_max);
+    Ok(libc::rlimit {
+        rlim_cur: n,
+        rlim_max: n,
+    })
+}
+
+/// The `RLIMIT_DATA` a child started with `limits` really gets: the same
+/// clamping [`apply_in_child`] does, so a message can name it. Falls back to
+/// the wanted value when the limit cannot be read.
+pub fn effective_data_limit(limits: &Limits) -> u64 {
+    clamped(libc::RLIMIT_DATA, limits.data).map_or(limits.data, |r| r.rlim_max)
+}
+
 /// Puts the calling process in its own session, applies `limits`, sets
 /// `no_new_privs`, enforces the ruleset if given, installs the seccomp
 /// filter (even without a ruleset) and marks every fd >= 3 close-on-exec.
@@ -575,24 +607,6 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
         } else {
             Ok(())
         }
-    }
-    // A limit is never raised: if the supervisor itself runs under a lower
-    // hard limit (`ulimit -d` / `-f`), raising the hard limit would fail
-    // with EPERM and every spawn would fail. Lowering is always allowed, so
-    // each is clamped to the inherited hard limit (getrlimit is
-    // async-signal-safe; RLIM_INFINITY is the largest value).
-    fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
-        let mut cur = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: `cur` is a writable rlimit.
-        check(unsafe { libc::getrlimit(resource, &mut cur) }.into())?;
-        let n = want.min(cur.rlim_max);
-        Ok(libc::rlimit {
-            rlim_cur: n,
-            rlim_max: n,
-        })
     }
     let fsize = clamped(libc::RLIMIT_FSIZE, limits.fsize)?;
     let data = clamped(libc::RLIMIT_DATA, limits.data)?;
@@ -820,6 +834,22 @@ pub(crate) mod tests {
         assert_eq!(limits_for(GIB).fsize, 16 * GIB);
         assert_eq!(limits_for(2 * GIB).fsize, 16 * GIB);
         assert_eq!(limits_for(u64::MAX).fsize, 16 * GIB);
+    }
+
+    /// The limit named in the out-of-memory message is the one the child
+    /// gets: never above the inherited hard limit, never above the wanted.
+    #[test]
+    fn effective_data_limit_is_clamped_to_the_hard_limit() {
+        let mut hard = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `hard` is a writable rlimit.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut hard) }, 0);
+        let limits = |data| Limits { fsize: 0, data };
+        assert_eq!(effective_data_limit(&limits(u64::MAX)), hard.rlim_max);
+        let small = hard.rlim_max.min(1 << 30);
+        assert_eq!(effective_data_limit(&limits(small)), small);
     }
 
     #[test]

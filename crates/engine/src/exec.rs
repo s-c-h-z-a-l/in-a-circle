@@ -1031,7 +1031,14 @@ fn run_step(
         Err(e) => return fail_all(sink, &format!("cannot start action: {e}")),
     };
     drop(ruleset);
-    let mut sup = Supervisor::new(child, step_in, dir, root, cancel, limits.data);
+    let mut sup = Supervisor::new(
+        child,
+        step_in,
+        dir,
+        root,
+        cancel,
+        sandbox::effective_data_limit(&limits),
+    );
     sup.run(sink);
     sup.finish(sink)
 }
