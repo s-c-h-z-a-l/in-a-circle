@@ -271,16 +271,33 @@ fn oversized_message_is_refused() {
     let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
     let r = c.call(call("Ping"), after(500));
     assert!(matches!(r, Err(Error::TooLarge)), "{:?}", r.err());
-    // Only the fixed header was read: the rest is still in the socket.
-    let mut unread: libc::c_int = 0;
-    // SAFETY: FIONREAD writes one int to a valid pointer.
-    assert_eq!(
-        unsafe { libc::ioctl(c.as_raw_fd(), libc::FIONREAD, &mut unread) },
-        0
-    );
-    assert_eq!(unread, 1000);
+    // Only the fixed header was read: the rest is still in the socket. Count
+    // it by reading, not with FIONREAD: for a partially consumed AF_UNIX
+    // stream skb the FIONREAD count depends on the kernel version (1000 on
+    // some, 1016 = the consumed header included, on others).
+    let mut left = Vec::new();
+    loop {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is valid for `buf.len()` writable bytes.
+        let n = unsafe {
+            libc::recv(
+                c.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n <= 0 {
+            // EAGAIN: nothing more is queued.
+            break;
+        }
+        left.extend_from_slice(&buf[..n as usize]);
+    }
+    assert_eq!(left.len(), 1000);
+    assert!(left.iter().all(|&x| x == 0xaa));
     // The stream is out of sync now: the connection refuses further use.
-    assert!(c.call(call("Ping"), after(50)).is_err());
+    let r = c.call(call("Ping"), after(50));
+    assert!(matches!(r, Err(Error::Closed)), "{:?}", r.err());
     drop(c);
     fake.join();
 }

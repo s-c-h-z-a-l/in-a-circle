@@ -36,8 +36,14 @@ it's a bug.
    - hover repaint: <= 100 µs per event
    - while the wheel waits: no wakeups except input events
    - idle cost: 0 (no resident process)
-   - peak memory: <= 5 MB PSS (proportional set size: shared libc and
-     loader pages count by their share; RSS is reported alongside)
+   - peak memory of `inacircle` (wheel, engine, supervisor): <= 5 MB PSS
+     (proportional set size: shared libc and loader pages count by their
+     share; RSS is reported alongside). Actions are not held to it: they
+     stream where the format allows, elsewhere hold at most one unit
+     (a page, an image, a chapter), and enforce documented input limits
+     on the data they actually produce, not only on declared sizes. The
+     sandbox's `RLIMIT_DATA` net (RAM/8, 1-4 GiB, see
+     `docs/resource-limits.md`) catches a limit that is wrong or missing.
    - binary: `inacircle` <= 1.5 MB; each family binary <= 1 MB of code
      (embedded data such as fonts is justified and measured separately).
      A plan that grows a binary by more than 100 KB explains why.
@@ -146,6 +152,15 @@ it's a bug.
 - Run `cargo fmt` and `cargo clippy` after changes.
 - Prefer `cargo check` / narrow tests before the full suite.
 - No `unsafe` without a documented invariant.
+- No magic numbers: every limit, deadline and threshold states its reason
+  (why this value, derived from what, what happens past it) in a code
+  comment and in the commit body.
+- Every new action comes with its MIME type in the classifier, a preset
+  and group in the menu, a refreshed catalog cache, and a fake-compositor
+  test that the wheel offers and runs it. `lossy` means the content can
+  lose something; anything an action may drop makes it `lossy=yes`.
+- Every new shipped binary is added to `scripts/shipped-bins` in its
+  first commit, so the dependency and size guards cover it.
 
 ## Testing
 
@@ -158,10 +173,29 @@ Test behavior, not lines. Coverage is a signal, never a target.
   without the fix).
 - Not required: trivial getters and constructors, or what the compiler
   already guarantees. Test internals through the public interface.
-- Effort follows risk: parsers get official test suites and edge cases
-  (later fuzzing); engine logic and the action contract get unit and
-  integration tests; Wayland/UI code gets unit tests for its pure logic
-  (geometry, hit testing, damage) plus a manual checklist on niri.
+- Effort follows risk: parsers get official test suites and edge cases;
+  engine logic and the action contract get unit and integration tests;
+  Wayland/UI code gets unit tests for its pure logic (geometry, hit
+  testing, damage) plus a manual checklist on niri.
+- Fuzzing: every parser that reads foreign input gets a `cargo-fuzz`
+  target (nightly, test-time only) that also watches time, depth and
+  memory, not just panics. Every finding becomes a regression test in the
+  normal suite. Campaigns are reproducible: pinned oracle, seed corpus,
+  stated run time, minimized failing input.
+- Differential tests: where a recognized reference or official suite
+  exists, our output is checked against it as a pinned dev-dependency.
+  An encoder round-tripped through our own decoder is not independent
+  evidence. Where no reference exists, the plan says what we compare to.
+- Mutation testing (`cargo-mutants`) at the end of a plan, only on the
+  code the plan changed, with a time limit. Surviving mutants are reported
+  in the outcome; each is a question, not an automatic failure.
+- A plan that changes a budgeted path (start, hover, memory, wakeups)
+  also measures it on a second, untuned machine (stock kernel), and the
+  numbers go to the benchmark page.
+- The closing verification runs the suite with
+  `INACIRCLE_REQUIRE_LANDLOCK=1`.
+- CI (`.github/workflows/ci.yml`) is a safety net, not the authority: the
+  final word is the local run.
 - Measure line coverage per crate with `cargo llvm-cov` at the end of each
   plan and report it. Rough signal bands: parsers ~90%, engine and
   contract ~80%, UI lower. Far below its band is a question to answer

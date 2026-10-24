@@ -33,7 +33,8 @@
 //!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
 //!   opened before the sandbox reaches the action.
-//! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`.
+//! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`, and
+//!   the memory net `RLIMIT_DATA` (see [`data_cap`]), with or without Landlock.
 //!
 //! # What is not covered
 //!
@@ -52,8 +53,10 @@
 //!   fill a disk.
 //! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
 //!   installs none (sockets and metadata are then not restricted).
-//! - No `RLIMIT_NPROC` or memory limit: an action can fork-bomb or exhaust
-//!   RAM until it is cancelled.
+//! - No `RLIMIT_NPROC`: an action can fork-bomb until it is cancelled.
+//! - `RLIMIT_DATA` is per process, not per process tree: a forking action
+//!   gets the cap once per child. File mmaps and shared memory are not
+//!   counted.
 //! - Keyring syscalls (`keyctl`, `add_key`, `request_key`) are allowed.
 
 use std::fs::OpenOptions;
@@ -143,8 +146,9 @@ pub struct Policy<'a> {
     /// intermediate outputs go through [`allow_read_fd`]): a symlink is
     /// refused, never followed. Must exist.
     pub read_exact: &'a [PathBuf],
-    /// Full write (the work dir). Must exist.
-    pub write: &'a Path,
+    /// Full write (the work dir). Must exist. `None`: nothing is
+    /// writable (the manifest run).
+    pub write: Option<&'a Path>,
 }
 
 /// Resource limits for the child. `RLIMIT_CORE` is always 0.
@@ -152,6 +156,8 @@ pub struct Policy<'a> {
 pub struct Limits {
     /// `RLIMIT_FSIZE` in bytes.
     pub fsize: u64,
+    /// `RLIMIT_DATA` in bytes (soft = hard), see [`data_cap`].
+    pub data: u64,
 }
 
 /// The highest Landlock ABI the running kernel supports, or `None` when
@@ -251,7 +257,10 @@ pub fn add(ruleset: &Ruleset, policy: &Policy) -> io::Result<()> {
     for p in policy.read_exact {
         allow_at(ruleset, p, read, libc::O_NOFOLLOW)?;
     }
-    allow(ruleset, policy.write, fs)
+    match policy.write {
+        Some(dir) => allow(ruleset, dir, fs),
+        None => Ok(()),
+    }
 }
 
 /// Grants reading the file open as `fd` (an `O_PATH` fd the engine has
@@ -339,12 +348,71 @@ pub fn build(policy: &Policy) -> io::Result<Option<Ruleset>> {
 }
 
 /// `RLIMIT_FSIZE`: 16 x the total input size, at least 256 MiB, at most 16 GiB.
+/// `RLIMIT_DATA`: [`data_cap`] of this machine's RAM (read once per call).
 pub fn limits_for(inputs_total: u64) -> Limits {
     const MIN: u64 = 256 << 20;
     const MAX: u64 = 16 << 30;
     Limits {
         fsize: inputs_total.saturating_mul(16).clamp(MIN, MAX),
+        data: data_cap(total_ram()),
     }
+}
+
+/// The lower bound of [`data_cap`]: 1 GiB. The Phase 6 pixel limit is
+/// 180 MP (Pillow rejects above 179 MP as a decompression bomb); 180 MP
+/// as RGBA8 is 720 MB, and the simplest operation (a format change) must
+/// fit even on the smallest machine we support (8 GB RAM, where 1/8 is
+/// exactly 1 GiB).
+const DATA_CAP_MIN: u64 = 1 << 30;
+
+/// The upper bound of [`data_cap`]: 4 GiB. A need beyond it signals a bug
+/// in our own per-family limits, not a legitimate use, and the net must
+/// not let such a bug grow into most of a big machine's RAM.
+const DATA_CAP_MAX: u64 = 4 << 30;
+
+/// The divisor of [`data_cap`]: an action gets 1/8 of the machine's RAM.
+/// Spawn-per-use means several actions can run at once, so one must not be
+/// able to take a large share of the RAM. 1/8 is 1 GiB on 8 GB (12.5%),
+/// 2 GiB on 16 GB and reaches the 4 GiB bound at 32 GB.
+const DATA_CAP_RAM_DIVISOR: u64 = 8;
+
+/// The `RLIMIT_DATA` of a sandboxed action on a machine with `total_ram`
+/// bytes of RAM: `total_ram / 8`, clamped to 1 GiB ..= 4 GiB.
+///
+/// This is the last net against a faulty or missing per-family limit
+/// (Phase 6 and 7 set those), not the protection itself.
+///
+/// - Why `DATA`, not `AS`: `RLIMIT_AS` caps the virtual address space, and
+///   glibc reserves a 64 MB malloc arena per thread virtually, so a
+///   multi-threaded action would fail long before it uses real memory.
+///   `RLIMIT_DATA` (Linux 4.7 and later) counts the heap and private
+///   writable anonymous mappings: what we want to bound. File mmaps and
+///   the code of shared libraries do not count.
+/// - Why a fixed, machine-dependent cap and not one derived from the
+///   input: memory use does not follow the input size. A 3 MB JPEG is 48
+///   MB decoded; a 50 KB PNG can be gigabytes of pixels.
+/// - Why 1/8 and 1 GiB to 4 GiB: see the constants. A user with a 12 MP
+///   phone photo needs 48 MB, a 61 MP DSLR frame 244 MB (488 MB at 16
+///   bit), a 139 MP 1200 dpi A4 scan 557 MB (1.1 GB at 16 bit), a 200 MP
+///   phone 800 MB. On 8 GB, a 180 MP progressive JPEG (about 1.26 GB)
+///   does not fit and fails cleanly; from 16 GB it does.
+///
+/// Over the cap an allocation fails (`ENOMEM`), and the action fails with a
+/// clear message; the machine stays up.
+pub fn data_cap(total_ram: u64) -> u64 {
+    (total_ram / DATA_CAP_RAM_DIVISOR).clamp(DATA_CAP_MIN, DATA_CAP_MAX)
+}
+
+/// The machine's RAM in bytes (`sysinfo(2)`: `totalram * mem_unit`), or 0
+/// when the call fails (then [`data_cap`] gives its lower bound).
+pub fn total_ram() -> u64 {
+    // SAFETY: an all-zero sysinfo is a valid value.
+    let mut si: libc::sysinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `si` is a writable sysinfo.
+    if unsafe { libc::sysinfo(&mut si) } != 0 {
+        return 0;
+    }
+    (si.totalram as u64).saturating_mul(u64::from(si.mem_unit))
 }
 
 /// The seccomp filter: deny non-unix sockets, metadata writes and io_uring.
@@ -489,6 +557,38 @@ fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
     return None;
 }
 
+/// `want` clamped to the inherited hard limit of `resource`, as a rlimit
+/// with soft = hard. A limit is never raised: if the supervisor itself runs
+/// under a lower hard limit (`ulimit -d` / `-f`), raising the hard limit
+/// would fail with EPERM and every spawn would fail. Lowering is always
+/// allowed. `RLIM_INFINITY` is the largest value.
+///
+/// Also called between fork and exec: getrlimit is not on the POSIX
+/// async-signal-safe list, but in glibc it is a plain `prlimit64` syscall,
+/// with no locks or allocation, so it is safe there.
+fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
+    let mut cur = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `cur` is a writable rlimit.
+    if unsafe { libc::getrlimit(resource, &mut cur) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let n = want.min(cur.rlim_max);
+    Ok(libc::rlimit {
+        rlim_cur: n,
+        rlim_max: n,
+    })
+}
+
+/// The `RLIMIT_DATA` a child started with `limits` really gets: the same
+/// clamping [`apply_in_child`] does, so a message can name it. Falls back to
+/// the wanted value when the limit cannot be read.
+pub fn effective_data_limit(limits: &Limits) -> u64 {
+    clamped(libc::RLIMIT_DATA, limits.data).map_or(limits.data, |r| r.rlim_max)
+}
+
 /// Puts the calling process in its own session, applies `limits`, sets
 /// `no_new_privs`, enforces the ruleset if given, installs the seccomp
 /// filter (even without a ruleset) and marks every fd >= 3 close-on-exec.
@@ -508,10 +608,8 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
             Ok(())
         }
     }
-    let fsize = libc::rlimit {
-        rlim_cur: limits.fsize,
-        rlim_max: limits.fsize,
-    };
+    let fsize = clamped(libc::RLIMIT_FSIZE, limits.fsize)?;
+    let data = clamped(libc::RLIMIT_DATA, limits.data)?;
     let core = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -523,6 +621,7 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
     unsafe {
         check(libc::setsid().into())?;
         check(libc::setrlimit(libc::RLIMIT_FSIZE, &fsize).into())?;
+        check(libc::setrlimit(libc::RLIMIT_DATA, &data).into())?;
         check(libc::setrlimit(libc::RLIMIT_CORE, &core).into())?;
         check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).into())?;
         if let Some(fd) = ruleset {
@@ -575,7 +674,7 @@ pub(crate) mod tests {
     }
 
     /// The running ABI, or `None` after saying the test is skipped.
-    fn abi_or_skip(test: &str, min: u32) -> Option<u32> {
+    pub(crate) fn abi_or_skip(test: &str, min: u32) -> Option<u32> {
         match landlock_abi() {
             Some(abi) if abi >= min => Some(abi),
             Some(abi) => {
@@ -612,13 +711,14 @@ pub(crate) mod tests {
             exec: &exec,
             read,
             read_exact: &[],
-            write,
+            write: Some(write),
         };
         build(&policy).unwrap().expect("Landlock available")
     }
 
     const NO_LIMIT: Limits = Limits {
         fsize: 1 << 40, // far above anything a test writes
+        data: 1 << 44,  // far above any test's heap
     };
 
     /// Runs `/bin/sh -c script` under `ruleset` and `limits`.
@@ -736,6 +836,34 @@ pub(crate) mod tests {
         assert_eq!(limits_for(u64::MAX).fsize, 16 * GIB);
     }
 
+    /// The limit named in the out-of-memory message is the one the child
+    /// gets: never above the inherited hard limit, never above the wanted.
+    #[test]
+    fn effective_data_limit_is_clamped_to_the_hard_limit() {
+        let mut hard = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `hard` is a writable rlimit.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut hard) }, 0);
+        let limits = |data| Limits { fsize: 0, data };
+        assert_eq!(effective_data_limit(&limits(u64::MAX)), hard.rlim_max);
+        let small = hard.rlim_max.min(1 << 30);
+        assert_eq!(effective_data_limit(&limits(small)), small);
+    }
+
+    #[test]
+    fn data_cap_bounds() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(data_cap(0), GIB);
+        assert_eq!(data_cap(4 * GIB), GIB);
+        assert_eq!(data_cap(8 * GIB), GIB);
+        assert_eq!(data_cap(16 * GIB), 2 * GIB);
+        assert_eq!(data_cap(32 * GIB), 4 * GIB);
+        assert_eq!(data_cap(96 * GIB), 4 * GIB);
+        assert_eq!(data_cap(u64::MAX), 4 * GIB);
+    }
+
     #[test]
     fn handled_rights_follow_the_abi() {
         let base = (1 << 13) - 1;
@@ -837,7 +965,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &exact,
-            write: &other.0,
+            write: Some(&other.0),
         };
         let e = build(&policy).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
@@ -847,7 +975,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &exact,
-            write: &work.0,
+            write: Some(&work.0),
         };
         let rs = build(&policy).unwrap().unwrap();
         let o = sh(Some(&rs), NO_LIMIT, &format!("cat '{}'", secret.display()));
@@ -892,7 +1020,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         let rs = build(&policy).unwrap().unwrap();
         let o = sh(Some(&rs), NO_LIMIT, "echo ok");
@@ -911,7 +1039,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &read,
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         let e = build(&policy).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
@@ -920,7 +1048,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &gone,
+            write: Some(&gone),
         };
         assert_eq!(build(&policy).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
@@ -937,7 +1065,7 @@ pub(crate) mod tests {
             exec: &exec,
             read: &[],
             read_exact: &[],
-            write: &work.0,
+            write: Some(&work.0),
         };
         for abi in 1..=top {
             let rs = build_for_abi(&policy, abi).unwrap();
@@ -958,7 +1086,10 @@ pub(crate) mod tests {
     fn fsize_limit_gives_efbig() {
         let work = Tmp::new("work");
         let out = work.0.join("big");
-        let limits = Limits { fsize: 1 << 20 };
+        let limits = Limits {
+            fsize: 1 << 20,
+            ..NO_LIMIT
+        };
         let script = format!(
             "trap '' XFSZ; dd if=/dev/zero of='{}' bs=64k count=32 2>&1",
             out.display()
@@ -968,6 +1099,56 @@ pub(crate) mod tests {
         let msg = String::from_utf8_lossy(&o.stdout);
         assert!(msg.contains("File too large"), "{msg}");
         assert_eq!(fs::metadata(&out).unwrap().len(), 1 << 20);
+    }
+
+    #[test]
+    fn data_limit_is_set_soft_and_hard() {
+        let limits = Limits {
+            data: 2 << 30,
+            ..NO_LIMIT
+        };
+        // Without Landlock: the net does not depend on it. `ulimit` is in KiB.
+        let o = sh(None, limits, "ulimit -d; ulimit -H -d");
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(o.stdout, b"2097152\n2097152\n");
+    }
+
+    /// A supervisor under a lower hard limit than ours must not make the
+    /// spawn fail: the inherited (lower) limit stays in force.
+    #[test]
+    fn inherited_lower_hard_limits_are_kept() {
+        const DATA: u64 = 512 << 20;
+        const FSIZE: u64 = 100 << 20;
+        let mut cmd = Command::new("/bin/true");
+        cmd.stdin(Stdio::null());
+        // SAFETY: only setrlimit, getrlimit and apply_in_child (all
+        // async-signal-safe) on stack data.
+        unsafe {
+            cmd.pre_exec(|| {
+                let lower = |res, v: u64| {
+                    let r = libc::rlimit {
+                        rlim_cur: v,
+                        rlim_max: v,
+                    };
+                    cvt(libc::setrlimit(res, &r))
+                };
+                lower(libc::RLIMIT_DATA, DATA)?;
+                lower(libc::RLIMIT_FSIZE, FSIZE)?;
+                apply_in_child(None, &NO_LIMIT)?;
+                for (res, want) in [(libc::RLIMIT_DATA, DATA), (libc::RLIMIT_FSIZE, FSIZE)] {
+                    let mut r = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    cvt(libc::getrlimit(res, &mut r))?;
+                    if r.rlim_cur != want || r.rlim_max != want {
+                        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+                    }
+                }
+                Ok(())
+            });
+        }
+        assert!(cmd.spawn().unwrap().wait().unwrap().success());
     }
 
     #[test]

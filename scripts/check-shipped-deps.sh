@@ -4,7 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SHIPPED="inacircle inacircle-text"
+# The shipped binaries, one per line (shared with check-sizes.sh).
+SHIPPED=$(cat scripts/shipped-bins)
 # Libraries the shipped binaries link: libc and our own crates only.
 LIBS="wire ui"
 bad=0

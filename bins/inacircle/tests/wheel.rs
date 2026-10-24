@@ -305,6 +305,17 @@ fn dead(pid: i32) -> bool {
     }
 }
 
+/// The pid of the process whose command line is exactly `sleep <secs>`,
+/// found by scanning `/proc` (a sandboxed manifest cannot write a pid file).
+fn find_sleeper(secs: u32) -> Option<i32> {
+    let want = format!("sleep\0{secs}\0");
+    fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+        let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+        let cmd = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        (cmd == want.as_bytes() && !dead(pid)).then_some(pid)
+    })
+}
+
 /// The early path to stage 2: the drag enters, the list is read, the drag
 /// moves onto the Document slice (north of the center) and drops; returns
 /// once stage 2 is on the wheel.
@@ -347,11 +358,9 @@ fn wait_exit(child: &mut std::process::Child, limit: Duration) -> std::process::
 fn a_hanging_manifest_never_runs_under_the_overlay() {
     let root = Root::new("hang");
     root.markdown_action_cached();
-    let pidfile = root.0.join("hang.pid");
-    root.action(
-        "zz-hang",
-        &format!("echo $$ > {}\nexec sleep 30", pidfile.display()),
-    );
+    // A unique duration tells this test's child from any other `sleep`.
+    let secs = 1000 + std::process::id();
+    root.action("zz-hang", &format!("exec sleep {secs}"));
     let list = root.files(1);
     let mut child = None;
     let mut c = Compositor::serve(&root.0.join("runtime"), Duration::from_secs(2), || {
@@ -371,18 +380,27 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
         "stage 2 took {:?}",
         t.elapsed()
     );
-    assert!(!pidfile.exists(), "a manifest ran under the overlay");
+    assert!(
+        find_sleeper(secs).is_none(),
+        "a manifest ran under the overlay"
+    );
 
     c.close();
     let t = Instant::now();
+    // The refresh runs it once the wheel is closed.
+    let pid = loop {
+        if let Some(pid) = find_sleeper(secs) {
+            break pid;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "the refresh never ran it"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let st = wait_exit(&mut child, Duration::from_secs(8));
     assert_eq!(st.code(), Some(0));
     // The refresh ran it, then hit its deadline.
-    let pid: i32 = fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     assert!(t.elapsed() >= Duration::from_secs(1), "{:?}", t.elapsed());
     assert!(dead(pid), "the hanging manifest outlived the wheel");
 }
