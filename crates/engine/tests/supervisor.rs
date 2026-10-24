@@ -411,9 +411,18 @@ fn two_step_intermediate_dir_swapped_for_a_symlink_fails() {
     let s2 = t.script("append", APPEND_STEP);
     let (a1, a2) = (action(&s1, "mid"), action(&s2, "md"));
     let (r, _) = run(&[&a1, &a2], std::slice::from_ref(&a), None);
-    assert_eq!(
-        failed(&r),
-        [(a, "intermediate output changed".to_owned())],
+    // The step swaps `0/` right after its `done`: if the supervisor reads the
+    // event after the swap, the done check itself refuses it (a contract
+    // violation); otherwise the re-check before step 2 does. Both fail the
+    // input and place nothing, which is what matters.
+    let f = failed(&r);
+    assert_eq!(f.len(), 1, "{:?}", r.outcomes);
+    assert_eq!(f[0].0, a);
+    assert!(
+        f[0].1 == "intermediate output changed"
+            || f[0]
+                .1
+                .starts_with("contract violation: done output 0/a.mid"),
         "{:?}",
         r.outcomes
     );

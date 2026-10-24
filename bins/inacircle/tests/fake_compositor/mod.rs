@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use wire::op;
 
 pub const OUTPUT: (u32, u32) = (1920, 1080);
+/// The first offer the fake source makes; `offer(n)` is the nth.
 const OFFER: u32 = 0xff00_0000;
 const URI_LIST: &str = "text/uri-list";
 const DND_COPY: u32 = 1;
@@ -62,6 +63,14 @@ pub struct Compositor {
     surfaces: Vec<u32>,
     layer: u32,
     data_device: u32,
+    /// Every request to a data offer so far, in order: (offer, opcode).
+    offer_log: Vec<(u32, u16)>,
+    /// Commits-with-buffer of the wheel subsurface so far.
+    attaches: usize,
+    /// The wheel buffer on screen.
+    shown: Option<u32>,
+    /// Buffers replaced on screen, not yet released to the client.
+    held: Vec<u32>,
 }
 
 impl Compositor {
@@ -89,6 +98,10 @@ impl Compositor {
             surfaces: Vec::new(),
             layer: 0,
             data_device: 0,
+            offer_log: Vec::new(),
+            attaches: 0,
+            shown: None,
+            held: Vec::new(),
         }
     }
 
@@ -170,7 +183,7 @@ impl Compositor {
         let args = self.inb[8..size].to_vec();
         self.inb.drain(..size);
         let carries_fd = (Some(&obj) == self.bound.get("wl_shm") && op == op::wl_shm::CREATE_POOL)
-            || (obj == OFFER && op == op::wl_data_offer::RECEIVE);
+            || (is_offer(obj) && op == op::wl_data_offer::RECEIVE);
         let fd = carries_fd.then(|| self.fds.pop_front().expect("fd with the request"));
         Some(Req { obj, op, args, fd })
     }
@@ -186,6 +199,7 @@ impl Compositor {
         loop {
             let open = self.fill();
             while let Some(mut r) = self.next() {
+                self.note(&r);
                 self.answer(&r);
                 if let Some(t) = want(self, &mut r) {
                     return t;
@@ -246,33 +260,141 @@ impl Compositor {
         assert!(self.data_device != 0, "no data device");
     }
 
-    /// A drag offering a URI list enters at the output's center and drops;
-    /// returns the pipe the client wants the list on.
-    pub fn drag_and_drop(&mut self, limit: Duration) -> OwnedFd {
-        let dd = self.data_device;
-        let overlay = self.surfaces[0];
-        self.send(dd, op::wl_data_device::DATA_OFFER, &words(&[OFFER]));
-        self.send(OFFER, op::wl_data_offer::OFFER, &wstr(URI_LIST));
+    /// A drag offering a URI list (the nth offer, `offer(n)`) enters at the
+    /// output's center, copy negotiated; returns the pipe the client wants
+    /// the list on (its early read), or `None` if the client did not ask
+    /// within `limit`.
+    pub fn drag_enters(&mut self, n: u32, limit: Duration) -> Option<OwnedFd> {
+        let (dd, overlay, o) = (self.data_device, self.surfaces[0], offer(n));
+        self.send(dd, op::wl_data_device::DATA_OFFER, &words(&[o]));
+        self.send(o, op::wl_data_offer::OFFER, &wstr(URI_LIST));
         let (cx, cy) = (OUTPUT.0 / 2 * 256, OUTPUT.1 / 2 * 256);
         self.send(
             dd,
             op::wl_data_device::ENTER,
-            &words(&[1, overlay, cx, cy, OFFER]),
+            &words(&[n + 1, overlay, cx, cy, o]),
         );
-        self.send(OFFER, op::wl_data_offer::ACTION, &words(&[DND_COPY]));
-        self.send(dd, op::wl_data_device::DROP, &[]);
-        self.until(limit, |_, r| {
-            (r.obj == OFFER && r.op == op::wl_data_offer::RECEIVE)
+        self.send(o, op::wl_data_offer::ACTION, &words(&[DND_COPY]));
+        self.until_or_timeout(limit, |_, r| {
+            (r.obj == o && r.op == op::wl_data_offer::RECEIVE)
                 .then(|| r.fd.take().expect("receive carries the pipe"))
         })
     }
 
-    /// Waits for the wheel surface's next buffer: stage 2 drawn.
-    pub fn wheel_drawn(&mut self, limit: Duration) {
-        let wheel = self.surfaces[1];
-        self.until(limit, |_, r| {
-            (r.obj == wheel && r.op == op::wl_surface::ATTACH).then_some(())
+    /// The next `receive` on offer `n`, e.g. the drop's own read.
+    pub fn next_receive(&mut self, n: u32, limit: Duration) -> Option<OwnedFd> {
+        let o = offer(n);
+        self.until_or_timeout(limit, |_, r| {
+            (r.obj == o && r.op == op::wl_data_offer::RECEIVE)
+                .then(|| r.fd.take().expect("receive carries the pipe"))
+        })
+    }
+
+    /// The drag moves to `(x, y)` (output coordinates).
+    pub fn drag_motion(&mut self, x: u32, y: u32) {
+        let dd = self.data_device;
+        self.send(
+            dd,
+            op::wl_data_device::MOTION,
+            &words(&[0, x * 256, y * 256]),
+        );
+    }
+
+    /// The drag drops.
+    pub fn drop_it(&mut self) {
+        let dd = self.data_device;
+        self.send(dd, op::wl_data_device::DROP, &[]);
+    }
+
+    /// Waits until the client has ended offer `n` (`destroy`), so its
+    /// request log is complete.
+    pub fn offer_destroyed(&mut self, n: u32, limit: Duration) {
+        let o = offer(n);
+        self.until(limit, |c, _| {
+            c.offer_log
+                .contains(&(o, op::wl_data_offer::DESTROY))
+                .then_some(())
         });
+    }
+
+    /// The requests the client made to offer `n`, as opcodes, in order.
+    pub fn offer_requests(&self, n: u32) -> Vec<u16> {
+        let o = offer(n);
+        self.offer_log
+            .iter()
+            .filter(|r| r.0 == o)
+            .map(|r| r.1)
+            .collect()
+    }
+
+    /// Wheel commits with a buffer so far.
+    pub fn attaches(&self) -> usize {
+        self.attaches
+    }
+
+    /// A frame passed: releases the buffers a newer one replaced.
+    pub fn release_held(&mut self) {
+        for b in std::mem::take(&mut self.held) {
+            self.send(b, op::wl_buffer::RELEASE, &[]);
+        }
+    }
+
+    /// The drag leaves without a drop.
+    pub fn drag_leaves(&mut self) {
+        let dd = self.data_device;
+        self.send(dd, op::wl_data_device::LEAVE, &[]);
+    }
+
+    /// Handles the client's requests for `d`.
+    pub fn pump(&mut self, d: Duration) {
+        let _ = self.until_or_timeout(d, |_, _| None::<()>);
+    }
+
+    /// Waits until the wheel has had `n` buffers attached in all.
+    pub fn attached(&mut self, n: usize, limit: Duration) {
+        self.until(limit, |c, _| (c.attaches >= n).then_some(()));
+    }
+
+    /// Like `until`, but `None` at the limit instead of a panic.
+    fn until_or_timeout<T>(
+        &mut self,
+        limit: Duration,
+        mut want: impl FnMut(&Compositor, &mut Req) -> Option<T>,
+    ) -> Option<T> {
+        let until = Instant::now() + limit;
+        loop {
+            let open = self.fill();
+            while let Some(mut r) = self.next() {
+                self.note(&r);
+                self.answer(&r);
+                if let Some(t) = want(self, &mut r) {
+                    return Some(t);
+                }
+            }
+            assert!(open, "the client hung up");
+            if Instant::now() >= until {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Logs a request for the tests.
+    fn note(&mut self, r: &Req) {
+        if is_offer(r.obj) {
+            self.offer_log.push((r.obj, r.op));
+        }
+        if self.surfaces.get(1) == Some(&r.obj) && r.op == op::wl_surface::ATTACH {
+            self.attaches += 1;
+            // Like a compositor: the buffer shown before is released only
+            // later, when the test says a frame passed (`release_held`).
+            let buf = r.word(0);
+            if buf != 0
+                && let Some(prev) = self.shown.replace(buf)
+            {
+                self.held.push(prev);
+            }
+        }
     }
 
     /// The compositor closes the overlay.
@@ -280,6 +402,15 @@ impl Compositor {
         let layer = self.layer;
         self.send(layer, op::zwlr_layer_surface_v1::CLOSED, &[]);
     }
+}
+
+/// The nth offer's object id (server-created ids start at 0xff000000).
+fn offer(n: u32) -> u32 {
+    OFFER + n
+}
+
+fn is_offer(obj: u32) -> bool {
+    (OFFER..OFFER + 0x100).contains(&obj)
 }
 
 /// Writes `data` into the drop pipe and closes it.

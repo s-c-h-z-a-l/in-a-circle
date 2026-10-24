@@ -18,7 +18,8 @@ Every architectural decision has been measured first, and the reports are
 public in [`docs/benchmarks/`](docs/benchmarks). The engine runs headless
 (a command line that classifies files, runs sandboxed actions, undoes
 them and reports through desktop notifications), and `inacircle` without
-arguments is the wheel: drag a file, press the hotkey, drop it on a slice.
+arguments is the wheel: drag a file, press the hotkey, drop it on a category
+(Document), then on a target (Markdown, Plain text).
 The wheel is built and its measurements and manual checks on
 [niri](https://github.com/YaLTeR/niri) are in progress; there are no
 packages or presets worth installing yet. The first usable version is a

@@ -9,8 +9,24 @@ pub struct Preset {
     pub input: &'static str,
     pub output: &'static str,
     pub label: &'static str,
+    /// Direction within its group's wheel.
+    pub direction: u8,
+    /// Id of a [`GROUPS`] entry.
+    pub group: &'static str,
+}
+
+/// A category on the first-level wheel. `direction`: as for [`Preset`].
+pub struct Group {
+    pub id: &'static str,
+    pub label: &'static str,
     pub direction: u8,
 }
+
+pub const GROUPS: &[Group] = &[Group {
+    id: "document",
+    label: "Document",
+    direction: 0,
+}];
 
 pub const PRESETS: &[Preset] = &[
     Preset {
@@ -19,6 +35,7 @@ pub const PRESETS: &[Preset] = &[
         output: "text/markdown",
         label: "Markdown",
         direction: 0,
+        group: "document",
     },
     Preset {
         id: "plain-text",
@@ -26,6 +43,7 @@ pub const PRESETS: &[Preset] = &[
         output: "text/plain",
         label: "Plain text",
         direction: 4,
+        group: "document",
     },
 ];
 
@@ -93,11 +111,16 @@ pub struct Tally {
     /// appearance.
     pub types: Vec<(String, usize, String)>,
     pub first_label: Option<String>,
+    /// The first file's name.
+    pub first_name: Option<String>,
 }
 
 impl Tally {
     pub fn add(&mut self, name: &str, kind: &Kind) {
         self.total += 1;
+        if self.first_name.is_none() {
+            self.first_name = Some(name.to_owned());
+        }
         if self.first_label.is_none() {
             self.first_label = Some(kind.label.clone());
         }
@@ -110,12 +133,125 @@ impl Tally {
         }
     }
 
+    /// What the source is called on the hub: the file's name, or the count.
+    pub fn source_text(&self) -> String {
+        match (self.total, &self.first_name) {
+            (0, _) => String::new(),
+            (1, Some(name)) => name.clone(),
+            (n, _) => format!("{n} files"),
+        }
+    }
+
     /// How many files have type `mime`, and the first one's name.
     pub fn of(&self, mime: &str) -> (usize, &str) {
         self.types
             .iter()
             .find(|t| t.0 == mime)
             .map_or((0, ""), |t| (t.1, t.2.as_str()))
+    }
+}
+
+/// Why a preset cannot run, `None` when it can.
+fn disabled_reason(cat: &Catalog, p: &Preset) -> Option<String> {
+    if route(cat, p.input, p.output).is_some() {
+        return None;
+    }
+    Some(match plan(cat, p.input, p.output, |_| true) {
+        Some(r) => match r.iter().find_map(|a| missing_tools(a).into_iter().next()) {
+            Some(t) => format!("needs {t}"),
+            None => "no action installed".into(),
+        },
+        None => "no action installed".into(),
+    })
+}
+
+/// A first-level category slice. `lit`: some dragged file has a runnable
+/// preset in it; dim: the category exists, nothing applies.
+pub struct GroupSlice {
+    pub group: &'static str,
+    pub label: &'static str,
+    pub lit: bool,
+}
+
+/// The first-level wheel, each category in its fixed direction.
+pub fn groups(cat: &Catalog, tally: &Tally) -> [Option<GroupSlice>; 8] {
+    groups_in(GROUPS, PRESETS, cat, tally)
+}
+
+fn groups_in(
+    table: &'static [Group],
+    presets: &[Preset],
+    cat: &Catalog,
+    tally: &Tally,
+) -> [Option<GroupSlice>; 8] {
+    warn_unknown_groups(table, presets);
+    let mut out: [Option<GroupSlice>; 8] = Default::default();
+    for g in table {
+        let lit = presets.iter().any(|p| {
+            p.group == g.id && tally.of(p.input).0 > 0 && route(cat, p.input, p.output).is_some()
+        });
+        out[usize::from(g.direction)] = Some(GroupSlice {
+            group: g.id,
+            label: g.label,
+            lit,
+        });
+    }
+    out
+}
+
+/// One stderr line per run for presets whose group is not in the table.
+fn warn_unknown_groups(table: &[Group], presets: &[Preset]) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    for p in presets {
+        if !table.iter().any(|g| g.id == p.group)
+            && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!("inacircle: preset {} has unknown group {}", p.id, p.group);
+        }
+    }
+}
+
+/// The second-level wheel: the presets of one category in their own
+/// directions; a preset no dragged file fits is dim (`applicable == 0`).
+/// The hub is the category's label.
+pub fn offer_group(cat: &Catalog, tally: &Tally, group: &str) -> Offer {
+    offer_group_in(GROUPS, PRESETS, cat, tally, group)
+}
+
+fn offer_group_in(
+    table: &'static [Group],
+    presets: &[Preset],
+    cat: &Catalog,
+    tally: &Tally,
+    group: &str,
+) -> Offer {
+    let mut slices: [Option<Slice>; 8] = Default::default();
+    let total = tally.total;
+    let Some(g) = table.iter().find(|g| g.id == group) else {
+        return Offer {
+            slices,
+            hub: String::new(),
+            total,
+        };
+    };
+    for p in presets.iter().filter(|p| p.group == g.id) {
+        let applicable = tally.of(p.input).0;
+        let disabled = if applicable == 0 {
+            Some("no matching file".to_owned())
+        } else {
+            disabled_reason(cat, p)
+        };
+        slices[usize::from(p.direction)] = Some(Slice {
+            preset: p.id,
+            label: p.label.into(),
+            applicable,
+            disabled,
+        });
+    }
+    Offer {
+        slices,
+        hub: g.label.to_owned(),
+        total,
     }
 }
 
@@ -149,17 +285,7 @@ pub fn offer_tally(cat: &Catalog, tally: &Tally) -> Offer {
         return Offer { slices, hub, total };
     };
     for p in PRESETS.iter().filter(|p| p.input == mime) {
-        let disabled = if route(cat, p.input, p.output).is_some() {
-            None
-        } else if let Some(r) = plan(cat, p.input, p.output, |_| true) {
-            let tool = r.iter().find_map(|a| missing_tools(a).into_iter().next());
-            Some(match tool {
-                Some(t) => format!("needs {t}"),
-                None => "no action installed".into(),
-            })
-        } else {
-            Some("no action installed".into())
-        };
+        let disabled = disabled_reason(cat, p);
         slices[usize::from(p.direction)] = Some(Slice {
             preset: p.id,
             label: p.label.into(),
@@ -379,6 +505,119 @@ mod tests {
         let o = offer(&two_way(), &f);
         assert!(o.slices.iter().all(Option::is_none));
         assert_eq!((o.hub.as_str(), o.total), ("no action for PDF", 2));
+    }
+
+    fn tally(files: &[(&str, &str)]) -> Tally {
+        let mut t = Tally::default();
+        for (n, m) in files {
+            t.add(n, &kind(Some(m), "X"));
+        }
+        t
+    }
+
+    #[test]
+    fn groups_light_document_for_text() {
+        let g = groups(&two_way(), &tally(&[("a.txt", "text/plain")]));
+        let s = g[0].as_ref().unwrap();
+        assert_eq!((s.group, s.label, s.lit), ("document", "Document", true));
+        assert_eq!(g.iter().flatten().count(), 1);
+    }
+
+    #[test]
+    fn groups_dim_document_without_a_route() {
+        let t = tally(&[("a.txt", "text/plain")]);
+        let g = groups(&Catalog { actions: vec![] }, &t);
+        assert!(!g[0].as_ref().unwrap().lit);
+        // A file nothing applies to: the category exists, so it is dim.
+        let g = groups(&two_way(), &tally(&[("a.pdf", "application/pdf")]));
+        assert!(!g[0].as_ref().unwrap().lit);
+        // No files at all: dim as well, never absent.
+        let g = groups(&two_way(), &Tally::default());
+        assert!(!g[0].as_ref().unwrap().lit);
+    }
+
+    #[test]
+    fn unknown_group_is_not_shown() {
+        let presets = [Preset {
+            id: "x",
+            input: "text/plain",
+            output: "text/markdown",
+            label: "X",
+            direction: 0,
+            group: "nonexistent",
+        }];
+        let t = tally(&[("a.txt", "text/plain")]);
+        let g = groups_in(GROUPS, &presets, &two_way(), &t);
+        // Only the table's category appears, and the stray preset lights nothing.
+        assert_eq!(g.iter().flatten().count(), 1);
+        assert!(!g[0].as_ref().unwrap().lit);
+        let o = offer_group_in(GROUPS, &presets, &two_way(), &t, "nonexistent");
+        assert!(o.slices.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn offer_group_lists_only_its_presets() {
+        let t = tally(&[("a.txt", "text/plain")]);
+        let o = offer_group(&two_way(), &t, "document");
+        assert_eq!(o.hub, "Document");
+        assert_eq!(o.total, 1);
+        let md = o.slices[0].as_ref().unwrap();
+        assert_eq!(
+            (md.preset, md.applicable, md.disabled.as_deref()),
+            ("markdown", 1, None)
+        );
+        // plain-text is in the group, but no file fits it: dim.
+        let pt = o.slices[4].as_ref().unwrap();
+        assert_eq!(pt.applicable, 0);
+        assert!(pt.disabled.is_some());
+        assert_eq!(o.slices.iter().flatten().count(), 2);
+        let o = offer_group(&two_way(), &t, "nope");
+        assert!(o.slices.iter().all(Option::is_none));
+        assert_eq!(o.hub, "");
+    }
+
+    #[test]
+    fn mixed_types_light_the_group_and_both_targets() {
+        let t = tally(&[
+            ("a.txt", "text/plain"),
+            ("b.md", "text/markdown"),
+            ("c.md", "text/markdown"),
+        ]);
+        let g = groups(&two_way(), &t);
+        assert!(g[0].as_ref().unwrap().lit);
+        let o = offer_group(&two_way(), &t, "document");
+        let md = o.slices[0].as_ref().unwrap();
+        let pt = o.slices[4].as_ref().unwrap();
+        assert_eq!((md.applicable, md.disabled.as_deref()), (1, None));
+        assert_eq!((pt.applicable, pt.disabled.as_deref()), (2, None));
+        assert_eq!(o.total, 3);
+        assert_eq!(t.source_text(), "3 files");
+        assert_eq!(tally(&[("a.txt", "text/plain")]).source_text(), "a.txt");
+        assert_eq!(Tally::default().source_text(), "");
+    }
+
+    /// Directions are part of the muscle memory: pinned, and unique where
+    /// they share a table.
+    #[test]
+    fn group_directions_are_fixed() {
+        let doc = GROUPS.iter().find(|g| g.id == "document").unwrap();
+        assert_eq!((doc.label, doc.direction), ("Document", 0));
+        for (i, a) in GROUPS.iter().enumerate() {
+            assert!(a.direction < 8, "{}", a.id);
+            assert!(GROUPS[i + 1..].iter().all(|b| b.direction != a.direction));
+        }
+        let dir = |id: &str| PRESETS.iter().find(|p| p.id == id).unwrap().direction;
+        assert_eq!((dir("markdown"), dir("plain-text")), (0, 4));
+        for (i, a) in PRESETS.iter().enumerate() {
+            assert!(GROUPS.iter().any(|g| g.id == a.group), "{}", a.id);
+            assert!(
+                PRESETS[i + 1..]
+                    .iter()
+                    .all(|b| a.group != b.group || a.direction != b.direction),
+                "{} shares a direction in its group",
+                a.id
+            );
+        }
     }
 
     #[test]
