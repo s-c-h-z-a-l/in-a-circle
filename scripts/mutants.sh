@@ -96,7 +96,13 @@ EXTRA=(${MUTANTS_ARGS:-})
 file_args=()
 for f in "${FILES[@]}"; do file_args+=(-f "$f"); done
 
+# Code under #[cfg(fuzzing)] (the fuzz_* entry points and Event::clone_args) is
+# compiled out of every test build, so no test could kill a mutant in it: they
+# would all be reported as missed. They are fuzz-only glue, not shipped code.
+EXCLUDE_FUZZ_RE='(\bfuzz_[a-z_]+|Event::clone_args)'
+
 common=(
+  --exclude-re "$EXCLUDE_FUZZ_RE"
   --jobs "$JOBS"
   --timeout-multiplier "$TIMEOUT_MULTIPLIER"
   --minimum-test-timeout "$MIN_TEST_TIMEOUT"
@@ -139,7 +145,7 @@ run() { # <outdir> <cargo-mutants args...> [-- <test binary args...>]
 case $MODE in
 list)
   stage_tree
-  cargo mutants -d "$TREE" --list "${file_args[@]}" "${EXTRA[@]}"
+  cargo mutants -d "$TREE" --list --exclude-re "$EXCLUDE_FUZZ_RE" "${file_args[@]}" "${EXTRA[@]}"
   ;;
 stage1)
   skips=()
