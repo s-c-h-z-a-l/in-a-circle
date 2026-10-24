@@ -367,6 +367,22 @@ fn manifest_lines(bin: &Path, builtin: bool, refresh_end: Instant) -> Result<Vec
 /// `run` does. The child's whole process group is killed and reaped on
 /// failure.
 fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail> {
+    let mut child = spawn_manifest(bin, builtin)?;
+    let result = read_limited(&mut child, deadline);
+    if result.is_err() {
+        kill_group(&child);
+    }
+    let status = wait_until(&mut child, deadline);
+    let out = result?;
+    match status {
+        Some(s) if s.success() => Ok(out),
+        Some(s) => Err(Fail::Transient(format!("exited with {s}"))),
+        None => Err(Fail::Transient("did not exit in time".to_owned())),
+    }
+}
+
+/// Starts `<bin> --manifest` in the manifest sandbox (see [`capture`]).
+fn spawn_manifest(bin: &Path, builtin: bool) -> Result<std::process::Child, Fail> {
     use crate::sandbox::{self, Limits, Policy};
     use std::os::unix::process::CommandExt;
     // Paths that do not exist are skipped by the ruleset builder.
@@ -408,21 +424,11 @@ fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail
     unsafe {
         cmd.pre_exec(move || sandbox::apply_in_child(fd, &limits));
     }
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| Fail::Transient(format!("cannot run: {e}")))?;
     drop(ruleset);
-    let result = read_limited(&mut child, deadline);
-    if result.is_err() {
-        kill_group(&child);
-    }
-    let status = wait_until(&mut child, deadline);
-    let out = result?;
-    match status {
-        Some(s) if s.success() => Ok(out),
-        Some(s) => Err(Fail::Transient(format!("exited with {s}"))),
-        None => Err(Fail::Transient("did not exit in time".to_owned())),
-    }
+    Ok(child)
 }
 
 /// Whether a manifest may run: a plugin's only inside Landlock (its code is
@@ -1068,6 +1074,73 @@ mod tests {
         manifest_script(&d.join("tool"), &[act("x.a", "new")]);
         let c = Catalog::load_from(&dirs, &f.cache());
         assert_eq!(c.get("x.a").unwrap().label, "new");
+    }
+
+    /// Benchmark, not a test: the cost of the sandboxed manifest run against
+    /// a plain spawn, for docs/benchmarks/manifest-sandbox.md. Needs a
+    /// release `inacircle-text` (or `INACIRCLE_BENCH_BIN`). Run:
+    /// `INACIRCLE_REQUIRE_LANDLOCK=1 cargo test --release -p engine --lib
+    /// manifest_sandbox_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark"]
+    fn manifest_sandbox_cost() {
+        /// Runs per variant; enough for a stable p50 and a max that shows
+        /// the occasional outlier.
+        const RUNS: usize = 300;
+        /// Runs dropped first: cold page cache and CPU caches.
+        const WARMUP: usize = 20;
+        let bin = std::env::var_os("INACIRCLE_BENCH_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/inacircle-text")
+            });
+        assert!(bin.is_file(), "build {} first", bin.display());
+        let deadline = || Instant::now() + DEADLINE;
+        // (spawn returned, output complete and reaped), in microseconds.
+        let mut sandboxed = Vec::new();
+        let mut plain = Vec::new();
+        for i in 0..WARMUP + RUNS {
+            let t = Instant::now();
+            let mut c = spawn_manifest(&bin, true).ok().expect("sandboxed spawn");
+            let spawned = t.elapsed();
+            let out = read_limited(&mut c, deadline()).ok().expect("output");
+            wait_until(&mut c, deadline());
+            let total = t.elapsed();
+            assert!(!out.is_empty());
+            if i >= WARMUP {
+                sandboxed.push((spawned.as_micros(), total.as_micros()));
+            }
+            let t = Instant::now();
+            let mut c = Command::new(&bin)
+                .arg("--manifest")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("plain spawn");
+            let spawned = t.elapsed();
+            let out = read_limited(&mut c, deadline()).ok().expect("output");
+            wait_until(&mut c, deadline());
+            let total = t.elapsed();
+            assert!(!out.is_empty());
+            if i >= WARMUP {
+                plain.push((spawned.as_micros(), total.as_micros()));
+            }
+        }
+        let report = |name: &str, v: &[(u128, u128)]| {
+            let col = |f: fn(&(u128, u128)) -> u128| {
+                let mut x: Vec<u128> = v.iter().map(f).collect();
+                x.sort_unstable();
+                (x[x.len() / 2], x[x.len() - 1])
+            };
+            let (sp50, smax) = col(|p| p.0);
+            let (tp50, tmax) = col(|p| p.1);
+            eprintln!(
+                "{name}: spawn p50 {sp50} us max {smax} us; output p50 {tp50} us max {tmax} us"
+            );
+        };
+        report("sandboxed", &sandboxed);
+        report("plain    ", &plain);
     }
 
     #[test]
