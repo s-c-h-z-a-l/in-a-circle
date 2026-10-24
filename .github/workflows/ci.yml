@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version and components come from rust-toolchain.toml.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Tests skip their Landlock parts when it is unavailable; this step
+      # makes the runner's status visible in the log. Syscall 444 is
+      # landlock_create_ruleset on every architecture; flag 1 returns the ABI.
+      - name: Landlock availability
+        run: |
+          python3 - <<'PY'
+          import ctypes, os
+          libc = ctypes.CDLL(None, use_errno=True)
+          abi = libc.syscall(444, None, 0, 1)
+          if abi > 0:
+              print(f"Landlock ABI {abi}")
+          else:
+              print(f"Landlock unavailable ({os.strerror(ctypes.get_errno())})")
+          PY
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Shipped dependencies
+        run: scripts/check-shipped-deps.sh
+
+      - name: Binary sizes
+        run: scripts/check-sizes.sh
