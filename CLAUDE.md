@@ -82,27 +82,22 @@ it's a bug.
 - Commit messages: technical, terse, clear, easy to follow. Imperative
   subject line, body only when the "why" isn't obvious.
 
-## Cloud workflow (while the cloud credit lasts, until 2026-11-04)
+## Workflow
 
-The full step list and scripts are private in `notes/cloud/` (`WORKFLOW.md`).
-In short:
-
-- The local session is the controller: plans, rulings, the ledger, local
-  verification, merges. Implementers and reviewers run as cloud sessions
-  (`claude --cloud`), one at a time on the plan branch, with the whole task
-  brief inline (they cannot see `notes/`).
-- Cloud sessions push code to the plan branch and their reports to a
-  temporary `planN-reports` branch, deleted when the plan closes. A
-  background watcher on that branch wakes the controller.
-- Fix rounds go to the same implementer session
-  (`claude -p "…" --cloud <session-id>`); scoped re-reviews to the same
-  reviewer session.
+- Plans are written to `notes/plans/` and run task by task: an
+  implementer subagent per task, then a reviewer, fix rounds with the same
+  implementer, a closing whole-branch review, then the local verification
+  and the merge. The local session is the controller: plans, rulings, the
+  ledger, verification, merges. Subagents run locally on the user's quota:
+  keep briefs tight and reviews proportionate to risk.
 - When the user is away, keep going task by task the same way. Stop only
   for a decision that is the user's (budgets, architecture, sandbox), at
-  the end of a plan, or when the local quota runs out.
+  the end of a plan, or when the quota runs out.
+- Before deleting a branch, prove it is merged
+  (`git merge-base --is-ancestor <branch> origin/main`); archive anything
+  that is not code before deleting it. Each plan's merge gets a `plan-N` tag.
 - The final word is always the local run (Landlock, the real machine, niri,
-  the real notification server). After the credit: the same loop with local
-  subagents.
+  the real notification server).
 
 ## Stack
 
