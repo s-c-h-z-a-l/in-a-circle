@@ -11,7 +11,7 @@ not shipped; the shipped dependency tree is unchanged.
 - Modes: `scripts/fuzz.sh smoke|close|baseline|cmin [target...]`. Durations
   and per-target `-max_len`, `-timeout`, `-rss_limit_mb` are explained in the
   script.
-- Corpus: `fuzz/corpus/<target>/`, seeded from real manifests and the
-  CommonMark examples; keep it minimized with `scripts/fuzz.sh cmin`.
+- Corpus: `fuzz/corpus/<target>/`, seeded from real manifests, a real cache
+  and history, fake-compositor messages and the CommonMark examples; keep it minimized with `scripts/fuzz.sh cmin`.
 - A finding is fixed in the crate and its minimized input becomes a
   regression test there.

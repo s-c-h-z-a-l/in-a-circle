@@ -22,7 +22,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -64,6 +64,24 @@ limits() {
         # from a drop. 1 s: a line splitter plus percent-decoding is linear.
         # 512 MB: ~8000x the input.
         uri_list) echo "65536 1 512" ;;
+        # The cache has no size cap in the code (read_cache reads the whole
+        # file). 64 KiB = MAX_OUTPUT: an entry is one binary's manifest
+        # output (capped at that) plus a bin line, so a cache of a few
+        # binaries is a few KiB (the real one for 2 binaries is 0.8 KiB) and
+        # 64 KiB holds one maximal entry. 1 s: a line parser, linear.
+        # 512 MB: ~8000x the input.
+        catalog_cache) echo "65536 1 512" ;;
+        # The history has no line or size cap in the code (it only grows;
+        # undo streams it and holds one line at a time). A record is ~200
+        # bytes, so 64 KiB (the same bound as the other line grammars) is
+        # ~300 records and reaches every branch. 1 s: linear scan plus a
+        # substring search per line. 512 MB: ~8000x the input.
+        history) echo "65536 1 512" ;;
+        # 8192 = MAX_INB in crates/wire/src/conn.rs (2 * MAX_MESSAGE, 4096):
+        # the most unframed bytes a Conn holds, and fuzz_events cuts to it.
+        # 1 s: framing and the readers are linear in the input. 512 MB:
+        # ~64000x the input.
+        wire_events) echo "8192 1 512" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

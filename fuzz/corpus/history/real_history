@@ -1,0 +1,6 @@
+inacircle-history 0
+out	job=1792864834-684071-b2654707	in=/home/u/docs/a.txt	path=/home/u/docs/a.md	size=3	mtime=1792864834220605741	ctime=1792864834220748501	dev=57	ino=1634939
+out	job=1792864834-684071-b2654707	in=/home/u/docs/tab\tname.txt	path=/home/u/docs/tab\tname.md	size=4	mtime=1792864834220605741	ctime=1792864834220748501	dev=57	ino=1634941
+job	id=1792864834-684071-b2654707	time=1792864834	action=text.txt-to-md	status=done	sandbox=yes
+out	job=1792864834-684074-2da28980	in=/home/u/docs/b.md	path=/home/u/docs/b.txt	size=2	mtime=1792864834222349527	ctime=1792864834222479576	dev=57	ino=1634948
+job	id=1792864834-684074-2da28980	time=1792864834	action=text.md-to-txt	status=done	sandbox=yes

@@ -1,0 +1,4 @@
+inacircle-history 0
+out	job=10-1	in=/i	path=/o/a	size=1	mtime=2	ctime=3	dev=4	ino=5	undo=no
+garbage\q	zz
+undo	job=10-1	time=5	rem

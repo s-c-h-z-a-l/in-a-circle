@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "action"
+version = "0.0.0"
+dependencies = [
+ "manifest",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -38,6 +45,15 @@ name = "doc"
 version = "0.0.0"
 
 [[package]]
+name = "engine"
+version = "0.0.0"
+dependencies = [
+ "action",
+ "libc",
+ "manifest",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -60,8 +76,10 @@ version = "0.0.0"
 dependencies = [
  "dbus",
  "doc",
+ "engine",
  "libfuzzer-sys",
  "manifest",
+ "wire",
 ]
 
 [[package]]
@@ -105,3 +123,10 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "wire"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
