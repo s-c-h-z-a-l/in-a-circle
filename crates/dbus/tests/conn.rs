@@ -296,7 +296,8 @@ fn oversized_message_is_refused() {
     assert_eq!(left.len(), 1000);
     assert!(left.iter().all(|&x| x == 0xaa));
     // The stream is out of sync now: the connection refuses further use.
-    assert!(c.call(call("Ping"), after(50)).is_err());
+    let r = c.call(call("Ping"), after(50));
+    assert!(matches!(r, Err(Error::Closed)), "{:?}", r.err());
     drop(c);
     fake.join();
 }
