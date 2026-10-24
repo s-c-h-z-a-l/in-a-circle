@@ -359,7 +359,7 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
     let root = Root::new("hang");
     root.markdown_action_cached();
     // A unique duration tells this test's child from any other `sleep`.
-    let secs = 1000 + std::process::id() % 100_000;
+    let secs = 1000 + std::process::id();
     root.action("zz-hang", &format!("exec sleep {secs}"));
     let list = root.files(1);
     let mut child = None;

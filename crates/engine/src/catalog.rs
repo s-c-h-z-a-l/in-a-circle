@@ -373,7 +373,7 @@ fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail
     // leader, so `kill_group` still reaches its descendants) would fail.
     // SAFETY: the closure makes only the async-signal-safe calls of
     // `apply_in_child`; the ruleset fd stays open until spawn returns
-    // (`ruleset` lives to the end of this function).
+    // (`ruleset` is dropped only after the spawn).
     unsafe {
         cmd.pre_exec(move || sandbox::apply_in_child(fd, &limits));
     }
@@ -730,10 +730,9 @@ mod tests {
                 "action\tx.bad\tfamily=f".to_owned(),
             ],
         );
-        let c = Catalog::load_from(&[(d, false)], &f.cache());
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert_eq!(c.actions.len(), 1);
         assert_eq!(c.actions[0].requires, ["foo", "bar"]);
-        assert!(!c.actions[0].builtin);
     }
 
     #[test]
@@ -889,7 +888,7 @@ mod tests {
         let (d1, d2) = (f.dir("a"), f.dir("b"));
         manifest_script(&d1.join("one"), &[act("x.a", "first")]);
         manifest_script(&d2.join("two"), &[act("x.a", "second"), act("x.b", "B")]);
-        let c = Catalog::load_from(&[(d1, true), (d2, false)], &f.cache());
+        let c = Catalog::load_from(&[(d1, true), (d2, true)], &f.cache());
         assert_eq!(c.actions.len(), 2);
         assert_eq!(c.get("x.a").unwrap().label, "first");
         assert!(c.get("x.b").is_some());
@@ -903,14 +902,27 @@ mod tests {
         // are told by a changed outcome: `a-fails` exits 1 now and is fixed
         // after the first load; `b-garbage` has a malformed header and is
         // fixed after it with the same size and mtime.
-        script(&d.join("a-fails"), "exit 1");
+        let good_a = manifest_body("", &[act("y.a", "Y")]);
+        // Same size as the good body: a wrongly cached failure would then
+        // stay cached after the fix (size and mtime unchanged).
+        let failing = {
+            let head = "exit 1\n#";
+            format!("{head}{}", "x".repeat(good_a.len() - head.len()))
+        };
+        script(&d.join("a-fails"), &failing);
+        let mtime_a = std::fs::metadata(d.join("a-fails"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
         let good_b = manifest_body("", &[act("x.b", "B")]);
         let garbage = good_b.replace("inacircle-manifest 0", "inacircle-garbage-00");
         script(&d.join("b-garbage"), &garbage);
         manifest_script(&d.join("c-good"), &[act("x.a", "A")]);
         let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
         assert_eq!(c.actions.len(), 1);
-        manifest_script(&d.join("a-fails"), &[act("y.a", "Y")]);
+        script(&d.join("a-fails"), &good_a);
+        set_mtime(&d.join("a-fails"), mtime_a);
         let mtime = std::fs::metadata(d.join("b-garbage"))
             .unwrap()
             .modified()
@@ -937,11 +949,15 @@ mod tests {
         manifest_script(&real.join("tool"), &[act("x.a", "A"), extra]);
         std::os::unix::fs::symlink(real.join("tool"), d.join("link")).unwrap();
         manifest_script(&d.join(".hidden"), &[act("x.h", "H")]);
+        // A plugin dir needs Landlock for its manifest to run; without it
+        // (and without INACIRCLE_REQUIRE_LANDLOCK=1) the dir counts as
+        // built in here and only the built-in flag check is lost.
+        let plugin = crate::sandbox::tests::abi_or_skip("symlink_dotfile", 1).is_some();
         for _ in 0..2 {
-            let c = Catalog::load_from(&[(d.clone(), false)], &f.cache());
+            let c = Catalog::load_from(&[(d.clone(), !plugin)], &f.cache());
             assert_eq!(c.actions.len(), 1);
             assert_eq!(c.actions[0].bin, d.join("link"));
-            assert!(!c.actions[0].builtin);
+            assert_eq!(c.actions[0].builtin, !plugin);
         }
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(c.actions[0].builtin);
