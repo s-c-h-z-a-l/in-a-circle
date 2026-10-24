@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown"
+ALL_TARGETS="manifest markdown dbus_message uri_list"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -54,6 +54,15 @@ limits() {
         # every limit and keeps a quadratic case visible. 2 s: a block
         # parser plus three writers under ASan. 512 MB: ~32000x the input.
         markdown) echo "16384 2 512" ;;
+        # 64 KiB = MAX_MESSAGE in crates/dbus/src/message.rs: frame_len
+        # rejects anything larger before decode runs, so longer inputs only
+        # test that rejection. 1 s: a message that small decodes in us.
+        # 512 MB: ~8000x the input.
+        dbus_message) echo "65536 1 512" ;;
+        # 64 KiB = MAX_BYTES in bins/inacircle/src/uri.rs, the most read
+        # from a drop. 1 s: a line splitter plus percent-decoding is linear.
+        # 512 MB: ~8000x the input.
+        uri_list) echo "65536 1 512" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
