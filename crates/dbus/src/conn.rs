@@ -374,6 +374,9 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => {}
+                // mutants: equivalent (guard -> false): the socket is
+                // SOCK_NONBLOCK, and a non-blocking recvmsg never sleeps, so
+                // a signal cannot interrupt it. Kept as defence in depth.
                 Err(Error::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                 Err(e) => return Err(e),
@@ -392,6 +395,12 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => return Ok(()),
+                // mutants: equivalent (guard -> false): `wait` just reported the
+                // fd readable and this Conn is its only reader, so recvmsg
+                // returns data, EOF or a real error; neither WouldBlock nor
+                // (SOCK_NONBLOCK, see try_frame) Interrupted can occur. Kept
+                // as defence in depth. (Guard -> true is killed by the
+                // reset tests in tests/conn.rs.)
                 Err(Error::Io(e))
                     if matches!(
                         e.kind(),
@@ -414,9 +423,15 @@ impl Conn {
                     libc::MSG_NOSIGNAL,
                 )
             };
+            // mutants: equivalent (`<` -> `<=`): send(2) of a non-empty
+            // buffer on a stream socket returns at least 1 byte or -1,
+            // never 0 (the loop only runs while `b` is not empty).
             if n < 0 {
                 let e = io::Error::last_os_error();
                 match e.kind() {
+                    // mutants: equivalent (delete arm): non-blocking send never
+                    // sleeps, so it is never interrupted by a signal (see
+                    // try_frame). Kept as defence in depth.
                     io::ErrorKind::Interrupted => {}
                     io::ErrorKind::WouldBlock => {
                         wait(self.fd.as_raw_fd(), libc::POLLOUT, deadline)?
@@ -457,6 +472,11 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
         };
         // SAFETY: p is one valid pollfd.
         let r = unsafe { libc::poll(&mut p, 1, ms) };
+        // mutants: equivalent (`>` -> `>=`): a timed-out poll (0) would return
+        // Ok with the fd not ready; every caller then reads or writes, gets
+        // EAGAIN, and waits again, where the deadline check at the top of
+        // this loop gives the same `Timeout` (poll times out only once the
+        // rounded-up deadline has passed).
         if r > 0 {
             return Ok(());
         }
@@ -470,6 +490,8 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
 }
 
 fn socket() -> Result<OwnedFd, Error> {
+    // mutants: equivalent (both `|` -> `^`): the three flags are distinct
+    // single bits, so OR and XOR give the same value.
     // SAFETY: socket(2) has no memory preconditions.
     let fd = unsafe {
         libc::socket(
@@ -666,5 +688,53 @@ mod tests {
             );
         }
         assert_eq!(parse_address("unix:guid=00,path=/a"), path("/a"));
+    }
+
+    /// Control data whose header claims far more fds than the buffer holds:
+    /// only the fds inside `msg_controllen` may be closed. Laid out in a
+    /// larger array whose tail holds the numbers of fds that must survive.
+    #[test]
+    fn close_passed_fds_stays_inside_the_control_buffer() {
+        // SAFETY (all unsafe below): CMSG_SPACE/CMSG_LEN only compute sizes;
+        // the zeroed msghdr is valid; the pointers written into it and the
+        // header written into `buf` stay inside `buf`, which is 8-aligned
+        // (u64 words) and larger than anything touched.
+        let guard = |n: i32| {
+            let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+            assert!(fd >= 0);
+            assert_eq!(unsafe { libc::dup2(fd, n) }, n);
+            unsafe { libc::close(fd) };
+        };
+        let is_open = |n: i32| unsafe { libc::fcntl(n, libc::F_GETFD) } != -1;
+        let (passed, g1, g2) = (700, 701, 702);
+        guard(passed);
+        guard(g1);
+        guard(g2);
+        let mut buf = [0u64; 8];
+        let space = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_control = buf.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            // Claims ten fds, though the buffer holds one.
+            (*c).cmsg_len = libc::CMSG_LEN(10 * size_of::<RawFd>() as u32) as _;
+            let data = libc::CMSG_DATA(c).cast::<RawFd>();
+            data.write_unaligned(passed);
+            // The rest of the padded slot (not a real fd), then, just past
+            // `msg_controllen`, fds that are not ours to close.
+            data.add(1).write_unaligned(-1);
+            data.add(2).write_unaligned(g1);
+            data.add(3).write_unaligned(g2);
+        }
+        close_passed_fds(&msg);
+        assert!(!is_open(passed), "the passed fd is closed");
+        assert!(is_open(g1) && is_open(g2), "fds past the buffer are not");
+        unsafe {
+            libc::close(g1);
+            libc::close(g2);
+        }
     }
 }

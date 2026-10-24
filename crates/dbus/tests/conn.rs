@@ -565,3 +565,141 @@ fn recv_now_keeps_a_partial_frame() {
     drop(c);
     fake.join();
 }
+
+/// A connection whose peer answered one call without reading it and then
+/// closed with that request unread: the kernel resets the stream, so the
+/// next read fails with `ECONNRESET` (not an end-of-stream).
+fn reset_after_one_call() -> (Fake, Conn) {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        // The client's next serial after Hello's 1; wait for the request to
+        // arrive, so that it is unread when we close.
+        let mut m = call("Ping");
+        m.serial = 2;
+        wait_readable(p.stream.as_raw_fd());
+        p.reply(&m, vec![]);
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    c.call(call("Ping"), after(500)).unwrap();
+    // Let the peer's close land.
+    std::thread::sleep(Duration::from_millis(50));
+    (fake, c)
+}
+
+fn is_reset(r: &Result<impl std::fmt::Debug, Error>) -> bool {
+    matches!(r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionReset)
+}
+
+#[test]
+fn a_reset_connection_is_an_io_error_for_recv() {
+    let (fake, mut c) = reset_after_one_call();
+    let t = Instant::now();
+    let r = c.recv(after(1000));
+    assert!(is_reset(&r), "{r:?}");
+    assert!(t.elapsed() < Duration::from_millis(500));
+    // And the connection is unusable from then on.
+    assert!(matches!(c.recv(after(50)), Err(Error::Closed)));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn a_reset_connection_is_an_io_error_for_recv_now() {
+    let (fake, mut c) = reset_after_one_call();
+    let r = c.recv_now();
+    assert!(is_reset(&r), "{r:?}");
+    assert!(matches!(c.recv_now(), Err(Error::Closed)));
+    drop(c);
+    fake.join();
+}
+
+/// A socket file at `path` that accepts nothing; returns whether a client
+/// reached it.
+fn reached(path: &std::path::Path, addr: Address) -> (bool, Result<Conn, Error>) {
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let r = Conn::connect(&addr, after(50));
+    (listener.accept().is_ok(), r)
+}
+
+fn invalid_input(r: &Result<Conn, Error>) -> bool {
+    // Refused by us, before any syscall: no OS error code.
+    matches!(r, Err(Error::Io(e))
+        if e.kind() == std::io::ErrorKind::InvalidInput && e.raw_os_error().is_none())
+}
+
+#[test]
+fn unusable_socket_paths_are_refused_before_the_kernel_sees_them() {
+    let dir = std::env::temp_dir().join(format!("inacircle-paths-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("s");
+    // A NUL would cut the path short: "<dir>/s\0junk" must not reach "<dir>/s".
+    let mut nul = sock.clone().into_os_string().into_encoded_bytes();
+    nul.extend(b"\0junk");
+    let nul = PathBuf::from(os_string(nul));
+    let (reached_it, r) = reached(&sock, Address::Path(nul));
+    assert!(!reached_it, "connected through a path with a NUL");
+    assert!(invalid_input(&r), "{:?}", r.err());
+    std::fs::remove_file(&sock).unwrap();
+
+    // An empty path and one that cannot fit in sockaddr_un.
+    for p in [
+        PathBuf::new(),
+        PathBuf::from(format!("/{}", "x".repeat(107))),
+    ] {
+        let r = Conn::connect(&Address::Path(p.clone()), after(50));
+        assert!(invalid_input(&r), "{p:?}: {:?}", r.err());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn os_string(bytes: Vec<u8>) -> std::ffi::OsString {
+    std::os::unix::ffi::OsStringExt::from_vec(bytes)
+}
+
+#[test]
+fn the_longest_socket_path_that_fits_is_connectable() {
+    // sun_path holds 108 bytes, the last for the NUL: a 107-byte path works.
+    let base = std::env::temp_dir().join(format!("inacircle-long-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let head = base.join("s").into_os_string().into_encoded_bytes();
+    let pad = 107usize
+        .checked_sub(head.len())
+        .expect("temp dir too deep for this test");
+    let mut bytes = head;
+    bytes.extend(std::iter::repeat_n(b'x', pad));
+    let path = PathBuf::from(os_string(bytes));
+    assert_eq!(path.as_os_str().len(), 107);
+    let (reached_it, r) = reached(&path, Address::Path(path.clone()));
+    assert!(reached_it, "{:?}", r.err());
+    // It did not fail for its length (the peer never answers: a timeout).
+    assert!(matches!(r, Err(Error::Timeout)), "{:?}", r.err());
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn abstract_names_may_contain_nul_bytes() {
+    use std::os::linux::net::SocketAddrExt;
+    let name = format!("inacircle-nul-{}\0tail", std::process::id()).into_bytes();
+    let sa = std::os::unix::net::SocketAddr::from_abstract_name(&name).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind_addr(&sa).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let r = Conn::connect(&Address::Abstract(name), after(50));
+    assert!(listener.accept().is_ok(), "{:?}", r.err());
+}
+
+#[test]
+fn connect_failures_are_the_connect_errors() {
+    let dir = std::env::temp_dir().join(format!("inacircle-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let kind = |p: PathBuf| match Conn::connect(&Address::Path(p), after(300)) {
+        Err(Error::Io(e)) => e.kind(),
+        other => panic!("{:?}", other.err()),
+    };
+    assert_eq!(kind(dir.join("missing")), std::io::ErrorKind::NotFound);
+    // A socket file nobody listens on.
+    let stale = dir.join("stale");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    assert_eq!(kind(stale), std::io::ErrorKind::ConnectionRefused);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
