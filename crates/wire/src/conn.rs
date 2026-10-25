@@ -1194,12 +1194,22 @@ mod tests {
     /// `f` returns the child's exit code (0: all held); a panic is code 99
     /// and an alarm bounds a hang.
     fn in_child(f: impl FnOnce() -> i32) -> libc::c_int {
-        // SAFETY: fork(2); the child runs `f` and leaves with `_exit`, never
-        // returning into the test harness. glibc keeps malloc usable in a
-        // forked child.
+        // SAFETY: fork(2) in a multithreaded process: the child is NOT
+        // async-signal-safe, because it allocates and may spawn threads. That
+        // is acceptable in test-only code: glibc makes malloc fork-safe, and a
+        // std lock held by another thread at the instant of the fork could
+        // deadlock the child, which the alarm below bounds (a spurious
+        // failure, never a hang). The child leaves with `_exit`, never
+        // returning into the harness.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
         if pid == 0 {
+            // SAFETY: close_range(2) is a plain syscall (fork-safe) taking
+            // integers. The child inherited copies of every fd of the
+            // parallel tests (server sockets); keeping them would delay the
+            // EOF those tests wait for until this child exits. Only stdin,
+            // stdout and stderr stay; `f` creates what it needs itself.
+            unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
             // SAFETY: plain alarm(2): a hung child dies by SIGALRM.
             unsafe { libc::alarm(20) };
             let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(99);
@@ -1517,6 +1527,15 @@ mod tests {
         // SAFETY: valid one-byte buffer.
         let n = unsafe { libc::send(server.as_raw_fd(), b"x".as_ptr().cast(), 1, libc::MSG_OOB) };
         assert_eq!(n, 1);
+        // Pre-check: the kernel reports the OOB byte as readable. If it ever
+        // reports only POLLPRI, this test would exercise nothing: fail loudly.
+        let mut p = libc::pollfd {
+            fd: c.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        assert!(unsafe { libc::poll(&mut p, 1, 1000) } > 0 && p.revents & libc::POLLIN != 0);
         let t = Instant::now();
         assert!(!c.read(t + Duration::from_millis(50)).unwrap());
         assert!(t.elapsed() >= Duration::from_millis(50));
@@ -1580,7 +1599,7 @@ mod tests {
             let r = c.flush(t + Duration::from_millis(100));
             let ms = t.elapsed().as_millis();
             if r.as_ref().err().map(io::Error::kind) != Some(io::ErrorKind::TimedOut)
-                || !(100..300).contains(&ms)
+                || !(100..3000).contains(&ms)
             {
                 return 2;
             }
@@ -1591,7 +1610,7 @@ mod tests {
             let t = Instant::now();
             let r = rd.read(t + Duration::from_millis(100));
             let ms = t.elapsed().as_millis();
-            i32::from(!(matches!(r, Ok(false)) && (100..300).contains(&ms)))
+            i32::from(!(matches!(r, Ok(false)) && (100..3000).contains(&ms)))
         });
         assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
     }

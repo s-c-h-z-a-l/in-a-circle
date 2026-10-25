@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn a_65_deep_variant_chain_is_refused() {
+    fn a_65th_nested_variant_is_refused() {
         let chain = |n: usize| {
             let mut body = Vec::new();
             for _ in 0..n {
@@ -849,11 +849,19 @@ mod tests {
             body.extend([1, b'y', 0, 9]); // innermost: variant "y" = 9
             body
         };
+        // `chain(n)` is n + 1 variants inside each other (n of signature "v",
+        // then one holding a byte). 64 variants fit; the 65th does not.
+        assert!(decode(&hand_frame(1, &call_fields(b"v"), &chain(62))).is_ok());
         assert!(decode(&hand_frame(1, &call_fields(b"v"), &chain(63))).is_ok());
-        assert!(matches!(
-            decode(&hand_frame(1, &call_fields(b"v"), &chain(65))),
-            Err(Error::Malformed("containers nested too deep"))
-        ));
+        for n in [64, 65] {
+            assert!(
+                matches!(
+                    decode(&hand_frame(1, &call_fields(b"v"), &chain(n))),
+                    Err(Error::Malformed("containers nested too deep"))
+                ),
+                "{n}"
+            );
+        }
     }
 
     #[test]
