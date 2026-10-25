@@ -773,6 +773,7 @@ mod tests {
         let a = c.recv_within(&mut frames).unwrap().unwrap();
         assert_eq!(a.member.as_deref(), Some("A"));
         assert_eq!(frames, 1);
+        assert_eq!(c.queued_bytes(), 2 * signal_frame("A").len());
         let b = c.recv_within(&mut frames).unwrap().unwrap();
         assert_eq!(b.member.as_deref(), Some("B"));
         assert_eq!(frames, 0);

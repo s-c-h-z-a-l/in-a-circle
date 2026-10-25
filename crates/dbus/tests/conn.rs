@@ -848,12 +848,14 @@ fn recv_now_looks_at_a_bounded_number_of_frames() {
 
 #[test]
 fn reads_stop_at_the_end_of_the_frame() {
-    // Two signals in one write: after `recv` returns the first, the second
-    // is still in the socket, not in our buffer.
-    let fake = Fake::start(|p| {
+    // Two signals in one write: after `recv` returns the first, the whole
+    // second one is still in the socket, none of it read ahead.
+    let two = batch(signal("Two", vec![]), 1);
+    let two_len = two.len();
+    let fake = Fake::start(move |p| {
         p.handshake();
         let mut both = batch(signal("One", vec![]), 1);
-        both.extend(batch(signal("Two", vec![]), 1));
+        both.extend(two);
         p.write(&both);
         p.drain();
     });
@@ -862,9 +864,24 @@ fn reads_stop_at_the_end_of_the_frame() {
     std::thread::sleep(Duration::from_millis(50));
     let s = c.recv(after(500)).unwrap().unwrap();
     assert_eq!(s.member.as_deref(), Some("One"));
-    assert!(readable(c.as_raw_fd()), "the second frame was read ahead");
-    let s = c.recv(after(500)).unwrap().unwrap();
-    assert_eq!(s.member.as_deref(), Some("Two"));
+    let mut left = 0;
+    loop {
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is valid for `buf.len()` writable bytes.
+        let n = unsafe {
+            libc::recv(
+                c.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        left += n as usize;
+    }
+    assert_eq!(left, two_len);
     drop(c);
     fake.join();
 }
