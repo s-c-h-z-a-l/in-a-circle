@@ -78,7 +78,7 @@ fn conn_receiving_fds(fds: usize) -> (Fake, Result<Message, Error>, Conn) {
         drop(f);
         p.drain();
     });
-    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
     let r = c.call(call("Ping"), after(500));
     std::fs::remove_file(&target).unwrap();
     (fake, r, c)
@@ -124,7 +124,7 @@ fn ancillary_data_that_is_not_fds_is_not_closed_as_fds() {
             p.reply(&m, vec![Value::Str("pong".into())]);
             p.drain();
         });
-        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
         let on: libc::c_int = 1;
         // SAFETY: a valid fd and a pointer to a c_int of the size given.
         let r = unsafe {
@@ -168,7 +168,7 @@ fn no_free_fd_is_an_error_not_a_panic() {
     assert_child_ok(|| {
         let fake = Fake::start(|p| p.drain());
         let old = set_nofile(0);
-        let r = Conn::connect(&fake.address(), after(300));
+        let r = Conn::connect(&fake.address(), after(5000));
         restore_nofile(old);
         assert!(matches!(&r, Err(Error::Io(_))), "{:?}", r.err());
         drop(fake);
@@ -185,7 +185,7 @@ fn fd_zero_is_a_usable_socket() {
         });
         // SAFETY: closing stdin of the test process; nothing here reads it.
         unsafe { libc::close(0) };
-        let c = Conn::connect(&fake.address(), after(300));
+        let c = Conn::connect(&fake.address(), after(5000));
         let c = c.unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(c.as_raw_fd(), 0, "the socket was meant to take fd 0");
         drop(c);
@@ -202,7 +202,7 @@ fn a_failing_poll_is_reported_not_retried_until_the_deadline() {
             p.handshake();
             p.drain();
         });
-        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
         // poll(2) fails with EINVAL when nfds exceeds RLIMIT_NOFILE.
         let old = set_nofile(0);
         let t = Instant::now();

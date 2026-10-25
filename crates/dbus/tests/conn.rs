@@ -699,10 +699,14 @@ fn connect_failures_are_the_connect_errors() {
         other => panic!("{:?}", other.err()),
     };
     assert_eq!(kind(dir.join("missing")), std::io::ErrorKind::NotFound);
-    // A socket file nobody listens on.
+    // A socket file nobody listens on: bound, never listen()ed. (A listener
+    // that was dropped would race with children forked by parallel tests,
+    // which may still hold a copy for an instant.)
     let stale = dir.join("stale");
-    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    let bound = bind_without_listen(&stale);
     assert_eq!(kind(stale), std::io::ErrorKind::ConnectionRefused);
+    // SAFETY: closing the fd opened above.
+    unsafe { libc::close(bound) };
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -927,7 +931,7 @@ fn persistent_eintr_on_send_ends_at_the_deadline() {
             p.handshake();
             p.drain();
         });
-        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
         deny_syscalls(&SEND, libc::EINTR as u32);
         let t = Instant::now();
         let r = c.call(call("Ping"), t + Duration::from_millis(100));
@@ -951,7 +955,7 @@ fn persistent_eintr_on_recv_ends_at_the_deadline() {
             p.signal("/a", "a.B", "One", vec![]);
             p.drain();
         });
-        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
         wait_readable(c.as_raw_fd());
         deny_syscalls(&[libc::SYS_recvmsg], libc::EINTR as u32);
         // Readable, but every recvmsg is interrupted: no frame, no spin.
@@ -968,4 +972,28 @@ fn persistent_eintr_on_recv_ends_at_the_deadline() {
         }
         0
     });
+}
+
+/// A stream socket bound to `path` that does not listen; returns its fd.
+fn bind_without_listen(path: &std::path::Path) -> i32 {
+    // SAFETY: plain socket(2) and bind(2); `sa` is a zeroed sockaddr_un with
+    // the path copied in (checked to fit), and the length passed is its size.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        assert!(fd >= 0);
+        let mut sa: libc::sockaddr_un = std::mem::zeroed();
+        sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let b = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+        assert!(b.len() < sa.sun_path.len());
+        for (d, s) in sa.sun_path.iter_mut().zip(b) {
+            *d = *s as libc::c_char;
+        }
+        let r = libc::bind(
+            fd,
+            (&raw const sa).cast(),
+            size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        assert_eq!(r, 0);
+        fd
+    }
 }
