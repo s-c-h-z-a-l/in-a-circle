@@ -1,6 +1,7 @@
 //! Connection behaviour against a scripted peer (and a real `dbus-daemon`
 //! when one is installed).
 
+mod child;
 mod common;
 
 use std::io::{BufRead, BufReader};
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use child::{assert_child_ok, deny_syscalls, wait_for_bytes};
 use common::{Fake, Peer};
 use dbus::{Address, Conn, Error, Message, Value, parse_address};
 
@@ -564,4 +566,434 @@ fn recv_now_keeps_a_partial_frame() {
     assert_eq!(m.body, vec![Value::U32(9)]);
     drop(c);
     fake.join();
+}
+
+/// A connection whose peer answered one call without reading it and then
+/// closed with that request unread: the kernel resets the stream, so the
+/// next read fails with `ECONNRESET` (not an end-of-stream).
+fn reset_after_one_call() -> (Fake, Conn) {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        // The client's next serial after Hello's 1; wait for the request to
+        // arrive, so that it is unread when we close.
+        let mut m = call("Ping");
+        m.serial = 2;
+        wait_readable(p.stream.as_raw_fd());
+        p.reply(&m, vec![]);
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    c.call(call("Ping"), after(500)).unwrap();
+    // The peer's close has landed once the socket reports the reset.
+    wait_readable(c.as_raw_fd());
+    (fake, c)
+}
+
+fn is_reset(r: &Result<impl std::fmt::Debug, Error>) -> bool {
+    matches!(r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionReset)
+}
+
+#[test]
+fn a_reset_connection_is_an_io_error_for_recv() {
+    let (fake, mut c) = reset_after_one_call();
+    let t = Instant::now();
+    let r = c.recv(after(1000));
+    assert!(is_reset(&r), "{r:?}");
+    assert!(t.elapsed() < Duration::from_millis(500));
+    // And the connection is unusable from then on.
+    assert!(matches!(c.recv(after(50)), Err(Error::Closed)));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn a_reset_connection_is_an_io_error_for_recv_now() {
+    let (fake, mut c) = reset_after_one_call();
+    let r = c.recv_now();
+    assert!(is_reset(&r), "{r:?}");
+    assert!(matches!(c.recv_now(), Err(Error::Closed)));
+    drop(c);
+    fake.join();
+}
+
+/// A socket file at `path` that accepts nothing; returns whether a client
+/// reached it.
+fn reached(path: &std::path::Path, addr: Address) -> (bool, Result<Conn, Error>) {
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let r = Conn::connect(&addr, after(50));
+    (listener.accept().is_ok(), r)
+}
+
+fn invalid_input(r: &Result<Conn, Error>) -> bool {
+    // Refused by us, before any syscall: no OS error code.
+    matches!(r, Err(Error::Io(e))
+        if e.kind() == std::io::ErrorKind::InvalidInput && e.raw_os_error().is_none())
+}
+
+#[test]
+fn unusable_socket_paths_are_refused_before_the_kernel_sees_them() {
+    let dir = std::env::temp_dir().join(format!("inacircle-paths-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("s");
+    // A NUL would cut the path short: "<dir>/s\0junk" must not reach "<dir>/s".
+    let mut nul = sock.clone().into_os_string().into_encoded_bytes();
+    nul.extend(b"\0junk");
+    let nul = PathBuf::from(os_string(nul));
+    let (reached_it, r) = reached(&sock, Address::Path(nul));
+    assert!(!reached_it, "connected through a path with a NUL");
+    assert!(invalid_input(&r), "{:?}", r.err());
+    std::fs::remove_file(&sock).unwrap();
+
+    // An empty path and one that cannot fit in sockaddr_un.
+    for p in [
+        PathBuf::new(),
+        PathBuf::from(format!("/{}", "x".repeat(107))),
+    ] {
+        let r = Conn::connect(&Address::Path(p.clone()), after(50));
+        assert!(invalid_input(&r), "{p:?}: {:?}", r.err());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn os_string(bytes: Vec<u8>) -> std::ffi::OsString {
+    std::os::unix::ffi::OsStringExt::from_vec(bytes)
+}
+
+#[test]
+fn the_longest_socket_path_that_fits_is_connectable() {
+    // sun_path holds 108 bytes, the last for the NUL: a 107-byte path works.
+    let base = std::env::temp_dir().join(format!("inacircle-long-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let head = base.join("s").into_os_string().into_encoded_bytes();
+    let pad = 107usize
+        .checked_sub(head.len())
+        .expect("temp dir too deep for this test");
+    let mut bytes = head;
+    bytes.extend(std::iter::repeat_n(b'x', pad));
+    let path = PathBuf::from(os_string(bytes));
+    assert_eq!(path.as_os_str().len(), 107);
+    let (reached_it, r) = reached(&path, Address::Path(path.clone()));
+    assert!(reached_it, "{:?}", r.err());
+    // It did not fail for its length (the peer never answers: a timeout).
+    assert!(matches!(r, Err(Error::Timeout)), "{:?}", r.err());
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn abstract_names_may_contain_nul_bytes() {
+    use std::os::linux::net::SocketAddrExt;
+    let name = format!("inacircle-nul-{}\0tail", std::process::id()).into_bytes();
+    let sa = std::os::unix::net::SocketAddr::from_abstract_name(&name).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind_addr(&sa).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let r = Conn::connect(&Address::Abstract(name), after(50));
+    assert!(listener.accept().is_ok(), "{:?}", r.err());
+}
+
+#[test]
+fn connect_failures_are_the_connect_errors() {
+    let dir = std::env::temp_dir().join(format!("inacircle-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let kind = |p: PathBuf| match Conn::connect(&Address::Path(p), after(300)) {
+        Err(Error::Io(e)) => e.kind(),
+        other => panic!("{:?}", other.err()),
+    };
+    assert_eq!(kind(dir.join("missing")), std::io::ErrorKind::NotFound);
+    // A socket file nobody listens on: bound, never listen()ed. (A listener
+    // that was dropped would race with children forked by parallel tests,
+    // which may still hold a copy for an instant.)
+    let stale = dir.join("stale");
+    let bound = bind_without_listen(&stale);
+    assert_eq!(kind(stale), std::io::ErrorKind::ConnectionRefused);
+    // SAFETY: closing the fd opened above.
+    unsafe { libc::close(bound) };
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_error_reply_to_another_call_does_not_end_this_call() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        let mut other = m.clone();
+        other.serial = m.serial + 100;
+        p.error(&other, "org.example.Error.Other", "not for you");
+        p.reply(&m, vec![Value::Str("mine".into())]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let r = c.call(call("Ping"), after(500)).unwrap();
+    assert_eq!(r.body, vec![Value::Str("mine".into())]);
+    drop(c);
+    fake.join();
+}
+
+/// A signal `Q` whose encoded form is exactly `len` bytes: a serial, then
+/// padding bytes to make up the size.
+fn sized_signal(len: usize) -> (Message, usize) {
+    // The fixed part is small; the byte array supplies the rest.
+    for n in 0..len {
+        let m = signal(
+            "Q",
+            vec![
+                Value::U32(0),
+                Value::Array("y".into(), vec![Value::Byte(1); n]),
+            ],
+        );
+        let got = dbus::encode(&m).unwrap().len();
+        if got == len {
+            return (m, n);
+        }
+    }
+    panic!("no signal of {len} bytes");
+}
+
+/// The body that `sized_signal`'s message has, with `i` in the first slot.
+fn sized_body(i: u32, n: usize) -> Vec<Value> {
+    vec![
+        Value::U32(i),
+        Value::Array("y".into(), vec![Value::Byte(1); n]),
+    ]
+}
+
+/// A connection that was sent `bodies` as signals (as `Q` from /a) and then
+/// answered one call, so that all of them wait in the queue.
+fn conn_with_queued(bodies: Vec<Vec<Value>>) -> (Fake, Conn) {
+    let fake = Fake::start(move |p| {
+        p.handshake();
+        let m = p.recv();
+        for b in bodies {
+            p.signal("/a", "a.B", "Q", b);
+        }
+        p.reply(&m, vec![]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    c.call(call("Ping"), after(3000)).unwrap();
+    (fake, c)
+}
+
+fn first_u32(m: &Message) -> u32 {
+    let Value::U32(i) = m.body[0] else {
+        panic!("{m:?}")
+    };
+    i
+}
+
+#[test]
+fn the_signal_queue_holds_exactly_its_byte_budget() {
+    // 64 frames of 4096 bytes are exactly 256 KiB: all stay; a 65th pushes
+    // out the oldest.
+    let (_, n) = sized_signal(4096);
+    for (count, first) in [(64u32, 0u32), (65, 1)] {
+        let (fake, mut c) = conn_with_queued((0..count).map(|i| sized_body(i, n)).collect());
+        assert_eq!(c.queued_bytes(), 64 * 4096, "{count} sent");
+        for i in first..count {
+            let s = c.recv(after(100)).unwrap().unwrap();
+            assert_eq!(first_u32(&s), i);
+        }
+        assert!(c.recv(after(20)).unwrap().is_none());
+        assert_eq!(c.queued_bytes(), 0);
+        drop(c);
+        fake.join();
+    }
+}
+
+#[test]
+fn queue_accounting_follows_the_frames_that_come_and_go() {
+    // Small frames first, then one near the 64 KiB frame cap: room is judged
+    // by the bytes held, not by their product with the new frame's size.
+    let (_, n) = sized_signal(1024);
+    let bodies = vec![
+        sized_body(0, 0),
+        sized_body(1, n),
+        sized_body(2, 0),
+        vec![Value::U32(3), Value::Str("x".repeat(60_000))],
+    ];
+    let lens: Vec<usize> = bodies
+        .iter()
+        .map(|b| dbus::encode(&signal("Q", b.clone())).unwrap().len())
+        .collect();
+    let (fake, mut c) = conn_with_queued(bodies);
+    let mut left: usize = lens.iter().sum();
+    assert_eq!(c.queued_bytes(), left);
+    for (i, len) in lens.iter().enumerate() {
+        let s = c.recv(after(100)).unwrap().unwrap();
+        assert_eq!(first_u32(&s), i as u32);
+        left -= len;
+        assert_eq!(c.queued_bytes(), left, "after signal {i}");
+    }
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn recv_now_looks_at_a_bounded_number_of_frames() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let mut stale = call("x");
+        stale.serial = 9999;
+        // 100 frames that are not signals, then a signal.
+        p.write(&batch(Peer::reply_msg(&stale, vec![]), 100));
+        p.signal("/a", "a.B", "Last", vec![]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    // Everything the peer wrote is in the socket: 100 stale frames and the
+    // signal.
+    let stale_len = batch(Peer::reply_msg(&call("x"), vec![]), 1).len();
+    let last_len = batch(signal("Last", vec![]), 1).len();
+    wait_for_bytes(c.as_raw_fd(), 100 * stale_len + last_len);
+    // 64 frames are looked at per call, none of them a signal.
+    assert!(c.recv_now().unwrap().is_none());
+    assert!(readable(c.as_raw_fd()), "the rest is still in the socket");
+    // The remaining 36 stale frames and the signal fit in the next call.
+    let s = c.recv_now().unwrap().expect("the signal is next");
+    assert_eq!(s.member.as_deref(), Some("Last"));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn reads_stop_at_the_end_of_the_frame() {
+    // Two signals in one write: after `recv` returns the first, the whole
+    // second one is still in the socket, none of it read ahead.
+    let one_len = batch(signal("One", vec![]), 1).len();
+    let two = batch(signal("Two", vec![]), 1);
+    let two_len = two.len();
+    let fake = Fake::start(move |p| {
+        p.handshake();
+        let mut both = batch(signal("One", vec![]), 1);
+        both.extend(two);
+        p.write(&both);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_for_bytes(c.as_raw_fd(), one_len + two_len);
+    let s = c.recv(after(500)).unwrap().unwrap();
+    assert_eq!(s.member.as_deref(), Some("One"));
+    let mut left = 0;
+    loop {
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is valid for `buf.len()` writable bytes.
+        let n = unsafe {
+            libc::recv(
+                c.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        left += n as usize;
+    }
+    assert_eq!(left, two_len);
+    drop(c);
+    fake.join();
+}
+
+/// A peer-sent out-of-band byte makes poll report the socket readable while a
+/// plain recv finds nothing (EAGAIN): not an error, the waits run to their
+/// deadlines.
+#[test]
+fn a_pending_oob_byte_is_not_an_error() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        // SAFETY: valid one-byte buffer.
+        let n = unsafe { libc::send(p.stream.as_raw_fd(), b"x".as_ptr().cast(), 1, libc::MSG_OOB) };
+        assert_eq!(n, 1);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_readable(c.as_raw_fd());
+    let t = Instant::now();
+    assert!(c.recv(t + Duration::from_millis(60)).unwrap().is_none());
+    assert!(t.elapsed() >= Duration::from_millis(60));
+    // Without waiting: no frame yet.
+    assert!(c.recv_now().unwrap().is_none());
+    // A call that gets no reply times out, rather than failing.
+    let r = c.call(call("Silent"), after(60));
+    assert!(matches!(r, Err(Error::Timeout)), "{:?}", r.err());
+    drop(c);
+    fake.join();
+}
+
+/// A signal-ish `recvmsg`/`send` that keeps failing with EINTR, in a child
+/// with a seccomp filter. `libc::send` is `sendto` on x86-64, so deny both.
+const SEND: [libc::c_long; 2] = [libc::SYS_sendto, libc::SYS_sendmsg];
+
+#[test]
+fn persistent_eintr_on_send_ends_at_the_deadline() {
+    assert_child_ok(|| {
+        let fake = Fake::start(|p| {
+            p.handshake();
+            p.drain();
+        });
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
+        deny_syscalls(&SEND, libc::EINTR as u32);
+        let t = Instant::now();
+        let r = c.call(call("Ping"), t + Duration::from_millis(100));
+        let ms = t.elapsed().as_millis();
+        if !matches!(r, Err(Error::Timeout)) || !(100..3000).contains(&ms) {
+            return 2;
+        }
+        // The half-sent call broke the connection.
+        if !matches!(c.call(call("Ping"), after(1000)), Err(Error::Closed)) {
+            return 3;
+        }
+        0
+    });
+}
+
+#[test]
+fn persistent_eintr_on_recv_ends_at_the_deadline() {
+    assert_child_ok(|| {
+        let fake = Fake::start(|p| {
+            p.handshake();
+            p.signal("/a", "a.B", "One", vec![]);
+            p.drain();
+        });
+        let mut c = Conn::connect(&fake.address(), after(5000)).unwrap();
+        wait_readable(c.as_raw_fd());
+        deny_syscalls(&[libc::SYS_recvmsg], libc::EINTR as u32);
+        // Readable, but every recvmsg is interrupted: no frame, no spin.
+        let t = Instant::now();
+        let r = c.recv_now();
+        if !matches!(r, Ok(None)) || t.elapsed() > Duration::from_secs(2) {
+            return 2;
+        }
+        let t = Instant::now();
+        let r = c.recv(t + Duration::from_millis(100));
+        let ms = t.elapsed().as_millis();
+        if !matches!(r, Ok(None)) || !(100..3000).contains(&ms) {
+            return 3;
+        }
+        0
+    });
+}
+
+/// A stream socket bound to `path` that does not listen; returns its fd.
+fn bind_without_listen(path: &std::path::Path) -> i32 {
+    // SAFETY: plain socket(2) and bind(2); `sa` is a zeroed sockaddr_un with
+    // the path copied in (checked to fit), and the length passed is its size.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        assert!(fd >= 0);
+        let mut sa: libc::sockaddr_un = std::mem::zeroed();
+        sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let b = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+        assert!(b.len() < sa.sun_path.len());
+        for (d, s) in sa.sun_path.iter_mut().zip(b) {
+            *d = *s as libc::c_char;
+        }
+        let r = libc::bind(
+            fd,
+            (&raw const sa).cast(),
+            size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        assert_eq!(r, 0);
+        fd
+    }
 }

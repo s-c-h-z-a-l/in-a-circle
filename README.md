@@ -20,10 +20,11 @@ public in [`docs/benchmarks/`](docs/benchmarks). The engine runs headless
 them and reports through desktop notifications), and `inacircle` without
 arguments is the wheel: drag a file, press the hotkey, drop it on a category
 (Document), then on a target (Markdown, Plain text).
-The wheel is built and its measurements and manual checks on
-[niri](https://github.com/YaLTeR/niri) are in progress; there are no
-packages or presets worth installing yet. The first usable version is a
-**File Circle**.
+The same binaries have passed manual conversion and notification Undo
+checks on [niri](https://github.com/YaLTeR/niri) with Nautilus and on
+Plasma Wayland with Dolphin. [Measurements on both systems](docs/benchmarks/wheel-portability.md)
+include the performance limits that remain open. There are no packages
+or presets worth installing yet. The first usable version is a **File Circle**.
 
 ## How it will work
 

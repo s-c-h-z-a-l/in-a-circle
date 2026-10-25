@@ -549,6 +549,9 @@ impl<'a> Reader<'a> {
                 let mut entries = Vec::new();
                 while self.pos < end {
                     self.align(8)?;
+                    // mutants: equivalent (`depth + 1` -> `depth * 1`): the key is
+                    // a basic type (parse_type refuses any other), and `depth` is
+                    // only ever compared for containers or passed on to them.
                     let key = self.read_ty(k, depth + 1)?;
                     let val = self.read_ty(v, depth + 1)?;
                     entries.push((key, val));
@@ -692,7 +695,8 @@ mod tests {
         err("ay", &[0xff, 0xff, 0xff, 0xff]); // huge length
         err("b", &[2, 0, 0, 0]); // invalid bool
         err("z", &[]); // unknown type code
-        err("a{vy}", &[0, 0, 0, 0]); // container dict key
+        err("a{vy}", &[0; 8]); // container dict key (a body that would read fine)
+        err("a{ayy}", &[0; 8]);
         err("()", &[]); // empty struct
         err("(y", &[0]); // unterminated struct
         err("a", &[0, 0, 0, 0]); // incomplete signature
@@ -874,6 +878,132 @@ mod tests {
         assert!(matches!(
             Reader::new(&bytes, true).read("v"),
             Err(Error::Malformed(_))
+        ));
+    }
+    #[test]
+    fn false_reads_as_false() {
+        let v = Reader::new(&[0, 0, 0, 0, 1, 0, 0, 0], true)
+            .read("bb")
+            .unwrap();
+        assert_eq!(v, vec![Value::Bool(false), Value::Bool(true)]);
+    }
+
+    #[test]
+    fn alignment_of_each_type_code_follows_the_spec() {
+        // The D-Bus specification's alignment table, by first type code.
+        for (sig, want) in [
+            ("y", 1),
+            ("g", 1),
+            ("v", 1),
+            ("n", 2),
+            ("q", 2),
+            ("b", 4),
+            ("i", 4),
+            ("u", 4),
+            ("s", 4),
+            ("o", 4),
+            ("ay", 4),
+            ("x", 8),
+            ("t", 8),
+            ("(yy)", 8),
+            ("{sv}", 8),
+        ] {
+            assert_eq!(align_of(sig), want, "{sig}");
+        }
+    }
+
+    /// The arrays of 8-aligned elements, as the specification lays them out:
+    /// the length, zero padding up to the element alignment (also when the
+    /// array is empty), then the elements.
+    #[rustfmt::skip]
+    fn eight_aligned_arrays() -> Vec<(Value, Vec<u8>)> {
+        vec![
+            (Value::Array("t".into(), vec![Value::U64(5)]),
+             vec![8, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]),
+            (Value::Array("x".into(), vec![Value::I64(-1)]),
+             vec![8, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255]),
+            (Value::Array("t".into(), vec![]),
+             vec![0, 0, 0, 0, 0, 0, 0, 0]),
+            (Value::Array("(yy)".into(), vec![Value::Struct(vec![Value::Byte(1), Value::Byte(2)])]),
+             vec![2, 0, 0, 0, 0, 0, 0, 0, 1, 2]),
+        ]
+    }
+
+    #[test]
+    fn arrays_of_8_aligned_elements_are_padded_on_write() {
+        for (v, want) in eight_aligned_arrays() {
+            assert_eq!(write(std::slice::from_ref(&v)), want, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn arrays_of_8_aligned_elements_are_padded_on_read() {
+        for (v, bytes) in eight_aligned_arrays() {
+            let mut r = Reader::new(&bytes, true);
+            assert_eq!(r.read(&v.signature()).unwrap(), vec![v.clone()], "{v:?}");
+            assert!(r.finished(), "{v:?}: the padding of an empty array too");
+        }
+    }
+
+    /// `n` layers of a variant holding a struct that holds the next layer.
+    fn variant_struct_chain(n: usize) -> Value {
+        let mut v = Value::Byte(0);
+        for _ in 0..n {
+            v = Value::Variant(Box::new(Value::Struct(vec![v])));
+        }
+        v
+    }
+
+    /// `n` layers of a variant holding a dict whose single value is the next
+    /// layer.
+    fn variant_dict_chain(n: usize) -> Value {
+        let mut v = Value::Byte(0);
+        for _ in 0..n {
+            let vs = v.signature();
+            v = Value::Variant(Box::new(Value::Dict("s".into(), vs, vec![(s("k"), v)])));
+        }
+        v
+    }
+
+    #[test]
+    fn structs_and_dict_entries_count_towards_the_depth_limit() {
+        // Two levels per layer (variant + container): 32 layers reach the
+        // limit of 64, 33 pass it.
+        for chain in [variant_struct_chain, variant_dict_chain] {
+            assert!(read_value(&chain(32)).is_ok());
+            assert!(matches!(
+                read_value(&chain(33)),
+                Err(Error::Malformed("containers nested too deep"))
+            ));
+        }
+    }
+
+    #[test]
+    fn signature_nesting_limit_is_32_for_structs_and_arrays() {
+        let structs = |n: usize| format!("{}y{}", "(".repeat(n), ")".repeat(n));
+        assert!(parse_all(&structs(32)).is_ok());
+        assert!(matches!(
+            parse_all(&structs(33)),
+            Err(Error::Malformed("signature too deep"))
+        ));
+        // A dict entry counts for two levels: its array and its braces.
+        // Value side: 30 arrays fit, 31 do not.
+        let value = |n: usize| format!("a{{s{}y}}", "a".repeat(n));
+        assert!(parse_all(&value(30)).is_ok());
+        assert!(matches!(
+            parse_all(&value(31)),
+            Err(Error::Malformed("signature too deep"))
+        ));
+        // Key side: a key nested past the limit is reported as too deep,
+        // before it could be reported as a non-basic key.
+        let key = |n: usize| format!("a{{{}y{}y}}", "(".repeat(n), ")".repeat(n));
+        assert!(matches!(
+            parse_all(&key(30)),
+            Err(Error::Malformed("dict key is not a basic type"))
+        ));
+        assert!(matches!(
+            parse_all(&key(31)),
+            Err(Error::Malformed("signature too deep"))
         ));
     }
 }

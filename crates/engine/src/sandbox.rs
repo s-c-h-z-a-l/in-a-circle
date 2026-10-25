@@ -69,9 +69,11 @@ use std::path::{Path, PathBuf};
 pub const SYSTEM_EXEC_PATHS: [&str; 4] = ["/usr", "/lib", "/lib64", "/etc/ld.so.cache"];
 
 // Landlock uapi, checked against include/uapi/linux/landlock.h.
+// mutants: equivalent: 1 >> 0 == 1 << 0 (bit 0 is the same either way).
 const CREATE_RULESET_VERSION: u32 = 1 << 0;
 const RULE_PATH_BENEATH: libc::c_int = 1;
 
+// mutants: equivalent: 1 >> 0 == 1 << 0.
 const ACCESS_FS_EXECUTE: u64 = 1 << 0;
 const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
 const ACCESS_FS_READ_FILE: u64 = 1 << 2;
@@ -83,17 +85,22 @@ const ACCESS_FS_TRUNCATE: u64 = 1 << 14; // ABI 3
 const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15; // ABI 5
 const ACCESS_FS_RESOLVE_UNIX: u64 = 1 << 16; // ABI 9
 /// The rights that apply to a non-directory; the kernel rejects others.
+// mutants: equivalent for `| -> ^` here: the five bits are disjoint, so
+// `|` and `^` give the same mask. (`|` -> `&` is not: write_path_may_be_a_file
+// and device_ioctl_needs_the_ioctl_right kill it.)
 const ACCESS_FS_FILE: u64 = ACCESS_FS_EXECUTE
     | ACCESS_FS_WRITE_FILE
     | ACCESS_FS_READ_FILE
     | ACCESS_FS_TRUNCATE
     | ACCESS_FS_IOCTL_DEV;
 
+// mutants: equivalent: 1 >> 0 == 1 << 0.
 const ACCESS_NET_BIND_TCP: u64 = 1 << 0; // ABI 4
 const ACCESS_NET_CONNECT_TCP: u64 = 1 << 1; // ABI 4
 const ACCESS_NET_BIND_UDP: u64 = 1 << 2; // ABI 10
 const ACCESS_NET_CONNECT_SEND_UDP: u64 = 1 << 3; // ABI 10
 
+// mutants: equivalent: 1 >> 0 == 1 << 0.
 const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0; // ABI 6
 const SCOPE_SIGNAL: u64 = 1 << 1; // ABI 6
 
@@ -187,6 +194,7 @@ fn handled(abi: u32) -> (u64, u64, u64) {
     if abi >= 3 {
         fs |= ACCESS_FS_TRUNCATE;
     }
+    // mutants: equivalent for `| -> ^` in the three masks below: disjoint bits.
     if abi >= 4 {
         net |= ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP;
     }
@@ -243,6 +251,8 @@ fn create_for_abi(abi: u32) -> io::Result<Ruleset> {
 /// Adds the rules of `policy` to `ruleset`.
 pub fn add(ruleset: &Ruleset, policy: &Policy) -> io::Result<()> {
     let fs = ruleset.fs;
+    // mutants: equivalent for `| -> ^` on the next line and the `read` mask
+    // below: disjoint bits.
     let exec = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
     for p in policy.exec {
         match allow(ruleset, p, exec & fs) {
@@ -267,6 +277,7 @@ pub fn add(ruleset: &Ruleset, policy: &Policy) -> io::Result<()> {
 /// checked; `path` only names it in errors). The rule is on that inode,
 /// whatever its path resolves to by now.
 pub fn allow_read_fd(ruleset: &Ruleset, fd: BorrowedFd, path: &Path) -> io::Result<()> {
+    // mutants: equivalent for `| -> ^`: disjoint bits.
     let read = (ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR) & ruleset.fs;
     allow_fd(ruleset, fd, read, path)
 }
@@ -282,6 +293,7 @@ fn allow(ruleset: &Ruleset, path: &Path, access: u64) -> io::Result<()> {
 fn allow_at(ruleset: &Ruleset, path: &Path, access: u64, flags: libc::c_int) -> io::Result<()> {
     let f = OpenOptions::new()
         .read(true)
+        // mutants: equivalent for `| -> ^`: `flags` is 0 or O_NOFOLLOW, never O_PATH.
         .custom_flags(libc::O_PATH | flags)
         .open(path)?;
     allow_fd(ruleset, f.as_fd(), access, path)
@@ -473,6 +485,16 @@ mod seccomp {
         469, // file_setattr (not in libc)
     ];
 
+    // mutants: the three `+ -> *` mutants on the layout constants below are
+    // equivalent in behavior: ALLOW, SOCKET and IOCTL_EPERM move further out
+    // and `program()` leaves the gap as `stmt(0, 0)` (a load of 0 into the
+    // accumulator, no jump), which every path that reaches it runs through
+    // before the next real instruction. No syscall gets another verdict; the
+    // filter only gets longer. The other layout mutants are not equivalent:
+    // `EPERM = ALLOW * 1` would overwrite ALLOW's slot, `SOCKET = EPERM * 1`
+    // collides with EPERM, and `LEN = IOCTL_EPERM * 1` leaves no room for the
+    // last instruction (the build fails); `jump` also refuses, at compile
+    // time, an offset that does not fit its u8.
     // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
     // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
     // [ioctl: load arg1, 4 x cmd?, ALLOW, EPERM].
@@ -494,7 +516,19 @@ mod seccomp {
     }
 
     /// A conditional jump at `at` to `to` when true, to the next when false.
+    // mutants: equivalent for every `| -> ^` (and the `| -> &` where noted)
+    // in `jump` and `program`: BPF_LD, BPF_W and BPF_K are 0, BPF_RET, BPF_JMP,
+    // BPF_JEQ/JGE and BPF_ABS are distinct single bits or disjoint, and
+    // SECCOMP_RET_ERRNO (0x5_0000) does not overlap an errno, so `^` builds the
+    // same opcode as `|`; `LD & W` is 0 like `LD | W`. The `&` that would
+    // change an opcode (`W & ABS`, `JMP & JEQ`, ...) is killed by the seccomp
+    // tests below, which would see the wrong verdict.
     const fn jump(at: usize, code: u32, k: u32, to: usize) -> sock_filter {
+        // `jt` is a u8 and a BPF jump goes forward only: a layout whose
+        // offset does not fit would truncate silently into a jump to the
+        // wrong instruction. `program()` is evaluated at compile time, so
+        // this stops the build instead.
+        assert!(to > at && to - at - 1 <= u8::MAX as usize);
         sock_filter {
             code: (BPF_JMP | code | BPF_K) as u16,
             jt: (to - at - 1) as u8,
@@ -572,6 +606,9 @@ fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::r
         rlim_max: 0,
     };
     // SAFETY: `cur` is a writable rlimit.
+    // mutants: equivalent for `< -> >`: getrlimit with a valid resource and a
+    // writable struct cannot fail (only EFAULT/EINVAL), so the error branch
+    // is unreachable and no test can observe it.
     if unsafe { libc::getrlimit(resource, &mut cur) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -2055,5 +2092,278 @@ pub(crate) mod tests {
             let r = probe(Sb::On(None), move || in_grandchild(f));
             assert_eq!(errno(r), Some(libc::EPERM), "{name}");
         }
+    }
+
+    /// The reported ABI is the kernel's: every right set the kernel
+    /// accepts (it rejects unknown bits) is at or below it, and the first
+    /// one it rejects is above it. Only the ABIs that add a right are
+    /// distinguishable this way.
+    #[test]
+    fn reported_abi_is_what_the_kernel_accepts() {
+        let Some(abi) = abi_or_skip("reported_abi_is_what_the_kernel_accepts", 1) else {
+            return;
+        };
+        for level in [1, 2, 3, 4, 5, 6, 9, 10] {
+            assert_eq!(
+                create_for_abi(level).is_ok(),
+                abi >= level,
+                "ABI {level} vs reported {abi}"
+            );
+        }
+    }
+
+    /// A failing `landlock_create_ruleset` is an error, not an fd.
+    #[test]
+    fn create_fails_cleanly_without_a_free_fd() {
+        if abi_or_skip("create_fails_cleanly_without_a_free_fd", 1).is_none() {
+            return;
+        }
+        let r = probe(Sb::Off, || {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `none` is a valid rlimit; only this child is lowered.
+            cvt(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none) })?;
+            create_for_abi(1).map(drop)
+        });
+        assert_eq!(errno(r), Some(libc::EMFILE));
+    }
+
+    /// fd 0 is a valid result (a process that closed stdin).
+    #[test]
+    fn create_accepts_fd_zero() {
+        if abi_or_skip("create_accepts_fd_zero", 1).is_none() {
+            return;
+        }
+        probe(Sb::Off, || {
+            // SAFETY: closing fd 0 in the child; nothing else uses it.
+            cvt(unsafe { libc::close(0) })?;
+            let rs = create_for_abi(1)?;
+            if rs.as_raw_fd() != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EPROTO));
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn total_ram_matches_proc_meminfo() {
+        let info = fs::read_to_string("/proc/meminfo").unwrap();
+        let kib: u64 = info
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("MemTotal in /proc/meminfo");
+        assert_eq!(total_ram(), kib * 1024);
+    }
+
+    /// A path that fails for another reason than "missing" is an error even
+    /// in the exec list (only a missing one is skipped).
+    #[test]
+    fn unopenable_exec_path_is_an_error() {
+        if abi_or_skip("unopenable_exec_path_is_an_error", 1).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let looped = work.0.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let mut exec = system_exec();
+        exec.push(looped);
+        let policy = Policy {
+            exec: &exec,
+            read: &[],
+            read_exact: &[],
+            write: Some(&work.0),
+        };
+        let e = build(&policy).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "{e}");
+    }
+
+    /// An exec path is read + execute, never write.
+    #[test]
+    fn exec_dir_runs_but_is_not_writable() {
+        if abi_or_skip("exec_dir_runs_but_is_not_writable", 1).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let tools = Tmp::new("tools");
+        fs::write(tools.0.join("a"), "a\n").unwrap();
+        fs::copy("/bin/true", tools.0.join("true")).unwrap();
+        let mut exec = system_exec();
+        exec.push(tools.0.clone());
+        let policy = Policy {
+            exec: &exec,
+            read: &[],
+            read_exact: &[],
+            write: Some(&work.0),
+        };
+        let rs = build(&policy).unwrap().unwrap();
+        let dir = tools.0.display();
+        let o = sh(
+            Some(&rs),
+            NO_LIMIT,
+            &format!("'{dir}/true' && cat '{dir}/a'"),
+        );
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(o.stdout, b"a\n");
+        let o = sh(Some(&rs), NO_LIMIT, &format!("echo x >> '{dir}/a'"));
+        assert!(!o.status.success());
+        let o = sh(Some(&rs), NO_LIMIT, &format!("echo x > '{dir}/new'"));
+        assert!(!o.status.success());
+        assert_eq!(fs::read(tools.0.join("a")).unwrap(), b"a\n");
+        assert!(!tools.0.join("new").exists());
+    }
+
+    /// `allow_read_fd` grants reading the inode, nothing more.
+    #[test]
+    fn read_fd_grants_read_only() {
+        if abi_or_skip("read_fd_grants_read_only", 1).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let other = Tmp::new("other");
+        let file = other.0.join("intermediate");
+        fs::write(&file, "data\n").unwrap();
+        let rs = create().unwrap().unwrap();
+        let exec = system_exec();
+        let policy = Policy {
+            exec: &exec,
+            read: &[],
+            read_exact: &[],
+            write: Some(&work.0),
+        };
+        add(&rs, &policy).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(&file)
+            .unwrap();
+        allow_read_fd(&rs, held.as_fd(), &file).unwrap();
+        let p = file.display();
+        let o = sh(Some(&rs), NO_LIMIT, &format!("cat '{p}'"));
+        assert_eq!(o.stdout, b"data\n", "{}", stderr(&o));
+        let o = sh(Some(&rs), NO_LIMIT, &format!("echo x >> '{p}'"));
+        assert!(!o.status.success());
+        let o = sh(Some(&rs), NO_LIMIT, &format!(": > '{p}'"));
+        assert!(!o.status.success());
+        assert_eq!(fs::read(&file).unwrap(), b"data\n");
+    }
+
+    /// The write path may be a single file: it can be appended to (and
+    /// truncated where the kernel handles truncation); a sibling cannot.
+    #[test]
+    fn write_path_may_be_a_file() {
+        let Some(abi) = abi_or_skip("write_path_may_be_a_file", 1) else {
+            return;
+        };
+        let dir = Tmp::new("dir");
+        let granted = dir.0.join("granted");
+        let sibling = dir.0.join("sibling");
+        fs::write(&granted, "old\n").unwrap();
+        fs::write(&sibling, "old\n").unwrap();
+        let rs = ruleset(&[], &granted);
+        let o = sh(
+            Some(&rs),
+            NO_LIMIT,
+            &format!("echo more >> '{}'", granted.display()),
+        );
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(fs::read(&granted).unwrap(), b"old\nmore\n");
+        let o = sh(
+            Some(&rs),
+            NO_LIMIT,
+            &format!("echo x >> '{}'", sibling.display()),
+        );
+        assert!(!o.status.success());
+        assert_eq!(fs::read(&sibling).unwrap(), b"old\n");
+        if abi >= 3 {
+            let o = sh(Some(&rs), NO_LIMIT, &format!(": > '{}'", granted.display()));
+            assert!(o.status.success(), "{}", stderr(&o));
+            assert!(fs::read(&granted).unwrap().is_empty());
+        }
+    }
+
+    /// `TCGETS` on `/dev/null` as the open file's owner would see it:
+    /// ENOTTY when the ioctl is allowed, EACCES when Landlock refuses it.
+    fn tcgets_dev_null(rs: &Ruleset, flags: libc::c_int) -> Option<i32> {
+        errno(probe(Sb::On(Some(rs)), move || {
+            // SAFETY: open reads a NUL-terminated literal; the ioctl writes
+            // at most a termios (60 bytes) into the 64-byte buffer.
+            unsafe {
+                let fd = libc::open(c"/dev/null".as_ptr(), flags | libc::O_CLOEXEC);
+                cvt(fd)?;
+                let mut buf = [0u8; 64];
+                cvt(libc::ioctl(fd, libc::TCGETS, buf.as_mut_ptr()))
+            }
+        }))
+    }
+
+    /// Ioctls on device files need the IOCTL_DEV right: handled (denied by
+    /// default) from ABI 5, and granted on a path given with write access.
+    #[test]
+    fn device_ioctl_needs_the_ioctl_right() {
+        if abi_or_skip("device_ioctl_needs_the_ioctl_right", 5).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let dev = PathBuf::from("/dev/null");
+        // Control: unsandboxed, the ioctl reaches the driver.
+        let control = errno(probe(Sb::Off, || {
+            // SAFETY: as in tcgets_dev_null.
+            unsafe {
+                let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                cvt(fd)?;
+                let mut buf = [0u8; 64];
+                cvt(libc::ioctl(fd, libc::TCGETS, buf.as_mut_ptr()))
+            }
+        }));
+        assert_eq!(control, Some(libc::ENOTTY));
+        let rs = ruleset(std::slice::from_ref(&dev), &work.0);
+        assert_eq!(tcgets_dev_null(&rs, libc::O_RDONLY), Some(libc::EACCES));
+        let rs = ruleset(&[], &dev);
+        assert_eq!(tcgets_dev_null(&rs, libc::O_RDWR), Some(libc::ENOTTY));
+    }
+
+    /// Hard links between directories of the work dir are allowed (the
+    /// REFER right is granted there); the kernel refuses them everywhere
+    /// the ruleset does not grant it. `ln`, not `mv`: `mv` falls back to
+    /// copy + unlink when the rename is refused.
+    #[test]
+    fn link_between_work_dirs_allowed() {
+        if abi_or_skip("link_between_work_dirs_allowed", 2).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let rs = ruleset(&[], &work.0);
+        let script = format!(
+            "set -e; cd '{}'; mkdir d; echo hi > d/f; ln d/f g; cat g",
+            work.0.display()
+        );
+        let o = sh(Some(&rs), NO_LIMIT, &script);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(o.stdout, b"hi\n");
+    }
+
+    /// The refusal side: a link from the work dir into a directory the
+    /// ruleset does not grant is refused (and nothing appears there).
+    #[test]
+    fn link_out_of_the_work_dir_refused() {
+        if abi_or_skip("link_out_of_the_work_dir_refused", 2).is_none() {
+            return;
+        }
+        let work = Tmp::new("work");
+        let outside = Tmp::new("outside");
+        let rs = ruleset(&[], &work.0);
+        let script = format!(
+            "set -e; cd '{}'; echo hi > f; if ln f '{}/g'; then echo LINKED; else echo REFUSED; fi",
+            work.0.display(),
+            outside.0.display()
+        );
+        let o = sh(Some(&rs), NO_LIMIT, &script);
+        assert_eq!(o.stdout, b"REFUSED\n", "{}", stderr(&o));
+        assert!(!outside.0.join("g").exists());
     }
 }

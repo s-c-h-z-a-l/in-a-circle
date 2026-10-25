@@ -1,0 +1,5 @@
+inacircle-history 0
+out	job=10-1	in=i	path=/otory 0
+out	job=10-1	path=e
+out	job=10-1	in	job=10-1	in=/i	path=/otory 0
+out	job=10-1	=/

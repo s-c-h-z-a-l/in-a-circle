@@ -625,4 +625,292 @@ mod tests {
         m.member = Some("M\0".into());
         assert!(matches!(encode(&m), Err(Error::Malformed(_))));
     }
+
+    fn call_with(body: Vec<Value>) -> Message {
+        Message::call(1, "a.b", "/o", "a.B", "M", body)
+    }
+
+    /// `n` layers of `wrap` around a byte.
+    fn nest(n: usize, wrap: fn(Value) -> Value) -> Value {
+        (0..n).fold(Value::Byte(0), |v, _| wrap(v))
+    }
+
+    #[test]
+    fn encode_and_decode_agree_on_the_nesting_limit() {
+        fn variant(v: Value) -> Value {
+            Value::Variant(Box::new(v))
+        }
+        fn in_struct(v: Value) -> Value {
+            variant(Value::Struct(vec![v]))
+        }
+        fn in_array(v: Value) -> Value {
+            variant(Value::Array(v.signature(), vec![v]))
+        }
+        fn in_dict(v: Value) -> Value {
+            variant(Value::Dict(
+                "s".into(),
+                v.signature(),
+                vec![(Value::Str("k".into()), v)],
+            ))
+        }
+        // (wrapper, layers that fit): a variant is one level, the others two.
+        for (what, wrap, fits) in [
+            ("variant", variant as fn(Value) -> Value, 64),
+            ("struct", in_struct, 32),
+            ("array", in_array, 32),
+            ("dict", in_dict, 32),
+        ] {
+            let ok = call_with(vec![nest(fits, wrap)]);
+            assert_eq!(decode(&encode(&ok).unwrap()).unwrap(), ok, "{what}");
+            assert!(
+                matches!(
+                    encode(&call_with(vec![nest(fits + 1, wrap)])),
+                    Err(Error::Malformed("containers nested too deep"))
+                ),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn nesting_is_checked_before_a_deep_dict_key() {
+        // A dict that sits exactly at the limit: its key is one level too
+        // deep, so the depth error comes before the NUL in the key.
+        let dict = Value::Dict(
+            "s".into(),
+            "y".into(),
+            vec![(Value::Str("a\0".into()), Value::Byte(0))],
+        );
+        let mut v = dict;
+        for _ in 0..64 {
+            v = Value::Variant(Box::new(v));
+        }
+        assert!(matches!(
+            encode(&call_with(vec![v])),
+            Err(Error::Malformed("containers nested too deep"))
+        ));
+    }
+
+    #[test]
+    fn strings_inside_structs_are_validated() {
+        let bad = Value::Struct(vec![Value::Byte(1), Value::Str("a\0b".into())]);
+        assert!(matches!(
+            encode(&call_with(vec![bad])),
+            Err(Error::Malformed("NUL inside string"))
+        ));
+    }
+
+    #[test]
+    fn dict_keys_must_be_basic_types() {
+        for key in ["ay", "v", "(y)", "a{sy}"] {
+            let d = Value::Dict(key.into(), "y".into(), vec![]);
+            assert!(
+                matches!(
+                    encode(&call_with(vec![d])),
+                    Err(Error::Malformed("dict key is not a basic type"))
+                ),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn signatures_of_exactly_255_bytes_are_allowed() {
+        // A signature value, a variant holding a wide struct, and the body
+        // signature itself: 255 fit (one length byte), 256 do not.
+        let sig = Value::Sig("y".repeat(255));
+        let wide = Value::Variant(Box::new(Value::Struct(vec![Value::Byte(7); 253])));
+        let body = vec![Value::Byte(0); 255];
+        for body in [vec![sig], vec![wide], body] {
+            let m = call_with(body);
+            let back = decode(&encode(&m).unwrap()).unwrap();
+            assert_eq!(back, m);
+        }
+        let too_wide = Value::Variant(Box::new(Value::Struct(vec![Value::Byte(7); 254])));
+        assert!(matches!(
+            encode(&call_with(vec![too_wide])),
+            Err(Error::Malformed("signature too long"))
+        ));
+    }
+
+    /// A message of `kind` with exactly the header fields in `have`
+    /// (bit 0 PATH, 1 INTERFACE, 2 MEMBER, 3 ERROR_NAME, 4 REPLY_SERIAL).
+    fn with_fields(kind: Kind, have: u8) -> Message {
+        let on = |bit: u8| have & (1 << bit) != 0;
+        let text = |bit: u8, s: &str| on(bit).then(|| s.to_owned());
+        Message {
+            kind,
+            serial: 1,
+            reply_serial: on(4).then_some(1),
+            path: text(0, "/o"),
+            interface: text(1, "a.B"),
+            member: text(2, "M"),
+            error_name: text(3, "a.B.Err"),
+            destination: None,
+            sender: None,
+            signature: String::new(),
+            body: vec![],
+        }
+    }
+
+    #[test]
+    fn each_message_type_needs_exactly_its_required_fields() {
+        // Required fields per message type, from the specification:
+        // METHOD_CALL PATH+MEMBER; METHOD_RETURN REPLY_SERIAL;
+        // ERROR ERROR_NAME+REPLY_SERIAL; SIGNAL PATH+INTERFACE+MEMBER.
+        let (path, iface, member, error, reply) = (1u8, 2, 4, 8, 16);
+        for (kind, required) in [
+            (Kind::MethodCall, path | member),
+            (Kind::MethodReturn, reply),
+            (Kind::Error, error | reply),
+            (Kind::Signal, path | iface | member),
+        ] {
+            for have in 0..32u8 {
+                let m = with_fields(kind, have);
+                let r = decode(&encode(&m).unwrap());
+                if have & required == required {
+                    assert_eq!(r.unwrap(), m, "{kind:?} {have:05b}");
+                } else {
+                    assert!(
+                        matches!(r, Err(Error::Malformed("required header field missing"))),
+                        "{kind:?} {have:05b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A little-endian message laid out by hand from the D-Bus specification:
+    /// the fixed header, the header-field array (each field struct aligned to
+    /// 8 from the array start, the array length excluding the final padding),
+    /// padding to 8, then the body. `fields` are the field structs without
+    /// padding; none of this goes through our encoder.
+    fn hand_frame(kind: u8, fields: &[Vec<u8>], body: &[u8]) -> Vec<u8> {
+        let mut arr = Vec::new();
+        for f in fields {
+            while arr.len() % 8 != 0 {
+                arr.push(0);
+            }
+            arr.extend(f);
+        }
+        let mut b = vec![b'l', kind, 0, 1];
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(1u32.to_le_bytes()); // serial
+        b.extend((arr.len() as u32).to_le_bytes());
+        b.extend(arr);
+        while b.len() % 8 != 0 {
+            b.push(0);
+        }
+        b.extend(body);
+        b
+    }
+
+    /// A header field whose variant holds a string-like value of type `t`
+    /// ('o', 's'): code, signature "t", u32 length, bytes, NUL.
+    fn str_field(code: u8, t: u8, v: &str) -> Vec<u8> {
+        let mut f = vec![code, 1, t, 0];
+        f.extend((v.len() as u32).to_le_bytes());
+        f.extend(v.as_bytes());
+        f.push(0);
+        f
+    }
+
+    /// SIGNATURE field (code 8, type 'g').
+    fn sig_field(sig: &[u8]) -> Vec<u8> {
+        let mut f = vec![8, 1, b'g', 0, sig.len() as u8];
+        f.extend(sig);
+        f.push(0);
+        f
+    }
+
+    fn call_fields(sig: &[u8]) -> Vec<Vec<u8>> {
+        vec![
+            str_field(1, b'o', "/o"),
+            str_field(3, b's', "M"),
+            sig_field(sig),
+        ]
+    }
+
+    #[test]
+    fn hand_written_frames_decode_when_valid() {
+        // y=7 as the body of a call: the helper's layout is itself right.
+        let m = decode(&hand_frame(1, &call_fields(b"y"), &[7])).unwrap();
+        assert_eq!(m.body, vec![Value::Byte(7)]);
+        assert_eq!(m.member.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn a_65th_nested_variant_is_refused() {
+        let chain = |n: usize| {
+            let mut body = Vec::new();
+            for _ in 0..n {
+                body.extend([1, b'v', 0]); // variant signature "v"
+            }
+            body.extend([1, b'y', 0, 9]); // innermost: variant "y" = 9
+            body
+        };
+        // `chain(n)` is n + 1 variants inside each other (n of signature "v",
+        // then one holding a byte). 64 variants fit; the 65th does not.
+        assert!(decode(&hand_frame(1, &call_fields(b"v"), &chain(62))).is_ok());
+        assert!(decode(&hand_frame(1, &call_fields(b"v"), &chain(63))).is_ok());
+        for n in [64, 65] {
+            assert!(
+                matches!(
+                    decode(&hand_frame(1, &call_fields(b"v"), &chain(n))),
+                    Err(Error::Malformed("containers nested too deep"))
+                ),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn over_long_and_over_deep_signatures_are_refused() {
+        // A signature field is limited to 255 bytes by its one-byte length;
+        // a 256-byte signature cannot even be written. 255 bytes are fine as
+        // long as the type is, and 33 nested arrays are not.
+        let deep = [vec![b'a'; 33], b"y".to_vec()].concat();
+        assert!(matches!(
+            decode(&hand_frame(1, &call_fields(&deep), &[])),
+            Err(Error::Malformed("signature too deep"))
+        ));
+        // A length byte of 255 with fewer bytes behind it.
+        let mut f = hand_frame(1, &call_fields(b"y"), &[0]);
+        let at = f.iter().position(|&b| b == b'g').unwrap() + 2;
+        f[at] = 255;
+        assert!(decode(&f).is_err());
+        // 255 one-byte types are a valid signature: 255 bytes of body.
+        let body = vec![5u8; 255];
+        let m = decode(&hand_frame(1, &call_fields(&[b'y'; 255]), &body)).unwrap();
+        assert_eq!(m.body.len(), 255);
+    }
+
+    #[test]
+    fn a_signal_without_an_interface_is_refused() {
+        let fields = vec![str_field(1, b'o', "/o"), str_field(3, b's', "M")];
+        assert!(matches!(
+            decode(&hand_frame(4, &fields, &[])),
+            Err(Error::Malformed("required header field missing"))
+        ));
+        let mut with = fields;
+        with.push(str_field(2, b's', "a.B"));
+        assert!(decode(&hand_frame(4, &with, &[])).is_ok());
+    }
+
+    #[test]
+    fn a_dict_with_a_non_basic_key_is_refused() {
+        // Body signature a{vy}: an array of length 0, padded to its 8-aligned
+        // elements. Valid in every other respect.
+        for sig in [&b"a{vy}"[..], b"a{ayy}", b"a{(y)y}"] {
+            assert!(
+                matches!(
+                    decode(&hand_frame(1, &call_fields(sig), &[0; 8])),
+                    Err(Error::Malformed("dict key is not a basic type"))
+                ),
+                "{}",
+                String::from_utf8_lossy(sig)
+            );
+        }
+        assert!(decode(&hand_frame(1, &call_fields(b"a{sy}"), &[0; 8])).is_ok());
+    }
 }

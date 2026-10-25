@@ -1,0 +1,18 @@
+[foo]: /url\bar\*baz
+
+[f[foo]: /url\ba]*baz
+
+[f[foo]: /url\bar\*baz
+
+[foo]bar\baz"
+
+[foo]oo]bar\baz"
+
+[foo]
+\*baz
+
+[foo]bar\baz"
+
+[foo]oo]bar\baz"
+
+[foo]

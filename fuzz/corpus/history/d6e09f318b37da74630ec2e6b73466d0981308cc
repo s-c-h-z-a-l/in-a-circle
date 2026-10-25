@@ -1,0 +1,11 @@
+inacircle-history 0
+out	job=10-1	in=/i	p!th;
+out	job =0
+out	job=10-1	in=/i	path&/o/a	size=-	mtimejob=10-1	in=/i	path=/o/a	size=1	mtime=3	dev=4	ino=0
+out	job=10-1	in=/i	path=/o/a	size=-	mtimejob=0-0e=3	dev=4	ino=5	ua.mcob=0
+out	job=10-1	in=/i	patha	size=-	mtimejob=10-1	in=/i	path=/m/a	size=1	mtimg=1	ctime=3	dev=4	ino=5
+dir	job=10-1	pa|h=/o
+sy 0
+out	job=(
+out	job=10-1	in=/i	path=/o/a	size=-	mtimee=3	dev=4	ino=5	ua.mc	size=3	mtime=4	ino=5	undiozno
+garbage\qv=4	ijAb=10	i

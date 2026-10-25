@@ -1,0 +1,10 @@
+[foo][bar][baz]2
+
+[baz]: /url1
+[bar]: /urlbaz]
+
+[bazfoo][bar][baz]
+ /url1
+[bar]: /url`az]
+*[baz]: /[bar]url1
+[bar]2

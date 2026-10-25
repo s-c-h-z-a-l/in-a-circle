@@ -2,11 +2,16 @@
 resolver = "3"
 # Members are listed explicitly because cargo rejects globs that match nothing.
 members = ["crates/action", "crates/dbus", "crates/doc", "crates/engine", "crates/manifest", "crates/ui", "crates/wire", "bins/inacircle", "bins/inacircle-text", "bins/inacircle-testaction", "tools/bake-atlas", "tools/gen-entities"]
-exclude = ["spikes"]
+exclude = ["spikes", "fuzz"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
+
+# `fuzzing` is set by cargo-fuzz (nightly, `fuzz/`); declared so stable builds
+# and clippy do not warn about the `#[cfg(fuzzing)]` entry points.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [profile.release]
 opt-level = 3

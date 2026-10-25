@@ -6,5 +6,8 @@ license.workspace = true
 publish = false
 
 # Development tool: bakes the glyph atlas for the ui crate. Never shipped.
+[lints]
+workspace = true
+
 [dependencies]
 fontdue = "=0.9.5"

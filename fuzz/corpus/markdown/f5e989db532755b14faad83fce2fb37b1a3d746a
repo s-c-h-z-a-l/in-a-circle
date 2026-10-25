@@ -1,0 +1,166 @@
+<!--/a b
+  - c
+   
+- a
+ - b
+  - c
+  ,
+- d
+  
+   - e
+ - f a
+ - b
+ - d
+  - c
+   
+- d e
+ -"f a
+ - b
+ - d
+  - c
+   
+- d
+  - e
+ - - e
+ f
+- g
+- e
+ f
+- 
+- d
+  - - e
+ - f a
+ - b
+ - d
+  - c
+   
+- d e
+ -"f a
+ - b
+ - d
+  - c
+   
+- d
+  - e
+ - -`e
+ f
+- g
+- e
+ f
+- 
+- d
+  - e
+ - - e
+ f
+- g
+- e
+ f
+- g
+- g
+ - d
+  - g
+ - d
+  - c
+   
+- d
+  -
+- e
+ f
+- g
+- g
+ - d
+  - g
+ - d
+  - c
+   
+- d
+  - e
+ - - e
+ g
+- g
+ - d
+  - g
+ - 
+- d
+  -
+  - c
+   
+- ad
+  - c
+   
+- d
+  - e
+ - - e
+ f
+- g
+- g
+f a
+#x;
+&#438c
+    b
+  - c
+   
+- a
+ - \
+  - c
+ a
+ - - d
+  
+   - e
+ - f a
+ - b
+ - d
+  - c
+   
+- d e
+ -"f a
+ - b
+ - d
+  - c
+   
+- d
+  - e
+ f
+- g
+- e
+ f
+- 
+- d
+  - - e
+ - f a
+ - b
+ - d
+  - c
+   
+- d ef		
+ -"
+  - c
+   
+- d
+  -    
+- d
+  - e
+ - - e
+ f
+- g
+- g
+f a
+#x;
+#&786c
+    b
+  - c
+   
+- a
+ - \
+  - c
+ a
+ - \
+  - c
+   
+- d
+  - e
+
+ h= f
+- g
+- g
+ - d

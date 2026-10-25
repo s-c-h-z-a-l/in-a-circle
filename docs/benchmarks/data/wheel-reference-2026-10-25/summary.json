@@ -1,0 +1,87 @@
+{
+  "reference-A1": {
+    "attempts": 50,
+    "valid_scenarios": 50,
+    "startup_cpu": {
+      "N": 50,
+      "min": 638,
+      "p50": 751,
+      "p95": 851,
+      "max": 914
+    },
+    "startup_wall": {
+      "N": 50,
+      "min": 826,
+      "p50": 966,
+      "p95": 2147,
+      "max": 2415
+    },
+    "sampled_pss_max_KiB": 2630,
+    "rss_hwm_max_KiB": 4792,
+    "idle_wakeups_max": 0
+  },
+  "reference-A2": {
+    "attempts": 50,
+    "valid_scenarios": 50,
+    "startup_cpu": {
+      "N": 50,
+      "min": 637,
+      "p50": 765,
+      "p95": 860,
+      "max": 913
+    },
+    "startup_wall": {
+      "N": 50,
+      "min": 885,
+      "p50": 1975,
+      "p95": 2181,
+      "max": 2192
+    },
+    "sampled_pss_max_KiB": 2629,
+    "rss_hwm_max_KiB": 4840,
+    "idle_wakeups_max": 0
+  },
+  "reference-A3": {
+    "attempts": 50,
+    "valid_scenarios": 50,
+    "startup_cpu": {
+      "N": 50,
+      "min": 663,
+      "p50": 774,
+      "p95": 849,
+      "max": 886
+    },
+    "startup_wall": {
+      "N": 50,
+      "min": 853,
+      "p50": 2063,
+      "p95": 2236,
+      "max": 2245
+    },
+    "sampled_pss_max_KiB": 2631,
+    "rss_hwm_max_KiB": 4864,
+    "idle_wakeups_max": 0
+  },
+  "interrupted-A2": {
+    "attempts": 31,
+    "valid_scenarios": 30,
+    "startup_cpu": {
+      "N": 31,
+      "min": 659,
+      "p50": 748,
+      "p95": 829,
+      "max": 853
+    },
+    "startup_wall": {
+      "N": 31,
+      "min": 843,
+      "p50": 970,
+      "p95": 2018,
+      "max": 2410
+    },
+    "sampled_pss_max_KiB": 2629,
+    "rss_hwm_max_KiB": 4792,
+    "idle_wakeups_max": 0
+  },
+  "complete_series_p95_spread_pct": 1.2956419316843437
+}

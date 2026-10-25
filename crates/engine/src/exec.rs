@@ -43,6 +43,9 @@ const MAX_LINE: usize = 64 * 1024;
 /// Time between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Work dir mtime refresh period (stale dirs are those older than a day).
+// mutants: not equivalent — a shorter period (`60 + 60`, `60 / 60`) only adds
+// wakeups and utimensat calls during an action (resource cost); the safety
+// property (an active work dir never looks stale) holds; accepted.
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Warnings kept per input; the rest are only counted.
 const MAX_WARNINGS: u32 = 16;
@@ -267,7 +270,7 @@ pub fn run(
         all(&mut sink, "invalid route");
         return sink.report(false);
     }
-    if abi.is_none() && route.iter().any(|a| !a.builtin) {
+    if refuse_without_landlock(abi.is_some(), route) {
         all(&mut sink, "sandbox unavailable");
         return sink.report(false);
     }
@@ -909,6 +912,40 @@ fn last_line(tail: &[u8]) -> String {
         .to_owned()
 }
 
+/// Whether a route must be refused because Landlock is unavailable: only
+/// built-in actions (code we ship and trust) may run without it; a plugin
+/// anywhere in the route would run unconfined.
+fn refuse_without_landlock(landlock: bool, route: &[&Action]) -> bool {
+    !landlock && route.iter().any(|a| !a.builtin)
+}
+
+/// Where a step's Landlock ruleset comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum RuleSource {
+    /// The pre-built ruleset (it already grants an intermediate step's
+    /// inputs, from the fds their check opened) gets this step's rules.
+    Extend,
+    /// An intermediate step without its pre-built ruleset: building one
+    /// from paths would re-resolve them (a swap race), so the step fails.
+    Refuse,
+    /// A first step builds its ruleset from its input paths.
+    Build,
+}
+
+fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
+    match (has_pre, intermediate) {
+        (true, _) => RuleSource::Extend,
+        (false, true) => RuleSource::Refuse,
+        (false, false) => RuleSource::Build,
+    }
+}
+
+/// Whether a step must fail because it ended up without a ruleset: only
+/// built-in actions may run unconfined.
+fn refuse_unsandboxed(has_ruleset: bool, builtin: bool) -> bool {
+    !has_ruleset && !builtin
+}
+
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
 /// unfinished input is then failed as cancelled). With Landlock, an
@@ -968,10 +1005,11 @@ fn run_step(
         write: Some(dir),
     };
     let ruleset = if landlock {
-        let built = match pre {
-            Some(r) => sandbox::add(&r, &policy).map(|()| Some(r)),
-            None if step_in.intermediate => Err(io::Error::other("no intermediate rules")),
-            None => sandbox::build(&policy),
+        let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
+            (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| Some(r)),
+            (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
+            (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
+            (RuleSource::Build, _) => sandbox::build(&policy),
         };
         match built {
             Ok(r) => r,
@@ -980,7 +1018,7 @@ fn run_step(
     } else {
         None
     };
-    if ruleset.is_none() && !action.builtin {
+    if refuse_unsandboxed(ruleset.is_some(), action.builtin) {
         return fail_all(sink, "sandbox unavailable");
     }
     let total: u64 = step_in
@@ -1909,5 +1947,214 @@ mod tests {
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         assert!(t.is_cancelled());
         assert!(t.is_cancelled(), "stays cancelled");
+    }
+
+    #[test]
+    fn only_builtins_may_run_without_the_sandbox() {
+        let t = Tmp::new("decisions");
+        let builtin = script_action(&t, "b", "exit 0", "md");
+        let mut plugin = script_action(&t, "p", "exit 0", "md");
+        plugin.builtin = false;
+        assert!(!refuse_without_landlock(true, &[&builtin]));
+        assert!(!refuse_without_landlock(true, &[&plugin]));
+        assert!(!refuse_without_landlock(false, &[&builtin, &builtin]));
+        assert!(refuse_without_landlock(false, &[&plugin]));
+        assert!(refuse_without_landlock(false, &[&builtin, &plugin]));
+        assert!(refuse_without_landlock(false, &[&plugin, &builtin]));
+        // The same rule, once a step has (or lacks) its ruleset.
+        assert!(!refuse_unsandboxed(true, true));
+        assert!(!refuse_unsandboxed(true, false));
+        assert!(!refuse_unsandboxed(false, true));
+        assert!(refuse_unsandboxed(false, false));
+    }
+
+    #[test]
+    fn an_intermediate_step_never_builds_its_own_ruleset() {
+        assert_eq!(rule_source(true, true), RuleSource::Extend);
+        assert_eq!(rule_source(true, false), RuleSource::Extend);
+        assert_eq!(rule_source(false, true), RuleSource::Refuse);
+        assert_eq!(rule_source(false, false), RuleSource::Build);
+    }
+
+    #[test]
+    fn done_index_accepts_only_canonical_decimals_below_the_batch_size() {
+        assert_eq!(done_index("0/a.md", 2), Ok(0));
+        assert_eq!(done_index("1/a.md", 2), Ok(1));
+        assert_eq!(done_index("10/a.md", 11), Ok(10));
+        for bad in [
+            "00/a.md",
+            "01/a.md",
+            "+1/a.md",
+            "-1/a.md",
+            "1a/a.md",
+            "a/a.md",
+            "2/a.md",
+            "/1/a.md",
+            "1",
+            "1//a.md",
+            "1/../a.md",
+        ] {
+            assert!(done_index(bad, 2).is_err(), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn touch_refreshes_the_work_dir_mtime() {
+        let t = Tmp::new("touch");
+        let old = libc::timespec {
+            tv_sec: 1_000_000,
+            tv_nsec: 0,
+        };
+        let times = [old, old];
+        let c = CString::new(t.0.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c is a valid path, times points to two timespecs.
+        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(r, 0);
+        touch(&t.0);
+        let age = fs::metadata(&t.0)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(
+            age < Duration::from_secs(60),
+            "mtime not refreshed: {age:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_of_no_or_three_steps_fails_every_input() {
+        let t = Tmp::new("route-len");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let a = script_action(&t, "act", "exit 0", "md");
+        for route in [&[][..], &[&a, &a, &a][..]] {
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(route, std::slice::from_ref(&input), &mut seen, &tok);
+            assert_eq!(
+                seen.0,
+                [Outcome::Failed {
+                    input: input.clone(),
+                    reason: "invalid route".to_owned()
+                }]
+            );
+        }
+        assert_eq!(
+            fs::read_dir(&t.0).unwrap().count(),
+            2,
+            "nothing was created"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_an_input_and_nothing_is_placed_for_it() {
+        let t = Tmp::new("dir-input");
+        let dir_input = t.0.join("folder.txt");
+        fs::create_dir(&dir_input).unwrap();
+        let a = script_action(&t, "act", "echo ran > \"$4/ran\"", "md");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&a], std::slice::from_ref(&dir_input), &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: dir_input.clone(),
+                reason: "not a regular file".to_owned()
+            }]
+        );
+        let left: Vec<_> = fs::read_dir(&t.0).unwrap().flatten().collect();
+        assert_eq!(left.len(), 2, "only the input and the script: {left:?}");
+    }
+
+    /// Child side of the no-Landlock wiring tests; a no-op without the env.
+    #[test]
+    fn helper_no_landlock() {
+        let (Some(dir), Some(case)) = (
+            std::env::var_os("INACIRCLE_HELPER"),
+            std::env::var_os("INACIRCLE_CASE"),
+        ) else {
+            return;
+        };
+        // SAFETY: alarm has no preconditions; a watchdog against a hang.
+        unsafe { libc::alarm(20) };
+        // Landlock "does not exist" for this process and its children.
+        crate::output::tests::deny_syscalls(
+            &[libc::SYS_landlock_create_ruleset],
+            libc::ENOSYS as u32,
+        );
+        assert!(sandbox::landlock_abi().is_none());
+        let t = Tmp(PathBuf::from(dir));
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let mut action = script_action(
+            &t,
+            "act",
+            "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
+             printf 'done\\t%s\\t0/a.md\\n' \"$in\"",
+            "md",
+        );
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        match case.to_str().unwrap() {
+            "plugin" => {
+                action.builtin = false;
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                assert!(!r.sandboxed);
+                assert_eq!(
+                    seen.0,
+                    [Outcome::Failed {
+                        input: input.clone(),
+                        reason: "sandbox unavailable".to_owned()
+                    }]
+                );
+                assert!(!t.0.join("a.md").exists(), "a plugin ran unconfined");
+            }
+            "builtin" => {
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                assert!(!r.sandboxed);
+                assert_eq!(
+                    seen.0[0],
+                    Outcome::Warned {
+                        input: input.clone(),
+                        message: "ran without sandbox".to_owned()
+                    }
+                );
+                assert!(matches!(seen.0[1], Outcome::Done { .. }), "{:?}", seen.0);
+                assert_eq!(fs::read_to_string(t.0.join("a.md")).unwrap(), "a\n");
+            }
+            other => panic!("unknown case {other}"),
+        }
+        // SAFETY: skips the harness' teardown, which the filter may affect.
+        unsafe { libc::_exit(0) };
+    }
+
+    #[test]
+    fn without_landlock_plugins_are_refused_and_builtins_warn() {
+        if !crate::sandbox::tests::seccomp_or_skip("without_landlock") {
+            return;
+        }
+        for case in ["plugin", "builtin"] {
+            let t = Tmp::new("no-landlock");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "exec::tests::helper_no_landlock",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("INACIRCLE_HELPER", &t.0)
+                .env("INACIRCLE_CASE", case)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "case {case}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

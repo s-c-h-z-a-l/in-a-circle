@@ -1,0 +1,14 @@
+\*nasist
+\# ist
+\#oo [ba[foo]
+
+[foo]: /f&ouml;ouml; "f&ouml;&ouml;"
+t a h[foo]:/url "n*foo [ba[foo]
+
+[foo]: /f&ouml;"Ouml; not a h\[foo]: /url "n*fo [ba[foo]
+
+[foo]: / [ba[foo]
+
+[foo]: /f&ouml;"ouml; "
+_bar_
+bar entmty

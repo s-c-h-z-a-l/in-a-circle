@@ -1,0 +1,7 @@
+[foo]: 7url\\*
+
+[foo]bbaz"
+
+[foo]\baz"
+
+[foo]

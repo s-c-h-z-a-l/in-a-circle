@@ -1,0 +1,12 @@
+[foo]: /url1
+
+[foo]: /url '
+ti[tle
+line1
+line2
+'
+[foo]: /url '
+ti[tlline2
+'
+
+[fo]fo0o]: /url2[bar][foo]

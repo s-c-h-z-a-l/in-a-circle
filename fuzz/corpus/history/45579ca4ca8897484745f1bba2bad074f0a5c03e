@@ -1,0 +1,36 @@
+inacircle-history 0
+out	job=10-1	in=/i	path=/o/a	size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reason=boom
+job	id=10-1	time=5	action=a		size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reason=boom
+job	id=10-1	time=5	action=a	sYtatus=p
+jtatup=
+sjob	id½1b	om
+job	id=id=10-110-1	time=5	actio1		iason=boom
+job	id=10`-1	time=5	action=a	statup=
+sjobid=1b	id=10-1	:ime=5	action=a	status=p
+job	id=10-1	time=5	action=a	sirle-history 0
+out	job=10-1	in=/i	path=/o/a	size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reason=boom
+job	id=10-1	time=5	action=a		size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reason=boom
+job	=/i	pa„h=/o/a	size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reasoé=boom
+job	id=10-1	time=5	action=a		size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+jtatup=
+sjob	id=1b	om
+job	id=	action=a	sirle-history 0
+out	job=10-1	in=/i	path=/o/a	size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action=a	s/i7	reason=boom
+job	id=10-1	time=5	action=a		size==a	status=p
+job	id=1b	id=10-1	time=5	action=a	status=p
+job	id=10-1	time=5	action	time=5	action=a	status=p
+jobme=5	action=a	statup=
+sjob	id=1b	id=10-1	time=5	aime=5	a=1	pt=0

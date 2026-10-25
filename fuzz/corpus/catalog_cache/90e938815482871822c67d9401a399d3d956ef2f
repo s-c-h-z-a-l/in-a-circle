@@ -1,0 +1,2 @@
+inacircle-catalog 0
+bin	p!th=/test	out=app-stream	ext=bin	label=Test	group=test	cost=1m	ext=n	labelh=yes

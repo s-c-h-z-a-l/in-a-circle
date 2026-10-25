@@ -1,0 +1,76 @@
+#cm ar
+  `  bcm `
+ `   baz
+
+   &
+	## `   baz
+
+   &> bcm ar
+  `  bcm `
+ `   baz
+
+   &ar
+  ` 
+ 
+ `
+ ` `
+ `   baz
+
+   &> bcm ` far  baz
+
+   &> b~m ` far
+	## `   baz
+
+   &> bcm ar
+  ` 
+ n
+
+ "``
+ (  bar
+  ` 
+ `
+ ` 0  baz
+
+   &> bcm `
+ `   baz
+
+   &ar
+  ` 
+ `
+ `   
+	## `  z
+
+   &> bcm ar
+  `  bcm `
+ `   baz
+
+   &ar
+  ` 
+ 
+ ` ` `
+ `   baz
+
+   &> baz
+
+   &> bcm ar
+  ` 
+ n
+
+ "```
+ (  bar
+  ` 
+ `
+ ` 0  baz
+
+   &> bcm `
+ `   baz
+
+   &ar
+  ` 
+ `
+ `   
+
+   &> bcm arbaz
+
+   c&> bm$`
+  `

@@ -1,0 +1,9 @@
+inacircle-history 0
+n=exzts
+fail	jo1b=11id=0-0-1	ins
+fail	jo2b=10id=0-0-1	yn==2	kepts
+fail	jo1b=10i1b=10id=s
+fail	jo1b1=0id=0-0-1	ins
+fail	jo1b=10id=0-0-1	it0p
+ts
+fail	jo0b10id=0

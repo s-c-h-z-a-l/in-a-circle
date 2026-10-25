@@ -1,0 +1,4 @@
+inacircle-history 0
+out	job=10-1	in=/i	path/i	path=/o	dev=222222222222222222222inacircle-hist
+out	job=10-1	path=/o/0a=/0o/a	sizee=2	dev=22222222222222222222ts
+=10ina

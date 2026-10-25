@@ -14,6 +14,8 @@ pub mod conn;
 pub mod event;
 pub mod proto;
 
+#[cfg(fuzzing)]
+pub use conn::fuzz_events;
 pub use conn::{Arg, Conn, DISPLAY};
 pub use event::Event;
 pub use proto::{Iface, event_fds, op};

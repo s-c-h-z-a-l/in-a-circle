@@ -1,0 +1,297 @@
+{
+  "tc": {
+    "model": "Lenovo ThinkCentre M910q",
+    "machine_type": "10MUS1P70L",
+    "bios": {
+      "version": "M1AKT59A",
+      "date": "2023-10-27"
+    },
+    "cpu": {
+      "Model name": "Intel(R) Core(TM) i5-7500T CPU @ 2.70GHz",
+      "CPU family": "6",
+      "Model": "158",
+      "Stepping": "9",
+      "Microcode version": "0xf8",
+      "Socket(s)": "1",
+      "Core(s) per socket": "4",
+      "Thread(s) per core": "1",
+      "L1d cache": "128 KiB (4 instances)",
+      "L1i cache": "128 KiB (4 instances)",
+      "L2 cache": "1 MiB (4 instances)",
+      "L3 cache": "6 MiB (1 instance)"
+    },
+    "ram": {
+      "installed_bytes": 8589934592,
+      "usable_bytes": 8200368128,
+      "modules": 2,
+      "per_module_bytes": 4294967296,
+      "manufacturer": "Samsung",
+      "part": "M471A5244BB0-CRC",
+      "channels_reported": [
+        "ChannelA-DIMM0",
+        "ChannelB-DIMM0"
+      ],
+      "type": "DDR4",
+      "configured_MT_s": 2400,
+      "configured_voltage": 1.2,
+      "rank_per_module": 1
+    },
+    "storage": {
+      "model": "SanDisk SD7TB6S256G1001",
+      "transport": "SATA",
+      "bytes": 256060514304,
+      "filesystem": "Btrfs",
+      "mount_options_relevant": [
+        "noatime",
+        "compress=zstd:3",
+        "ssd",
+        "discard=async"
+      ]
+    },
+    "gpu": {
+      "model": "Intel HD Graphics 630",
+      "pci_id": "8086:5912",
+      "kernel_driver": "i915",
+      "mesa_package": "1:26.2.5-1"
+    },
+    "os": "EndeavourOS",
+    "kernel": "7.2.11-arch1-1",
+    "kernel_package": "linux 7.2.11.arch1-1",
+    "scheduler": "EEVDF; sched_ext disabled",
+    "kernel_config": {
+      "PREEMPT_DYNAMIC": true,
+      "HZ": 1000
+    },
+    "boot_flags_relevant": [
+      "nowatchdog",
+      "nvme_load=YES",
+      "loglevel=3"
+    ],
+    "cpu_policy": {
+      "driver": "intel_pstate active",
+      "governor": "powersave",
+      "EPP": "balance_performance",
+      "minimum_kHz": 800000,
+      "maximum_kHz": 3300000,
+      "min_perf_pct": 24,
+      "max_perf_pct": 100,
+      "turbo_enabled": true,
+      "power_profile": "balanced",
+      "ananicy-cpp": "inactive/not installed"
+    },
+    "compositor": {
+      "name": "niri",
+      "version": "26.04",
+      "commit": "8ed0da4",
+      "package": "26.04-1"
+    },
+    "display": {
+      "model": "NEC EA192M",
+      "connector": "DP-1",
+      "width": 1280,
+      "height": 1024,
+      "refresh_Hz": 60.02,
+      "scale": 1,
+      "physical_mm": [
+        380,
+        300
+      ],
+      "VRR": false
+    },
+    "applications": {
+      "file_manager": "Nautilus 51.1-1",
+      "notifications": "mako 1.11.0-1",
+      "action_picker": "wofi 1.5.3-1",
+      "terminal": "kitty 0.49.2-1",
+      "automatic_Escape": "wtype 0.4-2"
+    },
+    "runtime_packages": {
+      "glibc": "2.44+r50+g1848099f063e-1",
+      "gcc-libs": "16.2.1+r23+gd564253eb6c8-1",
+      "intel-ucode": "20260925-1",
+      "linux-firmware": "20260916-1"
+    },
+    "swap": {
+      "type": "file",
+      "bytes": 536866816,
+      "used_bytes_at_inventory": 0
+    },
+    "vulnerabilities": {
+      "Gather data sampling": "Mitigation; Microcode",
+      "Ghostwrite": "Not affected",
+      "Indirect target selection": "Not affected",
+      "Itlb multihit": "KVM: Mitigation: VMX unsupported",
+      "L1tf": "Mitigation; PTE Inversion",
+      "Mds": "Mitigation; Clear CPU buffers; SMT disabled",
+      "Meltdown": "Mitigation; PTI",
+      "Mmio stale data": "Mitigation; Clear CPU buffers; SMT disabled",
+      "Old microcode": "Not affected",
+      "Reg file data sampling": "Not affected",
+      "Retbleed": "Mitigation; IBRS",
+      "Spec rstack overflow": "Not affected",
+      "Spec store bypass": "Mitigation; Speculative Store Bypass disabled via prctl",
+      "Spectre v1": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization",
+      "Spectre v2": "Mitigation; IBRS; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected",
+      "Srbds": "Mitigation; Microcode",
+      "Tsa": "Not affected",
+      "Tsx async abort": "Mitigation; TSX disabled",
+      "Vmscape": "Mitigation; IBPB before exit to userspace"
+    }
+  },
+  "x280": {
+    "model": "Lenovo ThinkPad X280",
+    "machine_type": "20KF001RMH",
+    "bios": {
+      "version": "N20ET74W (1.59)",
+      "date": "2025-08-26"
+    },
+    "cpu": {
+      "Model name": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+      "CPU family": "6",
+      "Model": "142",
+      "Stepping": "10",
+      "Microcode version": "0xf6",
+      "Socket(s)": "1",
+      "Core(s) per socket": "4",
+      "Thread(s) per core": "2",
+      "L1d cache": "128 KiB (4 instances)",
+      "L1i cache": "128 KiB (4 instances)",
+      "L2 cache": "1 MiB (4 instances)",
+      "L3 cache": "6 MiB (1 instance)"
+    },
+    "ram": {
+      "installed_bytes": 8589934592,
+      "usable_bytes": 8064671744,
+      "modules_reported_by_SMBIOS": 2,
+      "per_reported_device_bytes": 4294967296,
+      "manufacturer": "not reported (SMBIOS 0000)",
+      "part": "not reported",
+      "channels_reported": [
+        "ChannelA-DIMM0",
+        "ChannelB-DIMM0"
+      ],
+      "type": "DDR4",
+      "configured_MT_s": 2400,
+      "configured_voltage": 1.2,
+      "rank_per_reported_device": 1,
+      "physical_replaceability": "not inferred from SMBIOS form-factor labels"
+    },
+    "storage": {
+      "model": "Lenovo LENSE20256GMSP34MEAT2TA",
+      "transport": "NVMe",
+      "bytes": 256060514304,
+      "filesystem": "Btrfs",
+      "mount_options_relevant": [
+        "noatime",
+        "compress=zstd:1",
+        "ssd",
+        "discard=async"
+      ]
+    },
+    "gpu": {
+      "model": "Intel UHD Graphics 620",
+      "pci_id": "8086:5917",
+      "kernel_driver": "i915",
+      "mesa_package": "3:26.2.4-1",
+      "KWin_renderer": "OpenGL ES 3.2 / EGL"
+    },
+    "os": "CachyOS",
+    "kernel": "7.2.11-1-cachyos",
+    "kernel_package": "linux-cachyos 7.2.11-1 (cachyos-v3, x86_64_v3)",
+    "scheduler": "EEVDF; no BORE config/sysctl; sched_ext disabled",
+    "kernel_config": {
+      "PREEMPT_DYNAMIC": true,
+      "HZ": 1000,
+      "SCHED_POC_SELECTOR": true,
+      "CC_OPTIMIZE_FOR_PERFORMANCE_O3": true,
+      "LTO_CLANG_THIN": true
+    },
+    "kernel_package_description": "EEVDF + LTO + AutoFDO + Propeller Cachy Sauce Kernel",
+    "boot_flags_relevant": [
+      "quiet",
+      "nowatchdog",
+      "splash"
+    ],
+    "cpu_policy": {
+      "driver": "intel_pstate active",
+      "governor": "powersave",
+      "EPP": "balance_performance",
+      "minimum_kHz": 400000,
+      "maximum_kHz": 3400000,
+      "min_perf_pct": 11,
+      "max_perf_pct": 100,
+      "turbo_enabled": true,
+      "power_profile": "balanced",
+      "AC_connected": true,
+      "ananicy-cpp": "1.2.0-1.1 active",
+      "scx_loader": "inactive"
+    },
+    "compositor": {
+      "name": "KWin / Plasma Wayland",
+      "version": "6.8.0",
+      "package": "kwin/plasma-workspace 6.8.0-1.1",
+      "Qt": "6.12.0",
+      "KDE_Frameworks": "6.31.0"
+    },
+    "display": {
+      "model": "internal panel; EDID manufacturer IVO, product 0x04e6; no model-name descriptor",
+      "connector": "eDP-1",
+      "width": 1920,
+      "height": 1080,
+      "refresh_Hz": 60.001,
+      "scale": 1,
+      "physical_mm": [
+        276,
+        156
+      ],
+      "VRR": false,
+      "HDR": false
+    },
+    "applications": {
+      "file_manager": "Dolphin 26.08.2-1.1",
+      "notifications": "Plasma 6.8.0",
+      "terminal": "Konsole 26.08.2-1.1",
+      "automatic_input": "ydotool 1.0.4-2.1 (test-only; helper stopped after use)"
+    },
+    "runtime_packages": {
+      "glibc": "2.44+r50+g1848099f063e-3",
+      "gcc-libs": "16.2.1+r23+gd564253eb6c8-1",
+      "intel-ucode": "20260925-1",
+      "linux-firmware": "1:20260916-1"
+    },
+    "swap": {
+      "type": "zram",
+      "bytes": 8064598016,
+      "used_bytes_at_inventory": 1957888
+    },
+    "vulnerabilities": {
+      "Gather data sampling": "Mitigation; Microcode",
+      "Ghostwrite": "Not affected",
+      "Indirect target selection": "Not affected",
+      "Itlb multihit": "KVM: Mitigation: VMX unsupported",
+      "L1tf": "Mitigation; PTE Inversion",
+      "Mds": "Mitigation; Clear CPU buffers; SMT vulnerable",
+      "Meltdown": "Mitigation; PTI",
+      "Mmio stale data": "Mitigation; Clear CPU buffers; SMT vulnerable",
+      "Old microcode": "Not affected",
+      "Reg file data sampling": "Not affected",
+      "Retbleed": "Mitigation; IBRS",
+      "Spec rstack overflow": "Not affected",
+      "Spec store bypass": "Mitigation; Speculative Store Bypass disabled via prctl",
+      "Spectre v1": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization",
+      "Spectre v2": "Mitigation; IBRS; IBPB conditional; STIBP conditional; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected",
+      "Srbds": "Mitigation; Microcode",
+      "Tsa": "Not affected",
+      "Tsx async abort": "Not affected",
+      "Vmscape": "Mitigation; IBPB before exit to userspace"
+    }
+  },
+  "desktop_renderer_control": {
+    "kernel": "7.2.9-1-cachyos",
+    "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+    "scaling_driver": "amd-pstate-epp",
+    "scaling_governor": "performance",
+    "scaling_min_freq": "1742662",
+    "scaling_max_freq": "4665835"
+  }
+}

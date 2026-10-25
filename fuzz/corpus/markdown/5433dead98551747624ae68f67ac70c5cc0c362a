@@ -1,0 +1,11 @@
+[foo]: /f&ouml;&ouml; "fooo&fu[o]
+
+[foo]: /nbspml;&oml;&ouml; "fooo&fu[o]
+
+[foo]: /nbspml;&ouml; "f&ouoo]6
+
+[foo]
+
+[foo]: /f&ouml;&ouml; "f&ou
+
+[foo]: o ml;"

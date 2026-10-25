@@ -1,0 +1,33 @@
+inacircle-history 0
+out-1	in0-
+out	job=10-1	in=/i/	path=/o/a	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	cze=2	mtime=2	ctime=-3	dev=4	ino=5
+dir	job=10-1	path=/o
+skip	job=10-1	=/o/a	size=1	minize=0
+out	job=10-1	in=/i/	path=/o=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	/a	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+y 0
+out	job=10ize=1	minize=	ircle-a	sohistory 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-0	dev=8	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+dir	job=10-1	path=/o
+0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-0	dev=4	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+-1	in=/i/	path=/o/a	size=2	mtime=2	cze=2	mtime=2	ctime=-3	dev=4	ino=5
+dir	job=10-1	path=/o
+skip	job=10-1	=/o/a	size=1	minize=	ircle-a	sohistory 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-0	dev=8	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+dir	job=10-1	path=/o
+0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-0	dev=4	ino=5
+y 0
+out	job=10-1	in=/i/	path=/o/a	size=2	mtime=2	ctime=-3	dev=4	ino=5
+dir	job=10-1	path=/o
+skip	jobin==1	kept=0

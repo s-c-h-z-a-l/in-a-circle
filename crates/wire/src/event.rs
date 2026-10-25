@@ -23,6 +23,12 @@ impl Event {
         }
     }
 
+    /// The raw argument bytes, for the fuzz target.
+    #[cfg(fuzzing)]
+    pub(crate) fn clone_args(&self) -> Vec<u8> {
+        self.args.clone()
+    }
+
     pub fn u32(&mut self) -> Result<u32, Error> {
         let w = self.args.get(self.pos..self.pos + 4).ok_or(Error::Short)?;
         let v = u32::from_ne_bytes([w[0], w[1], w[2], w[3]]);

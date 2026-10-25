@@ -397,6 +397,7 @@ pub struct UndoResult {
     pub kept: Vec<(PathBuf, String)>,
 }
 
+#[derive(Debug)]
 struct Out {
     path: PathBuf,
     id: FileId,
@@ -488,6 +489,97 @@ fn parse_out(l: &Line) -> Option<Out> {
     })
 }
 
+/// What the history says about one job.
+#[derive(Debug, Default)]
+struct JobRecords {
+    known: bool,
+    undone: bool,
+    outs: Vec<Out>,
+    dirs: Vec<PathBuf>,
+}
+
+/// Reads a history stream (header, then lines) and collects the records of
+/// one job. Pure: no file, no lock. It streams (only lines that mention the
+/// job are parsed), so `undo` hands it the locked file and the fuzz target
+/// a byte slice. A bad or unsupported header is `InvalidData`; a last line
+/// without its newline (cut off mid-write), a line that is not UTF-8 and a
+/// line that does not parse are skipped.
+fn job_records(mut rd: impl BufRead, job: &JobId) -> io::Result<JobRecords> {
+    let mut r = JobRecords::default();
+    let mut buf = Vec::new();
+    rd.read_until(b'\n', &mut buf)?;
+    let head = String::from_utf8_lossy(&buf);
+    let head = head.trim_end_matches('\n');
+    let ok = head
+        .split_once(' ')
+        .is_some_and(|(m, v)| m == MAGIC && v.parse::<u32>().is_ok_and(|v| v == VERSION));
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad or unsupported history header",
+        ));
+    }
+    let needle = format!("job={}", job.0);
+    let id_needle = format!("id={}", job.0);
+    loop {
+        buf.clear();
+        if rd.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        // A last line cut off mid-write has no newline: skip it.
+        if buf.pop() != Some(b'\n') {
+            break;
+        }
+        if !(contains(&buf, needle.as_bytes()) || contains(&buf, id_needle.as_bytes())) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(l) = parse_line(text) else { continue };
+        match l.kind.as_str() {
+            "job" if l.get("id") == Some(&job.0) => r.known = true,
+            "undo" if l.get("job") == Some(&job.0) => r.undone = true,
+            "out" if l.get("job") == Some(&job.0) => {
+                r.known = true;
+                r.outs.extend(parse_out(&l));
+            }
+            "dir" if l.get("job") == Some(&job.0) => {
+                r.known = true;
+                r.dirs.extend(l.get("path").map(PathBuf::from));
+            }
+            "skip" | "fail" if l.get("job") == Some(&job.0) => r.known = true,
+            _ => {}
+        }
+    }
+    Ok(r)
+}
+
+/// Fuzz entry point: the history reader on arbitrary bytes. The job id is
+/// the first one the input names (`job=<id>` up to the next tab or newline),
+/// so the matching branches run; the empty id and a foreign one run too.
+#[cfg(fuzzing)]
+pub fn fuzz_history(bytes: &[u8]) {
+    let named = bytes
+        .windows(4)
+        .position(|w| w == b"job=")
+        .map(|i| &bytes[i + 4..])
+        .map(|t| {
+            &t[..t
+                .iter()
+                .position(|&b| b == b'\t' || b == b'\n')
+                .unwrap_or(t.len())]
+        });
+    let ids = [
+        String::from_utf8_lossy(named.unwrap_or_default()).into_owned(),
+        String::new(),
+        "0-0".to_owned(),
+    ];
+    for id in ids {
+        let _ = job_records(bytes, &JobId(id));
+    }
+}
+
 /// How long `undo` waits for the history lock before giving up.
 const UNDO_LOCK_WAIT: Duration = Duration::from_secs(2);
 const UNDO_LOCK_STEP: Duration = Duration::from_millis(50);
@@ -533,57 +625,12 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .append(true)
         .open(history_path()?)?;
     lock_with_deadline(&file, UNDO_LOCK_WAIT)?;
-    let (mut known, mut undone) = (false, false);
-    let (mut outs, mut dirs) = (Vec::new(), Vec::new());
-    {
-        let mut rd = BufReader::new(&file);
-        let mut buf = Vec::new();
-        rd.read_until(b'\n', &mut buf)?;
-        let head = String::from_utf8_lossy(&buf);
-        let head = head.trim_end_matches('\n');
-        let ok = head
-            .split_once(' ')
-            .is_some_and(|(m, v)| m == MAGIC && v.parse::<u32>().is_ok_and(|v| v == VERSION));
-        if !ok {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad or unsupported history header",
-            ));
-        }
-        let needle = format!("job={}", job.0);
-        let id_needle = format!("id={}", job.0);
-        loop {
-            buf.clear();
-            if rd.read_until(b'\n', &mut buf)? == 0 {
-                break;
-            }
-            // A last line cut off mid-write has no newline: skip it.
-            if buf.pop() != Some(b'\n') {
-                break;
-            }
-            if !(contains(&buf, needle.as_bytes()) || contains(&buf, id_needle.as_bytes())) {
-                continue;
-            }
-            let Ok(text) = std::str::from_utf8(&buf) else {
-                continue;
-            };
-            let Ok(l) = parse_line(text) else { continue };
-            match l.kind.as_str() {
-                "job" if l.get("id") == Some(&job.0) => known = true,
-                "undo" if l.get("job") == Some(&job.0) => undone = true,
-                "out" if l.get("job") == Some(&job.0) => {
-                    known = true;
-                    outs.extend(parse_out(&l));
-                }
-                "dir" if l.get("job") == Some(&job.0) => {
-                    known = true;
-                    dirs.extend(l.get("path").map(PathBuf::from));
-                }
-                "skip" | "fail" if l.get("job") == Some(&job.0) => known = true,
-                _ => {}
-            }
-        }
-    }
+    let JobRecords {
+        known,
+        undone,
+        outs,
+        dirs,
+    } = job_records(BufReader::new(&file), job)?;
     if !known {
         return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
     }
@@ -952,6 +999,175 @@ mod tests {
             let r = undo(&job).unwrap();
             assert_eq!(r.removed, vec![f]);
         });
+    }
+
+    /// Undo is scoped to its job: with the history holding interleaved lines
+    /// of three jobs, two of whose ids are prefixes of the third's (`10-1`,
+    /// `10-10`, `10-100`; the reader's `job=10-1` prefilter matches all of
+    /// them), undoing one removes exactly its own files and folders, the
+    /// others stay on disk and stay undoable.
+    #[test]
+    fn undo_touches_only_its_own_job_among_interleaved_prefix_ids() {
+        let t = Tmp::new("interleaved");
+        t.env(|| {
+            let ids = ["10-1", "10-10", "10-100"];
+            let files: Vec<[PathBuf; 2]> = ids
+                .iter()
+                .map(|i| {
+                    [
+                        t.0.join(format!("out/{i}-a")),
+                        t.0.join(format!("out/{i}-b")),
+                    ]
+                })
+                .collect();
+            let dirs: Vec<PathBuf> = ids.iter().map(|i| t.0.join(format!("out/d{i}"))).collect();
+            for (fs_, d) in files.iter().zip(&dirs) {
+                fs::create_dir(d).unwrap();
+                for f in fs_ {
+                    fs::write(f, "x").unwrap();
+                }
+            }
+            let jobs: Vec<JobId> = ids.iter().map(|i| JobId((*i).into())).collect();
+            let mut recs: Vec<Recorder> =
+                jobs.iter().map(|j| Recorder::open(j, "convert")).collect();
+            // One line of each job at a time: out, dir, skip, fail all interleave.
+            for n in 0..2 {
+                for (r, fs_) in recs.iter_mut().zip(&files) {
+                    r.outcome(&done("/in/x", &fs_[n]));
+                }
+            }
+            for (r, d) in recs.iter_mut().zip(&dirs) {
+                r.dir(d);
+                r.outcome(&Outcome::Skipped {
+                    input: PathBuf::from("/in/s"),
+                    reason: "same".into(),
+                });
+                r.outcome(&Outcome::Failed {
+                    input: PathBuf::from("/in/f"),
+                    reason: "bad".into(),
+                });
+            }
+            for r in recs {
+                r.finish(true);
+            }
+
+            // Undo the middle one: only its files go.
+            let r = undo(&jobs[1]).unwrap();
+            assert_eq!(r.removed, files[1].to_vec());
+            assert!(r.kept.is_empty());
+            assert!(!dirs[1].exists(), "its own emptied folder goes");
+            for k in [0, 2] {
+                assert!(files[k].iter().all(|f| f.exists()), "{} untouched", ids[k]);
+                assert!(dirs[k].exists());
+            }
+            // Its undo line does not mark the prefix-sharing jobs as undone,
+            // and they are still undoable, each removing only its own.
+            let r = undo(&jobs[0]).unwrap();
+            assert_eq!(r.removed, files[0].to_vec());
+            assert!(files[2].iter().all(|f| f.exists()));
+            let r = undo(&jobs[2]).unwrap();
+            assert_eq!(r.removed, files[2].to_vec());
+            for j in &jobs {
+                assert_eq!(undo(j).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            }
+        });
+    }
+
+    /// Every kind of line alone makes its own job known and no other: a
+    /// job's id is not found through a line of a job whose id it prefixes
+    /// (`10-1` vs `10-10`). The `undo` line alone marks only its own job.
+    #[test]
+    fn each_line_kind_counts_for_its_own_job_only() {
+        let kinds = [
+            "job\tid=%\ttime=1\taction=a\tstatus=done\tsandbox=yes\n",
+            "skip\tjob=%\tin=/i\treason=r\n",
+            "fail\tjob=%\tin=/i\treason=r\n",
+            "dir\tjob=%\tpath=/nonexistent-dir-x\n",
+            "out\tjob=%\tin=/i\tpath=/nonexistent-x\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n",
+        ];
+        let t = Tmp::new("kinds");
+        t.env(|| {
+            let hist = history_path().unwrap();
+            fs::create_dir_all(hist.parent().unwrap()).unwrap();
+            for k in kinds {
+                fs::write(
+                    &hist,
+                    format!("inacircle-history 0\n{}", k.replace('%', "10-10")),
+                )
+                .unwrap();
+                assert_eq!(
+                    undo(&JobId("10-1".into())).unwrap_err().kind(),
+                    io::ErrorKind::NotFound,
+                    "{k:?} of 10-10 is not a record of 10-1"
+                );
+                fs::write(
+                    &hist,
+                    format!("inacircle-history 0\n{}", k.replace('%', "10-1")),
+                )
+                .unwrap();
+                undo(&JobId("10-1".into())).unwrap_or_else(|e| panic!("{k:?}: {e}"));
+            }
+            // Another job's undo line neither refuses this job nor makes it known.
+            let other_undone = "undo\tjob=10-10\ttime=5\tremoved=0\tkept=0\n";
+            fs::write(
+                &hist,
+                format!(
+                    "inacircle-history 0\n{}{other_undone}",
+                    kinds[1].replace('%', "10-1")
+                ),
+            )
+            .unwrap();
+            undo(&JobId("10-1".into())).unwrap();
+            fs::write(&hist, format!("inacircle-history 0\n{other_undone}")).unwrap();
+            assert_eq!(
+                undo(&JobId("10-1".into())).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        });
+    }
+
+    const OUT: &str = "out\tjob=10-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n";
+
+    #[test]
+    fn job_records_collects_one_jobs_lines() {
+        let h = format!(
+            "inacircle-history 0\n{OUT}out\tjob=11-1\tin=/i\tpath=/o/b\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\ndir\tjob=10-1\tpath=/o\n"
+        );
+        let r = job_records(h.as_bytes(), &JobId("10-1".into())).unwrap();
+        assert!(r.known && !r.undone);
+        assert_eq!(r.outs.len(), 1);
+        assert_eq!(r.outs[0].path, Path::new("/o/a"));
+        assert_eq!(r.dirs, vec![PathBuf::from("/o")]);
+        let r = job_records(
+            &b"inacircle-history 0\nundo\tjob=10-1\ttime=5\n"[..],
+            &JobId("10-1".into()),
+        )
+        .unwrap();
+        assert!(r.undone && !r.known);
+        let none = job_records(h.as_bytes(), &JobId("99-9".into())).unwrap();
+        assert!(!none.known && none.outs.is_empty());
+    }
+
+    #[test]
+    fn job_records_skips_truncated_and_garbled_lines_and_rejects_a_bad_header() {
+        let job = JobId("10-1".into());
+        // The last line has no newline: skipped.
+        let cut = format!("inacircle-history 0\n{OUT}out\tjob=10-1\tin=/i\tpa");
+        assert_eq!(job_records(cut.as_bytes(), &job).unwrap().outs.len(), 1);
+        // Not UTF-8 and unparsable lines naming the job: skipped.
+        let mut bad = b"inacircle-history 0\nout\tjob=10-1\t\xff\ngarbage job=10-1\\q\n".to_vec();
+        bad.extend(OUT.as_bytes());
+        assert_eq!(job_records(&bad[..], &job).unwrap().outs.len(), 1);
+        for head in [
+            &b""[..],
+            b"inacircle-history",
+            b"inacircle-history 1\n",
+            b"other 0\n",
+            b"\xff\n",
+        ] {
+            let e = job_records(head, &job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{head:?}");
+        }
     }
 
     #[test]

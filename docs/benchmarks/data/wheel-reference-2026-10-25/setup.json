@@ -1,0 +1,36 @@
+[
+  {
+    "kind": "aborted_setup_attempt",
+    "launcher": "wtype Super+F3",
+    "status": "invalid",
+    "reason": "controller incorrectly required the host-spawned process to be visible in its restricted PID namespace",
+    "utc": "2026-10-25T13:07:46Z"
+  },
+  {
+    "kind": "aborted_setup_attempt",
+    "launcher": "niri IPC spawn",
+    "status": "invalid",
+    "reason": "controller incorrectly required the host-spawned process to be visible in its restricted PID namespace",
+    "utc": "2026-10-25T13:10:14Z"
+  },
+  {
+    "kind": "aborted_setup_attempt",
+    "launcher": "wtype Super+F3 -> configured niri binding",
+    "status": "invalid",
+    "reason": "no new marker collected; virtual Escape also interrupted the controlling terminal conversation",
+    "raw": ""
+  },
+  {
+    "kind": "successful_setup_smoke",
+    "launcher": "niri IPC spawn, controller in host PID namespace",
+    "status": "valid",
+    "raw": "inacircle: measure wheel main_to_commit_cpu_us=743 main_to_commit_wall_us=1546 hover_events=0 hover_us_p50=0 hover_us_max=0 idle_wakeups=0 events=3 wheel_cpu_us=967 meter_cpu_us=27 drop_to_stage2_cpu_us=-1 list_to_level1_cpu_us=-1 choice_abs_cpu_us=-1 pss_kb=2473 vm_hwm_kb=4568 exit_abs_cpu_us=3621\n"
+  },
+  {
+    "kind": "unassigned_setup_marker",
+    "status": "unassigned",
+    "main_to_commit_cpu_us": 746,
+    "main_to_commit_wall_us": 1152,
+    "reason": "a marker appeared in the shared log during setup; not unambiguously assignable to an aborted trial, never used for acceptance"
+  }
+]

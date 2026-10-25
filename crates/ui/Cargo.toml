@@ -5,4 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # No dependencies: pure logic over the embedded glyph atlas.
+[lints]
+workspace = true
+
 [dependencies]

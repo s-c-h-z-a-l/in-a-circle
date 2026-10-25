@@ -51,6 +51,83 @@ pub struct Conn {
     broken: Option<&'static str>,
 }
 
+/// The header of one framed message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Frame {
+    obj: u32,
+    op: u16,
+    /// Header and arguments, in bytes: 8..=`MAX_MESSAGE`, a multiple of 4.
+    size: usize,
+}
+
+/// Reads the header of the first message in `buf`. `None`: the header or
+/// the body is not all there yet. A size below 8, above [`MAX_MESSAGE`] or
+/// not a multiple of 4 is `BadSize`: the stream is out of sync. Pure: the
+/// connection state (known objects, fds) is checked by the caller.
+fn frame(buf: &[u8]) -> Result<Option<Frame>, Error> {
+    let Some(head) = buf.get(..8) else {
+        return Ok(None);
+    };
+    let obj = u32::from_ne_bytes([head[0], head[1], head[2], head[3]]);
+    let word = u32::from_ne_bytes([head[4], head[5], head[6], head[7]]);
+    let (size, op) = ((word >> 16) as usize, word as u16);
+    if !(8..=MAX_MESSAGE).contains(&size) || !size.is_multiple_of(4) {
+        return Err(Error::BadSize(size));
+    }
+    if buf.len() < size {
+        return Ok(None);
+    }
+    Ok(Some(Frame { obj, op, size }))
+}
+
+/// Fuzz entry point: the events a compositor could send, as bytes. Runs the
+/// real `Conn::event` over every object kind (client id `n + 1` and server
+/// id `SERVER_IDS + n` for the interface at index `n` of `Iface::ALL`) and
+/// every argument reader on what comes out. One fd is queued, so the first
+/// `wl_keyboard.keymap` finds its fd and a second one is refused as
+/// `MissingFd`.
+#[cfg(fuzzing)]
+pub fn fuzz_events(bytes: &[u8]) {
+    use crate::proto::Iface;
+    // SAFETY: plain open(2) of /dev/null; the result is checked.
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: fresh fd we own.
+    let mut c = Conn::from_fd(unsafe { OwnedFd::from_raw_fd(fd) });
+    for i in Iface::ALL.iter().skip(1) {
+        c.new_id(*i);
+    }
+    for (n, i) in Iface::ALL.iter().enumerate() {
+        c.register_server_id(SERVER_IDS + n as u32, *i);
+    }
+    // SAFETY: as above.
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd >= 0 {
+        // SAFETY: fresh fd we own.
+        c.in_fds.push_back(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+    // `read` never grows `inb` past this, so neither may the fuzz input.
+    c.inb.extend_from_slice(&bytes[..bytes.len().min(MAX_INB)]);
+    while let Ok(Some(mut ev)) = c.event() {
+        // Each reader on the whole argument block, then the readers as a
+        // consumer chains them, until one fails.
+        let all = ev.clone_args();
+        for kind in 0..5u8 {
+            let mut e = Event::new(ev.obj, ev.iface, ev.op, all.clone());
+            while match kind {
+                0 => e.u32().is_ok(),
+                1 => e.i32().is_ok(),
+                2 => e.fixed().is_ok(),
+                3 => e.bytes().is_ok(),
+                _ => e.string().is_ok(),
+            } {}
+        }
+        let _ = (ev.u32(), ev.string(), ev.fixed(), ev.bytes());
+    }
+}
+
 /// `$WAYLAND_DISPLAY` (default `wayland-0`): an absolute path, or a name
 /// under `$XDG_RUNTIME_DIR`.
 fn socket_path(display: Option<&OsStr>, runtime_dir: Option<&OsStr>) -> io::Result<PathBuf> {
@@ -99,6 +176,8 @@ impl Conn {
     fn connect_to(path: &Path) -> io::Result<Conn> {
         // SAFETY: plain socket(2); result checked. Non-blocking: every wait
         // goes through `poll` with a deadline, connect included.
+        // mutants: equivalent (`|` -> `^` in the flags) - the flag bits are
+        // disjoint, so `^` and `|` give the same value.
         let fd = unsafe {
             libc::socket(
                 libc::AF_UNIX,
@@ -231,6 +310,8 @@ impl Conn {
             return self.refuse(start, fds_before, "too many fds in one flush");
         }
         self.out[start..start + 4].copy_from_slice(&obj.to_ne_bytes());
+        // mutants: equivalent (`|` -> `^`) - `size << 16` has zero low 16 bits
+        // and `op` is a u16, so the operands are disjoint.
         let word = ((size as u32) << 16) | op as u32;
         self.out[start + 4..start + 8].copy_from_slice(&word.to_ne_bytes());
     }
@@ -265,6 +346,12 @@ impl Conn {
             };
             // SAFETY: one valid pollfd.
             let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+            // mutants: equivalent (`>` -> `>=`) - r == 0 is poll's timeout, so
+            // the deadline has passed. Reporting ready then makes the caller
+            // retry its non-blocking syscall once more: it gets WouldBlock and
+            // comes back to `left.is_zero()` (same Timeout), or, if data arrived
+            // in that instant, returns the data instead of Timeout. Benign: the
+            // deadline is a bound on waiting, not a promise to discard data.
             if r > 0 {
                 return Ok(true);
             }
@@ -289,6 +376,9 @@ impl Conn {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         let nfds = self.out_fds.len();
+        // mutants: equivalent (`>` -> `>=`) - with 0 fds this would attach a
+        // SCM_RIGHTS cmsg of zero fds, which the kernel delivers as no ancillary
+        // data at all: the peer sees the same bytes and no fds.
         if nfds > 0 {
             msg.msg_control = cbuf.as_mut_ptr().cast();
             msg.msg_controllen = ctrl_space(nfds) as _;
@@ -310,9 +400,13 @@ impl Conn {
             libc::sendmsg(
                 self.sock.as_raw_fd(),
                 &msg,
+                // mutants: equivalent (`|` -> `^`) - disjoint flag bits.
                 libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
             )
         };
+        // mutants: equivalent (`<` -> `<=`) - `flush` calls `send` only with a
+        // non-empty `out`, and sendmsg on a stream socket with iov_len > 0
+        // returns >= 1 or -1, never 0.
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -328,7 +422,18 @@ impl Conn {
         while !self.out.is_empty() {
             match self.send() {
                 Ok(n) => drop(self.out.drain(..n)),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                // An interrupted send is retried, but only before the deadline:
+                // the socket is writable, so `wait` would return at once and a
+                // persistent EINTR would otherwise spin past the deadline.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    if Instant::now() >= deadline {
+                        self.broken = Some("flush failed");
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Wayland flush timed out",
+                        ));
+                    }
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     let ready = self.wait(libc::POLLOUT, deadline);
                     if !matches!(ready, Ok(true)) {
@@ -364,6 +469,10 @@ impl Conn {
             }
             match self.recv() {
                 Ok(()) => return Ok(true),
+                // Not an error: a readable poll with nothing to receive (an
+                // out-of-band byte reports POLLIN but a plain recv finds
+                // EAGAIN) or an interrupted call. `wait` then checks the
+                // deadline again.
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -400,6 +509,7 @@ impl Conn {
             libc::recvmsg(
                 self.sock.as_raw_fd(),
                 &mut msg,
+                // mutants: equivalent (`|` -> `^`) - disjoint flag bits.
                 libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT,
             )
         };
@@ -471,19 +581,15 @@ impl Conn {
         if let Some(why) = self.broken {
             return Err(Error::Broken(why));
         }
-        let Some(head) = self.inb.get(..8) else {
-            return Ok(None);
+        let frame = match frame(&self.inb) {
+            Ok(Some(f)) => f,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                self.broken = Some("bad message size");
+                return Err(e);
+            }
         };
-        let obj = u32::from_ne_bytes([head[0], head[1], head[2], head[3]]);
-        let word = u32::from_ne_bytes([head[4], head[5], head[6], head[7]]);
-        let (size, op) = ((word >> 16) as usize, word as u16);
-        if !(8..=MAX_MESSAGE).contains(&size) || !size.is_multiple_of(4) {
-            self.broken = Some("bad message size");
-            return Err(Error::BadSize(size));
-        }
-        if self.inb.len() < size {
-            return Ok(None);
-        }
+        let Frame { obj, op, size } = frame;
         // An id we never allocated, or a server id never announced, has no
         // known fds or meaning: the peer and we disagree on the object map.
         let Some(iface) = self.iface_of(obj) else {
@@ -737,6 +843,52 @@ mod tests {
         want.extend(words(&[8, (16 << 16), 9, 4]));
         want.extend(words(&[9, (8 << 16) | 6]));
         assert_eq!(received(&server), (want, 1));
+    }
+
+    fn header(obj: u32, size: u32, op: u16) -> Vec<u8> {
+        let mut h = obj.to_ne_bytes().to_vec();
+        h.extend(((size << 16) | op as u32).to_ne_bytes());
+        h
+    }
+
+    #[test]
+    fn frame_reads_a_complete_header() {
+        let mut m = header(7, 12, 3);
+        m.extend([0; 4]);
+        assert_eq!(
+            frame(&m),
+            Ok(Some(Frame {
+                obj: 7,
+                op: 3,
+                size: 12
+            }))
+        );
+        // Bytes of the next message do not matter.
+        m.extend([9; 5]);
+        assert_eq!(frame(&m).unwrap().unwrap().size, 12);
+        let max = MAX_MESSAGE as u32;
+        let mut m = header(1, max, 0);
+        m.resize(MAX_MESSAGE, 0);
+        assert_eq!(frame(&m).unwrap().unwrap().size, MAX_MESSAGE);
+    }
+
+    #[test]
+    fn frame_waits_for_a_truncated_message() {
+        assert_eq!(frame(&[]), Ok(None));
+        assert_eq!(frame(&header(7, 12, 3)[..7]), Ok(None));
+        // Header complete, body not.
+        assert_eq!(frame(&header(7, 12, 3)), Ok(None));
+    }
+
+    #[test]
+    fn frame_rejects_a_bad_size() {
+        for size in [0u32, 4, 7, 9, 4097, 0xffff] {
+            assert_eq!(
+                frame(&header(7, size, 0)),
+                Err(Error::BadSize(size as usize)),
+                "{size}"
+            );
+        }
     }
 
     #[test]
@@ -1034,5 +1186,432 @@ mod tests {
         assert!(c.in_fds.len() <= MAX_QUEUED_FDS);
         assert!(c.event().is_err());
         assert!(c.flush(after(10)).is_err());
+    }
+
+    /// Runs `f` in a forked child and returns its wait status. For checks
+    /// that need a process-wide change (resource limits, signal
+    /// dispositions, fd 0 closed) which must not touch the parallel tests.
+    /// `f` returns the child's exit code (0: all held); a panic is code 99
+    /// and an alarm bounds a hang.
+    fn in_child(f: impl FnOnce() -> i32) -> libc::c_int {
+        // SAFETY: fork(2) in a multithreaded process: the child is NOT
+        // async-signal-safe, because it allocates and may spawn threads. That
+        // is acceptable in test-only code: glibc makes malloc fork-safe, and a
+        // std lock held by another thread at the instant of the fork could
+        // deadlock the child, which the alarm below bounds (a spurious
+        // failure, never a hang). The child leaves with `_exit`, never
+        // returning into the harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // SAFETY: close_range(2) is a plain syscall (fork-safe) taking
+            // integers. The child inherited copies of every fd of the
+            // parallel tests (server sockets); keeping them would delay the
+            // EOF those tests wait for until this child exits. Only stdin,
+            // stdout and stderr stay; `f` creates what it needs itself.
+            unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
+            // SAFETY: plain alarm(2): a hung child dies by SIGALRM.
+            unsafe { libc::alarm(20) };
+            let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(99);
+            // SAFETY: leave the forked child without running the parent's
+            // destructors or harness.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    }
+
+    fn lower_nofile(limit: libc::rlim_t) {
+        let rl = libc::rlimit {
+            rlim_cur: limit,
+            rlim_max: limit,
+        };
+        // SAFETY: valid rlimit; only called in a forked child.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) }, 0);
+    }
+
+    fn fd_flags(fd: RawFd) -> (bool, bool) {
+        // SAFETY: fcntl queries on a descriptor the caller holds.
+        let (fdf, fl) = unsafe {
+            (
+                libc::fcntl(fd, libc::F_GETFD),
+                libc::fcntl(fd, libc::F_GETFL),
+            )
+        };
+        (fdf & libc::FD_CLOEXEC != 0, fl & libc::O_NONBLOCK != 0)
+    }
+
+    #[test]
+    fn connect_makes_a_cloexec_nonblocking_socket() {
+        let dir = std::env::temp_dir().join(format!("wire-flags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("w");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let c = Conn::connect_to(&path).unwrap();
+        assert_eq!(fd_flags(c.as_raw_fd()), (true, true));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `as_raw_fd` is the connection's socket: what a caller polls.
+    #[test]
+    fn as_raw_fd_is_the_stream_socket() {
+        let (c, _server) = pair();
+        let mut ty: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&ty) as libc::socklen_t;
+        // SAFETY: valid out pointers of the stated size.
+        let r = unsafe {
+            libc::getsockopt(
+                c.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&raw mut ty).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((r, ty), (0, libc::SOCK_STREAM));
+    }
+
+    /// A socket that cannot be created (descriptor limit) or lands on fd 0
+    /// (stdin closed) is judged by the result, not the number.
+    #[test]
+    fn connect_handles_socket_failure_and_fd_zero() {
+        let dir = std::env::temp_dir().join(format!("wire-fd0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("w");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let st = in_child(|| {
+            lower_nofile(0);
+            i32::from(Conn::connect_to(&path).is_ok())
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+        let st = in_child(|| {
+            // SAFETY: the lowest free descriptor becomes 0 for the socket.
+            unsafe { libc::close(0) };
+            match Conn::connect_to(&path) {
+                Ok(c) => i32::from(c.as_raw_fd() != 0),
+                Err(_) => 1,
+            }
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A failing `poll` is reported, not retried until the deadline.
+    /// (`poll` with more fds than RLIMIT_NOFILE allows fails with EINVAL.)
+    #[test]
+    fn a_failing_poll_is_an_error() {
+        let st = in_child(|| {
+            let (mut c, _server) = pair();
+            lower_nofile(0);
+            let t = Instant::now();
+            let r = c.read(after(5000));
+            i32::from(!(r.is_err() && t.elapsed() < Duration::from_secs(2)))
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+    }
+
+    /// Writing to a gone peer is an error, never SIGPIPE (the library does
+    /// not rely on the process ignoring it), and reported at once.
+    #[test]
+    fn flush_to_a_closed_peer_fails_without_sigpipe() {
+        let st = in_child(|| {
+            // SAFETY: restore the default disposition, which kills on SIGPIPE.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+            let (mut c, server) = pair();
+            drop(server);
+            c.req(5, 0, &[U(1)]);
+            let t = Instant::now();
+            let r = c.flush(after(5000));
+            let fast = t.elapsed() < Duration::from_secs(2);
+            let kind = r.as_ref().err().map(io::Error::kind);
+            i32::from(
+                !(fast && kind == Some(io::ErrorKind::BrokenPipe) && c.flush(after(10)).is_err()),
+            )
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+    }
+
+    /// A receive error other than "try again" breaks the connection.
+    #[test]
+    fn a_reset_connection_breaks() {
+        let (mut c, server) = pair();
+        c.req(5, 0, &[U(1)]);
+        c.flush(after(1000)).unwrap();
+        // The peer closes with our bytes unread: we get ECONNRESET.
+        drop(server);
+        let e = c.read(after(1000)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
+        assert!(matches!(c.event(), Err(Error::Broken(_))));
+        assert!(c.flush(after(10)).is_err());
+    }
+
+    /// Up to `FDS_PER_MSG` fds cross in one message each way, intact.
+    #[test]
+    fn a_full_batch_of_fds_crosses_both_ways() {
+        // Client to compositor: the cmsg length covers every fd.
+        for n in [2, FDS_PER_MSG] {
+            let (mut c, server) = pair();
+            let fd = memfd(b"x");
+            let args: Vec<Arg> = (0..n).map(|_| Fd(fd.as_fd())).collect();
+            c.req(5, 0, &args);
+            c.flush(after(1000)).unwrap();
+            assert_eq!(received(&server), (msg(5, 0, &[]), n));
+        }
+        // Compositor to client: all 28 fit the control buffer, none is lost,
+        // each is close-on-exec and goes to its own event.
+        let (mut c, server) = pair();
+        let keyboard = c.new_id(Iface::Keyboard);
+        let fd = memfd(b"x");
+        let keymap = msg(keyboard, op::wl_keyboard::KEYMAP, &words(&[1, 1]));
+        send(
+            &server,
+            &keymap.repeat(FDS_PER_MSG),
+            &[fd.as_raw_fd(); FDS_PER_MSG],
+        );
+        for _ in 0..FDS_PER_MSG {
+            assert_eq!(next(&mut c).op, op::wl_keyboard::KEYMAP);
+            let got = c.take_fd().expect("fd");
+            assert!(fd_flags(got.as_raw_fd()).0, "close-on-exec");
+            assert_eq!(content(&got), b"x");
+        }
+        assert!(c.take_fd().is_none());
+    }
+
+    /// More fds in one flush than one message carries is refused whole.
+    #[test]
+    fn too_many_fds_in_one_request_is_refused() {
+        let (mut c, server) = pair();
+        let fd = memfd(b"x");
+        let args: Vec<Arg> = (0..FDS_PER_MSG + 1).map(|_| Fd(fd.as_fd())).collect();
+        c.req(5, 0, &args);
+        assert!(c.flush(after(1000)).is_err());
+        assert_eq!(received(&server), (Vec::new(), 0));
+    }
+
+    /// Exactly `MAX_QUEUED_FDS` unclaimed fds are tolerated (and every one
+    /// reaches its event); one more breaks the connection.
+    #[test]
+    fn the_queued_fd_limit_is_exact() {
+        for extra in [0, 1] {
+            let (mut c, server) = pair();
+            let keyboard = c.new_id(Iface::Keyboard);
+            let keymap = msg(keyboard, op::wl_keyboard::KEYMAP, &words(&[1, 1]));
+            let fd = memfd(b"x");
+            let batches = [
+                FDS_PER_MSG,
+                FDS_PER_MSG,
+                MAX_QUEUED_FDS - 2 * FDS_PER_MSG + extra,
+            ];
+            for n in batches {
+                send(&server, &keymap.repeat(n), &vec![fd.as_raw_fd(); n]);
+            }
+            // Read without claiming: the fds pile up behind their events.
+            let mut last = Ok(true);
+            for _ in batches {
+                last = c.read(after(1000));
+            }
+            if extra == 1 {
+                assert_eq!(last.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                assert!(c.event().is_err());
+                continue;
+            }
+            assert!(last.unwrap());
+            for _ in 0..MAX_QUEUED_FDS {
+                assert_eq!(next(&mut c).op, op::wl_keyboard::KEYMAP);
+                assert!(c.take_fd().is_some());
+            }
+            assert!(c.event().unwrap().is_none());
+        }
+    }
+
+    /// Only SCM_RIGHTS control data is fds: other ancillary data (here
+    /// SCM_CREDENTIALS, which a receiver asks for with SO_PASSCRED, carrying
+    /// pid, uid and gid) is not turned into descriptors, which would close
+    /// whatever happens to sit at those numbers.
+    #[test]
+    fn other_ancillary_data_is_not_fds() {
+        let st = in_child(|| {
+            // SAFETY: plain syscalls on numbers and descriptors we own.
+            let (pid, uid, gid) = unsafe { (libc::getpid(), libc::getuid(), libc::getgid()) };
+            let mut hard = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: valid rlimit in and out.
+            unsafe {
+                libc::getrlimit(libc::RLIMIT_NOFILE, &mut hard);
+                hard.rlim_cur = hard.rlim_max;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &hard);
+            }
+            let sentinel = memfd(b"s");
+            let nums = [pid as RawFd, uid as RawFd, gid as RawFd];
+            // Best effort: a pid above the descriptor limit cannot be occupied;
+            // the queue check below covers that case.
+            let nums: Vec<RawFd> = nums
+                .into_iter()
+                .filter(|n| *n <= 2 || unsafe { libc::dup2(sentinel.as_raw_fd(), *n) } == *n)
+                .collect();
+            let (mut c, server) = pair();
+            let on: libc::c_int = 1;
+            // SAFETY: valid option value of the stated size.
+            let r = unsafe {
+                libc::setsockopt(
+                    c.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PASSCRED,
+                    (&raw const on).cast(),
+                    std::mem::size_of_val(&on) as libc::socklen_t,
+                )
+            };
+            if r != 0 {
+                return 3;
+            }
+            send(&server, &msg(50, 0, &[]), &[]);
+            if !matches!(c.read(after(1000)), Ok(true)) {
+                return 4;
+            }
+            drop(c);
+            // SAFETY: F_GETFD only reads a flag; -1 would mean closed.
+            let open = |n: RawFd| unsafe { libc::fcntl(n, libc::F_GETFD) } != -1;
+            i32::from(!nums.into_iter().all(open))
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+        // And no fd is queued for an event.
+        let (mut c, server) = pair();
+        let keyboard = c.new_id(Iface::Keyboard);
+        let on: libc::c_int = 1;
+        // SAFETY: valid option value of the stated size.
+        unsafe {
+            libc::setsockopt(
+                c.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PASSCRED,
+                (&raw const on).cast(),
+                std::mem::size_of_val(&on) as libc::socklen_t,
+            )
+        };
+        send(
+            &server,
+            &msg(keyboard, op::wl_keyboard::KEYMAP, &words(&[1, 1])),
+            &[],
+        );
+        assert!(c.read(after(1000)).unwrap());
+        assert_eq!(c.event().err(), Some(Error::MissingFd));
+    }
+
+    /// The input buffer really holds two messages: a second full message
+    /// arrives whole while the first is still unframed.
+    #[test]
+    fn input_buffer_holds_two_full_messages() {
+        let (mut c, server) = pair();
+        let known = c.new_id(Iface::Pointer);
+        let big = msg(known, op::wl_pointer::FRAME, &vec![0; MAX_MESSAGE - 8]);
+        send(&server, &big, &[]);
+        send(&server, &big, &[]);
+        assert!(c.read(after(1000)).unwrap());
+        assert!(c.read(after(1000)).unwrap());
+        assert!(c.event().unwrap().is_some());
+        assert!(c.event().unwrap().is_some());
+        assert!(c.event().unwrap().is_none());
+    }
+
+    /// A readable poll with nothing a plain recv can take (an out-of-band
+    /// byte) is not an error: the read waits out its deadline.
+    #[test]
+    fn a_pending_oob_byte_is_not_an_error() {
+        let (mut c, server) = pair();
+        // SAFETY: valid one-byte buffer.
+        let n = unsafe { libc::send(server.as_raw_fd(), b"x".as_ptr().cast(), 1, libc::MSG_OOB) };
+        assert_eq!(n, 1);
+        // Pre-check: the kernel reports the OOB byte as readable. If it ever
+        // reports only POLLPRI, this test would exercise nothing: fail loudly.
+        let mut p = libc::pollfd {
+            fd: c.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        assert!(unsafe { libc::poll(&mut p, 1, 1000) } > 0 && p.revents & libc::POLLIN != 0);
+        let t = Instant::now();
+        assert!(!c.read(t + Duration::from_millis(50)).unwrap());
+        assert!(t.elapsed() >= Duration::from_millis(50));
+        // The connection is still good.
+        send(&server, &msg(50, 0, &[]), &[]);
+        assert!(c.read(after(1000)).unwrap());
+    }
+
+    /// Makes the calling thread's `nrs` syscalls fail with `errno` (a
+    /// seccomp filter). Child-side only: the filter cannot be removed.
+    /// Native architecture, so no arch check. (Same seam as the engine's
+    /// output tests.)
+    fn deny_syscalls(nrs: &[libc::c_long], errno: u32) {
+        use libc::{
+            BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
+            SECCOMP_RET_ERRNO, sock_filter, sock_fprog,
+        };
+        // SECCOMP_SET_MODE_FILTER (linux/seccomp.h).
+        const SET_MODE_FILTER: libc::c_long = 1;
+        let ins = |code: u32, jt: u8, k: u32| sock_filter {
+            code: code as u16,
+            jt,
+            jf: 0,
+            k,
+        };
+        let n = nrs.len();
+        let mut prog = vec![ins(BPF_LD | BPF_W | BPF_ABS, 0, 0)];
+        for (i, nr) in nrs.iter().enumerate() {
+            prog.push(ins(BPF_JMP | BPF_JEQ | BPF_K, (n - i) as u8, *nr as u32));
+        }
+        prog.push(ins(BPF_RET | BPF_K, 0, SECCOMP_RET_ALLOW));
+        prog.push(ins(BPF_RET | BPF_K, 0, SECCOMP_RET_ERRNO | errno));
+        let fprog = sock_fprog {
+            len: prog.len() as u16,
+            filter: prog.as_mut_ptr(),
+        };
+        // SAFETY: prctl and seccomp take plain integers and a pointer to
+        // `fprog`, which points at `prog`; both outlive the calls.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::syscall(libc::SYS_seccomp, SET_MODE_FILTER, 0, &fprog),
+                0
+            );
+        }
+    }
+
+    /// A send or receive that keeps failing with EINTR does not spin past
+    /// the deadline: flush times out (and breaks), read reports "nothing".
+    #[test]
+    fn persistent_eintr_ends_at_the_deadline() {
+        let st = in_child(|| {
+            let (mut c, server) = pair();
+            let (mut rd, rd_server) = pair();
+            // Data is waiting, so poll reports readable at once.
+            send(&rd_server, &msg(50, 0, &[]), &[]);
+            deny_syscalls(&[libc::SYS_sendmsg, libc::SYS_recvmsg], libc::EINTR as u32);
+            let _keep = server;
+            c.req(5, 0, &[U(1)]);
+            let t = Instant::now();
+            let r = c.flush(t + Duration::from_millis(100));
+            let ms = t.elapsed().as_millis();
+            if r.as_ref().err().map(io::Error::kind) != Some(io::ErrorKind::TimedOut)
+                || !(100..3000).contains(&ms)
+            {
+                return 2;
+            }
+            // Broken now: a second flush fails at once.
+            if c.flush(after(1000)).is_ok() {
+                return 3;
+            }
+            let t = Instant::now();
+            let r = rd.read(t + Duration::from_millis(100));
+            let ms = t.elapsed().as_millis();
+            i32::from(!(matches!(r, Ok(false)) && (100..3000).contains(&ms)))
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
     }
 }

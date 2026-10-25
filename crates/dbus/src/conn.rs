@@ -88,6 +88,8 @@ fn unescape(v: &str) -> Option<Vec<u8>> {
     while i < b.len() {
         if b[i] == b'%' {
             let (hi, lo) = (hex(*b.get(i + 1)?)?, hex(*b.get(i + 2)?)?);
+            // mutants: equivalent (`|` -> `^`): `hi << 4` has its low four
+            // bits clear and `lo` is at most 15, so OR and XOR agree.
             out.push(hi << 4 | lo);
             i += 3;
         } else {
@@ -374,8 +376,17 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => {}
-                Err(Error::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                // No frame yet. An interrupted recvmsg is not retried here:
+                // this call has no deadline, and a persistent EINTR would
+                // spin; the fd stays readable, so the caller polls again.
+                Err(Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    return Ok(None);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -392,6 +403,10 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => return Ok(()),
+                // Not an error: a readable poll with nothing to receive (an
+                // out-of-band byte reports POLLIN, but a plain recvmsg finds
+                // EAGAIN) or an interrupted call. `wait` checks the deadline
+                // again.
                 Err(Error::Io(e))
                     if matches!(
                         e.kind(),
@@ -414,10 +429,20 @@ impl Conn {
                     libc::MSG_NOSIGNAL,
                 )
             };
+            // mutants: equivalent (`<` -> `<=`): send(2) of a non-empty
+            // buffer on a stream socket returns at least 1 byte or -1,
+            // never 0 (the loop only runs while `b` is not empty).
             if n < 0 {
                 let e = io::Error::last_os_error();
                 match e.kind() {
-                    io::ErrorKind::Interrupted => {}
+                    // Retried only before the deadline: the socket is still
+                    // writable, so `wait` would return at once and a persistent
+                    // EINTR would otherwise spin past the deadline.
+                    io::ErrorKind::Interrupted => {
+                        if Instant::now() >= deadline {
+                            return Err(Error::Timeout);
+                        }
+                    }
                     io::ErrorKind::WouldBlock => {
                         wait(self.fd.as_raw_fd(), libc::POLLOUT, deadline)?
                     }
@@ -457,6 +482,13 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
         };
         // SAFETY: p is one valid pollfd.
         let r = unsafe { libc::poll(&mut p, 1, ms) };
+        // mutants: equivalent (`>` -> `>=`): r == 0 is poll's timeout, so the
+        // deadline has passed (it is rounded up to whole ms). Reporting ready
+        // then makes the caller retry its non-blocking syscall once more: it
+        // gets EAGAIN and returns here, where the check above gives the same
+        // Timeout; or, if data arrived in that instant, it returns the data
+        // instead of Timeout. Benign: the deadline bounds waiting, it is not
+        // a promise to discard data that is already there.
         if r > 0 {
             return Ok(());
         }
@@ -470,6 +502,8 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
 }
 
 fn socket() -> Result<OwnedFd, Error> {
+    // mutants: equivalent (both `|` -> `^`): the three flags are distinct
+    // single bits, so OR and XOR give the same value.
     // SAFETY: socket(2) has no memory preconditions.
     let fd = unsafe {
         libc::socket(
@@ -666,5 +700,146 @@ mod tests {
             );
         }
         assert_eq!(parse_address("unix:guid=00,path=/a"), path("/a"));
+    }
+
+    /// Control data whose header claims far more fds than the buffer holds:
+    /// only the fds inside `msg_controllen` may be closed. Laid out in a
+    /// larger array whose tail holds the numbers of fds that must survive.
+    #[test]
+    fn close_passed_fds_stays_inside_the_control_buffer() {
+        // SAFETY (all unsafe below): CMSG_SPACE/CMSG_LEN only compute sizes;
+        // the zeroed msghdr is valid; the pointers written into it and the
+        // header written into `buf` stay inside `buf`, which is 8-aligned
+        // (u64 words) and larger than anything touched.
+        let guard = |n: i32| {
+            let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+            assert!(fd >= 0);
+            assert_eq!(unsafe { libc::dup2(fd, n) }, n);
+            unsafe { libc::close(fd) };
+        };
+        let is_open = |n: i32| unsafe { libc::fcntl(n, libc::F_GETFD) } != -1;
+        let (passed, g1, g2) = (700, 701, 702);
+        guard(passed);
+        guard(g1);
+        guard(g2);
+        let mut buf = [0u64; 8];
+        let space = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_control = buf.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            // Claims ten fds, though the buffer holds one.
+            (*c).cmsg_len = libc::CMSG_LEN(10 * size_of::<RawFd>() as u32) as _;
+            let data = libc::CMSG_DATA(c).cast::<RawFd>();
+            data.write_unaligned(passed);
+            // The rest of the padded slot (not a real fd), then, just past
+            // `msg_controllen`, fds that are not ours to close.
+            data.add(1).write_unaligned(-1);
+            data.add(2).write_unaligned(g1);
+            data.add(3).write_unaligned(g2);
+        }
+        close_passed_fds(&msg);
+        assert!(!is_open(passed), "the passed fd is closed");
+        assert!(is_open(g1) && is_open(g2), "fds past the buffer are not");
+        unsafe {
+            libc::close(g1);
+            libc::close(g2);
+        }
+    }
+
+    /// A `Conn` over one end of a socketpair; the other end is returned.
+    fn pair() -> (Conn, std::os::unix::net::UnixStream) {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let c = Conn {
+            fd: OwnedFd::from(a),
+            name: String::new(),
+            serial: 0,
+            buf: Vec::new(),
+            queue: VecDeque::new(),
+            queued: 0,
+            keep_from: None,
+            broken: false,
+        };
+        (c, b)
+    }
+
+    fn signal_frame(member: &str) -> Vec<u8> {
+        let mut m = Message::call(1, "a.b", "/a", "a.B", member, vec![]);
+        m.kind = Kind::Signal;
+        encode(&m).unwrap()
+    }
+
+    #[test]
+    fn recv_within_spends_one_unit_per_queued_frame() {
+        let (mut c, _peer) = pair();
+        for name in ["A", "B", "C"] {
+            c.enqueue(signal_frame(name));
+        }
+        let mut frames = 2;
+        let a = c.recv_within(&mut frames).unwrap().unwrap();
+        assert_eq!(a.member.as_deref(), Some("A"));
+        assert_eq!(frames, 1);
+        assert_eq!(c.queued_bytes(), 2 * signal_frame("A").len());
+        let b = c.recv_within(&mut frames).unwrap().unwrap();
+        assert_eq!(b.member.as_deref(), Some("B"));
+        assert_eq!(frames, 0);
+        // Out of units: nothing more is handed out, and nothing is lost.
+        assert!(c.recv_within(&mut frames).unwrap().is_none());
+        assert!(c.pending());
+        let mut more = 1;
+        let third = c.recv_within(&mut more).unwrap().unwrap();
+        assert_eq!(third.member.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn an_auth_line_is_read_up_to_the_limit_and_no_further() {
+        use std::io::Write;
+        let (mut c, mut peer) = pair();
+        let reader_fd = c.fd.as_raw_fd();
+        // 100 bytes with no line end, then, once the reader has taken them
+        // (its receive queue is empty again), far more than the limit.
+        let writer = std::thread::spawn(move || {
+            peer.write_all(&[b'A'; 100]).unwrap();
+            let t = Instant::now();
+            loop {
+                let mut queued: libc::c_int = 0;
+                // SAFETY: FIONREAD writes one int through the pointer.
+                let r = unsafe { libc::ioctl(reader_fd, libc::FIONREAD, &mut queued) };
+                assert_eq!(r, 0);
+                if queued == 0 {
+                    break;
+                }
+                assert!(t.elapsed() < std::time::Duration::from_secs(5));
+                std::thread::yield_now();
+            }
+            peer.write_all(&[b'B'; 2000]).unwrap();
+            peer
+        });
+        let r = c.read_line(Instant::now() + std::time::Duration::from_secs(2));
+        assert!(matches!(r, Err(Error::Auth)), "{:?}", r.err());
+        // The rest of the 2100 bytes is still in the socket.
+        let _peer = writer.join().unwrap();
+        let mut left = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: buf is valid for buf.len() writable bytes.
+            let n = unsafe {
+                libc::recv(
+                    c.fd.as_raw_fd(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            left.extend_from_slice(&buf[..n as usize]);
+        }
+        assert_eq!(left.len(), 2100 - MAX_LINE);
     }
 }

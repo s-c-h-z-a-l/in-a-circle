@@ -47,10 +47,16 @@ impl Drop for Fd {
 /// refusing to follow a symlink in the last component, and gives it owner
 /// rwx first: a 0o000 or 0o300 directory can be neither opened for reading
 /// nor emptied. The chmod goes through an `O_PATH` fd (`/proc/self/fd/<n>`),
-/// so it hits exactly the inode that was opened. Without `/proc` it falls
-/// back to opening directly, which fails for a directory without `r`.
+/// so it hits exactly the inode that was opened. Without `/proc` (or when
+/// chmod is refused) it falls back to opening the name again, which fails
+/// for a directory without `r`; that open is `O_NONBLOCK` (a FIFO swapped in
+/// cannot block it) and its fd must be the very inode of the `O_PATH` fd, or
+/// the directory is refused and left alone: both routes end at the verified
+/// inode.
 fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
     let at = at.unwrap_or(libc::AT_FDCWD);
+    // mutants: equivalent — the flags are distinct single bits, so `|` and
+    // `^` build the same value (the same holds for every flag set below).
     let path_flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: name is a valid NUL-terminated string that outlives the call;
     // `at` is an open directory fd or AT_FDCWD.
@@ -59,8 +65,22 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
         return last_err();
     }
     let p = Fd(p);
+    #[cfg(test)]
+    tests::AFTER_OPATH.with_borrow_mut(|h| h.as_mut().map(|f| f()));
     let magic = CString::new(format!("/proc/self/fd/{}", p.0)).expect("no NUL in a number");
+    // mutants: equivalent — `^` as above; and `O_RDONLY | O_DIRECTORY` as
+    // `&` only drops O_DIRECTORY: on the magic link the inode is already
+    // proved a directory, and on the fallback the device/inode comparison
+    // below refuses anything that is not that directory (a regular file or
+    // FIFO swapped in is opened O_NONBLOCK and then refused there).
     let read_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    // mutants: `== 0` as `!= 0` is NOT equivalent and is killed by the
+    // `swap_magic` case: a successful chmod would send the mutant to the
+    // fallback, which opens the name again (the swapped-in impostor is only
+    // refused afterwards, by the inode check) instead of using the magic
+    // link to the opened inode; and with chmod refused on a readable,
+    // non-writable directory the mutant would skip the fchmod's route
+    // entirely. The real route is pinned by the original-inode assertion.
     // SAFETY: magic is a valid NUL-terminated path naming our O_PATH fd.
     if unsafe { libc::chmod(magic.as_ptr(), 0o700) } == 0 {
         // SAFETY: as above; the magic link resolves to the opened inode.
@@ -69,15 +89,41 @@ fn open_dir_for_removal(at: Option<RawFd>, name: &CString) -> io::Result<Fd> {
             return Ok(Fd(fd));
         }
     }
+    // mutants: equivalent — `^` as above; and `fd < 0` as `fd <= 0`: `p`
+    // is still open and was the lowest free fd, so this open cannot get 0.
+    // mutants: equivalent — `^` as above; `|` as `&` on the last flag
+    // (`NOFOLLOW & NONBLOCK`, by precedence) drops both: O_DIRECTORY already
+    // makes a FIFO or file fail at once without blocking, and any symlink or
+    // directory swapped in is refused by the device/inode comparison below
+    // (a symlink to the very same inode is the directory we opened).
     // SAFETY: as for the O_PATH open.
-    let fd = unsafe { libc::openat(at, name.as_ptr(), read_flags | libc::O_NOFOLLOW) };
+    let fd = unsafe {
+        libc::openat(
+            at,
+            name.as_ptr(),
+            read_flags | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
     if fd < 0 {
         return last_err();
     }
     let fd = Fd(fd);
+    if !same_inode(p.0, fd.0) {
+        return Err(io::Error::other("directory changed while being opened"));
+    }
     // SAFETY: fd.0 is an open fd.
     unsafe { libc::fchmod(fd.0, 0o700) };
     Ok(fd)
+}
+
+/// Whether the two open fds name the same file (device and inode).
+fn same_inode(a: RawFd, b: RawFd) -> bool {
+    let id = |fd: RawFd| {
+        // SAFETY: zeroed stat is valid storage; fd is an open fd.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+    };
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Entry names of the directory open as `dir` (without `.` and `..`).
@@ -162,6 +208,9 @@ pub(crate) fn random_u64() -> io::Result<u64> {
             return Ok(u64::from_ne_bytes(buf));
         }
         let err = io::Error::last_os_error();
+        // mutants: equivalent — `n < 0` as `n <= 0` differs only for a
+        // return of 0 with a stale errno of EINTR, which the kernel does not
+        // produce (the 0 case is tested: it is a short read).
         if n < 0 && err.kind() == io::ErrorKind::Interrupted {
             continue;
         }
@@ -241,6 +290,8 @@ pub fn clean_stale(target_dir: &Path) {
             .modified()
             .ok()
             .and_then(|m| now.duration_since(m).ok())
+            // mutants: equivalent — `>` as `>=` differs only for an age of
+            // exactly 24 h to the nanosecond, read from the running clock.
             .is_some_and(|age| age > STALE_AFTER);
         // symlink_metadata: a symlink is not a dir here, and remove_tree
         // refuses to open one anyway.
@@ -580,6 +631,7 @@ fn place_many_with(
 
 /// `openat(at, name, O_PATH | O_DIRECTORY | extra)`.
 fn open_path(at: RawFd, name: &CStr, extra: libc::c_int) -> io::Result<Fd> {
+    // mutants: equivalent — distinct flag bits, so `|` and `^` agree.
     let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | extra;
     // SAFETY: name is NUL-terminated; at is an open dir fd or AT_FDCWD.
     let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
@@ -621,7 +673,10 @@ fn resolve_beneath(root: &Path, rel: &Path) -> io::Result<(Fd, CString)> {
 /// way. The type is checked on the fd, so it is the file that was opened.
 pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedFd> {
     let (dir, leaf) = resolve_beneath(root, rel)?;
+    // mutants: equivalent — distinct flag bits, so `|` and `^` agree.
     let flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // mutants: equivalent — `fd < 0` as `fd <= 0`: `dir` is open and was
+    // allocated first, so this open cannot get fd 0.
     // SAFETY: leaf is NUL-terminated; dir.0 is an open directory fd.
     let fd = unsafe { libc::openat(dir.0, leaf.as_ptr(), flags) };
     if fd < 0 {
@@ -714,10 +769,19 @@ pub fn place_many_beneath(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::xdg::tests::with_env;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    type Hook = Option<Box<dyn FnMut()>>;
+
+    thread_local! {
+        /// Runs in `open_dir_for_removal` right after the `O_PATH` open:
+        /// the window in which a swap of the name must not matter.
+        pub(super) static AFTER_OPATH: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -1339,5 +1403,679 @@ mod tests {
             )
         };
         assert_eq!(r, 0);
+    }
+
+    // ---- Mutation-hardening tests: placement, removal, descriptor use ----
+
+    /// True (with a note) when the tests run as root, which ignores the
+    /// permission bits the test relies on.
+    fn root_or_skip(test: &str) -> bool {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let root = unsafe { libc::geteuid() } == 0;
+        if root {
+            eprintln!("SKIPPED {test}: running as root ignores permission bits");
+        }
+        root
+    }
+
+    /// Makes the calling thread's `nrs` syscalls fail with `errno` (a
+    /// seccomp filter; `errno` 0 makes them "succeed" with 0). Child-side
+    /// only: the filter cannot be removed again. Native architecture, so
+    /// no arch check.
+    pub(crate) fn deny_syscalls(nrs: &[libc::c_long], errno: u32) {
+        use libc::{
+            BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
+            SECCOMP_RET_ERRNO, sock_filter, sock_fprog,
+        };
+        // SECCOMP_SET_MODE_FILTER (linux/seccomp.h).
+        const SET_MODE_FILTER: libc::c_long = 1;
+        let ins = |code: u32, jt: u8, k: u32| sock_filter {
+            code: code as u16,
+            jt,
+            jf: 0,
+            k,
+        };
+        let n = nrs.len();
+        // Load the syscall number (offset 0 of seccomp_data); one equality
+        // test per number jumping to the errno return, which sits `n - i`
+        // instructions past the test's successor; else allow.
+        let mut prog = vec![ins(BPF_LD | BPF_W | BPF_ABS, 0, 0)];
+        for (i, nr) in nrs.iter().enumerate() {
+            prog.push(ins(BPF_JMP | BPF_JEQ | BPF_K, (n - i) as u8, *nr as u32));
+        }
+        prog.push(ins(BPF_RET | BPF_K, 0, SECCOMP_RET_ALLOW));
+        prog.push(ins(BPF_RET | BPF_K, 0, SECCOMP_RET_ERRNO | errno));
+        let fprog = sock_fprog {
+            len: prog.len() as u16,
+            filter: prog.as_mut_ptr(),
+        };
+        // SAFETY: prctl and seccomp take plain integers and a pointer to
+        // `fprog`, which points at `prog`; both outlive the calls.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::syscall(libc::SYS_seccomp, SET_MODE_FILTER, 0, &fprog),
+                0
+            );
+        }
+    }
+
+    fn mkdir_syscalls() -> Vec<libc::c_long> {
+        let mut v = vec![libc::SYS_mkdirat];
+        #[cfg(target_arch = "x86_64")]
+        v.push(libc::SYS_mkdir);
+        v
+    }
+
+    fn open_fds() -> usize {
+        fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+
+    fn cloexec(fd: RawFd) -> bool {
+        // SAFETY: F_GETFD on an fd number reads a flag and nothing else.
+        let f = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        f >= 0 && f & libc::FD_CLOEXEC != 0
+    }
+
+    /// Runs the child side `case` of `helper_case` in a fresh process of
+    /// this binary (single-threaded, its own fd table and filters).
+    fn run_case(case: &str, dir: &Path) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "output::tests::helper_case",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("INACIRCLE_HELPER", dir)
+            .env("INACIRCLE_CASE", case)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    fn assert_case_ok(case: &str, dir: &Path) {
+        let out = run_case(case, dir);
+        assert!(
+            out.status.success(),
+            "case {case} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Child side of the `run_case` tests; a no-op without the env.
+    #[test]
+    fn helper_case() {
+        let (Some(dir), Some(case)) = (
+            std::env::var_os("INACIRCLE_HELPER"),
+            std::env::var_os("INACIRCLE_CASE"),
+        ) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        // A 2 s watchdog (these cases take milliseconds): a loop that
+        // should end but does not dies by SIGALRM instead of hanging the
+        // suite.
+        // SAFETY: alarm has no preconditions.
+        unsafe { libc::alarm(2) };
+        match case.to_str().unwrap() {
+            "fd0_remove_tree" => {
+                // A daemon without stdin: the first descriptors we open are
+                // number 0, which is a valid fd, not a failure.
+                // SAFETY: closes the unused stdin of this test process.
+                unsafe { libc::close(0) };
+                let tree = dir.join("tree");
+                fs::create_dir_all(tree.join("ro/inner")).unwrap();
+                fs::create_dir(tree.join("locked")).unwrap();
+                fs::write(tree.join("ro/f"), "x").unwrap();
+                fs::write(tree.join("locked/g"), "x").unwrap();
+                fs::set_permissions(tree.join("ro"), fs::Permissions::from_mode(0o500)).unwrap();
+                fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o000))
+                    .unwrap();
+                remove_tree(&tree);
+                assert!(!tree.exists(), "tree left behind with fd 0 closed");
+            }
+            "fd0_place_beneath" => {
+                // SAFETY: as above.
+                unsafe { libc::close(0) };
+                let root = dir.join("root");
+                fs::create_dir_all(root.join("sub")).unwrap();
+                fs::write(root.join("sub/leaf"), "x").unwrap();
+                let target = dir.join("target");
+                fs::create_dir(&target).unwrap();
+                let (p, _) =
+                    place_beneath(&root, Path::new("sub/leaf"), &target, "out", "md", None)
+                        .expect("place with fd 0 closed");
+                assert_eq!(p, target.join("out.md"));
+            }
+            "open_dir_flags_and_no_leak" => {
+                let d = dir.join("d");
+                fs::create_dir(&d).unwrap();
+                let c = cstr(&d).unwrap();
+                let before = open_fds();
+                let fd = open_dir_for_removal(None, &c).unwrap();
+                assert!(cloexec(fd.0), "fd leaks into children");
+                drop(fd);
+                assert_eq!(open_fds(), before, "descriptor leaked");
+            }
+            "emfile_on_root" | "emfile_on_leaf" => {
+                let root = dir.join("root");
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("leaf"), "x").unwrap();
+                // SAFETY: dup returns the lowest free fd, which we close.
+                let lowest = unsafe { libc::dup(0) };
+                assert!(lowest >= 0);
+                // SAFETY: closes the fd just made.
+                unsafe { libc::close(lowest) };
+                // Descriptor numbers below the limit are usable: `lowest`
+                // free fds exist for `limit = lowest + k`, k = 0 or 1.
+                let k = u64::from(case == "emfile_on_leaf");
+                let lim = libc::rlimit {
+                    rlim_cur: lowest as u64 + k,
+                    rlim_max: lowest as u64 + k,
+                };
+                // SAFETY: lim is a valid rlimit.
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) }, 0);
+                let e = open_regular_beneath(&root, Path::new("leaf")).unwrap_err();
+                assert_eq!(e.raw_os_error(), Some(libc::EMFILE), "{e:?}");
+            }
+            "swap_magic" | "swap_fallback_dir" | "swap_fallback_fifo" | "swap_fallback_file" => {
+                let fallback = case != "swap_magic";
+                if fallback {
+                    // chmod (the magic-link route) refused, fchmod allowed:
+                    // a mode change of the impostor stays visible.
+                    let mut nrs = vec![libc::SYS_fchmodat];
+                    #[cfg(target_arch = "x86_64")]
+                    nrs.push(libc::SYS_chmod);
+                    deny_syscalls(&nrs, libc::EPERM as u32);
+                }
+                let d = dir.join("d");
+                fs::create_dir(&d).unwrap();
+                let original = fs::metadata(&d).unwrap().ino();
+                let (d2, moved) = (d.clone(), dir.join("moved"));
+                let kind = case.to_str().unwrap().to_owned();
+                let impostor = std::rc::Rc::new(std::cell::Cell::new(0u32));
+                let seen = impostor.clone();
+                AFTER_OPATH.set(Some(Box::new(move || {
+                    fs::rename(&d2, &moved).unwrap();
+                    let c = cstr(&d2).unwrap();
+                    match kind.as_str() {
+                        "swap_fallback_fifo" => {
+                            // SAFETY: c is a valid path.
+                            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+                        }
+                        "swap_fallback_file" => fs::write(&d2, "x").unwrap(),
+                        _ => {
+                            fs::create_dir(&d2).unwrap();
+                            fs::write(d2.join("keep"), "k").unwrap();
+                        }
+                    }
+                    seen.set(fs::symlink_metadata(&d2).unwrap().mode());
+                })));
+                let c = cstr(&d).unwrap();
+                let r = open_dir_for_removal(None, &c);
+                AFTER_OPATH.set(None);
+                if fallback {
+                    let e = r.err().expect("opened a swapped-in name");
+                    assert!(
+                        e.kind() == io::ErrorKind::Other || e.raw_os_error() == Some(libc::ENOTDIR),
+                        "{e:?}"
+                    );
+                    // Left alone: still the mode it was made with.
+                    assert_eq!(fs::symlink_metadata(&d).unwrap().mode(), impostor.get());
+                } else {
+                    let fd = r.expect("the magic link names the opened inode");
+                    // SAFETY: zeroed stat is valid storage; fd is open.
+                    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                    assert_eq!(unsafe { libc::fstat(fd.0, &mut st) }, 0);
+                    assert_eq!(st.st_ino as u64, original, "not the original directory");
+                    assert_eq!(fs::symlink_metadata(&d).unwrap().mode(), impostor.get());
+                }
+            }
+            "getrandom_eperm" => {
+                deny_syscalls(&[libc::SYS_getrandom], libc::EPERM as u32);
+                let e = random_u64().unwrap_err();
+                assert_eq!(e.raw_os_error(), Some(libc::EPERM), "{e:?}");
+            }
+            "getrandom_short" => {
+                deny_syscalls(&[libc::SYS_getrandom], 0);
+                let e = random_u64().unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e:?}");
+            }
+            "getrandom_eintr" => {
+                // An interrupted call is retried, so this never returns:
+                // the watchdog ends it.
+                deny_syscalls(&[libc::SYS_getrandom], libc::EINTR as u32);
+                let r = random_u64();
+                panic!("gave up on EINTR: {r:?}");
+            }
+            "mkdir_always_exists" => {
+                deny_syscalls(&mkdir_syscalls(), libc::EEXIST as u32);
+                let e = make_work_dir(&dir).err().expect("no work dir");
+                assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+                assert!(e.to_string().contains("no free work directory name"), "{e}");
+            }
+            "renameat2_unsupported_einval" | "renameat2_unsupported_enosys" => {
+                let errno = if case == "renameat2_unsupported_einval" {
+                    libc::EINVAL
+                } else {
+                    libc::ENOSYS
+                };
+                deny_syscalls(&[libc::SYS_renameat2], errno as u32);
+                let src = file(&dir, "produced", "mine");
+                file(&dir, "a.md", "theirs");
+                let p = place(&src, &dir, "a", "md", None).expect("fallback place");
+                assert_eq!(p, dir.join("a (1).md"));
+                assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "theirs");
+                assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
+                assert!(!src.exists(), "source left behind");
+            }
+            "renameat2_denied_eperm" => {
+                deny_syscalls(&[libc::SYS_renameat2], libc::EPERM as u32);
+                let src = file(&dir, "produced", "mine");
+                let e = place(&src, &dir, "a", "md", None).unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
+                assert!(src.exists() && !dir.join("a.md").exists());
+            }
+            other => panic!("unknown case {other}"),
+        }
+        // SAFETY: skips the harness' teardown, which a filter may break.
+        unsafe { libc::_exit(0) };
+    }
+
+    #[test]
+    fn work_dir_cleanup_works_with_fd_0_closed() {
+        let t = Tmp::new("fd0-remove");
+        assert_case_ok("fd0_remove_tree", &t.0);
+    }
+
+    #[test]
+    fn place_beneath_works_with_fd_0_closed() {
+        let t = Tmp::new("fd0-place");
+        assert_case_ok("fd0_place_beneath", &t.0);
+    }
+
+    #[test]
+    fn removal_open_survives_a_swapped_name_on_both_routes() {
+        // Magic-link route: the opened inode is used, the impostor untouched.
+        let t = Tmp::new("swap-magic");
+        assert_case_ok("swap_magic", &t.0);
+        // Fallback route (chmod refused): a directory, a FIFO or a file
+        // swapped in after the O_PATH open is refused, neither blocked on
+        // (the child's watchdog would fire) nor chmod-ed.
+        if !crate::sandbox::tests::seccomp_or_skip("removal_open_swapped_name_fallback") {
+            return;
+        }
+        for case in [
+            "swap_fallback_dir",
+            "swap_fallback_fifo",
+            "swap_fallback_file",
+        ] {
+            let t = Tmp::new("swap-fallback");
+            assert_case_ok(case, &t.0);
+        }
+    }
+
+    #[test]
+    fn removal_fd_is_close_on_exec_and_not_leaked() {
+        let t = Tmp::new("rm-fd");
+        assert_case_ok("open_dir_flags_and_no_leak", &t.0);
+    }
+
+    #[test]
+    fn descriptor_exhaustion_is_an_error_not_a_bogus_fd() {
+        for case in ["emfile_on_root", "emfile_on_leaf"] {
+            let t = Tmp::new("emfile");
+            assert_case_ok(case, &t.0);
+        }
+    }
+
+    #[test]
+    fn random_failures_are_reported_and_interrupts_retried() {
+        if !crate::sandbox::tests::seccomp_or_skip("random_failures") {
+            return;
+        }
+        let t = Tmp::new("getrandom");
+        assert_case_ok("getrandom_eperm", &t.0);
+        assert_case_ok("getrandom_short", &t.0);
+        // Retried forever: only the watchdog ends the child.
+        let out = run_case("getrandom_eintr", &t.0);
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&out.status),
+            Some(libc::SIGALRM),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn work_dir_names_exhausted_is_reported_as_such() {
+        if !crate::sandbox::tests::seccomp_or_skip("work_dir_names_exhausted") {
+            return;
+        }
+        let t = Tmp::new("mkdir-exists");
+        assert_case_ok("mkdir_always_exists", &t.0);
+    }
+
+    #[test]
+    fn work_dir_in_an_unwritable_folder_reports_permission_denied() {
+        if root_or_skip("work_dir_in_an_unwritable_folder") {
+            return;
+        }
+        let t = Tmp::new("ro-workdir");
+        fs::set_permissions(&t.0, fs::Permissions::from_mode(0o500)).unwrap();
+        let e = make_work_dir(&t.0).err().expect("no work dir");
+        fs::set_permissions(&t.0, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
+    }
+
+    #[test]
+    fn placing_into_an_unwritable_folder_reports_permission_denied() {
+        if root_or_skip("placing_into_an_unwritable_folder") {
+            return;
+        }
+        let t = Tmp::new("ro-place");
+        let src = file(&t.0, "produced", "mine");
+        let ro = t.0.join("ro");
+        fs::create_dir(&ro).unwrap();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
+        let one = place(&src, &ro, "a", "md", None).unwrap_err();
+        let many = place_many(std::slice::from_ref(&src), &ro, "out").unwrap_err();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(one.kind(), io::ErrorKind::PermissionDenied, "{one:?}");
+        assert_eq!(many.kind(), io::ErrorKind::PermissionDenied, "{many:?}");
+        assert!(src.exists(), "the produced file stays where it was");
+        assert_eq!(fs::read_dir(&ro).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn filesystem_without_noreplace_still_never_overwrites() {
+        if !crate::sandbox::tests::seccomp_or_skip("filesystem_without_noreplace") {
+            return;
+        }
+        for case in [
+            "renameat2_unsupported_einval",
+            "renameat2_unsupported_enosys",
+        ] {
+            let t = Tmp::new("no-noreplace");
+            assert_case_ok(case, &t.0);
+        }
+        // Any other failure is the move's failure, not a reason to fall back.
+        let t = Tmp::new("renameat2-eperm");
+        assert_case_ok("renameat2_denied_eperm", &t.0);
+    }
+
+    /// Child side of `open_dir_fallback_without_chmod`; a no-op otherwise.
+    #[test]
+    fn helper_open_dir_fallback() {
+        let Some(dir) = std::env::var_os("INACIRCLE_HELPER") else {
+            return;
+        };
+        if std::env::var_os("INACIRCLE_CASE").is_some() {
+            return;
+        }
+        let dir = PathBuf::from(dir);
+        // The parent made `open` (0o700) and `locked` (0o000) before the
+        // filter: chmod is denied here.
+        let c = cstr(&dir.join("open")).unwrap();
+        let fd = open_dir_for_removal(None, &c).expect("a readable directory opens");
+        assert!(cloexec(fd.0), "fallback fd leaks into children");
+        drop(fd);
+        // chmod is denied, so a directory without `r` cannot be opened: an
+        // error, never a pretend descriptor.
+        let c = cstr(&dir.join("locked")).unwrap();
+        let e = open_dir_for_removal(None, &c)
+            .err()
+            .expect("opened a 0o000 dir");
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
+        // Not even a name that does not exist.
+        let c = cstr(&dir.join("missing")).unwrap();
+        let e = open_dir_for_removal(None, &c)
+            .err()
+            .expect("opened a missing dir");
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e:?}");
+    }
+
+    #[test]
+    fn open_dir_fallback_without_chmod() {
+        if root_or_skip("open_dir_fallback_without_chmod")
+            || !crate::sandbox::tests::seccomp_or_skip("open_dir_fallback_without_chmod")
+        {
+            return;
+        }
+        let t = Tmp::new("open-fallback");
+        fs::create_dir(t.0.join("open")).unwrap();
+        fs::create_dir(t.0.join("locked")).unwrap();
+        fs::set_permissions(t.0.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        run_helper_under_seccomp("output::tests::helper_open_dir_fallback", &t.0);
+        fs::set_permissions(t.0.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn opening_a_missing_directory_is_not_found() {
+        let t = Tmp::new("missing-dir");
+        let c = cstr(&t.0.join("nope")).unwrap();
+        let e = open_dir_for_removal(None, &c).err().expect("opened");
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        let link = t.0.join("link");
+        std::os::unix::fs::symlink(&t.0, &link).unwrap();
+        let c = cstr(&link).unwrap();
+        assert!(
+            open_dir_for_removal(None, &c).is_err(),
+            "followed a symlink"
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_waits_a_full_day() {
+        let t = Tmp::new("stale-age");
+        let hour = 3600;
+        let ages = [
+            ("0000000000000001", 12 * hour),
+            ("0000000000000002", 23 * hour),
+        ];
+        for (name, age) in ages {
+            let d = t.0.join(format!(".inacircle-{name}"));
+            fs::create_dir(&d).unwrap();
+            set_age(&d, age);
+        }
+        let gone = t.0.join(".inacircle-0000000000000003");
+        fs::create_dir(&gone).unwrap();
+        set_age(&gone, 25 * hour);
+        clean_stale(&t.0);
+        assert!(
+            t.0.join(".inacircle-0000000000000001").exists(),
+            "12 h old removed"
+        );
+        assert!(
+            t.0.join(".inacircle-0000000000000002").exists(),
+            "23 h old removed"
+        );
+        assert!(!gone.exists(), "25 h old kept");
+    }
+
+    #[test]
+    fn link_fallback_names_the_directory_refusal() {
+        let t = Tmp::new("link-dir-kind");
+        let d = t.0.join("d");
+        fs::create_dir(&d).unwrap();
+        let e = link_then_unlink(&d, &t.0.join("e")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{e:?}");
+    }
+
+    #[test]
+    fn candidate_cuts_multibyte_stems_on_a_character_boundary() {
+        let dir = Path::new("/d");
+        let name = |stem: &str, ext: &str, n: u32| {
+            let p = candidate(dir, stem.as_bytes(), b"", ext.as_bytes(), n).unwrap();
+            p.file_name().unwrap().to_str().unwrap().to_owned()
+        };
+        assert_eq!(name("a", "md", 0), "a.md");
+        assert_eq!(name("a", "md", 2), "a (2).md");
+        // 2-byte characters: the budget (251) ends inside one.
+        let two = "é".repeat(200);
+        let n = name(&two, "txt", 0);
+        assert_eq!(n, format!("{}.txt", "é".repeat(125)));
+        assert_eq!(n.len(), 254);
+        // 3-byte characters: two bytes back to the boundary.
+        let three = "€".repeat(100);
+        let n = name(&three, "txt", 0);
+        assert_eq!(n, format!("{}.txt", "€".repeat(83)));
+        // 4-byte characters, and the number counts toward the limit.
+        let four = "😀".repeat(100);
+        let n = name(&four, "md", 12);
+        assert!(n.len() <= NAME_MAX && n.ends_with(" (12).md"), "{n}");
+        assert!(n.starts_with('😀'));
+        // A name that fits exactly is not cut.
+        let exact = "a".repeat(251);
+        assert_eq!(name(&exact, "txt", 0).len(), 255);
+        let over = "a".repeat(300);
+        assert_eq!(name(&over, "txt", 0).len(), 255);
+    }
+
+    #[test]
+    fn candidate_refuses_when_no_stem_fits() {
+        let long_suffix = vec![b'a'; NAME_MAX];
+        // Not even a byte of stem fits; a stem that starts with a
+        // continuation byte (a non-UTF-8 name) must not underflow.
+        for stem in [&b"abc"[..], &b"\x80abc"[..]] {
+            let e = candidate(Path::new("/d"), stem, &long_suffix, b"", 0).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn split_name_splits_at_the_last_dot_but_not_a_leading_one() {
+        let s = |n: &str| {
+            let (a, b) = split_name(OsStr::new(n));
+            (a.to_vec(), b.to_vec())
+        };
+        assert_eq!(s("a.txt"), (b"a".to_vec(), b"txt".to_vec()));
+        assert_eq!(s("a.tar.gz"), (b"a.tar".to_vec(), b"gz".to_vec()));
+        assert_eq!(s(".bashrc"), (b".bashrc".to_vec(), Vec::new()));
+        assert_eq!(s(".a.b"), (b".a".to_vec(), b"b".to_vec()));
+        assert_eq!(s("noext"), (b"noext".to_vec(), Vec::new()));
+    }
+
+    #[test]
+    fn many_outputs_keep_dotfiles_and_number_before_the_last_extension() {
+        let t = Tmp::new("many-names");
+        let (d1, d2) = (t.0.join("1"), t.0.join("2"));
+        fs::create_dir(&d1).unwrap();
+        fs::create_dir(&d2).unwrap();
+        let produced = [
+            file(&d1, ".hidden", "h"),
+            file(&d1, "a.tar.gz", "one"),
+            file(&d2, "a.tar.gz", "two"),
+            file(&d1, "b.txt", "one"),
+            file(&d2, "b.txt", "two"),
+        ];
+        let placed = place_many(&produced, &t.0, "out").unwrap();
+        let names: Vec<_> = placed
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [".hidden", "a.tar.gz", "a.tar (1).gz", "b.txt", "b (1).txt"]
+        );
+        assert_eq!(fs::read_to_string(&placed[2]).unwrap(), "two");
+    }
+
+    #[test]
+    fn many_outputs_beneath_number_before_the_last_extension() {
+        let t = Tmp::new("many-beneath-names");
+        let root = t.0.join("root");
+        fs::create_dir_all(root.join("0")).unwrap();
+        fs::create_dir_all(root.join("1")).unwrap();
+        fs::write(root.join("0/.hidden"), "h").unwrap();
+        fs::write(root.join("0/a.txt"), "one").unwrap();
+        fs::write(root.join("1/a.txt"), "two").unwrap();
+        let rels = [
+            PathBuf::from("0/.hidden"),
+            PathBuf::from("0/a.txt"),
+            PathBuf::from("1/a.txt"),
+        ];
+        let placed = place_many_beneath(&root, &rels, &t.0, "out").unwrap();
+        let names: Vec<_> = placed
+            .files
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, [".hidden", "a.txt", "a (1).txt"]);
+    }
+
+    #[test]
+    fn place_beneath_needs_no_read_permission_on_the_directories() {
+        if root_or_skip("place_beneath_needs_no_read_permission") {
+            return;
+        }
+        let t = Tmp::new("path-fds");
+        let root = t.0.join("root");
+        let sub = root.join("sub");
+        let target = t.0.join("target");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(sub.join("leaf"), "x").unwrap();
+        // Searchable and writable, never listable: only an O_PATH open
+        // works on them.
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o300)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o100)).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o300)).unwrap();
+        let r = place_beneath(&root, Path::new("sub/leaf"), &target, "out", "md", None);
+        for p in [&root, &sub, &target] {
+            fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let (p, id) = r.expect("placed through non-listable directories");
+        assert_eq!(p, target.join("out.md"));
+        assert_eq!(id.size, 1);
+        assert_eq!(fs::read_to_string(p).unwrap(), "x");
+    }
+
+    #[test]
+    fn place_beneath_into_a_missing_or_non_directory_target_fails_cleanly() {
+        let t = Tmp::new("bad-target");
+        let root = t.0.join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("leaf"), "x").unwrap();
+        let missing = place_beneath(&root, Path::new("leaf"), &t.0.join("none"), "o", "md", None);
+        assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+        let plain = file(&t.0, "plain", "p");
+        assert!(place_beneath(&root, Path::new("leaf"), &plain, "o", "md", None).is_err());
+        let through_file = place_beneath(&root, Path::new("leaf/x"), &t.0, "o", "md", None);
+        assert!(through_file.is_err());
+        assert!(root.join("leaf").exists(), "the output stays where it was");
+        assert_eq!(fs::read_to_string(&plain).unwrap(), "p");
+    }
+
+    #[test]
+    fn open_regular_beneath_opens_unreadable_files_close_on_exec() {
+        if root_or_skip("open_regular_beneath_opens_unreadable") {
+            return;
+        }
+        let t = Tmp::new("open-regular");
+        let f = file(&t.0, "secret", "x");
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o000)).unwrap();
+        let fd = open_regular_beneath(&t.0, Path::new("secret")).expect("O_PATH needs no read");
+        assert!(cloexec(fd.as_raw_fd()));
+        let err = open_regular_beneath(&t.0, Path::new("nope")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let d = t.0.join("dir");
+        fs::create_dir(&d).unwrap();
+        assert!(open_regular_beneath(&t.0, Path::new("dir")).is_err());
+    }
+
+    #[test]
+    fn open_path_is_close_on_exec_and_directory_only() {
+        let t = Tmp::new("open-path");
+        let f = file(&t.0, "plain", "x");
+        let c = cstr(&t.0).unwrap();
+        let d = open_path(libc::AT_FDCWD, &c, 0).unwrap();
+        assert!(cloexec(d.0));
+        let cf = cstr(&f).unwrap();
+        let e = open_path(libc::AT_FDCWD, &cf, 0)
+            .err()
+            .expect("opened a file");
+        assert_eq!(e.raw_os_error(), Some(libc::ENOTDIR));
     }
 }
