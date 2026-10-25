@@ -1,0 +1,62 @@
+--- a/bins/inacircle/src/main.rs
++++ b/bins/inacircle/src/main.rs
+@@ -55,0 +56 @@
++mod profile;
+@@ -619,0 +621 @@
++    profile::mark("wheel_entry");
+@@ -636,0 +639 @@
++    profile::mark("lock_done");
+@@ -637,0 +641 @@
++    profile::mark("model_done");
+@@ -638,0 +643 @@
++    profile::mark("surface_gone");
+@@ -647,0 +653,2 @@
++    profile::mark("reported");
++    profile::dump();
+--- a/bins/inacircle/src/surface.rs
++++ b/bins/inacircle/src/surface.rs
+@@ -69,0 +70 @@
++    crate::profile::mark("connected");
+@@ -71,0 +73 @@
++    crate::profile::mark("event_loop_done");
+@@ -375,0 +378 @@
++        crate::profile::mark("registry_done");
+@@ -438,0 +442 @@
++        crate::profile::mark("layer_requested");
+@@ -444,0 +449 @@
++        crate::profile::mark("paint0_done");
+@@ -449,0 +455 @@
++        crate::profile::mark("configure_done");
+@@ -455,0 +462 @@
++        crate::profile::mark("paint1_done");
+@@ -460,0 +468 @@
++        crate::profile::mark("shm_ready");
+@@ -520,0 +529 @@
++        crate::profile::mark("buffers_ready");
+@@ -997,0 +1007 @@
++                crate::profile::mark("first_commit");
+--- /dev/null
++++ b/bins/inacircle/src/profile.rs
+@@ -0,0 +1,22 @@
++//! Temporary diagnostic probes; not part of the product branch.
++use std::{cell::RefCell, sync::OnceLock};
++struct Point { label: &'static str, user: i64, sys: i64, minor: i64, major: i64, ns: i64 }
++thread_local! { static POINTS: RefCell<Vec<Point>> = RefCell::new(Vec::with_capacity(32)); }
++fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var_os("INACIRCLE_PHASE_PROFILE").is_some())
++}
++pub fn mark(label: &'static str) {
++    if !enabled() { return; }
++    // SAFETY: both libc output structures are valid and zero-initialized.
++    let (mut r, mut t) = unsafe { (std::mem::zeroed::<libc::rusage>(), std::mem::zeroed::<libc::timespec>()) };
++    // SAFETY: valid writable output structures; constant selectors.
++    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r); libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t); }
++    POINTS.with(|p| p.borrow_mut().push(Point { label, user: r.ru_utime.tv_sec*1_000_000+r.ru_utime.tv_usec, sys: r.ru_stime.tv_sec*1_000_000+r.ru_stime.tv_usec, minor: r.ru_minflt, major: r.ru_majflt, ns:t.tv_sec*1_000_000_000+t.tv_nsec }));
++}
++pub fn dump() {
++    if !enabled() { return; }
++    POINTS.with(|p| for v in p.take() {
++        eprintln!("inacircle: profile label={} user_us={} sys_us={} minflt={} majflt={} mono_ns={}",v.label,v.user,v.sys,v.minor,v.major,v.ns);
++    });
++}

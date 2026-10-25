@@ -5,15 +5,23 @@ within the budgets: our CPU from `main` to the first commit of the mapped
 wheel ≤ 1 ms, hover repaint ≤ 100 µs, no wakeups while it waits, peak memory
 ≤ 5 MB PSS, binary ≤ 1.5 MB?
 
-**Verdict:** within budget. Our CPU from `main` to the wheel's commit is
+**Historical reference-machine verdict:** within budget. Our CPU from `main` to the wheel's commit is
 755 µs p50 (856 µs max, budget 1 ms), there are no wakeups while the wheel
 waits, and peak memory is 2.5 MB PSS (budget 5 MB). RSS reads 4.7 MB, but
 2.2 MB of it is libc and loader pages shared with every process; our own
 part is the two 900 KB shm buffers, 160 kB of heap and the binary's pages.
-A drop of 1024 files adds about 120 kB at stage 2. The hover row is the
-rasterizer bench (14 µs median, 49 µs max, budget 100 µs), not an in-situ
-number: the drag runs (hover and wakeups while dragging) are pending the
-user's manual test on niri.
+A drop of 1024 files adds about 120 kB at stage 2. The initial hover row
+is the rasterizer bench (14 µs median, 49 µs max); in-situ drag results
+follow below.
+
+**Portability update (2026-10-25):** the same plan-7 binaries passed manual
+conversion tests on EndeavourOS/niri/Nautilus and CachyOS/Plasma/Dolphin,
+including notification Undo. Startup CPU exceeded 1 ms on both additional
+systems; the X280 also exceeded the early-list and hover limits. Memory
+and counted idle wakeups remained within their limits. See the
+[cross-machine report](wheel-portability.md) for full specifications,
+controls, raw records and the open performance-acceptance question. The
+historical reference numbers here are not a universal budget claim.
 
 ## Method
 
@@ -28,8 +36,10 @@ inacircle: measure wheel main_to_commit_cpu_us=… main_to_commit_wall_us=… ho
   from the start of the wheel mode to the first `wl_surface.commit` of the
   mapped wheel. Exec, loader and the spawner's teardown are before it and
   not counted; the wall time is the same interval, so it includes waiting
-  for the compositor.
-- `hover_us_*`: the time of each hover repaint (paint, damage, requests),
+  for the compositor. The commit requests are queued at the marker; this
+  is neither a socket-flush nor a presentation timestamp.
+- `hover_us_*`: elapsed wall time (`Instant::elapsed`) of each hover
+  repaint (paint, damage, requests),
   `hover_events` of them; p50 is the lower middle.
 - `idle_wakeups`: `poll` returns with nothing to do while the wheel waits
   (before its deadline). With no input it must be 0.
@@ -65,17 +75,22 @@ rasterizer alone), and the `idle_wakeups` row comes from the plain starts.
 
 ### Drag runs (the user's manual test on niri, Nautilus)
 
-The wheel's waiting points, our CPU for one input (the budget is per point):
+The historical wheel waiting points for one input (CPU except the
+explicitly wall-time hover row; the budget is per point):
 
 | point | one run | budget |
 |---|---|---|
 | `main` → the wheel's commit | 828 µs | ≤ 1 ms |
 | the drop's data → the stage-2 wheel's commit | 260 µs | ≤ 1 ms |
 | the early list → the lit level-1 wheel's commit (`list_to_level1_cpu_us`) | see below | ≤ 1 ms |
-| the choice → the action's start (`run` start − `choice_abs` + catalog + classify) | 303 µs | ≤ 1 ms |
+| choice → classification complete (`run` start − `choice_abs` + catalog + classify; see below) | 303 µs | legacy proxy |
 | hover repaint, in situ (after the stage-2 prepaint fix; was ~150 µs) | 17–23 µs | ≤ 100 µs |
 | per input event (pointer, drag motion), from 4 runs of 109–941 events | ~4.3 µs | per event |
 | peak memory | 2.6 MB PSS (RSS 5.06 MB) | ≤ 5 MB PSS |
+
+The choice expression ends at the classification mark, before recorder
+setup and executor invocation. It was formerly described as action start;
+it does not independently establish the time of the child's `execve`.
 
 `list_to_level1_cpu_us` counts our CPU from the early list's arrival
 (counted only when the machine accepts it) to the first commit of the lit
@@ -169,5 +184,5 @@ Each run:
 Take the `measure wheel` lines from the log; p50 and max over the runs.
 
 **Large drop:** `cargo test --release -p inacircle --test wheel --
-a_large_drop_stays_within_the_rss_budget --nocapture` prints both peaks and
+a_large_drop_stays_within_the_memory_budget --nocapture` prints both peaks and
 fails above 5 MB (a debug build checks only the drop's increment).

@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-25",
+  "source_commit": "3a1857bb435874599ef7245fa9df8b3fd1b321d8",
+  "main_control_commit": "2ba20403eca0533f12a2d1edbf8a647cfe062835",
+  "rustc": "1.98.1 (48a229cea 2026-09-01)",
+  "LLVM": "22.1.8",
+  "target": "x86_64-unknown-linux-gnu",
+  "release_profile": {
+    "opt-level": 3,
+    "lto": "fat",
+    "codegen-units": 1,
+    "panic": "abort",
+    "strip": true
+  },
+  "binaries": {
+    "inacircle": {
+      "bytes": 900352,
+      "sha256": "40e7912c6fd6510c74122539be39be06569fd4ee7318c60c8a3940a87b6829fb"
+    },
+    "inacircle-text": {
+      "bytes": 669920,
+      "sha256": "f3b567319404da5b42634f9ed9f137cdfcddadcd6c86104d770d5efd14f8f085"
+    },
+    "main-control-inacircle": {
+      "bytes": 899168,
+      "sha256": "fde9a11609813004665736bbd551100ff1a41af7a4435bf3382e9a4eab953550"
+    },
+    "phase-probe-inacircle": {
+      "bytes": 908000,
+      "sha256": "618f8910d0c5f27ced2e4acee11b0ca90f67b8f9039b7c5675f6a1a9f9f21be5"
+    },
+    "render-benchmark-ui": {
+      "bytes": 989976,
+      "sha256": "be1324620254bdd05745c71451cf873aac4da81c54fa18d450f9f1a544b348e2"
+    }
+  },
+  "additional_rustflags": [],
+  "normal_Rust_dependency": "libc 0.2.191 plus project crates",
+  "engine_ELF_NEEDED": [
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libc.so.6"
+  ]
+}

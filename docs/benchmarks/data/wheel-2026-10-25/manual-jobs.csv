@@ -1,0 +1,9 @@
+machine,job,action,outputs,status,sandbox,undo,undo_removed,undo_kept
+tc,1,text.txt-to-md,1,done,yes,not_invoked,,
+tc,2,text.txt-to-md,3,done,yes,not_invoked,,
+tc,3,text.md-to-txt,1,done,yes,not_invoked,,
+tc,4,text.txt-to-md,1,done,yes,recorded,1,0
+x280,1,text.txt-to-md,1,done,yes,recorded,1,0
+x280,2,text.txt-to-md,3,done,yes,recorded,3,0
+x280,3,text.md-to-txt,1,done,yes,recorded,1,0
+x280,4,text.txt-to-md,1,done,yes,recorded,1,0
