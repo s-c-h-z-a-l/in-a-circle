@@ -176,6 +176,8 @@ impl Conn {
     fn connect_to(path: &Path) -> io::Result<Conn> {
         // SAFETY: plain socket(2); result checked. Non-blocking: every wait
         // goes through `poll` with a deadline, connect included.
+        // mutants: equivalent (`|` -> `^` in the flags) - the flag bits are
+        // disjoint, so `^` and `|` give the same value.
         let fd = unsafe {
             libc::socket(
                 libc::AF_UNIX,
@@ -308,6 +310,8 @@ impl Conn {
             return self.refuse(start, fds_before, "too many fds in one flush");
         }
         self.out[start..start + 4].copy_from_slice(&obj.to_ne_bytes());
+        // mutants: equivalent (`|` -> `^`) - `size << 16` has zero low 16 bits
+        // and `op` is a u16, so the operands are disjoint.
         let word = ((size as u32) << 16) | op as u32;
         self.out[start + 4..start + 8].copy_from_slice(&word.to_ne_bytes());
     }
@@ -342,6 +346,11 @@ impl Conn {
             };
             // SAFETY: one valid pollfd.
             let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+            // mutants: equivalent (`>` -> `>=`) - r == 0 is poll's timeout, which
+            // is rounded up to whole ms, so the deadline has passed; reporting
+            // ready then only makes the caller retry its non-blocking syscall,
+            // get WouldBlock, and come back here to `left.is_zero()`: the same
+            // result one iteration later.
             if r > 0 {
                 return Ok(true);
             }
@@ -366,6 +375,9 @@ impl Conn {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         let nfds = self.out_fds.len();
+        // mutants: equivalent (`>` -> `>=`) - with 0 fds this would attach a
+        // SCM_RIGHTS cmsg of zero fds, which the kernel delivers as no ancillary
+        // data at all: the peer sees the same bytes and no fds.
         if nfds > 0 {
             msg.msg_control = cbuf.as_mut_ptr().cast();
             msg.msg_controllen = ctrl_space(nfds) as _;
@@ -387,9 +399,13 @@ impl Conn {
             libc::sendmsg(
                 self.sock.as_raw_fd(),
                 &msg,
+                // mutants: equivalent (`|` -> `^`) - disjoint flag bits.
                 libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
             )
         };
+        // mutants: equivalent (`<` -> `<=`) - `flush` calls `send` only with a
+        // non-empty `out`, and sendmsg on a stream socket with iov_len > 0
+        // returns >= 1 or -1, never 0.
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -405,6 +421,10 @@ impl Conn {
         while !self.out.is_empty() {
             match self.send() {
                 Ok(n) => drop(self.out.drain(..n)),
+                // mutants: equivalent (guard -> false) - sendmsg with MSG_DONTWAIT
+                // on a unix stream socket never sleeps, so it cannot be
+                // interrupted by a signal (EINTR comes only from the sleeping
+                // path); kept for portability. Not reachable by a test.
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     let ready = self.wait(libc::POLLOUT, deadline);
@@ -441,6 +461,11 @@ impl Conn {
             }
             match self.recv() {
                 Ok(()) => return Ok(true),
+                // mutants: equivalent (guard -> false) - `wait` returned ready, so
+                // data, hang-up or an error is pending and the non-blocking
+                // recvmsg neither finds the queue empty nor sleeps (no EINTR);
+                // nobody else reads this socket (`&mut self`). Kept for
+                // spurious wakeups; not reachable by a test.
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -477,6 +502,7 @@ impl Conn {
             libc::recvmsg(
                 self.sock.as_raw_fd(),
                 &mut msg,
+                // mutants: equivalent (`|` -> `^`) - disjoint flag bits.
                 libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT,
             )
         };
@@ -1153,5 +1179,257 @@ mod tests {
         assert!(c.in_fds.len() <= MAX_QUEUED_FDS);
         assert!(c.event().is_err());
         assert!(c.flush(after(10)).is_err());
+    }
+
+    /// Runs `f` in a forked child and returns its wait status. For checks
+    /// that need a process-wide change (resource limits, signal
+    /// dispositions, fd 0 closed) which must not touch the parallel tests.
+    /// `f` returns the child's exit code (0: all held); a panic is code 99
+    /// and an alarm bounds a hang.
+    fn in_child(f: impl FnOnce() -> i32) -> libc::c_int {
+        // SAFETY: fork(2); the child runs `f` and leaves with `_exit`, never
+        // returning into the test harness. glibc keeps malloc usable in a
+        // forked child.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // SAFETY: plain alarm(2): a hung child dies by SIGALRM.
+            unsafe { libc::alarm(20) };
+            let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(99);
+            // SAFETY: leave the forked child without running the parent's
+            // destructors or harness.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    }
+
+    fn lower_nofile(limit: libc::rlim_t) {
+        let rl = libc::rlimit {
+            rlim_cur: limit,
+            rlim_max: limit,
+        };
+        // SAFETY: valid rlimit; only called in a forked child.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) }, 0);
+    }
+
+    fn fd_flags(fd: RawFd) -> (bool, bool) {
+        // SAFETY: fcntl queries on a descriptor the caller holds.
+        let (fdf, fl) = unsafe {
+            (
+                libc::fcntl(fd, libc::F_GETFD),
+                libc::fcntl(fd, libc::F_GETFL),
+            )
+        };
+        (fdf & libc::FD_CLOEXEC != 0, fl & libc::O_NONBLOCK != 0)
+    }
+
+    #[test]
+    fn connect_makes_a_cloexec_nonblocking_socket() {
+        let dir = std::env::temp_dir().join(format!("wire-flags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("w");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let c = Conn::connect_to(&path).unwrap();
+        assert_eq!(fd_flags(c.as_raw_fd()), (true, true));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `as_raw_fd` is the connection's socket: what a caller polls.
+    #[test]
+    fn as_raw_fd_is_the_stream_socket() {
+        let (c, _server) = pair();
+        let mut ty: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&ty) as libc::socklen_t;
+        // SAFETY: valid out pointers of the stated size.
+        let r = unsafe {
+            libc::getsockopt(
+                c.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&raw mut ty).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((r, ty), (0, libc::SOCK_STREAM));
+    }
+
+    /// A socket that cannot be created (descriptor limit) or lands on fd 0
+    /// (stdin closed) is judged by the result, not the number.
+    #[test]
+    fn connect_handles_socket_failure_and_fd_zero() {
+        let dir = std::env::temp_dir().join(format!("wire-fd0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("w");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let st = in_child(|| {
+            lower_nofile(0);
+            i32::from(Conn::connect_to(&path).is_ok())
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+        let st = in_child(|| {
+            // SAFETY: the lowest free descriptor becomes 0 for the socket.
+            unsafe { libc::close(0) };
+            match Conn::connect_to(&path) {
+                Ok(c) => i32::from(c.as_raw_fd() != 0),
+                Err(_) => 1,
+            }
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A failing `poll` is reported, not retried until the deadline.
+    /// (`poll` with more fds than RLIMIT_NOFILE allows fails with EINVAL.)
+    #[test]
+    fn a_failing_poll_is_an_error() {
+        let st = in_child(|| {
+            let (mut c, _server) = pair();
+            lower_nofile(0);
+            let t = Instant::now();
+            let r = c.read(after(5000));
+            i32::from(!(r.is_err() && t.elapsed() < Duration::from_secs(2)))
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+    }
+
+    /// Writing to a gone peer is an error, never SIGPIPE (the library does
+    /// not rely on the process ignoring it), and reported at once.
+    #[test]
+    fn flush_to_a_closed_peer_fails_without_sigpipe() {
+        let st = in_child(|| {
+            // SAFETY: restore the default disposition, which kills on SIGPIPE.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+            let (mut c, server) = pair();
+            drop(server);
+            c.req(5, 0, &[U(1)]);
+            let t = Instant::now();
+            let r = c.flush(after(5000));
+            let fast = t.elapsed() < Duration::from_secs(2);
+            let kind = r.as_ref().err().map(io::Error::kind);
+            i32::from(
+                !(fast && kind == Some(io::ErrorKind::BrokenPipe) && c.flush(after(10)).is_err()),
+            )
+        });
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "{st:#x}");
+    }
+
+    /// A receive error other than "try again" breaks the connection.
+    #[test]
+    fn a_reset_connection_breaks() {
+        let (mut c, server) = pair();
+        c.req(5, 0, &[U(1)]);
+        c.flush(after(1000)).unwrap();
+        // The peer closes with our bytes unread: we get ECONNRESET.
+        drop(server);
+        let e = c.read(after(1000)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
+        assert!(matches!(c.event(), Err(Error::Broken(_))));
+        assert!(c.flush(after(10)).is_err());
+    }
+
+    /// Up to `FDS_PER_MSG` fds cross in one message each way, intact.
+    #[test]
+    fn a_full_batch_of_fds_crosses_both_ways() {
+        // Client to compositor: the cmsg length covers every fd.
+        for n in [2, FDS_PER_MSG] {
+            let (mut c, server) = pair();
+            let fd = memfd(b"x");
+            let args: Vec<Arg> = (0..n).map(|_| Fd(fd.as_fd())).collect();
+            c.req(5, 0, &args);
+            c.flush(after(1000)).unwrap();
+            assert_eq!(received(&server), (msg(5, 0, &[]), n));
+        }
+        // Compositor to client: all 28 fit the control buffer, none is lost,
+        // each is close-on-exec and goes to its own event.
+        let (mut c, server) = pair();
+        let keyboard = c.new_id(Iface::Keyboard);
+        let fd = memfd(b"x");
+        let keymap = msg(keyboard, op::wl_keyboard::KEYMAP, &words(&[1, 1]));
+        send(
+            &server,
+            &keymap.repeat(FDS_PER_MSG),
+            &[fd.as_raw_fd(); FDS_PER_MSG],
+        );
+        for _ in 0..FDS_PER_MSG {
+            assert_eq!(next(&mut c).op, op::wl_keyboard::KEYMAP);
+            let got = c.take_fd().expect("fd");
+            assert!(fd_flags(got.as_raw_fd()).0, "close-on-exec");
+            assert_eq!(content(&got), b"x");
+        }
+        assert!(c.in_fds.is_empty());
+    }
+
+    /// More fds in one flush than one message carries is refused whole.
+    #[test]
+    fn too_many_fds_in_one_request_is_refused() {
+        let (mut c, server) = pair();
+        let fd = memfd(b"x");
+        let args: Vec<Arg> = (0..FDS_PER_MSG + 1).map(|_| Fd(fd.as_fd())).collect();
+        c.req(5, 0, &args);
+        assert!(c.flush(after(1000)).is_err());
+        assert_eq!(received(&server), (Vec::new(), 0));
+    }
+
+    /// Exactly `MAX_QUEUED_FDS` unclaimed fds are tolerated; one more is not.
+    #[test]
+    fn the_queued_fd_limit_is_exact() {
+        let (mut c, server) = pair();
+        let fd = memfd(b"x");
+        for n in [FDS_PER_MSG, FDS_PER_MSG, MAX_QUEUED_FDS - 2 * FDS_PER_MSG] {
+            send(&server, &msg(50, 0, &[]), &vec![fd.as_raw_fd(); n]);
+        }
+        while c.in_fds.len() < MAX_QUEUED_FDS {
+            assert!(c.read(after(1000)).unwrap());
+        }
+        assert_eq!(c.in_fds.len(), MAX_QUEUED_FDS);
+        send(&server, &msg(50, 0, &[]), &[fd.as_raw_fd()]);
+        let e = c.read(after(1000)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(c.event().is_err());
+    }
+
+    /// Only SCM_RIGHTS control data is fds: other ancillary data (here
+    /// SCM_CREDENTIALS, which a receiver asks for with SO_PASSCRED) is not
+    /// turned into descriptors.
+    #[test]
+    fn other_ancillary_data_is_not_fds() {
+        let (mut c, server) = pair();
+        let on: libc::c_int = 1;
+        // SAFETY: valid option value of the stated size.
+        let r = unsafe {
+            libc::setsockopt(
+                c.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PASSCRED,
+                (&raw const on).cast(),
+                std::mem::size_of_val(&on) as libc::socklen_t,
+            )
+        };
+        assert_eq!(r, 0);
+        send(&server, &msg(50, 0, &[]), &[]);
+        assert!(c.read(after(1000)).unwrap());
+        assert!(c.in_fds.is_empty());
+    }
+
+    /// The input buffer really holds two messages: a second full message
+    /// arrives whole while the first is still unframed.
+    #[test]
+    fn input_buffer_holds_two_full_messages() {
+        let (mut c, server) = pair();
+        let known = c.new_id(Iface::Pointer);
+        let big = msg(known, op::wl_pointer::FRAME, &vec![0; MAX_MESSAGE - 8]);
+        send(&server, &big, &[]);
+        send(&server, &big, &[]);
+        assert!(c.read(after(1000)).unwrap());
+        assert!(c.read(after(1000)).unwrap());
+        assert_eq!(c.inb.len(), 2 * MAX_MESSAGE);
+        assert!(c.event().unwrap().is_some());
+        assert!(c.event().unwrap().is_some());
+        assert!(c.event().unwrap().is_none());
     }
 }
