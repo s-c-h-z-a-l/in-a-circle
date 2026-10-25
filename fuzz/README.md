@@ -9,7 +9,7 @@ not shipped; the shipped dependency tree is unchanged.
   through `scripts/fuzz.sh`, which names the nightly explicitly.
 - Tool: `cargo install --locked cargo-fuzz@0.13.2`.
 - Modes: `scripts/fuzz.sh smoke|close|baseline|cmin [target...]`. Durations
-  and per-target `-max_len`, `-timeout`, `-rss_limit_mb` are explained in the
+  and per-target `-max_len`, `-timeout`, `-malloc_limit_mb` (per input), `-rss_limit_mb` (whole process) are explained in the
   script.
 - Corpus: `fuzz/corpus/<target>/`, seeded from real manifests, a real cache
   and history, fake-compositor messages and the CommonMark examples; keep it minimized with `scripts/fuzz.sh cmin`.

@@ -35,53 +35,67 @@ SMOKE_SECS=30
 CLOSE_SECS=600
 BASELINE_SECS=3600
 
-# Per-target libFuzzer limits: <max_len> <timeout_s> <rss_limit_mb>.
+# Per-target libFuzzer limits: <max_len> <timeout_s> <malloc_limit_mb> <rss_limit_mb>.
 #   max_len    tied to the input limit the real code already has.
 #   timeout    per input; the parsers are linear and finish in ms, so a
 #              multi-second input is super-linear behaviour (or a hang),
 #              which is what this catches. Kept well above the ASan slowdown.
-#   rss_limit  per process; above linear memory growth. ASan itself costs
-#              ~100-200 MB, so the limit leaves room for it.
+#   malloc     the per-input memory guard: libFuzzer reports any single
+#              allocation above it as out-of-memory. Derived from the input
+#              limit (about 1000-4000x max_len: a parser's buffers are a few
+#              times its input, so past this an allocation is sized by a
+#              bug, not by the data). It stays strict because it is
+#              independent of the corpus size.
+#   rss        whole-process ceiling, a backstop for runaway growth over
+#              many small allocations. RSS is not per input: it also holds
+#              the loaded corpus, ASan's shadow and its 256 MB free-memory
+#              quarantine. Measured peak RSS of a full-corpus smoke run
+#              (2026-10-25): 445-583 Mb (markdown, 8753 files, 35 MB on
+#              disk, is the highest; the others sit at ~450-540 even with
+#              small corpora, which is the ASan and libFuzzer floor). 1024
+#              is ~1.75x the highest: room for corpus growth, still far
+#              below a leak that matters. The earlier 512 was the floor
+#              itself and failed CI once the markdown corpus was committed.
 limits() {
     case "$1" in
         # 64 KiB = MAX_OUTPUT in crates/engine/src/catalog.rs, the most a
         # plugin's --manifest output can be; cache and history files are
         # our own writes of the same grammar. 1 s: 64 KiB in a line parser.
-        # 512 MB: ~8000x the input.
-        manifest) echo "65536 1 512" ;;
+        # 64 MB malloc limit, 1024 MB RSS ceiling.
+        manifest) echo "65536 1 64 1024" ;;
         # The document readers have no size limit; the spec examples are
         # under 1 KiB and the deepest nesting (MAX_DEPTH 256 in
         # crates/doc/src/md/inline.rs) fits in a few KiB, so 16 KiB reaches
         # every limit and keeps a quadratic case visible. 2 s: a block
         # parser plus three writers under ASan. 512 MB: ~32000x the input.
-        markdown) echo "16384 2 512" ;;
+        markdown) echo "16384 2 64 1024" ;;
         # 64 KiB = MAX_MESSAGE in crates/dbus/src/message.rs: frame_len
         # rejects anything larger before decode runs, so longer inputs only
         # test that rejection. 1 s: a message that small decodes in us.
-        # 512 MB: ~8000x the input.
-        dbus_message) echo "65536 1 512" ;;
+        # 64 MB malloc limit, 1024 MB RSS ceiling.
+        dbus_message) echo "65536 1 64 1024" ;;
         # 64 KiB = MAX_BYTES in bins/inacircle/src/uri.rs, the most read
         # from a drop. 1 s: a line splitter plus percent-decoding is linear.
-        # 512 MB: ~8000x the input.
-        uri_list) echo "65536 1 512" ;;
+        # 64 MB malloc limit, 1024 MB RSS ceiling.
+        uri_list) echo "65536 1 64 1024" ;;
         # The cache has no size cap in the code (read_cache reads the whole
         # file). 64 KiB = MAX_OUTPUT: an entry is one binary's manifest
         # output (capped at that) plus a bin line, so a cache of a few
         # binaries is a few KiB (the real one for 2 binaries is 0.8 KiB) and
         # 64 KiB holds one maximal entry. 1 s: a line parser, linear.
-        # 512 MB: ~8000x the input.
-        catalog_cache) echo "65536 1 512" ;;
+        # 64 MB malloc limit, 1024 MB RSS ceiling.
+        catalog_cache) echo "65536 1 64 1024" ;;
         # The history has no line or size cap in the code (it only grows;
         # undo streams it and holds one line at a time). A record is ~200
         # bytes, so 64 KiB (the same bound as the other line grammars) is
         # ~300 records and reaches every branch. 1 s: linear scan plus a
         # substring search per line. 512 MB: ~8000x the input.
-        history) echo "65536 1 512" ;;
+        history) echo "65536 1 64 1024" ;;
         # 8192 = MAX_INB in crates/wire/src/conn.rs (2 * MAX_MESSAGE, 4096):
         # the most unframed bytes a Conn holds, and fuzz_events cuts to it.
         # 1 s: framing and the readers are linear in the input. 512 MB:
         # ~64000x the input.
-        wire_events) echo "8192 1 512" ;;
+        wire_events) echo "8192 1 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
@@ -120,12 +134,12 @@ RUN_DIR=fuzz/runs/$mode-$(date +%Y%m%d-%H%M%S)
 # left no artifact in this run's directory. A missing or non-executable
 # binary, a startup failure or a killed process leave no such line and fail.
 run_one() {
-    local t=$1 secs=$2 workers=$3 corpus=$4 max_len timeout rss
-    read -r max_len timeout rss <<<"$(limits "$t")"
+    local t=$1 secs=$2 workers=$3 corpus=$4 max_len timeout malloc rss
+    read -r max_len timeout malloc rss <<<"$(limits "$t")"
     local dir=$PWD/$RUN_DIR/$t
     mkdir -p "$dir/artifacts"
     local args=("-max_total_time=$secs" "-max_len=$max_len" "-timeout=$timeout"
-        "-rss_limit_mb=$rss" "-artifact_prefix=$dir/artifacts/")
+        "-malloc_limit_mb=${FUZZ_MALLOC_MB:-$malloc}" "-rss_limit_mb=${FUZZ_RSS_MB:-$rss}" "-artifact_prefix=$dir/artifacts/")
     if [ "$workers" -gt 1 ]; then
         args+=("-jobs=$workers" "-workers=$workers") # writes fuzz-N.log into the cwd
     fi
