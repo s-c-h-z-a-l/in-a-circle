@@ -7,9 +7,10 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import subprocess
 
 
@@ -121,6 +122,80 @@ class QualificationTests(unittest.TestCase):
             observed = self.probe.probe_seccomp()
         self.assertFalse(observed["ok"])
         self.assertIn("PR_SET_SECCOMP: EACCES (13)", observed["error"])
+
+    def run_seccomp_child(self, overrides):
+        responses = {
+            "PR_SET_NO_NEW_PRIVS": (0, errno.EINVAL),
+            "PR_GET_NO_NEW_PRIVS": (1, errno.EINVAL),
+            "PR_SET_SECCOMP": (0, errno.EINVAL),
+            "PR_GET_SECCOMP": (2, errno.EINVAL),
+            "getppid": (-1, errno.EPERM),
+            "getpid": (4242, errno.EINVAL),
+        }
+        responses.update(overrides)
+
+        def respond(operation):
+            value, error_number = responses[operation]
+            ctypes.set_errno(error_number)
+            return value
+
+        libc = SimpleNamespace(
+            prctl=Mock(side_effect=lambda option, *args: respond({
+                38: "PR_SET_NO_NEW_PRIVS", 39: "PR_GET_NO_NEW_PRIVS",
+                22: "PR_SET_SECCOMP", 21: "PR_GET_SECCOMP",
+            }[option])),
+            syscall=Mock(side_effect=lambda number: respond({110: "getppid", 39: "getpid"}[number])),
+        )
+        with patch.object(self.probe.ctypes, "CDLL", return_value=libc), \
+                patch.object(self.probe.platform, "system", return_value="Linux"), \
+                patch.object(self.probe.platform, "machine", return_value="x86_64"), \
+                patch.object(self.probe.os, "getpid", return_value=4242):
+            return self.probe.seccomp_child()
+
+    def test_failed_postinstall_controls_preserve_immediate_results_and_errno(self):
+        cases = (
+            ("no_new_privs", "PR_GET_NO_NEW_PRIVS", 13, "EACCES"),
+            ("filter_installed", "PR_GET_SECCOMP", 1, "EPERM"),
+            ("denied_syscall", "getppid", 13, "EACCES"),
+            ("positive_control", "getpid", 38, "ENOSYS"),
+        )
+        for control, operation, number, name in cases:
+            with self.subTest(control=control):
+                observed = self.run_seccomp_child({operation: (-1, number)})
+                self.assertFalse(observed["ok"])
+                self.assertFalse(observed[control])
+                self.assertIn(f"{name} ({number})", observed["error"])
+                self.assertIn(operation, observed["error"])
+                self.assertEqual(observed["checks"][control]["return_value"], -1)
+                self.assertEqual(observed["checks"][control]["errno"], number)
+
+    def test_unexpected_success_values_are_reported_without_stale_errno(self):
+        cases = (
+            ("no_new_privs", "PR_GET_NO_NEW_PRIVS", 0),
+            ("filter_installed", "PR_GET_SECCOMP", 1),
+            ("denied_syscall", "getppid", 1234),
+            ("positive_control", "getpid", 4243),
+        )
+        for control, operation, returned in cases:
+            with self.subTest(control=control):
+                observed = self.run_seccomp_child({operation: (returned, errno.EACCES)})
+                self.assertFalse(observed["ok"])
+                self.assertIn(f"{operation} returned {returned}", observed["error"])
+                self.assertEqual(observed["checks"][control]["return_value"], returned)
+                self.assertEqual(observed["checks"][control]["errno"], 0)
+
+    def test_failed_child_forwards_postinstall_observations_to_parent_report(self):
+        checks = {"denied_syscall": {"operation": "getppid", "return_value": -1, "errno": 13}}
+        child = subprocess.CompletedProcess(
+            [], 1, stdout=json.dumps({"ok": False, "checks": checks,
+                                      "error": "getppid returned -1: EACCES (13)"}), stderr="",
+        )
+        with patch.object(self.probe.subprocess, "run", return_value=child):
+            observed = self.probe.probe_seccomp()
+        self.assertFalse(observed["ok"])
+        self.assertIn("checks", observed)
+        self.assertEqual(observed["checks"], checks)
+        self.assertIn("EACCES (13)", observed["error"])
 
     def test_malformed_child_result_is_a_failure(self):
         for body in ("not json", "[]", '{"ok": true}'):

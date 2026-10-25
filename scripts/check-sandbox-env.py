@@ -42,7 +42,7 @@ def probe_landlock(libc):
 
 
 def seccomp_child():
-    result = {"ok": False, **{control: False for control in CONTROLS}, "error": None}
+    result = {"ok": False, **{control: False for control in CONTROLS}, "checks": {}, "error": None}
     try:
         architecture = ARCHITECTURES.get(platform.machine())
         if platform.system() != "Linux" or architecture is None:
@@ -77,23 +77,41 @@ def seccomp_child():
                 error = kernel_error(ctypes.get_errno())
                 raise RuntimeError(f"{operation}: {error['name']} ({error['errno']}): {error['message']}")
 
+        verification_failures = []
+
+        def verify(control, operation, call, expected, expected_errno=0):
+            ctypes.set_errno(0)
+            returned = call()
+            observed_errno = ctypes.get_errno()
+            # errno is meaningful only for an error return. A successful libc
+            # call may leave errno set by a previous denied control.
+            number = observed_errno if returned == -1 else 0
+            name = errno.errorcode.get(number, "NONE" if number == 0 else "UNKNOWN")
+            result["checks"][control] = {
+                "operation": operation, "return_value": returned, "errno": number,
+                "errno_name": name, "expected_return_value": expected,
+                "expected_errno": expected_errno,
+            }
+            result[control] = returned == expected and number == expected_errno
+            if not result[control]:
+                verification_failures.append(
+                    f"{operation} returned {returned}, expected {expected}; "
+                    f"{name} ({number}): {os.strerror(number)}; expected errno {expected_errno}"
+                )
+
         prctl(38, 1, "PR_SET_NO_NEW_PRIVS")
-        result["no_new_privs"] = libc.prctl(39, 0, 0, 0, 0) == 1
+        verify("no_new_privs", "PR_GET_NO_NEW_PRIVS", lambda: libc.prctl(39, 0, 0, 0, 0), 1)
         ctypes.set_errno(0)
         if libc.prctl(22, 2, ctypes.byref(program), 0, 0) == -1:
             error = kernel_error(ctypes.get_errno())
             raise RuntimeError(f"PR_SET_SECCOMP: {error['name']} ({error['errno']}): {error['message']}")
-        result["filter_installed"] = libc.prctl(21, 0, 0, 0, 0) == 2
-        ctypes.set_errno(0)
-        denied = libc.syscall(architecture["getppid"])
-        deny_errno = ctypes.get_errno()
-        result["denied_syscall"] = denied == -1 and deny_errno == errno.EPERM
-        result["positive_control"] = libc.syscall(architecture["getpid"]) == os.getpid()
+        verify("filter_installed", "PR_GET_SECCOMP", lambda: libc.prctl(21, 0, 0, 0, 0), 2)
+        verify("denied_syscall", "getppid", lambda: libc.syscall(architecture["getppid"]), -1, errno.EPERM)
+        expected_pid = os.getpid()
+        verify("positive_control", "getpid", lambda: libc.syscall(architecture["getpid"]), expected_pid)
         result["ok"] = all(result[control] for control in CONTROLS)
         if not result["ok"]:
-            result["error"] = "seccomp verification failed: " + ", ".join(
-                control for control in CONTROLS if not result[control]
-            )
+            result["error"] = "seccomp verification failed: " + "; ".join(verification_failures)
     except (OSError, RuntimeError) as error:
         result["error"] = str(error)
     return result
@@ -116,6 +134,8 @@ def probe_seccomp():
             result = json.loads(child.stdout)
             if isinstance(result, dict) and isinstance(result.get("error"), str):
                 reason = result["error"]
+                if isinstance(result.get("checks"), dict):
+                    failed["checks"] = result["checks"]
         except (ValueError, TypeError):
             pass
         return {**failed, "error": f"seccomp child exited {child.returncode}: {reason}"}
