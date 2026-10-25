@@ -8,6 +8,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  sandbox-qualification:
+    name: Sandbox qualification (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capability probe self-tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_sandbox_env.py' -v
+
+      - name: Qualify Landlock and isolated seccomp installation
+        run: python3 scripts/check-sandbox-env.py --min-landlock-abi 6 --output sandbox-qualification.json
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-qualification-${{ matrix.runner }}
+          path: sandbox-qualification.json
+          if-no-files-found: error
+
   check:
     runs-on: ubuntu-latest
     steps:
