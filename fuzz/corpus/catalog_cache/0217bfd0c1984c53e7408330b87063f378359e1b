@@ -1,12 +1,0 @@
-inacircle-catalog 0
-bin	pat07	si											=yes
-ascnt	cost								=yes
-act)un	tei											=g 0
-bin	path=07	si							nacircle-catalog 0
-th=t	cost								es
-act)unyewi											=t							=yes
-act)unpath=07	si							nacatalog 0
-th=t	cost												=yes
-ascnt	cost								=yes
-act)un	tei											=g 0
-bin	path=07	si						y

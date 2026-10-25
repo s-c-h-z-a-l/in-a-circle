@@ -1,0 +1,6 @@
+inacircle-history 0
+out	jzz
+undo	job=10-1	timx=nosan
+undo	job=10-1	a	sn
+undo	job=10-1		re
+omo2d

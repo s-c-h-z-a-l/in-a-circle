@@ -1,0 +1,3 @@
+inacircle-manifest 0
+actimd	family=text	in=	cost=10	lossy=no	batch=yes
+acyes	batch=srkdown	grou=document	cost=10	lossy=no	batch=yestexdown	ext=md	label=Markdown	gro=Plain text	group=document	cost=10	lossy=yes	batch=s

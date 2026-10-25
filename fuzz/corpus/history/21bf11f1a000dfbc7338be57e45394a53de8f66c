@@ -1,0 +1,5 @@
+inacircle-history 0
+out	job=10-1	ts
+fail	job=11-1	in=/ireajob=10-11	pkistory 0ts
+fail	job=49-1	=/i3	r2a[job=10-1	pah=o
+s

@@ -1,9 +1,0 @@
-inacircle-history 0
-odev=4	ino=5
-dir	job=10-1	path=/	p
-dir	job=10-1	path=/o-so=5
-dir	job=10-1	path=/o-FFry 5
-odev=4	ino=5
-dir	job=10-1	path=	ino=5on=exists
-fail	j
-garbag

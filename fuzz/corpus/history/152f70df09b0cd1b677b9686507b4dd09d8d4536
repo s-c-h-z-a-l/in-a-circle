@@ -1,0 +1,8 @@
+inacircle-history 0
+out	job=10-1	in=/i	path=/o/a	sizg=1	mtimets
+fail	job=05-1	in=/i3	reajob=10-1	s
+fail	job=11-1	in=/i3	ajob=10-1	path=/o
+sÿxists
+fail	fail	job=11-1	ix=/i3	rea	id=10-1	es=ex=ists
+fail	job=11-1	in=/i3	reajob=10-1	path=/o
+	bob=1
