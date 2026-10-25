@@ -376,11 +376,17 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => {}
-                // mutants: equivalent (guard -> false): the socket is
-                // SOCK_NONBLOCK, and a non-blocking recvmsg never sleeps, so
-                // a signal cannot interrupt it. Kept as defence in depth.
-                Err(Error::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                // No frame yet. An interrupted recvmsg is not retried here:
+                // this call has no deadline, and a persistent EINTR would
+                // spin; the fd stays readable, so the caller polls again.
+                Err(Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    return Ok(None);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -397,12 +403,10 @@ impl Conn {
             match r {
                 Ok(0) => return Err(Error::Closed),
                 Ok(_) => return Ok(()),
-                // mutants: equivalent (guard -> false): `wait` just reported the
-                // fd readable and this Conn is its only reader, so recvmsg
-                // returns data, EOF or a real error; neither WouldBlock nor
-                // (SOCK_NONBLOCK, see try_frame) Interrupted can occur. Kept
-                // as defence in depth. (Guard -> true is killed by the
-                // reset tests in tests/conn.rs.)
+                // Not an error: a readable poll with nothing to receive (an
+                // out-of-band byte reports POLLIN, but a plain recvmsg finds
+                // EAGAIN) or an interrupted call. `wait` checks the deadline
+                // again.
                 Err(Error::Io(e))
                     if matches!(
                         e.kind(),
@@ -431,10 +435,14 @@ impl Conn {
             if n < 0 {
                 let e = io::Error::last_os_error();
                 match e.kind() {
-                    // mutants: equivalent (delete arm): non-blocking send never
-                    // sleeps, so it is never interrupted by a signal (see
-                    // try_frame). Kept as defence in depth.
-                    io::ErrorKind::Interrupted => {}
+                    // Retried only before the deadline: the socket is still
+                    // writable, so `wait` would return at once and a persistent
+                    // EINTR would otherwise spin past the deadline.
+                    io::ErrorKind::Interrupted => {
+                        if Instant::now() >= deadline {
+                            return Err(Error::Timeout);
+                        }
+                    }
                     io::ErrorKind::WouldBlock => {
                         wait(self.fd.as_raw_fd(), libc::POLLOUT, deadline)?
                     }
@@ -474,11 +482,13 @@ fn wait(fd: RawFd, events: libc::c_short, deadline: Instant) -> Result<(), Error
         };
         // SAFETY: p is one valid pollfd.
         let r = unsafe { libc::poll(&mut p, 1, ms) };
-        // mutants: equivalent (`>` -> `>=`): a timed-out poll (0) would return
-        // Ok with the fd not ready; every caller then reads or writes, gets
-        // EAGAIN, and waits again, where the deadline check at the top of
-        // this loop gives the same `Timeout` (poll times out only once the
-        // rounded-up deadline has passed).
+        // mutants: equivalent (`>` -> `>=`): r == 0 is poll's timeout, so the
+        // deadline has passed (it is rounded up to whole ms). Reporting ready
+        // then makes the caller retry its non-blocking syscall once more: it
+        // gets EAGAIN and returns here, where the check above gives the same
+        // Timeout; or, if data arrived in that instant, it returns the data
+        // instead of Timeout. Benign: the deadline bounds waiting, it is not
+        // a promise to discard data that is already there.
         if r > 0 {
             return Ok(());
         }
@@ -789,16 +799,28 @@ mod tests {
     fn an_auth_line_is_read_up_to_the_limit_and_no_further() {
         use std::io::Write;
         let (mut c, mut peer) = pair();
-        // 100 bytes with no line end, then far more than the limit.
+        let reader_fd = c.fd.as_raw_fd();
+        // 100 bytes with no line end, then, once the reader has taken them
+        // (its receive queue is empty again), far more than the limit.
         let writer = std::thread::spawn(move || {
             peer.write_all(&[b'A'; 100]).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let t = Instant::now();
+            loop {
+                let mut queued: libc::c_int = 0;
+                // SAFETY: FIONREAD writes one int through the pointer.
+                let r = unsafe { libc::ioctl(reader_fd, libc::FIONREAD, &mut queued) };
+                assert_eq!(r, 0);
+                if queued == 0 {
+                    break;
+                }
+                assert!(t.elapsed() < std::time::Duration::from_secs(5));
+                std::thread::yield_now();
+            }
             peer.write_all(&[b'B'; 2000]).unwrap();
             peer
         });
         let r = c.read_line(Instant::now() + std::time::Duration::from_secs(2));
         assert!(matches!(r, Err(Error::Auth)), "{:?}", r.err());
-        assert_eq!(c.buf.len(), MAX_LINE, "read exactly up to the limit");
         // The rest of the 2100 bytes is still in the socket.
         let _peer = writer.join().unwrap();
         let mut left = Vec::new();

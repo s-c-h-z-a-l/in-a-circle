@@ -1,6 +1,7 @@
 //! Connection behaviour against a scripted peer (and a real `dbus-daemon`
 //! when one is installed).
 
+mod child;
 mod common;
 
 use std::io::{BufRead, BufReader};
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use child::{assert_child_ok, deny_syscalls, wait_for_bytes};
 use common::{Fake, Peer};
 use dbus::{Address, Conn, Error, Message, Value, parse_address};
 
@@ -581,8 +583,8 @@ fn reset_after_one_call() -> (Fake, Conn) {
     });
     let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
     c.call(call("Ping"), after(500)).unwrap();
-    // Let the peer's close land.
-    std::thread::sleep(Duration::from_millis(50));
+    // The peer's close has landed once the socket reports the reset.
+    wait_readable(c.as_raw_fd());
     (fake, c)
 }
 
@@ -830,12 +832,14 @@ fn recv_now_looks_at_a_bounded_number_of_frames() {
         // 100 frames that are not signals, then a signal.
         p.write(&batch(Peer::reply_msg(&stale, vec![]), 100));
         p.signal("/a", "a.B", "Last", vec![]);
-        std::thread::sleep(Duration::from_millis(300));
         p.drain();
     });
     let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
-    wait_readable(c.as_raw_fd());
-    std::thread::sleep(Duration::from_millis(100));
+    // Everything the peer wrote is in the socket: 100 stale frames and the
+    // signal.
+    let stale_len = batch(Peer::reply_msg(&call("x"), vec![]), 1).len();
+    let last_len = batch(signal("Last", vec![]), 1).len();
+    wait_for_bytes(c.as_raw_fd(), 100 * stale_len + last_len);
     // 64 frames are looked at per call, none of them a signal.
     assert!(c.recv_now().unwrap().is_none());
     assert!(readable(c.as_raw_fd()), "the rest is still in the socket");
@@ -850,6 +854,7 @@ fn recv_now_looks_at_a_bounded_number_of_frames() {
 fn reads_stop_at_the_end_of_the_frame() {
     // Two signals in one write: after `recv` returns the first, the whole
     // second one is still in the socket, none of it read ahead.
+    let one_len = batch(signal("One", vec![]), 1).len();
     let two = batch(signal("Two", vec![]), 1);
     let two_len = two.len();
     let fake = Fake::start(move |p| {
@@ -860,8 +865,7 @@ fn reads_stop_at_the_end_of_the_frame() {
         p.drain();
     });
     let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
-    wait_readable(c.as_raw_fd());
-    std::thread::sleep(Duration::from_millis(50));
+    wait_for_bytes(c.as_raw_fd(), one_len + two_len);
     let s = c.recv(after(500)).unwrap().unwrap();
     assert_eq!(s.member.as_deref(), Some("One"));
     let mut left = 0;
@@ -884,4 +888,84 @@ fn reads_stop_at_the_end_of_the_frame() {
     assert_eq!(left, two_len);
     drop(c);
     fake.join();
+}
+
+/// A peer-sent out-of-band byte makes poll report the socket readable while a
+/// plain recv finds nothing (EAGAIN): not an error, the waits run to their
+/// deadlines.
+#[test]
+fn a_pending_oob_byte_is_not_an_error() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        // SAFETY: valid one-byte buffer.
+        let n = unsafe { libc::send(p.stream.as_raw_fd(), b"x".as_ptr().cast(), 1, libc::MSG_OOB) };
+        assert_eq!(n, 1);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_readable(c.as_raw_fd());
+    let t = Instant::now();
+    assert!(c.recv(t + Duration::from_millis(60)).unwrap().is_none());
+    assert!(t.elapsed() >= Duration::from_millis(60));
+    // Without waiting: no frame yet.
+    assert!(c.recv_now().unwrap().is_none());
+    // A call that gets no reply times out, rather than failing.
+    let r = c.call(call("Silent"), after(60));
+    assert!(matches!(r, Err(Error::Timeout)), "{:?}", r.err());
+    drop(c);
+    fake.join();
+}
+
+/// A signal-ish `recvmsg`/`send` that keeps failing with EINTR, in a child
+/// with a seccomp filter. `libc::send` is `sendto` on x86-64, so deny both.
+const SEND: [libc::c_long; 2] = [libc::SYS_sendto, libc::SYS_sendmsg];
+
+#[test]
+fn persistent_eintr_on_send_ends_at_the_deadline() {
+    assert_child_ok(|| {
+        let fake = Fake::start(|p| {
+            p.handshake();
+            p.drain();
+        });
+        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        deny_syscalls(&SEND, libc::EINTR as u32);
+        let t = Instant::now();
+        let r = c.call(call("Ping"), t + Duration::from_millis(100));
+        let ms = t.elapsed().as_millis();
+        if !matches!(r, Err(Error::Timeout)) || !(100..300).contains(&ms) {
+            return 2;
+        }
+        // The half-sent call broke the connection.
+        if !matches!(c.call(call("Ping"), after(1000)), Err(Error::Closed)) {
+            return 3;
+        }
+        0
+    });
+}
+
+#[test]
+fn persistent_eintr_on_recv_ends_at_the_deadline() {
+    assert_child_ok(|| {
+        let fake = Fake::start(|p| {
+            p.handshake();
+            p.signal("/a", "a.B", "One", vec![]);
+            p.drain();
+        });
+        let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+        wait_readable(c.as_raw_fd());
+        deny_syscalls(&[libc::SYS_recvmsg], libc::EINTR as u32);
+        // Readable, but every recvmsg is interrupted: no frame, no spin.
+        let t = Instant::now();
+        let r = c.recv_now();
+        if !matches!(r, Ok(None)) || t.elapsed() > Duration::from_millis(100) {
+            return 2;
+        }
+        let t = Instant::now();
+        let r = c.recv(t + Duration::from_millis(100));
+        let ms = t.elapsed().as_millis();
+        if !matches!(r, Ok(None)) || !(100..300).contains(&ms) {
+            return 3;
+        }
+        0
+    });
 }
