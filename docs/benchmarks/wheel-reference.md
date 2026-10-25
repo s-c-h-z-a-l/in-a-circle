@@ -105,7 +105,7 @@ The same binary completed the following 100 attempts after the virtual
 keyboard's post-Esc lifetime was increased to 50 ms. This observation
 does **not** prove the cause was the input tool or rule out a product or
 compositor interaction. The automated close anomaly remains unresolved
-closing evidence; it is not explained away by a passing startup percentile.
+follow-up evidence; it is not explained away by a passing startup percentile.
 
 Three earlier setup attempts are retained separately: two aborted because
 the controller wrongly expected host-spawned processes in its restricted
@@ -138,7 +138,9 @@ results separate, and record any deliberate change to close control.
 **The reference startup CPU gate passes in the three complete series.**
 Other interval/hover p95s, complete memory/idle evidence, matched code
 regression comparisons and the automated-close anomaly require their own
-evidence. The ThinkCentre/X280 absolute overruns and the opportunity to
+evidence. They are retained as explicit follow-ups in the
+[Plan-7 integration scope](acceptance.md#plan-7-interpretation), rather than
+retroactively declaring the older observations accepted under the new
+method. The ThinkCentre/X280 absolute overruns and the opportunity to
 avoid two full SHM paints remain as documented in the
-[portability report](wheel-portability.md). Plan-7 integration still
-requires its complete closing review and success criteria.
+[portability report](wheel-portability.md).

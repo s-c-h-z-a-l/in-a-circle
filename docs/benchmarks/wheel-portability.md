@@ -384,5 +384,7 @@ machine is subject to the same absolute 1 ms reference gate, but the
 observed overruns remain in the record. This report itself did not raise
 any numerical limit. Its 20-run and mixed manual series cannot close the
 new p95/regression gates. A [fresh three-series reference measurement](wheel-reference.md)
-now passes startup CPU p95; the other required closing evidence and its
-automatic-close anomaly remain separate gates before plan 7 can merge.
+now passes startup CPU p95. The
+[integration scope](acceptance.md#plan-7-interpretation) retains the other
+performance coverage and automatic-close investigation as explicit
+follow-ups; it does not claim that those observations passed the new gates.

@@ -155,6 +155,11 @@ The [fresh reference startup series](wheel-reference.md) verify its CPU
 p95 with this method; an old p50 or a successful functional test could
 not establish that result. Other timing points still require their own
 evidence. Policy adoption does not by itself close missing memory, idle,
-action-start, regression or other plan-success evidence, or the automatic
-close anomaly recorded in that report. Main integration still requires
-the closing review and every applicable success criterion.
+action-start, regression or other plan-success evidence. Plan 7 integrates
+the fuzz/mutation infrastructure, the additional-system measurements and
+the reference startup check. Its integration explicitly retains the
+remaining performance coverage and automatic-close investigation as
+follow-ups; none are represented as passing measurements. The safety and
+resource ceilings remain in force. Subsequent plans touching these paths
+must satisfy the applicable acceptance gates, with a closing review and
+documented evidence.
