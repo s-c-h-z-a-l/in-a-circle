@@ -42,6 +42,11 @@ request**, not a hardware-verified fixed clock. `original` is the normal
 plan-7 binary; `profile_off` and `profile_on` use the separate probe build.
 The single shortcut-setup smoke was not included in the 20-run hotkey series.
 
+These series predate the [acceptance policy](../../acceptance.md). Their
+20-run p50/max summaries and smaller diagnostic/manual cohorts remain
+preliminary; they do not satisfy its ≥50-observation nearest-rank p95
+requirement or establish an alternating A/B regression result.
+
 ## Units, missing values and calculation
 
 - Times ending in `_us`: microseconds. Parent/probe monotonic timestamps

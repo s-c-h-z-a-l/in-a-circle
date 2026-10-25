@@ -1,0 +1,232 @@
+{
+  "date": "2026-10-25",
+  "reference_id": "ryzen5700x-niri26.04-performance-warm-executable-niri-ipc-shell",
+  "build_manifest": "../wheel-2026-10-25/build.json",
+  "source_commit": "3a1857bb435874599ef7245fa9df8b3fd1b321d8",
+  "CPU_topology": "8 cores / 16 threads, no affinity pinning",
+  "owner_reported_tuning": "all-core OC 4650 MHz @ 1.1 V; clock residency not measured",
+  "RAM": "96 GB DDR4-3200, owner-reported; OS MemTotal 98744136 KiB",
+  "boot_flags_without_device_ids": [
+    "quiet",
+    "nowatchdog",
+    "splash",
+    "rw",
+    "nvidia-drm.modeset=1",
+    "nvidia-drm.fbdev=1",
+    "loglevel=3",
+    "mitigations=off",
+    "split_lock_detect=off",
+    "tsc=reliable",
+    "clocksource=tsc",
+    "nvme_core.default_ps_max_latency_us=0"
+  ],
+  "microcode": "0xa201213",
+  "launcher": "niri msg action spawn -- sh -c <the same shell command configured for Super+F3>; not a physical-hotkey timing measurement",
+  "shell_command": "INACIRCLE_ACTIONS_DIR=$HOME/.local/share/inacircle-test INACIRCLE_MEASURE=1 exec $HOME/Projects/active/in-a-circle/target/release/inacircle 2>>/tmp/wheel.log",
+  "workload": "plain wheel, no drag/selection or pointer motion requested; Escape after 1 s; 0.35 s between attempts and 10 s between complete batches",
+  "cache": "read entire unmodified engine executable before each attempt; mincore verified 220/220 pages resident; no eviction or instruction/data-cache priming claimed; existing text-family catalog, no catalog-cold claim",
+  "measurement": "existing unmodified wheel logger; getrusage self CPU and Instant wall; queued mapped-wheel commit, not flush or presentation",
+  "controller": "host PID namespace, after setup failure under a restricted namespace; no CPU affinity or exclusive host isolation",
+  "states": {
+    "initial_before": {
+      "utc": "2026-10-25T13:15:10Z",
+      "kernel": "7.2.9-1-cachyos",
+      "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+      "policy_cpu0": {
+        "scaling_driver": "amd-pstate-epp",
+        "scaling_governor": "performance",
+        "scaling_min_freq": "1742662",
+        "scaling_max_freq": "4665835",
+        "energy_performance_preference": "performance"
+      },
+      "power_profile": "performance",
+      "niri": "niri 26.04 (8ed0da4)",
+      "display": [
+        {
+          "model": "MPG491CX OLED",
+          "make": "Microstep",
+          "connector": "DP-1",
+          "mode": {
+            "width": 5120,
+            "height": 1440,
+            "refresh_rate": 240000,
+            "is_preferred": false
+          },
+          "logical": {
+            "x": 0,
+            "y": 0,
+            "width": 5120,
+            "height": 1440,
+            "scale": 1.0,
+            "transform": "Normal"
+          },
+          "VRR_active": false
+        }
+      ],
+      "loadavg": [
+        "0.26",
+        "0.53",
+        "0.61"
+      ],
+      "packages_reported": [
+        "niri 26.04-1.1",
+        "glibc 2.44+r50+g1848099f063e-3",
+        "gcc-libs 16.2.1+r23+gd564253eb6c8-1",
+        "wtype 0.4-2.2",
+        "linux-cachyos 7.2.9-1"
+      ],
+      "engine_sha256": "40e7912c6fd6510c74122539be39be06569fd4ee7318c60c8a3940a87b6829fb",
+      "family_sha256": "f3b567319404da5b42634f9ed9f137cdfcddadcd6c86104d770d5efd14f8f085"
+    },
+    "initial_after": {
+      "utc": "2026-10-25T13:17:17Z",
+      "kernel": "7.2.9-1-cachyos",
+      "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+      "policy_cpu0": {
+        "scaling_driver": "amd-pstate-epp",
+        "scaling_governor": "performance",
+        "scaling_min_freq": "1742662",
+        "scaling_max_freq": "4665835",
+        "energy_performance_preference": "performance"
+      },
+      "power_profile": "performance",
+      "niri": "niri 26.04 (8ed0da4)",
+      "display": [
+        {
+          "model": "MPG491CX OLED",
+          "make": "Microstep",
+          "connector": "DP-1",
+          "mode": {
+            "width": 5120,
+            "height": 1440,
+            "refresh_rate": 240000,
+            "is_preferred": false
+          },
+          "logical": {
+            "x": 0,
+            "y": 0,
+            "width": 5120,
+            "height": 1440,
+            "scale": 1.0,
+            "transform": "Normal"
+          },
+          "VRR_active": false
+        }
+      ],
+      "loadavg": [
+        "0.56",
+        "0.52",
+        "0.59"
+      ],
+      "packages_reported": [
+        "niri 26.04-1.1",
+        "glibc 2.44+r50+g1848099f063e-3",
+        "gcc-libs 16.2.1+r23+gd564253eb6c8-1",
+        "wtype 0.4-2.2",
+        "linux-cachyos 7.2.9-1"
+      ],
+      "engine_sha256": "40e7912c6fd6510c74122539be39be06569fd4ee7318c60c8a3940a87b6829fb",
+      "family_sha256": "f3b567319404da5b42634f9ed9f137cdfcddadcd6c86104d770d5efd14f8f085"
+    },
+    "repeat_before": {
+      "utc": "2026-10-25T13:22:09Z",
+      "kernel": "7.2.9-1-cachyos",
+      "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+      "policy_cpu0": {
+        "scaling_driver": "amd-pstate-epp",
+        "scaling_governor": "performance",
+        "scaling_min_freq": "1742662",
+        "scaling_max_freq": "4665835",
+        "energy_performance_preference": "performance"
+      },
+      "power_profile": "performance",
+      "niri": "niri 26.04 (8ed0da4)",
+      "display": [
+        {
+          "model": "MPG491CX OLED",
+          "make": "Microstep",
+          "connector": "DP-1",
+          "mode": {
+            "width": 5120,
+            "height": 1440,
+            "refresh_rate": 240000,
+            "is_preferred": false
+          },
+          "logical": {
+            "x": 0,
+            "y": 0,
+            "width": 5120,
+            "height": 1440,
+            "scale": 1.0,
+            "transform": "Normal"
+          },
+          "VRR_active": false
+        }
+      ],
+      "loadavg": [
+        "0.57",
+        "0.45",
+        "0.53"
+      ],
+      "packages_reported": [
+        "niri 26.04-1.1",
+        "glibc 2.44+r50+g1848099f063e-3",
+        "gcc-libs 16.2.1+r23+gd564253eb6c8-1",
+        "wtype 0.4-2.2",
+        "linux-cachyos 7.2.9-1"
+      ],
+      "engine_sha256": "40e7912c6fd6510c74122539be39be06569fd4ee7318c60c8a3940a87b6829fb",
+      "family_sha256": "f3b567319404da5b42634f9ed9f137cdfcddadcd6c86104d770d5efd14f8f085"
+    },
+    "repeat_after": {
+      "utc": "2026-10-25T13:24:43Z",
+      "kernel": "7.2.9-1-cachyos",
+      "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+      "policy_cpu0": {
+        "scaling_driver": "amd-pstate-epp",
+        "scaling_governor": "performance",
+        "scaling_min_freq": "1742662",
+        "scaling_max_freq": "4665835",
+        "energy_performance_preference": "performance"
+      },
+      "power_profile": "performance",
+      "niri": "niri 26.04 (8ed0da4)",
+      "display": [
+        {
+          "model": "MPG491CX OLED",
+          "make": "Microstep",
+          "connector": "DP-1",
+          "mode": {
+            "width": 5120,
+            "height": 1440,
+            "refresh_rate": 240000,
+            "is_preferred": false
+          },
+          "logical": {
+            "x": 0,
+            "y": 0,
+            "width": 5120,
+            "height": 1440,
+            "scale": 1.0,
+            "transform": "Normal"
+          },
+          "VRR_active": false
+        }
+      ],
+      "loadavg": [
+        "0.50",
+        "0.45",
+        "0.52"
+      ],
+      "packages_reported": [
+        "niri 26.04-1.1",
+        "glibc 2.44+r50+g1848099f063e-3",
+        "gcc-libs 16.2.1+r23+gd564253eb6c8-1",
+        "wtype 0.4-2.2",
+        "linux-cachyos 7.2.9-1"
+      ],
+      "engine_sha256": "40e7912c6fd6510c74122539be39be06569fd4ee7318c60c8a3940a87b6829fb",
+      "family_sha256": "f3b567319404da5b42634f9ed9f137cdfcddadcd6c86104d770d5efd14f8f085"
+    }
+  }
+}

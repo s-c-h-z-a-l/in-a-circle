@@ -4,6 +4,14 @@ Measurements that shaped In.A.Circle's architecture. Each page has the
 method, the machine, the numbers, the verdict, and how to reproduce it.
 Spike code lives in [`spikes/`](../../spikes).
 
+Acceptance uses [environment-specific gates and baselines](acceptance.md):
+at least 50 valid observations per timing metric/condition, nearest-rank
+p95, >10% regression investigation and a >15% repeated, noise-unexplained
+regression blocking merge. The percentage thresholds are provisional
+engineering rules awaiting repeatability calibration. Safety/resource
+ceilings apply on every supported system. Historical medians below remain
+historical evidence, not acceptance under the new method.
+
 | # | Question | Verdict | Page |
 |---|---|---|---|
 | 1 | GPU or CPU rendering? | CPU. A GPU context costs 70-90 MB idle for a ~2 ms gain. | [render-backends.md](render-backends.md) |
@@ -20,6 +28,7 @@ Spike code lives in [`spikes/`](../../spikes).
 | 12 | What does the wheel cost end to end? | On the tuned reference machine: 755 µs of our CPU from `main` to the wheel's commit, no idle wakeups, peak 2.5 MB PSS (RSS 4.7 MB, of which 2.2 MB shared libc), 879 KB binary (+137 KB, 65 KB of it embedded data). | [wheel.md](wheel.md) |
 | 13 | What does sandboxing `--manifest` cost? | Within budget: +~0.22 ms until `spawn` returns (p50 ~290 µs vs ~65 µs), +~0.16 ms until the output is read (p50 ~1.6 ms vs ~1.43 ms); paid once per new or changed binary, never on a cache hit. | [manifest-sandbox.md](manifest-sandbox.md) |
 | 14 | Does the same wheel work on ordinary niri and Plasma systems, and what changes its cost? | Manual conversion/Undo checks pass on both, without product changes. Startup CPU exceeds 1 ms; energy policy and two buffer paints explain much of the cost. Full specifications and auditable run data. | [wheel-portability.md](wheel-portability.md) |
+| 15 | Does reference startup pass the new ≥50-observation p95 gate? | Three complete 50-run series: CPU p95 851 / 860 / 849 µs, all below 1 ms. Failed/setup attempts retained; one automatic-close anomaly remains open. | [wheel-reference.md](wheel-reference.md) |
 
 ## Reference machine
 
@@ -28,7 +37,7 @@ not stock**, which matters for some results:
 
 | | |
 |---|---|
-| CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), **all-core OC 4650 MHz @ 1.1 V**, `performance` governor (fixed max clock) |
+| CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), owner-reported **all-core OC 4650 MHz @ 1.1 V**, `performance` governor; clock residency was not measured |
 | RAM | 96 GB DDR4-3200, dual channel |
 | GPU | NVIDIA RTX 3080 Ti Founders Edition, 12 GB; **`nvidia-open` kernel module 615.71.09**; power limit 280 W (stock 350 W), +75 MHz core, +500 MHz memory |
 | OS | CachyOS (Arch-based), kernel 7.2.9-cachyos: BORE/EEVDF scheduler, `PREEMPT_DYNAMIC`, packages built for x86-64-v3 |
@@ -36,15 +45,22 @@ not stock**, which matters for some results:
 | Compositor | niri 26.04 |
 | Display | MSI MPG491CX OLED, 5120x1440 @ 240 Hz, scale 1. VRR is on-demand: fixed 240 Hz on the desktop, variable only for fullscreen games |
 
+This table describes the historical reference setup. The fresh
+[2026-10-25 startup baseline](wheel-reference.md#environment-and-method)
+pins the actual launcher, executable hashes, cache state, kernel/package
+versions and before/after policy readbacks for its three 50-run series.
+Use that recorded environment for its acceptance claim.
+
 **How the tuning skews the numbers:**
 
 - `mitigations=off` makes syscalls and context switches cheaper. Our
   microsecond figures (spawn, wire protocol, AT-SPI round trips) are
   syscall-heavy, so expect them to be **somewhat higher on a stock
   kernel**.
-- A fixed, overclocked CPU clock lowers both CPU time and its variance.
-  On a laptop with frequency scaling, the first invocation after idle
-  will be slower.
+- The overclock and performance policy can lower CPU time and its variance.
+  A laptop with frequency scaling can take longer on the first invocation
+  after idle. A governor or policy request alone does not verify a fixed
+  operating clock.
 - The GPU tuning only affects the GPU backends in
   [render-backends.md](render-backends.md), which we did not choose.
 - The original compositor-side numbers (presentation time, enter-event
@@ -62,5 +78,8 @@ pooled with the tuned desktop or treated as a BORE comparison.
 
 ## Budgets
 
-These measurements set the budgets new code must stay within (see
-`CLAUDE.md`). Spikes double as regression checks.
+These measurements informed the budgets in `CLAUDE.md`. The
+[acceptance policy](acceptance.md) defines scope, samples, percentile,
+regression thresholds, memory units and idle observations. Spikes provide
+diagnostic/regression evidence only for the workloads they actually measure;
+a passing median assertion alone does not establish p95 or maximum gates.

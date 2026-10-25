@@ -20,23 +20,36 @@ it's a bug.
    dependencies, binary size, latency). We don't build first and trim later.
 2. **Budgets, measured.** Architecture decisions need numbers (see
    `docs/benchmarks/`). New code must stay within these budgets; past them,
-   grill and fix. Within them, don't chase invisible microseconds.
-   - our CPU from `main` to wheel commit: <= 1 ms. Waiting for the
-     compositor (configure, pointer enter) and the cost before `main`
+   investigate and fix. Within them, don't chase invisible microseconds.
+   Absolute timing budgets apply to the recorded reference environment;
+   other environments require their own baselines and regression checks.
+   An environment includes CPU, kernel, compositor, launcher, power policy,
+   binary/build identity and cache condition. Safety and resource ceilings
+   remain mandatory on every supported system. Full acceptance method:
+   `docs/benchmarks/acceptance.md`.
+   - our CPU from wheel-mode entry to wheel commit: p95 <= 1 ms on the
+     reference environment. Waiting for the compositor (configure, pointer
+     enter) and the cost before `main`
      (exec, loader, the spawner's teardown: ~1 ms under niri) are measured
      and reported, not budgeted. Do our work during compositor waits.
    - our CPU from `main` to exit, excluding per-event work (hover, motion):
-     <= 1 ms. This covers reading the payload, classifying, and starting
-     the action. The wheel splits this into its waiting points, each
-     <= 1 ms of our CPU for one input: `main` to the wheel's commit, the
-     drop's data to the stage-2 wheel's commit, and the choice to the
+     p95 <= 1 ms on the reference environment. This covers reading the
+     payload, classifying, and starting the action. The wheel splits this
+     into its waiting points, each p95 <= 1 ms of our CPU for one input:
+     wheel-mode entry to the wheel's commit, the early list to level 1,
+     the drop's data to the stage-2 wheel's commit, and the choice to the
      action's start. Per-input work beyond one input scales and is
      reported, not budgeted. CPU before `main` (a launcher's `sh -c`, exec,
      loader) is reported, not budgeted.
-   - hover repaint: <= 100 µs per event
-   - while the wheel waits: no wakeups except input events
+   - hover repaint: <= 100 µs wall time per event on the reference
+     environment; report p95 and maximum separately
+   - while the wheel waits: no autonomous periodic work. Input/protocol
+     events and finite safety deadlines may wake it. `idle_wakeups=0`
+     counts only premature empty polls, not every possible wakeup; pair
+     the counter with an idle observation and the absence of periodic work
    - idle cost: 0 (no resident process)
    - peak memory of `inacircle` (wheel, engine, supervisor): <= 5 MB PSS
+     (5,000,000 B; Linux `kB` fields are KiB, multiply by 1024)
      (proportional set size: shared libc and loader pages count by their
      share; RSS is reported alongside). Actions are not held to it: they
      stream where the format allows, elsewhere hold at most one unit
@@ -51,6 +64,18 @@ it's a bug.
      measurement. Build- and test-time tools may use a few pinned crates
      (e.g. offline atlas baking, test-suite loaders); a check keeps them
      out of the shipped binaries' dependency tree.
+   - timing acceptance: >= 50 valid observations per metric and condition;
+     p95 is sorted sample `ceil(0.95 * N)`, one-based (nearest-rank).
+     Preserve valid outliers; document every failed/missing attempt.
+   - regression against an environment-matched baseline: > 10% p95
+     worsening requires investigation; > 15%, reproduced in an independent
+     comparison and not explained by measured noise, blocks merge. These
+     are provisional policy thresholds, not values derived from the old
+     measurements. Calibrate with repeated A/A series; compare A/B in
+     alternating order where possible. Unresolved excess noise or missing
+     evidence leaves acceptance open. Never average environments together
+     or relax sandbox, input limits, deadlines or overwrite protection to
+     accommodate a slower machine.
 3. **CPU rendering, damage-only.** Measured: a GPU context costs 70-90 MB RSS
    idle on NVIDIA for a ~2 ms gain on a static overlay. Redraw only what changed.
    (See `spikes/render-bench/`.)
@@ -191,7 +216,9 @@ Test behavior, not lines. Coverage is a signal, never a target.
   in the outcome; each is a question, not an automatic failure.
 - A plan that changes a budgeted path (start, hover, memory, wakeups)
   also measures it on a second, untuned machine (stock kernel), and the
-  numbers go to the benchmark page.
+  numbers go to the benchmark page. Record the entire environment and
+  distinguish preliminary diagnosis from >= 50-sample p95 acceptance;
+  report absolute overruns even outside the reference timing gate.
 - The closing verification runs the suite with
   `INACIRCLE_REQUIRE_LANDLOCK=1`.
 - CI (`.github/workflows/ci.yml`) is a safety net, not the authority: the

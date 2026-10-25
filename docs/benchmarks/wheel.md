@@ -20,8 +20,12 @@ including notification Undo. Startup CPU exceeded 1 ms on both additional
 systems; the X280 also exceeded the early-list and hover limits. Memory
 and counted idle wakeups remained within their limits. See the
 [cross-machine report](wheel-portability.md) for full specifications,
-controls, raw records and the open performance-acceptance question. The
-historical reference numbers here are not a universal budget claim.
+controls and raw records. The [acceptance policy](acceptance.md) now defines
+reference/environment scope, ≥50 observations, nearest-rank p95 and
+regression thresholds. The historical reference numbers here are not a
+universal budget claim or p95 acceptance under that policy.
+The [fresh reference report](wheel-reference.md) supplies three complete
+50-run startup CPU p95 checks with environment and failure records.
 
 ## Method
 
@@ -67,11 +71,15 @@ over the slices, then 10 s with the pointer still.
 | `main_to_commit_wall_us` | 1115 | 2688 | reported |
 | `hover_us` (per event, rasterizer bench) | 14 | 49 | ≤ 100 |
 | `idle_wakeups` (no input) | 0 | 0 | 0 |
-| `pss_kb` | 2545 | 2575 | ≤ 5000 |
+| `pss_kb` (KiB) | 2545 | 2575 | historical ≤ 5000 KiB |
 | `vm_hwm_kb` (reported) | 4630 | 4820 | — |
 
 The `hover_us` row is `cargo test -p ui --release -- --ignored` (the
 rasterizer alone), and the `idle_wakeups` row comes from the plain starts.
+The historical 5000 KiB table threshold is 5,120,000 B. Current acceptance
+uses the stated 5 MB ceiling as 5,000,000 B; see the
+[memory method](acceptance.md#memory-and-idle-evidence). The observations
+above are below both, but those thresholds are not interchangeable.
 
 ### Drag runs (the user's manual test on niri, Nautilus)
 
@@ -184,5 +192,9 @@ Each run:
 Take the `measure wheel` lines from the log; p50 and max over the runs.
 
 **Large drop:** `cargo test --release -p inacircle --test wheel --
-a_large_drop_stays_within_the_memory_budget --nocapture` prints both peaks and
-fails above 5 MB (a debug build checks only the drop's increment).
+a_large_drop_stays_within_the_memory_budget --nocapture` reports the lower
+of two stage-2 PSS samples for each workload and asserts that the 1024-file
+minimum is ≤5120 KiB (5,242,880 B). A debug build checks only the drop's
+increment. This smoke neither records every peak nor enforces the exact
+5,000,000 B acceptance ceiling; a passing result is not sufficient
+[memory acceptance evidence](acceptance.md#memory-and-idle-evidence).

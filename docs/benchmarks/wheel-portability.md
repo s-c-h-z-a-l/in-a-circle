@@ -12,10 +12,13 @@ adapter or product-code change was needed. The operator reported no
 noticeable delay on either system; input-to-photon latency was not measured.
 
 **The performance result is mixed.** Sampled PSS stayed below 3 MiB and
-there were no counted idle wakeups. The 1 ms startup CPU budget did not
+there were no counted idle wakeups. The historical 1 ms startup CPU budget did not
 hold on either additional machine. The X280 also exceeded the early-list
-and hover limits in manual runs. These are measured overruns, not a budget
-waiver. The earlier `main` build exceeded the startup limit on the
+and hover limits in manual runs. These remain measured absolute overruns;
+the [adopted acceptance policy](acceptance.md) scopes absolute timing gates
+to the reference environment and requires matched regression evidence
+elsewhere. It does not relabel these samples as successful absolute
+results. The earlier `main` build exceeded the startup limit on the
 ThinkCentre too. Energy policy has a large causal effect, and two full
 buffer paints dominate the profiled startup path.
 
@@ -153,6 +156,9 @@ cancellation gesture.
 Plain-start series below each contain 20 valid runs, closed by Esc about
 one second after launch. No missing/negative commit measurement was
 accepted and no outlier was removed.
+They are preliminary diagnostic series, below the new 50-observation
+minimum for p95 acceptance. Their sequential controls do not establish
+environment-matched regression acceptance.
 
 | Machine / launcher / revision | CPU p50 / max | Wall p50 / max | PSS max | Idle wakeups max |
 |---|---:|---:|---:|---:|
@@ -170,7 +176,7 @@ Do not pool launchers or infer a compositor/kernel effect from these rows.
 
 Ten mixed manual wheel runs on each machine produced:
 
-| Metric | ThinkCentre p50 / max | X280 p50 / max | Current limit |
+| Metric | ThinkCentre p50 / max | X280 p50 / max | Historical absolute limit |
 |---|---:|---:|---|
 | Startup CPU | 1671 / 4144 | 1485 / 1709 | ≤1000 µs |
 | Early list → level 1 CPU | 656 / 1006 (6 samples) | 1024 / 1108 (9) | ≤1000 µs for one input |
@@ -344,6 +350,13 @@ starts closed by Esc. Record the launcher rather than combining these
 series. On Plasma the test shortcut was Ctrl+Meta+F3; Meta+F3 retained its
 existing desktop-switching action.
 
+The commands above reproduce the original preliminary series, not the new
+acceptance protocol. For acceptance collect at least 50 valid observations
+per metric/condition, preserve all attempts, compute nearest-rank p95 and
+use matched, preferably alternating A/B comparisons as defined in
+[acceptance.md](acceptance.md). The script's p50/max summary alone is
+insufficient; retain its raw samples and calculate p95 explicitly.
+
 For phase/cache controls, follow the frozen probe instructions, record
 both clocks/fault counters, keep all successful samples, verify file
 residency and report the before/after policy. Automatic Plasma input used
@@ -360,8 +373,16 @@ cost. They do not establish that every instruction is necessary or that
 the code cannot be improved. The two-paint startup strategy is a design
 tradeoff; energy policy materially changes its CPU-time cost.
 
-There is no evidence here requiring an architectural rewrite. There is
-also no basis for silently calling the current absolute CPU/hover limits
-met. Their hardware/power-policy scope and the hover CPU-versus-wall
-meaning need an explicit decision. Until then, these results leave the
-plan-7 performance acceptance open. No limit was raised by this report.
+There is no evidence here requiring an architectural rewrite, or proving
+that the remaining cost is unavoidable hardware overhead. **Optimizing the
+two full SHM paints remains an open development opportunity.**
+
+The adopted [acceptance policy](acceptance.md) distinguishes absolute
+reference timing gates, environment-specific regression guarantees and
+mandatory safety/resource gates. Hover is wall time. Neither additional
+machine is subject to the same absolute 1 ms reference gate, but the
+observed overruns remain in the record. This report itself did not raise
+any numerical limit. Its 20-run and mixed manual series cannot close the
+new p95/regression gates. A [fresh three-series reference measurement](wheel-reference.md)
+now passes startup CPU p95; the other required closing evidence and its
+automatic-close anomaly remain separate gates before plan 7 can merge.
