@@ -132,10 +132,38 @@ EXCLUDE_FUZZ_RE='(\bfuzz_[a-z_]+|Event::clone_args)'
 common=(
   --exclude-re "$EXCLUDE_FUZZ_RE"
   --jobs "$JOBS"
-  --timeout-multiplier "$TIMEOUT_MULTIPLIER"
-  --minimum-test-timeout "$MIN_TEST_TIMEOUT"
   --build-timeout-multiplier "$BUILD_TIMEOUT_MULTIPLIER"
 )
+
+# Test timeout arguments. Stage 1 (one crate's tests): cargo-mutants' own
+# baseline of that crate, x TIMEOUT_MULTIPLIER, at least MIN_TEST_TIMEOUT.
+timeout_args=(--timeout-multiplier "$TIMEOUT_MULTIPLIER" --minimum-test-timeout "$MIN_TEST_TIMEOUT")
+
+# Stage 2 and diff run the WHOLE workspace's tests per mutant, but
+# cargo-mutants times a baseline of only the packages that hold the selected
+# mutants (incident: dbus-only survivors gave a 2 s baseline, so the 60 s
+# floor was far below the ~66 s a passing workspace run takes; every mutant
+# "timed out", and a timeout counts as caught, which hid real survivors).
+# So measure the full workspace suite here, in the staged tree, and give each
+# mutant WORKSPACE_TIMEOUT_MULTIPLIER x that (3 = the load of 8 parallel jobs
+# over an idle run, as for stage 1). A timeout then means a hang, not a pass.
+WORKSPACE_TIMEOUT_MULTIPLIER=3
+workspace_timeout() {
+  stage_tree
+  # Build first, so the measured time is the tests alone.
+  (cd "$TREE" && ulimit -S -H -d "$DATA_CAP_KIB" && cargo test --workspace --no-run >/dev/null 2>&1) ||
+    { echo "the staged tree does not build" >&2; exit 1; }
+  local t0=$SECONDS
+  (cd "$TREE" && ulimit -S -H -d "$DATA_CAP_KIB" && cargo test --workspace >/dev/null 2>&1) ||
+    { echo "the unmutated workspace suite fails in the staged tree" >&2; exit 1; }
+  local base=$((SECONDS - t0)) t
+  t=$((base * WORKSPACE_TIMEOUT_MULTIPLIER))
+  ((t < MIN_TEST_TIMEOUT)) && t=$MIN_TEST_TIMEOUT
+  echo "workspace baseline ${base}s, per-mutant test timeout ${t}s"
+  # The baseline was just measured: skip cargo-mutants' per-package one,
+  # which would set its own (wrong) timeout.
+  timeout_args=(--baseline skip --timeout "$t")
+}
 
 count() { # <file>: number of lines, 0 if the file is missing
   if [[ -f $1 ]]; then wc -l <"$1"; else echo 0; fi
@@ -176,7 +204,7 @@ run() { # <outdir> <cargo-mutants args...> [-- <test binary args...>]
   (
     ulimit -S -H -d "$DATA_CAP_KIB"
     exec systemd-run --user --scope --quiet --unit "$unit" -p "MemoryMax=${SCOPE_MAX_KIB}K" -p MemorySwapMax=0 -- \
-      cargo mutants -d "$TREE" "${common[@]}" -o "$PWD/$out" "${pre[@]}" "${EXTRA[@]}" "${post[@]}"
+      cargo mutants -d "$TREE" "${common[@]}" "${timeout_args[@]}" -o "$PWD/$out" "${pre[@]}" "${EXTRA[@]}" "${post[@]}"
   ) || rc=$?
   # A timed-out mutant's test helper (a child that called setsid, e.g. the
   # sandbox tests' seccomp helpers) escapes cargo-mutants' process-group kill
@@ -224,6 +252,7 @@ stage2)
   done <"$missed"
   # The whole workspace's tests, nothing skipped: bins/inacircle's integration
   # tests carry much of exec/output's coverage.
+  workspace_timeout
   run "$OUT_ROOT/stage2" "${file_args[@]}" --test-workspace=true "${re[@]}"
   ;;
 diff)
@@ -234,6 +263,7 @@ diff)
   [[ -s $patch ]] || { echo "no diff against $BASE"; exit 0; }
   # Changed code only (CLAUDE.md), across all crates, whole workspace tests,
   # nothing skipped: the diff is small, so the slow tests cost little.
+  workspace_timeout
   run "$OUT_ROOT/diff" --in-diff "$patch" --test-workspace=true
   ;;
 *)
