@@ -2358,7 +2358,7 @@ pub(crate) mod tests {
         let outside = Tmp::new("outside");
         let rs = ruleset(&[], &work.0);
         let script = format!(
-            "cd '{}'; echo hi > f; if ln f '{}/g'; then echo LINKED; else echo REFUSED; fi",
+            "set -e; cd '{}'; echo hi > f; if ln f '{}/g'; then echo LINKED; else echo REFUSED; fi",
             work.0.display(),
             outside.0.display()
         );
