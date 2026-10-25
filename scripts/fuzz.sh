@@ -67,7 +67,8 @@ limits() {
         # under 1 KiB and the deepest nesting (MAX_DEPTH 256 in
         # crates/doc/src/md/inline.rs) fits in a few KiB, so 16 KiB reaches
         # every limit and keeps a quadratic case visible. 2 s: a block
-        # parser plus three writers under ASan. 512 MB: ~32000x the input.
+        # parser plus three writers under ASan. 64 MB malloc limit: 4096x
+        # the input; 1024 MB RSS ceiling.
         markdown) echo "16384 2 64 1024" ;;
         # 64 KiB = MAX_MESSAGE in crates/dbus/src/message.rs: frame_len
         # rejects anything larger before decode runs, so longer inputs only
@@ -89,12 +90,14 @@ limits() {
         # undo streams it and holds one line at a time). A record is ~200
         # bytes, so 64 KiB (the same bound as the other line grammars) is
         # ~300 records and reaches every branch. 1 s: linear scan plus a
-        # substring search per line. 512 MB: ~8000x the input.
+        # substring search per line. 64 MB malloc limit: 1024x the input;
+        # 1024 MB RSS ceiling.
         history) echo "65536 1 64 1024" ;;
         # 8192 = MAX_INB in crates/wire/src/conn.rs (2 * MAX_MESSAGE, 4096):
         # the most unframed bytes a Conn holds, and fuzz_events cuts to it.
-        # 1 s: framing and the readers are linear in the input. 512 MB:
-        # ~64000x the input.
+        # 1 s: framing and the readers are linear in the input. 16 MB malloc
+        # limit: 2048x the input (a Conn's buffers are a few times MAX_INB);
+        # 1024 MB RSS ceiling.
         wire_events) echo "8192 1 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
@@ -130,7 +133,8 @@ BIN_DIR=fuzz/target/x86_64-unknown-linux-gnu/release
 RUN_DIR=fuzz/runs/$mode-$(date +%Y%m%d-%H%M%S)
 
 # run_one <target> <secs> <workers> <corpus-dir>
-# Returns 0 only if libFuzzer really ran (a "Done N runs" line in its log) and
+# Returns 0 only if libFuzzer really ran (a "Done N runs" line in its log;
+# in -jobs mode in every worker's log) and
 # left no artifact in this run's directory. A missing or non-executable
 # binary, a startup failure or a killed process leave no such line and fail.
 run_one() {
@@ -143,10 +147,29 @@ run_one() {
     if [ "$workers" -gt 1 ]; then
         args+=("-jobs=$workers" "-workers=$workers") # writes fuzz-N.log into the cwd
     fi
-    (cd "$dir" && "$PWD/../../../../$BIN_DIR/$t" "${args[@]}" "$corpus") >"$dir/out.log" 2>&1 || true
+    # Outer deadline: libFuzzer enforces -max_total_time itself, but a wedged
+    # process (a stuck worker, a lost signal) would hang the run and the
+    # user's terminal. secs*2: twice the budget covers corpus loading and
+    # shutdown on a slow box; +120 s: startup, ASan init and the final
+    # merge of the workers' corpora. Past it the target is killed and fails
+    # for want of a "Done" line.
+    local hard=$((secs * 2 + 120))
+    (cd "$dir" && timeout -k 10 "$hard" "$PWD/../../../../$BIN_DIR/$t" "${args[@]}" "$corpus") >"$dir/out.log" 2>&1 || true
     local ran=0 crashed=0
     # (grep on the files, not a pipe: grep -q closing early would fail a pipefail pipeline)
-    if grep -qE '^Done [0-9]+ runs' "$dir"/out.log "$dir"/fuzz-*.log 2>/dev/null; then ran=1; fi
+    if [ "$workers" -gt 1 ]; then
+        # -jobs mode: every worker log must end in "Done". A SIGKILLed
+        # worker (OOM killer) leaves a log without it, while the others
+        # finish, so any one "Done" line would hide the loss.
+        local logs=("$dir"/fuzz-*.log) l
+        ran=1
+        [ -e "${logs[0]}" ] || ran=0
+        for l in "${logs[@]}"; do
+            grep -qE '^Done [0-9]+ runs' "$l" 2>/dev/null || { ran=0; echo "[$t] no Done line in $l" >&2; }
+        done
+    elif grep -qE '^Done [0-9]+ runs' "$dir"/out.log 2>/dev/null; then
+        ran=1
+    fi
     if [ -n "$(find "$dir/artifacts" -type f)" ]; then crashed=1; fi
     tail -n 2 "$dir/out.log" | sed "s/^/[$t] /" >&2
     echo "[$t] logs: $RUN_DIR/$t" >&2

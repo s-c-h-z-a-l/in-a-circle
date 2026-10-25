@@ -24,7 +24,9 @@ fuzz_target!(|data: &[u8]| {
     // Callers also hand single lines to `parse_line`.
     for line in text.lines() {
         if let Ok(l) = manifest::parse_line(line) {
-            // The writer must accept whatever the parser produced.
+            // Exercise the writer on whatever the parser produced. Its
+            // result is not asserted: a parsed line may legitimately be
+            // refused by the writer (it checks its own, stricter rules).
             let _ = manifest::write_line(&l);
         }
     }

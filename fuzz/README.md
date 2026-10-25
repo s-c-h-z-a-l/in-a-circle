@@ -13,5 +13,17 @@ not shipped; the shipped dependency tree is unchanged.
   script.
 - Corpus: `fuzz/corpus/<target>/`, seeded from real manifests, a real cache
   and history, fake-compositor messages and the CommonMark examples; keep it minimized with `scripts/fuzz.sh cmin`.
+- Corpus size policy: 48 MB, 11923 files at the end of plan 7 (markdown is
+  35 MB of it, from the CommonMark examples and its own campaign finds).
+  After every `close` or `baseline` campaign run `scripts/fuzz.sh cmin` and
+  commit the minimized corpus, never the raw grown one. Upper bound: 64 MB
+  in total. A corpus is loaded into RAM by every run, and a smoke run's peak
+  RSS (about 450-580 MB, limit 1024 MB in `scripts/fuzz.sh`) grows with it;
+  64 MB keeps the smoke run under the CI limit and the repo clone small.
+  Past it, drop seeds that cmin keeps only for marginal coverage, or
+  re-seed that target. The `wire_events` seed files encode interface
+  indices, so they depend on the order of `Iface::ALL`
+  (`crates/wire/src/proto.rs`): reordering or inserting an interface there
+  invalidates them, and the seeds must be regenerated.
 - A finding is fixed in the crate and its minimized input becomes a
   regression test there.
