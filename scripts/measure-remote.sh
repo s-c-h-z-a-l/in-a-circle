@@ -15,10 +15,10 @@ cd "$(dirname "$0")/.."
 HOST=${1:?usage: measure-remote.sh <ssh-host> [runs]}
 # 20 runs: the same count as the reference method (wheel.md, "Start cost").
 RUNS=${2:-20}
-# Session environment of the host's niri session. The host's user id 1000 and
-# the first Wayland socket are what a single-user niri install uses.
-REMOTE_RUNTIME=/run/user/1000
-REMOTE_DISPLAY=wayland-1
+# Session environment of the host's niri session. The helper below assumes
+# user id 1000 and the Wayland socket wayland-1, which is what a single-user
+# niri install uses (niri's first socket is wayland-1 when no other compositor
+# was started before it).
 # Wait between starting the wheel and sending Esc: the wheel commits after one
 # compositor round trip (a few ms, wheel.md); 1 s leaves ample margin on a slow
 # box and is still short. If it is too short the wheel is not mapped yet and
@@ -32,8 +32,15 @@ EXIT_DEADLINE_S=5
 # a run takes SETTLE_S + up to EXIT_DEADLINE_S; the rest is connection setup.
 SSH_RUN_TIMEOUT_S=$((SETTLE_S + EXIT_DEADLINE_S + 10))
 
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
-SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
+# ConnectTimeout bounds the connect only; the outer `timeout` bounds the whole
+# command. Setup and info commands (mktemp, mkdir, chmod, uname, ...) do
+# milliseconds of work, so 30 s = the 10 s connect plus ample margin; copying
+# two binaries (about 1.5 MB, a few KB of helper) over even a slow link fits
+# well within it. Every ssh/scp below goes through these arrays, so every
+# wait has a deadline.
+SSH_SETUP_TIMEOUT_S=30
+SSH=(timeout "$SSH_SETUP_TIMEOUT_S" ssh -o BatchMode=yes -o ConnectTimeout=10)
+SCP=(timeout "$SSH_SETUP_TIMEOUT_S" scp -q -o BatchMode=yes -o ConnectTimeout=10)
 
 cargo build --release -q -p inacircle -p inacircle-text
 R=$PWD/target/release
@@ -68,12 +75,23 @@ if kill -0 "$pid" 2>/dev/null; then
   kill -KILL "$pid"; wait "$pid" 2>/dev/null
   echo "ERROR wheel outlived the deadline"; sed "s/^/err: /" "$dir/err"; exit 3
 fi
-grep 'measure wheel' "$dir/err" || { echo "ERROR no measure line"; sed 's/^/err: /' "$dir/err"; exit 4; }
+line=$(grep 'measure wheel' "$dir/err") || { echo "ERROR no measure line"; sed 's/^/err: /' "$dir/err"; exit 4; }
+# -1 is what the wheel reports when it never committed (nothing was drawn):
+# not a measurement, a failed run.
+case $line in
+  *main_to_commit_cpu_us=-1*) echo "ERROR no commit: $line"; exit 6 ;;
+esac
+echo "$line"
 HELP
 
-REMOTE=$("${SSH[@]}" "$HOST" mktemp -d)
-cleanup() { "${SSH[@]}" "$HOST" rm -rf "$REMOTE" || true; rm -rf "$W"; }
+REMOTE=
+cleanup() {
+  [ -z "$REMOTE" ] || "${SSH[@]}" "$HOST" rm -rf "$REMOTE" || true
+  rm -rf "$W"
+}
 trap cleanup EXIT
+
+REMOTE=$("${SSH[@]}" "$HOST" mktemp -d)
 
 "${SSH[@]}" "$HOST" mkdir -p "$REMOTE/actions" "$REMOTE/cache" "$REMOTE/state" "$REMOTE/config" "$REMOTE/home"
 "${SCP[@]}" "$R/inacircle" "$HOST:$REMOTE/"
@@ -85,7 +103,7 @@ LINES=$W/lines
 : > "$LINES"
 fail=0
 for i in $(seq "$RUNS"); do
-  if out=$(timeout "$SSH_RUN_TIMEOUT_S" "${SSH[@]}" "$HOST" "$REMOTE/run-one.sh" "$REMOTE" "$SETTLE_S" "$EXIT_DEADLINE_S" 2>&1); then
+  if out=$(timeout "$SSH_RUN_TIMEOUT_S" ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$REMOTE/run-one.sh" "$REMOTE" "$SETTLE_S" "$EXIT_DEADLINE_S" 2>&1); then
     echo "$out" >> "$LINES"
   else
     echo "run $i failed: $out" >&2
@@ -94,7 +112,10 @@ for i in $(seq "$RUNS"); do
 done
 
 # field NAME -> sorted values; p50 = element ceil(n/2), max = last.
-vals() { grep -o "$1=[0-9]*" "$LINES" | cut -d= -f2 | sort -n; }
+# Only well-formed non-negative integers count: an empty or negative value
+# (a run without a commit prints -1) must never reach p50/max. The helper
+# already fails such runs; this keeps the summary honest regardless.
+vals() { grep -oE "$1=-?[0-9]+" "$LINES" | cut -d= -f2 | grep -E '^[0-9]+$' | sort -n; }
 p50() { vals "$1" | awk '{a[NR]=$1} END{if(NR) print a[int((NR+1)/2)]; else print "n/a"}'; }
 mx() { vals "$1" | tail -n1; }
 
