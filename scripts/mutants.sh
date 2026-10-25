@@ -112,7 +112,14 @@ export INACIRCLE_REQUIRE_LANDLOCK=1
 # mutation-tested too; stage 2 must see the tree stage 1 saw.
 TREE=$PWD/$OUT_ROOT/tree
 stage_tree() {
+  # rsync --delete with --files-from only deletes within the listed files'
+  # directories' view, so a file removed or renamed in the repo would survive
+  # in the tree and still be compiled. Empty the tree first, except target/
+  # (the build cache, which keeps the staged builds incremental). The rm is
+  # guarded: $TREE must be exactly <repo>/target/mutants/tree.
+  [[ $TREE == "$PWD/target/mutants/tree" ]] || { echo "unexpected tree path: $TREE" >&2; exit 1; }
   mkdir -p "$TREE"
+  find "$TREE" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
   git ls-files -z --cached --others --exclude-standard |
     grep -zvE '^(fuzz|spikes|notes|\.superpowers|\.obsidian)/' |
     rsync -a --delete --from0 --files-from=- --delete-excluded ./ "$TREE/"
@@ -148,13 +155,30 @@ timeout_args=(--timeout-multiplier "$TIMEOUT_MULTIPLIER" --minimum-test-timeout 
 # mutant WORKSPACE_TIMEOUT_MULTIPLIER x that (3 = the load of 8 parallel jobs
 # over an idle run, as for stage 1). A timeout then means a hang, not a pass.
 WORKSPACE_TIMEOUT_MULTIPLIER=${WORKSPACE_TIMEOUT_MULTIPLIER:-3} # override for a trial run only
+# Hard ceiling for each of the two baseline commands below: the unmutated
+# suite takes ~66 s (measured, see above); 1800 s is ~27x that, so only a hang
+# reaches it, and it keeps a wedged test from blocking the whole run.
+BASELINE_CMD_TIMEOUT_S=1800
+# Run a command in the staged tree under the same limits as the mutant runs:
+# RLIMIT_DATA, a user systemd scope with the memory cap and no swap, and a
+# deadline. The scope is stopped afterwards, like in run().
+in_tree_capped() { # <args of cargo...>
+  local unit=inacircle-mutants-base-$$-$RANDOM rc=0
+  (
+    cd "$TREE" && ulimit -S -H -d "$DATA_CAP_KIB" &&
+      systemd-run --user --scope --quiet --unit "$unit" -p "MemoryMax=${SCOPE_MAX_KIB}K" -p MemorySwapMax=0 -- \
+        timeout -k 10 "$BASELINE_CMD_TIMEOUT_S" "$@" >/dev/null 2>&1
+  ) || rc=$?
+  systemctl --user stop "$unit.scope" 2>/dev/null || true
+  return $rc
+}
 workspace_timeout() {
   stage_tree
   # Build first, so the measured time is the tests alone.
-  (cd "$TREE" && ulimit -S -H -d "$DATA_CAP_KIB" && cargo test --workspace --no-run >/dev/null 2>&1) ||
+  in_tree_capped cargo test --workspace --no-run ||
     { echo "the staged tree does not build" >&2; exit 1; }
   local t0=$SECONDS
-  (cd "$TREE" && ulimit -S -H -d "$DATA_CAP_KIB" && cargo test --workspace >/dev/null 2>&1) ||
+  in_tree_capped cargo test --workspace ||
     { echo "the unmutated workspace suite fails in the staged tree" >&2; exit 1; }
   local base=$((SECONDS - t0)) t
   t=$((base * WORKSPACE_TIMEOUT_MULTIPLIER))
@@ -259,6 +283,11 @@ diff)
   mkdir -p "$OUT_ROOT"
   patch=$OUT_ROOT/diff-$$.patch
   git diff "$BASE...HEAD" >"$patch"
+  # The patch is base...HEAD but the tree under test is the working tree: the
+  # line numbers only agree if the sources match HEAD.
+  if [[ -n $(git status --porcelain --untracked-files=no -- crates bins Cargo.toml Cargo.lock) ]]; then
+    echo "warning: tracked sources differ from HEAD; the diff patch is base...HEAD but the tree under test is the working tree" >&2
+  fi
   trap 'rm -f "$patch"' EXIT
   [[ -s $patch ]] || { echo "no diff against $BASE"; exit 0; }
   # Changed code only (CLAUDE.md), across all crates, whole workspace tests,
