@@ -88,6 +88,8 @@ fn unescape(v: &str) -> Option<Vec<u8>> {
     while i < b.len() {
         if b[i] == b'%' {
             let (hi, lo) = (hex(*b.get(i + 1)?)?, hex(*b.get(i + 2)?)?);
+            // mutants: equivalent (`|` -> `^`): `hi << 4` has its low four
+            // bits clear and `lo` is at most 15, so OR and XOR agree.
             out.push(hi << 4 | lo);
             i += 3;
         } else {
@@ -736,5 +738,85 @@ mod tests {
             libc::close(g1);
             libc::close(g2);
         }
+    }
+
+    /// A `Conn` over one end of a socketpair; the other end is returned.
+    fn pair() -> (Conn, std::os::unix::net::UnixStream) {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let c = Conn {
+            fd: OwnedFd::from(a),
+            name: String::new(),
+            serial: 0,
+            buf: Vec::new(),
+            queue: VecDeque::new(),
+            queued: 0,
+            keep_from: None,
+            broken: false,
+        };
+        (c, b)
+    }
+
+    fn signal_frame(member: &str) -> Vec<u8> {
+        let mut m = Message::call(1, "a.b", "/a", "a.B", member, vec![]);
+        m.kind = Kind::Signal;
+        encode(&m).unwrap()
+    }
+
+    #[test]
+    fn recv_within_spends_one_unit_per_queued_frame() {
+        let (mut c, _peer) = pair();
+        for name in ["A", "B", "C"] {
+            c.enqueue(signal_frame(name));
+        }
+        let mut frames = 2;
+        let a = c.recv_within(&mut frames).unwrap().unwrap();
+        assert_eq!(a.member.as_deref(), Some("A"));
+        assert_eq!(frames, 1);
+        let b = c.recv_within(&mut frames).unwrap().unwrap();
+        assert_eq!(b.member.as_deref(), Some("B"));
+        assert_eq!(frames, 0);
+        // Out of units: nothing more is handed out, and nothing is lost.
+        assert!(c.recv_within(&mut frames).unwrap().is_none());
+        assert!(c.pending());
+        let mut more = 1;
+        let third = c.recv_within(&mut more).unwrap().unwrap();
+        assert_eq!(third.member.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn an_auth_line_is_read_up_to_the_limit_and_no_further() {
+        use std::io::Write;
+        let (mut c, mut peer) = pair();
+        // 100 bytes with no line end, then far more than the limit.
+        let writer = std::thread::spawn(move || {
+            peer.write_all(&[b'A'; 100]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            peer.write_all(&[b'B'; 2000]).unwrap();
+            peer
+        });
+        let r = c.read_line(Instant::now() + std::time::Duration::from_secs(2));
+        assert!(matches!(r, Err(Error::Auth)), "{:?}", r.err());
+        assert_eq!(c.buf.len(), MAX_LINE, "read exactly up to the limit");
+        // The rest of the 2100 bytes is still in the socket.
+        let _peer = writer.join().unwrap();
+        let mut left = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: buf is valid for buf.len() writable bytes.
+            let n = unsafe {
+                libc::recv(
+                    c.fd.as_raw_fd(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            left.extend_from_slice(&buf[..n as usize]);
+        }
+        assert_eq!(left.len(), 2100 - MAX_LINE);
     }
 }

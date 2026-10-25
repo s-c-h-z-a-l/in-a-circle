@@ -703,3 +703,168 @@ fn connect_failures_are_the_connect_errors() {
     assert_eq!(kind(stale), std::io::ErrorKind::ConnectionRefused);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn an_error_reply_to_another_call_does_not_end_this_call() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        let mut other = m.clone();
+        other.serial = m.serial + 100;
+        p.error(&other, "org.example.Error.Other", "not for you");
+        p.reply(&m, vec![Value::Str("mine".into())]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let r = c.call(call("Ping"), after(500)).unwrap();
+    assert_eq!(r.body, vec![Value::Str("mine".into())]);
+    drop(c);
+    fake.join();
+}
+
+/// A signal `Q` whose encoded form is exactly `len` bytes: a serial, then
+/// padding bytes to make up the size.
+fn sized_signal(len: usize) -> (Message, usize) {
+    // The fixed part is small; the byte array supplies the rest.
+    for n in 0..len {
+        let m = signal(
+            "Q",
+            vec![
+                Value::U32(0),
+                Value::Array("y".into(), vec![Value::Byte(1); n]),
+            ],
+        );
+        let got = dbus::encode(&m).unwrap().len();
+        if got == len {
+            return (m, n);
+        }
+    }
+    panic!("no signal of {len} bytes");
+}
+
+/// The body that `sized_signal`'s message has, with `i` in the first slot.
+fn sized_body(i: u32, n: usize) -> Vec<Value> {
+    vec![
+        Value::U32(i),
+        Value::Array("y".into(), vec![Value::Byte(1); n]),
+    ]
+}
+
+/// A connection that was sent `bodies` as signals (as `Q` from /a) and then
+/// answered one call, so that all of them wait in the queue.
+fn conn_with_queued(bodies: Vec<Vec<Value>>) -> (Fake, Conn) {
+    let fake = Fake::start(move |p| {
+        p.handshake();
+        let m = p.recv();
+        for b in bodies {
+            p.signal("/a", "a.B", "Q", b);
+        }
+        p.reply(&m, vec![]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    c.call(call("Ping"), after(3000)).unwrap();
+    (fake, c)
+}
+
+fn first_u32(m: &Message) -> u32 {
+    let Value::U32(i) = m.body[0] else {
+        panic!("{m:?}")
+    };
+    i
+}
+
+#[test]
+fn the_signal_queue_holds_exactly_its_byte_budget() {
+    // 64 frames of 4096 bytes are exactly 256 KiB: all stay; a 65th pushes
+    // out the oldest.
+    let (_, n) = sized_signal(4096);
+    for (count, first) in [(64u32, 0u32), (65, 1)] {
+        let (fake, mut c) = conn_with_queued((0..count).map(|i| sized_body(i, n)).collect());
+        assert_eq!(c.queued_bytes(), 64 * 4096, "{count} sent");
+        for i in first..count {
+            let s = c.recv(after(100)).unwrap().unwrap();
+            assert_eq!(first_u32(&s), i);
+        }
+        assert!(c.recv(after(20)).unwrap().is_none());
+        assert_eq!(c.queued_bytes(), 0);
+        drop(c);
+        fake.join();
+    }
+}
+
+#[test]
+fn queue_accounting_follows_the_frames_that_come_and_go() {
+    // Small frames first, then one near the 64 KiB frame cap: room is judged
+    // by the bytes held, not by their product with the new frame's size.
+    let (_, n) = sized_signal(1024);
+    let bodies = vec![
+        sized_body(0, 0),
+        sized_body(1, n),
+        sized_body(2, 0),
+        vec![Value::U32(3), Value::Str("x".repeat(60_000))],
+    ];
+    let lens: Vec<usize> = bodies
+        .iter()
+        .map(|b| dbus::encode(&signal("Q", b.clone())).unwrap().len())
+        .collect();
+    let (fake, mut c) = conn_with_queued(bodies);
+    let mut left: usize = lens.iter().sum();
+    assert_eq!(c.queued_bytes(), left);
+    for (i, len) in lens.iter().enumerate() {
+        let s = c.recv(after(100)).unwrap().unwrap();
+        assert_eq!(first_u32(&s), i as u32);
+        left -= len;
+        assert_eq!(c.queued_bytes(), left, "after signal {i}");
+    }
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn recv_now_looks_at_a_bounded_number_of_frames() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let mut stale = call("x");
+        stale.serial = 9999;
+        // 100 frames that are not signals, then a signal.
+        p.write(&batch(Peer::reply_msg(&stale, vec![]), 100));
+        p.signal("/a", "a.B", "Last", vec![]);
+        std::thread::sleep(Duration::from_millis(300));
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_readable(c.as_raw_fd());
+    std::thread::sleep(Duration::from_millis(100));
+    // 64 frames are looked at per call, none of them a signal.
+    assert!(c.recv_now().unwrap().is_none());
+    assert!(readable(c.as_raw_fd()), "the rest is still in the socket");
+    // The remaining 36 stale frames and the signal fit in the next call.
+    let s = c.recv_now().unwrap().expect("the signal is next");
+    assert_eq!(s.member.as_deref(), Some("Last"));
+    drop(c);
+    fake.join();
+}
+
+#[test]
+fn reads_stop_at_the_end_of_the_frame() {
+    // Two signals in one write: after `recv` returns the first, the second
+    // is still in the socket, not in our buffer.
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let mut both = batch(signal("One", vec![]), 1);
+        both.extend(batch(signal("Two", vec![]), 1));
+        p.write(&both);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    wait_readable(c.as_raw_fd());
+    std::thread::sleep(Duration::from_millis(50));
+    let s = c.recv(after(500)).unwrap().unwrap();
+    assert_eq!(s.member.as_deref(), Some("One"));
+    assert!(readable(c.as_raw_fd()), "the second frame was read ahead");
+    let s = c.recv(after(500)).unwrap().unwrap();
+    assert_eq!(s.member.as_deref(), Some("Two"));
+    drop(c);
+    fake.join();
+}
