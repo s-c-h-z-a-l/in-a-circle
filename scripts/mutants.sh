@@ -147,7 +147,7 @@ timeout_args=(--timeout-multiplier "$TIMEOUT_MULTIPLIER" --minimum-test-timeout 
 # So measure the full workspace suite here, in the staged tree, and give each
 # mutant WORKSPACE_TIMEOUT_MULTIPLIER x that (3 = the load of 8 parallel jobs
 # over an idle run, as for stage 1). A timeout then means a hang, not a pass.
-WORKSPACE_TIMEOUT_MULTIPLIER=3
+WORKSPACE_TIMEOUT_MULTIPLIER=${WORKSPACE_TIMEOUT_MULTIPLIER:-3} # override for a trial run only
 workspace_timeout() {
   stage_tree
   # Build first, so the measured time is the tests alone.
