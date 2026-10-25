@@ -1001,6 +1001,131 @@ mod tests {
         });
     }
 
+    /// Undo is scoped to its job: with the history holding interleaved lines
+    /// of three jobs, two of whose ids are prefixes of the third's (`10-1`,
+    /// `10-10`, `10-100`; the reader's `job=10-1` prefilter matches all of
+    /// them), undoing one removes exactly its own files and folders, the
+    /// others stay on disk and stay undoable.
+    #[test]
+    fn undo_touches_only_its_own_job_among_interleaved_prefix_ids() {
+        let t = Tmp::new("interleaved");
+        t.env(|| {
+            let ids = ["10-1", "10-10", "10-100"];
+            let files: Vec<[PathBuf; 2]> = ids
+                .iter()
+                .map(|i| {
+                    [
+                        t.0.join(format!("out/{i}-a")),
+                        t.0.join(format!("out/{i}-b")),
+                    ]
+                })
+                .collect();
+            let dirs: Vec<PathBuf> = ids.iter().map(|i| t.0.join(format!("out/d{i}"))).collect();
+            for (fs_, d) in files.iter().zip(&dirs) {
+                fs::create_dir(d).unwrap();
+                for f in fs_ {
+                    fs::write(f, "x").unwrap();
+                }
+            }
+            let jobs: Vec<JobId> = ids.iter().map(|i| JobId((*i).into())).collect();
+            let mut recs: Vec<Recorder> =
+                jobs.iter().map(|j| Recorder::open(j, "convert")).collect();
+            // One line of each job at a time: out, dir, skip, fail all interleave.
+            for n in 0..2 {
+                for (r, fs_) in recs.iter_mut().zip(&files) {
+                    r.outcome(&done("/in/x", &fs_[n]));
+                }
+            }
+            for (r, d) in recs.iter_mut().zip(&dirs) {
+                r.dir(d);
+                r.outcome(&Outcome::Skipped {
+                    input: PathBuf::from("/in/s"),
+                    reason: "same".into(),
+                });
+                r.outcome(&Outcome::Failed {
+                    input: PathBuf::from("/in/f"),
+                    reason: "bad".into(),
+                });
+            }
+            for r in recs {
+                r.finish(true);
+            }
+
+            // Undo the middle one: only its files go.
+            let r = undo(&jobs[1]).unwrap();
+            assert_eq!(r.removed, files[1].to_vec());
+            assert!(r.kept.is_empty());
+            assert!(!dirs[1].exists(), "its own emptied folder goes");
+            for k in [0, 2] {
+                assert!(files[k].iter().all(|f| f.exists()), "{} untouched", ids[k]);
+                assert!(dirs[k].exists());
+            }
+            // Its undo line does not mark the prefix-sharing jobs as undone,
+            // and they are still undoable, each removing only its own.
+            let r = undo(&jobs[0]).unwrap();
+            assert_eq!(r.removed, files[0].to_vec());
+            assert!(files[2].iter().all(|f| f.exists()));
+            let r = undo(&jobs[2]).unwrap();
+            assert_eq!(r.removed, files[2].to_vec());
+            for j in &jobs {
+                assert_eq!(undo(j).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            }
+        });
+    }
+
+    /// Every kind of line alone makes its own job known and no other: a
+    /// job's id is not found through a line of a job whose id it prefixes
+    /// (`10-1` vs `10-10`). The `undo` line alone marks only its own job.
+    #[test]
+    fn each_line_kind_counts_for_its_own_job_only() {
+        let kinds = [
+            "job\tid=%\ttime=1\taction=a\tstatus=done\tsandbox=yes\n",
+            "skip\tjob=%\tin=/i\treason=r\n",
+            "fail\tjob=%\tin=/i\treason=r\n",
+            "dir\tjob=%\tpath=/nonexistent-dir-x\n",
+            "out\tjob=%\tin=/i\tpath=/nonexistent-x\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n",
+        ];
+        let t = Tmp::new("kinds");
+        t.env(|| {
+            let hist = history_path().unwrap();
+            fs::create_dir_all(hist.parent().unwrap()).unwrap();
+            for k in kinds {
+                fs::write(
+                    &hist,
+                    format!("inacircle-history 0\n{}", k.replace('%', "10-10")),
+                )
+                .unwrap();
+                assert_eq!(
+                    undo(&JobId("10-1".into())).unwrap_err().kind(),
+                    io::ErrorKind::NotFound,
+                    "{k:?} of 10-10 is not a record of 10-1"
+                );
+                fs::write(
+                    &hist,
+                    format!("inacircle-history 0\n{}", k.replace('%', "10-1")),
+                )
+                .unwrap();
+                undo(&JobId("10-1".into())).unwrap_or_else(|e| panic!("{k:?}: {e}"));
+            }
+            // Another job's undo line neither refuses this job nor makes it known.
+            let other_undone = "undo\tjob=10-10\ttime=5\tremoved=0\tkept=0\n";
+            fs::write(
+                &hist,
+                format!(
+                    "inacircle-history 0\n{}{other_undone}",
+                    kinds[1].replace('%', "10-1")
+                ),
+            )
+            .unwrap();
+            undo(&JobId("10-1".into())).unwrap();
+            fs::write(&hist, format!("inacircle-history 0\n{other_undone}")).unwrap();
+            assert_eq!(
+                undo(&JobId("10-1".into())).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        });
+    }
+
     const OUT: &str = "out\tjob=10-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n";
 
     #[test]
