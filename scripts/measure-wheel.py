@@ -70,6 +70,9 @@ def parse_attempt(text, line_number):
         fail("a valid record needs a value")
     if record["status"] != "valid" and value is not None:
         fail("only a valid record may carry a value")
+    note = record.get("note")
+    if note is not None and not isinstance(note, str):
+        fail("note must be a string")
     return {
         "metric": record["metric"],
         "condition": record["condition"],
@@ -77,6 +80,8 @@ def parse_attempt(text, line_number):
         "unit": record["unit"],
         "status": record["status"],
         "value": value,
+        "note": note,
+        "line": line_number,
     }
 
 
@@ -90,7 +95,14 @@ def read_attempts(path):
 
 
 def summarize(attempts, min_valid=MIN_VALID):
-    """Group by (metric, condition, series); never pool series or conditions."""
+    """Group by (metric, condition, series); never pool series or conditions.
+
+    Every non-valid attempt stays in the group's `failures` (line, status,
+    note), so the reason survives next to the counts. sample_gate counts valid
+    samples only; a large timeout share is visible in `non_valid`, not gated.
+    """
+    if min_valid < 1:
+        raise ValueError(f"min_valid must be >= 1, got {min_valid}")
     grouped = {}
     for item in attempts:
         key = (item["metric"], item["condition"], item.get("series", DEFAULT_SERIES))
@@ -110,6 +122,10 @@ def summarize(attempts, min_valid=MIN_VALID):
             "attempts": len(items),
             "valid": len(values),
             "non_valid": {s: sum(1 for i in items if i["status"] == s) for s in NON_VALID},
+            "failures": [
+                {"line": i.get("line"), "status": i["status"], "note": i.get("note")}
+                for i in items if i["status"] != "valid"
+            ],
             "min": min(values) if values else None,
             "p50": sorted(values)[(len(values) - 1) // 2] if values else None,  # lower-middle
             "p95": nearest_rank(values, 95),
@@ -128,8 +144,19 @@ def regression_percent(a_p95, b_p95):
     return 100 * (b_p95 / a_p95 - 1)
 
 
+def _side(group):
+    """The evidence behind one p95: its gate and the full attempt counts."""
+    return {key: group[key] for key in
+            ("p95", "sample_gate", "valid", "attempts", "non_valid", "failures")}
+
+
 def compare(a_summary, b_summary):
-    """Regression of B's p95 against A's, matched by (metric, condition) only."""
+    """Regression of B's p95 against A's, matched by (metric, condition) only.
+
+    Every pair on either side gets a row. A regression is given only when both
+    sides pass sample_gate and A's p95 is non-zero; otherwise `comparable` is
+    false, `regression_percent` is None and `reason` says why.
+    """
 
     def index(summary, name):
         found = {}
@@ -142,22 +169,39 @@ def compare(a_summary, b_summary):
 
     a, b = index(a_summary, "A"), index(b_summary, "B")
     rows = []
-    for key in sorted(a.keys() & b.keys()):
-        if a[key]["unit"] != b[key]["unit"]:
+    for key in sorted(a.keys() | b.keys()):
+        row = {"metric": key[0], "condition": key[1], "unit": None,
+               "a": None, "b": None, "a_p95": None, "b_p95": None,
+               "comparable": False, "regression_percent": None, "reason": None}
+        if key not in a or key not in b:
+            row["reason"] = "missing in A" if key not in a else "missing in B"
+        elif a[key]["unit"] != b[key]["unit"]:
             raise ValueError(f"unit mismatch for {key}")
-        rows.append({
-            "metric": key[0],
-            "condition": key[1],
-            "unit": a[key]["unit"],
-            "a_p95": a[key]["p95"],
-            "b_p95": b[key]["p95"],
-            "regression_percent": regression_percent(a[key]["p95"], b[key]["p95"]),
-        })
+        elif not (a[key]["sample_gate"] and b[key]["sample_gate"]):
+            row["reason"] = "insufficient samples"
+        else:
+            row["regression_percent"] = regression_percent(a[key]["p95"], b[key]["p95"])
+            row["comparable"] = row["regression_percent"] is not None
+            row["reason"] = "ok" if row["comparable"] else "regression undefined"
+        for side, groups in (("a", a), ("b", b)):
+            if key in groups:
+                row["unit"] = groups[key]["unit"]
+                row[side] = _side(groups[key])
+                row[side + "_p95"] = groups[key]["p95"]
+        rows.append(row)
     return rows
 
 
 def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def min_valid_arg(text):
+    # The CLI may only tighten the CLAUDE.md floor, never relax it.
+    value = int(text)
+    if value < MIN_VALID:
+        raise argparse.ArgumentTypeError(f"must be >= {MIN_VALID} (acceptance floor)")
+    return value
 
 
 def main(argv=None):
@@ -166,7 +210,7 @@ def main(argv=None):
     s = sub.add_parser("summarize")
     s.add_argument("--attempts", required=True)
     s.add_argument("--output", required=True)
-    s.add_argument("--min-valid", type=int, default=MIN_VALID)
+    s.add_argument("--min-valid", type=min_valid_arg, default=MIN_VALID)
     c = sub.add_parser("compare")
     c.add_argument("--a", required=True, help="summary JSON of the baseline")
     c.add_argument("--b", required=True, help="summary JSON of the candidate")

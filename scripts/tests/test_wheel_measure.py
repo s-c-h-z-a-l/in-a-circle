@@ -158,10 +158,71 @@ class WheelMeasureTests(unittest.TestCase):
         a = self.m.summarize([attempt(v, series="A") for v in range(1, 51)])
         b = self.m.summarize([attempt(v * 2, series="B") for v in range(1, 51)]
                              + [attempt(v, metric="other") for v in range(1, 51)])
-        rows = self.m.compare(a, b)
+        rows = [r for r in self.m.compare(a, b) if r["comparable"]]
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["metric"], rows[0]["condition"]), ("start", "cold"))
         self.assertAlmostEqual(rows[0]["regression_percent"], 100.0)
+
+    def test_compare_carries_gate_and_withholds_regression_when_insufficient(self):
+        a = self.m.summarize([attempt(v) for v in range(1, 51)])
+        b = self.m.summarize([attempt(v * 2) for v in range(1, 6)])
+        row = self.m.compare(a, b)[0]
+        self.assertTrue(row["a"]["sample_gate"])
+        self.assertFalse(row["b"]["sample_gate"])
+        self.assertEqual((row["b"]["valid"], row["b"]["attempts"]), (5, 5))
+        self.assertIn("non_valid", row["b"])
+        self.assertFalse(row["comparable"])
+        self.assertIsNone(row["regression_percent"])
+
+    def test_compare_reports_one_sided_pairs(self):
+        a = self.m.summarize([attempt(v) for v in range(1, 51)]
+                             + [attempt(v, metric="gone") for v in range(1, 51)])
+        b = self.m.summarize([attempt(v) for v in range(1, 51)]
+                             + [attempt(v, metric="new") for v in range(1, 51)])
+        rows = {r["metric"]: r for r in self.m.compare(a, b)}
+        self.assertEqual(set(rows), {"start", "gone", "new"})
+        self.assertEqual(rows["gone"]["reason"], "missing in B")
+        self.assertEqual(rows["new"]["reason"], "missing in A")
+        for name in ("gone", "new"):
+            self.assertFalse(rows[name]["comparable"])
+            self.assertIsNone(rows[name]["regression_percent"])
+
+    def test_cli_rejects_min_valid_below_floor(self):
+        for bad in ("0", "-3", "49"):
+            with tempfile.TemporaryDirectory() as tmp:
+                src = Path(tmp) / "a.jsonl"
+                out = Path(tmp) / "o.json"
+                src.write_text(json.dumps(attempt(1)) + "\n")
+                done = subprocess.run(
+                    [sys.executable, str(SCRIPT), "summarize", "--attempts", str(src),
+                     "--output", str(out), "--min-valid", bad],
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(done.returncode, 0, bad)
+                self.assertFalse(out.exists(), bad)
+        with self.assertRaises(ValueError):
+            self.m.summarize([attempt(1)], min_valid=0)
+
+    def test_failed_attempts_keep_line_status_and_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "a.jsonl"
+            out = Path(tmp) / "o.json"
+            rows = [attempt(1), {**attempt(None, "timeout"), "note": "no commit in 2s"},
+                    attempt(2), attempt(None, "missing")]
+            src.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), "summarize", "--attempts", str(src),
+                 "--output", str(out)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            g = group(json.loads(out.read_text()))
+        self.assertEqual(g["failures"], [
+            {"line": 2, "status": "timeout", "note": "no commit in 2s"},
+            {"line": 4, "status": "missing", "note": None},
+        ])
+        with self.assertRaises(ValueError):
+            self.m.parse_attempt(json.dumps({**attempt(1), "note": 5}), 1)
 
 
 if __name__ == "__main__":
