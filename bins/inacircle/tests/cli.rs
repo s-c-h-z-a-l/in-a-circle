@@ -1220,3 +1220,61 @@ fn unwritable_history_warns_once_and_the_run_proceeds() {
         .count();
     assert_eq!(warns, 1, "{}", o.stderr);
 }
+
+/// The value of `key` in the first `measure <what>` stderr line.
+fn measure_field(stderr: &str, what: &str, key: &str) -> Option<i64> {
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with(&format!("inacircle: measure {what} ")))?;
+    line.split_whitespace()
+        .find_map(|w| w.strip_prefix(key)?.strip_prefix('='))?
+        .parse()
+        .ok()
+}
+
+/// The measurement log carries the moment the first action event was
+/// observed (CPU and `CLOCK_MONOTONIC`, absolute, with the process id the
+/// wheel's report also carries); a child that emits no event leaves the
+/// markers out, never 0.
+#[test]
+fn action_entry_marker_is_observed_once_and_absent_without_events() {
+    let e = Env::new("entry");
+    let ok = e.test_input("ok/a.test", &["events=progress:0,progress:0.5,done"]);
+    let mut c = e.cmd(&["run", "--action", "test.script"]);
+    c.arg(&ok).env("INACIRCLE_MEASURE", "1");
+    let o = parse_out(c.output().unwrap());
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stderr);
+    let cpu = measure_field(&o.stderr, "run", "action_entry_observed_abs_cpu_us");
+    let wall = measure_field(&o.stderr, "run", "action_entry_observed_abs_wall_us");
+    let (cpu, wall) = (cpu.expect("cpu marker"), wall.expect("wall marker"));
+    let start = measure_field(&o.stderr, "run", "start_abs_cpu_us").unwrap();
+    assert!(cpu >= start, "{cpu} < {start}");
+    assert!(wall > 0);
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entries"),
+        Some(1),
+        "{}",
+        o.stderr
+    );
+    assert!(measure_field(&o.stderr, "run", "pid").is_some_and(|p| p > 1));
+
+    let silent = e.test_input("silent/a.test", &["kill_self=9"]);
+    let mut c = e.cmd(&["run", "--action", "test.script"]);
+    c.arg(&silent).env("INACIRCLE_MEASURE", "1");
+    let o = parse_out(c.output().unwrap());
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entry_observed_abs_cpu_us"),
+        None,
+        "{}",
+        o.stderr
+    );
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entry_observed_abs_wall_us"),
+        None
+    );
+    assert_eq!(measure_field(&o.stderr, "run", "action_entries"), Some(0));
+
+    // Without the switch, no marker line at all.
+    let o = run_test_action(&e, &[&ok]);
+    assert!(!o.stderr.contains("action_entry"), "{}", o.stderr);
+}

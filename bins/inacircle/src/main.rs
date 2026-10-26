@@ -187,6 +187,19 @@ struct Printer<'a> {
     rec: &'a mut Recorder,
     notifier: Option<&'a mut Notifier>,
     last: Option<String>,
+    /// The measurement switch's action-entry marks; `None` without it, so
+    /// the callback then costs one branch.
+    entry: Option<Entry>,
+}
+
+/// When the supervisor first observed an action child running: CPU and
+/// `CLOCK_MONOTONIC`, absolute, in µs. An upper bound on the child's own
+/// entry, taken at the first valid event the engine read, not at its
+/// `main`. Only the first child is kept; `count` counts all.
+#[derive(Default)]
+struct Entry {
+    first: Option<(i64, i64)>,
+    count: u32,
 }
 
 impl Observer for Printer<'_> {
@@ -195,6 +208,17 @@ impl Observer for Printer<'_> {
         self.rec.outcome(o);
         if let Some(n) = &mut self.notifier {
             n.event(o);
+        }
+    }
+
+    fn started(&mut self, _pid: u32) {
+        // Clocks first, nothing else between the event and the reading.
+        if let Some(e) = &mut self.entry {
+            let (cpu, mono) = (cpu_us(libc::RUSAGE_SELF), monotonic_us().unwrap_or(-1));
+            e.count += 1;
+            if e.first.is_none() && cpu >= 0 && mono >= 0 {
+                e.first = Some((cpu, mono));
+            }
         }
     }
 
@@ -277,7 +301,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         Target::Action(_) => None,
     };
     // The measurement switch: our CPU at each phase boundary of the run.
-    let mut lap = measuring().then(|| vec![("start", cpu_us(libc::RUSAGE_SELF))]);
+    let measure_on = measuring();
+    let mut lap = measure_on.then(|| vec![("start", cpu_us(libc::RUSAGE_SELF))]);
     let mut mark = |name: &'static str| {
         if let Some(l) = &mut lap {
             l.push((name, cpu_us(libc::RUSAGE_SELF)));
@@ -361,6 +386,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             n.event(&o);
         }
     }
+    let mut entry = None;
     let sandboxed = if inputs.is_empty() {
         engine::sandbox::landlock_abi().is_some()
     } else {
@@ -369,8 +395,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             rec: &mut rec,
             notifier: notifier.as_mut(),
             last: None,
+            entry: measure_on.then(Entry::default),
         };
-        exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
+        let sandboxed = exec::run(&route, &inputs, &mut obs, &cancel).sandboxed;
+        entry = obs.entry.take();
+        sandboxed
     };
     mark("exec");
     // Read now: a cancel after this point stopped nothing.
@@ -386,7 +415,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         .pair("failed", &failed.to_string()));
     let _ = io::stdout().flush();
     // Before the notifications: their cost is measured on its own.
-    if measuring() {
+    if measure_on {
         measure();
     }
     if let Some(l) = &lap {
@@ -394,10 +423,17 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             .windows(2)
             .map(|w| format!("{}_cpu_us={}", w[1].0, w[1].1 - w[0].1))
             .collect();
+        // Absent when no child emitted a valid event, never 0.
+        let entry = entry.unwrap_or_default();
+        let marks = entry.first.map_or(String::new(), |(c, w)| {
+            format!(" action_entry_observed_abs_cpu_us={c} action_entry_observed_abs_wall_us={w}")
+        });
         eprintln!(
-            "inacircle: measure run start_abs_cpu_us={} {}",
+            "inacircle: measure run pid={} start_abs_cpu_us={} {} action_entries={}{marks}",
+            std::process::id(),
             l[0].1,
-            phases.join(" ")
+            phases.join(" "),
+            entry.count
         );
     }
     // The job is closed in the history and gone from the registry, so an
@@ -438,6 +474,21 @@ fn cpu_us(who: libc::c_int) -> i64 {
     }
     let us = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec;
     us(ru.ru_utime) + us(ru.ru_stime)
+}
+
+/// `CLOCK_MONOTONIC` in microseconds: the wall clock of the measurement
+/// log, shared by every process on the machine, so the wheel's choice and
+/// the run's action entry compare directly.
+fn monotonic_us() -> io::Result<i64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec into `ts`, which outlives it.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000)
 }
 
 /// Measurement switch (`INACIRCLE_MEASURE=1`): our CPU time, the reaped
@@ -615,8 +666,13 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
 
 /// The wheel: lock, deadline, surface; then the chosen preset, if any.
 fn cmd_wheel() -> u8 {
-    let mut meter =
-        measuring().then(|| measure::Meter::new(cpu_us(libc::RUSAGE_SELF), Instant::now()));
+    let mut meter = measuring().then(|| {
+        measure::Meter::new(
+            cpu_us(libc::RUSAGE_SELF),
+            monotonic_us().unwrap_or(-1),
+            Instant::now(),
+        )
+    });
     // The deadline first: it covers the lock too (a slow runtime dir).
     if let Err(e) = default_sigalrm() {
         eprintln!("inacircle: cannot arm the deadline: {e}");

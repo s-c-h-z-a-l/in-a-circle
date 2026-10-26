@@ -98,8 +98,10 @@ fn txt_to_md_writes_into_work_only() {
     assert!(rel.is_relative());
     let produced = fs::read_to_string(work.join(rel)).unwrap();
     assert!(produced.contains("hello"));
-    assert_eq!(lines(&out, "progress").len(), 1);
-    assert_eq!(lines(&out, "progress")[0][1], "1");
+    // `progress 0` opens the run (the measured entry marker), then one per input.
+    assert!(out.starts_with("progress\t0\n"), "{out}");
+    assert_eq!(lines(&out, "progress").len(), 2);
+    assert_eq!(lines(&out, "progress")[1][1], "1");
 }
 
 #[test]
@@ -159,7 +161,8 @@ fn batch_mixed_invalid_utf8() {
     let skip = lines(&out, "skip");
     assert_eq!(skip.len(), 1);
     assert_eq!(skip[0][1..], [b.to_str().unwrap(), "unsupported"]);
-    assert_eq!(lines(&out, "progress").len(), 3);
+    assert!(out.starts_with("progress\t0\n"), "{out}");
+    assert_eq!(lines(&out, "progress").len(), 4);
     assert!(work.join("0").is_dir() && work.join("2").is_dir());
 }
 

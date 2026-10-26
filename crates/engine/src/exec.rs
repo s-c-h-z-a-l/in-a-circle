@@ -133,6 +133,13 @@ pub trait Observer {
     fn dir(&mut self, path: &Path);
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
+    /// The first valid action event of a child was read, once per child
+    /// (a two-step route has two), before the event itself is handled.
+    /// `pid` is the child's. It marks the moment the supervisor *observed*
+    /// the child running: an upper bound on when the child reached its
+    /// entry point, not that instant. A child that emits no valid event
+    /// never gets the call.
+    fn started(&mut self, _pid: u32) {}
     /// An fd the supervisor polls for `POLLIN` while an action runs;
     /// [`Observer::wake`] is called when it is readable. Asked again
     /// before every poll. After a hangup (or an error, or an invalid fd)
@@ -1121,6 +1128,8 @@ struct Supervisor<'a> {
     /// it fails and nothing of it is placed.
     offender: Option<(usize, String)>,
     cancelled: bool,
+    /// [`Observer::started`] was called for this child.
+    started: bool,
     term_at: Option<Instant>,
     killed: bool,
     /// The child is reaped: its pid, and so the group id, may now be
@@ -1250,6 +1259,7 @@ impl<'a> Supervisor<'a> {
             violation: None,
             offender: None,
             cancelled: false,
+            started: false,
             term_at: None,
             killed: false,
             reaped: false,
@@ -1469,6 +1479,10 @@ impl<'a> Supervisor<'a> {
                 return;
             }
         };
+        if !self.started {
+            self.started = true;
+            sink.obs.started(self.pid as u32);
+        }
         let again = |paths: &[PathBuf], index: usize| {
             format!(
                 "second result for {} after skip or fail",

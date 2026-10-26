@@ -609,6 +609,29 @@ fn level1_from_the_early_list_within_budget() {
         .unwrap();
     eprintln!("list_to_level1_cpu_us={us}");
     assert!(us >= 0, "never measured: {err}");
+    // The phases report CPU and wall separately; the queued commit and the
+    // flush that sent it are two points, in that order.
+    let get = |k: &str| -> i64 {
+        err.split_whitespace()
+            .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("no {k} in {err:?}"))
+            .parse()
+            .unwrap()
+    };
+    assert!(get("list_abs_cpu_us") >= get("start_abs_cpu_us"), "{err}");
+    assert!(get("list_abs_wall_us") >= get("start_abs_wall_us"), "{err}");
+    assert!(get("drop_abs_cpu_us") >= get("list_abs_cpu_us"), "{err}");
+    assert!(get("drop_abs_wall_us") >= get("list_abs_wall_us"), "{err}");
+    assert!(
+        get("main_to_flush_cpu_us") >= get("main_to_commit_cpu_us"),
+        "{err}"
+    );
+    assert!(
+        get("main_to_flush_wall_us") >= get("main_to_commit_wall_us"),
+        "{err}"
+    );
+    // Closed without a choice: no choice marker, not a zero.
+    assert!(!err.contains("choice_abs"), "{err}");
     if !cfg!(debug_assertions) {
         assert!(us <= 1000, "{us} us");
     }

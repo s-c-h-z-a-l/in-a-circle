@@ -717,3 +717,73 @@ fn wake_at_moved_in_wake_is_honoured() {
     run_with(&[&act], std::slice::from_ref(&a), &mut obs);
     assert_eq!(obs.wakes, 2);
 }
+
+/// Records the order of `started` and outcomes.
+#[derive(Default)]
+struct Starts {
+    log: Vec<String>,
+    pids: Vec<u32>,
+}
+
+impl Observer for Starts {
+    fn event(&mut self, o: &Outcome) {
+        self.log.push(match o {
+            Outcome::Done { .. } => "done".to_owned(),
+            _ => "other".to_owned(),
+        });
+    }
+    fn dir(&mut self, _: &std::path::Path) {}
+    fn progress(&mut self, _: usize, _: usize, _: f32) {
+        self.log.push("progress".to_owned());
+    }
+    fn started(&mut self, pid: u32) {
+        self.pids.push(pid);
+        self.log.push("started".to_owned());
+    }
+}
+
+/// `progress 0` first (flushed by printf), then more events: the callback
+/// runs once per child, before the first outcome, and more events do not
+/// repeat it.
+#[test]
+fn first_action_event_marks_start_once() {
+    let t = Tmp::new("started");
+    let a = t.input("a.txt", "a\n");
+    let b = t.input("b.txt", "b\n");
+    let s1 = t.script(
+        "copy",
+        &format!(
+            "printf 'progress\\t0\\n'\n{}",
+            copy_step("printf 'progress\\t0.5\\n'")
+        ),
+    );
+    let s2 = t.script("append", APPEND_STEP);
+    let (a1, a2) = (action(&s1, "mid"), action(&s2, "md"));
+    let mut obs = Starts::default();
+    run_with(&[&a1, &a2], &[a, b], &mut obs);
+    // One per child (two steps), distinct processes, each before its first
+    // outcome; the second step's first event is a `done`.
+    assert_eq!(obs.pids.len(), 2, "{:?}", obs.log);
+    assert_ne!(obs.pids[0], obs.pids[1]);
+    assert!(obs.pids.iter().all(|&p| p > 1));
+    assert_eq!(obs.log.iter().filter(|l| *l == "started").count(), 2);
+    let first_started = obs.log.iter().position(|l| l == "started").unwrap();
+    let first_done = obs.log.iter().position(|l| l == "done").unwrap();
+    assert!(first_started < first_done, "{:?}", obs.log);
+}
+
+/// A child that emits nothing valid was never observed to start: no
+/// callback (the marker is absent, not zero).
+#[test]
+fn no_child_event_means_no_start_marker() {
+    let t = Tmp::new("nostart");
+    let a = t.input("a.txt", "a\n");
+    let silent = t.script("silent", "exit 0");
+    let bad = t.script("bad", "printf 'bogus line\\n'");
+    for bin in [silent, bad] {
+        let act = action(&bin, "md");
+        let mut obs = Starts::default();
+        run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+        assert!(obs.pids.is_empty(), "{:?}", obs.log);
+    }
+}

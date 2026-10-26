@@ -147,6 +147,10 @@ fn run(inv: &Invocation, conv: Conversion) -> u8 {
     }
     let mut ev = Events::new(io::stdout().lock());
     let n = inv.inputs.len();
+    // The existing `progress 0` event, before any input work: the first
+    // line the engine reads, so it marks the child's entry for the
+    // measurement log. No new event.
+    ev.progress(0.0);
     let (mut done, mut failed) = (0, 0);
     for (i, input) in inv.inputs.iter().enumerate() {
         match process(conv, inv, i, input, &mut ev) {

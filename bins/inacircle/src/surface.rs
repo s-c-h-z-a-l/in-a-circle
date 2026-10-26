@@ -278,6 +278,8 @@ struct Surface {
     meter: Option<Meter>,
     /// Process CPU when the latest list or drop input reached `feed`.
     input_cpu: i64,
+    /// `CLOCK_MONOTONIC` at the same arrival, in µs (-1 if unreadable).
+    input_mono: i64,
 }
 
 impl Surface {
@@ -312,11 +314,20 @@ impl Surface {
             inputs: Vec::new(),
             meter: None,
             input_cpu: 0,
+            input_mono: -1,
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.conn.flush(self.deadline)
+        self.conn.flush(self.deadline)?;
+        // The first flush after the first commit sent it; the check is a
+        // field read, the clocks only run once.
+        if let Some(meter) = &mut self.meter
+            && meter.awaiting_flush()
+        {
+            meter.flushed(crate::cpu_us(libc::RUSAGE_SELF), Instant::now());
+        }
+        Ok(())
     }
 
     /// Handles every event read so far.
@@ -720,6 +731,7 @@ impl Surface {
             // machine builds a menu from it.
             if self.meter.is_some() && (list || matches!(i, Input::Drop)) {
                 self.input_cpu = crate::cpu_us(libc::RUSAGE_SELF);
+                self.input_mono = crate::monotonic_us().unwrap_or(-1);
             }
             let was_ready = m.early_ready();
             let fxs = m.on_at(self.started.elapsed(), i);
@@ -729,7 +741,7 @@ impl Surface {
                 && m.early_ready()
                 && let Some(meter) = &mut self.meter
             {
-                meter.listed(self.input_cpu);
+                meter.listed(self.input_cpu, self.input_mono);
             }
             for fx in fxs {
                 if let Some(end) = self.apply(fx, m)? {
@@ -755,7 +767,10 @@ impl Surface {
             Effect::Close => return Ok(Some(None)),
             Effect::Run(files, preset) => {
                 if let Some(meter) = &mut self.meter {
-                    meter.chose(crate::cpu_us(libc::RUSAGE_SELF));
+                    meter.chose(
+                        crate::cpu_us(libc::RUSAGE_SELF),
+                        crate::monotonic_us().unwrap_or(-1),
+                    );
                 }
                 return Ok(Some(Some((files, preset))));
             }
@@ -831,7 +846,7 @@ impl Surface {
         let copy = self.drop_action == DND_COPY;
         self.end_offer(offer, copy);
         if let Some(meter) = &mut self.meter {
-            meter.dropped(self.input_cpu);
+            meter.dropped(self.input_cpu, self.input_mono);
         }
     }
 
@@ -913,7 +928,10 @@ impl Surface {
             self.reading = None;
             self.end_offer(offer, r.is_ok() && action == DND_COPY);
             if let Some(meter) = &mut self.meter {
-                meter.dropped(crate::cpu_us(libc::RUSAGE_SELF));
+                meter.dropped(
+                    crate::cpu_us(libc::RUSAGE_SELF),
+                    crate::monotonic_us().unwrap_or(-1),
+                );
             }
             self.inputs.push(Input::DropData(r));
         }
@@ -1643,12 +1661,47 @@ mod tests {
         empty_groups(b)
     }
 
+    /// The choice's CPU and CLOCK_MONOTONIC readings live in the meter,
+    /// which `run` hands back after the surface is gone: the report built
+    /// from it still carries both, under this process's id, bracketed by
+    /// the clocks around the choice (the run's entry marker uses the same
+    /// clocks, so the two logs correlate).
+    #[test]
+    fn choice_and_entry_markers_survive_surface_teardown() {
+        let (mut s, _server) = fake_compositor();
+        s.meter = Some(Meter::new(0, 0, Instant::now()));
+        let (cpu0, mono0) = (
+            crate::cpu_us(libc::RUSAGE_SELF),
+            crate::monotonic_us().unwrap(),
+        );
+        s.apply(Effect::Run(vec![], "p".into()), &Machine::new())
+            .unwrap();
+        let (cpu1, mono1) = (
+            crate::cpu_us(libc::RUSAGE_SELF),
+            crate::monotonic_us().unwrap(),
+        );
+        // What `run` does on its way out, then the surface is dropped.
+        let meter = s.meter.take().unwrap();
+        drop(s);
+        let r = meter.report(0, -1);
+        let get = |k: &str| -> i64 {
+            r.split_whitespace()
+                .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
+                .unwrap_or_else(|| panic!("no {k} in {r}"))
+                .parse()
+                .unwrap()
+        };
+        assert!((cpu0..=cpu1).contains(&get("choice_abs_cpu_us")), "{r}");
+        assert!((mono0..=mono1).contains(&get("choice_abs_wall_us")), "{r}");
+        assert_eq!(get("pid"), i64::from(std::process::id()));
+    }
+
     /// `list_to_level1_cpu_us` starts at a list the machine took: a list
     /// with a stale tag, or one after a failure, is not counted.
     #[test]
     fn the_meter_counts_only_a_list_the_machine_accepted() {
         let (mut s, _server) = fake_compositor();
-        s.meter = Some(Meter::new(0, Instant::now()));
+        s.meter = Some(Meter::new(0, 0, Instant::now()));
         let mut m = Machine::with_menus(empty_groups, empty_targets);
         let enter = Input::DragEnter {
             x: 10.0,
