@@ -120,7 +120,8 @@ impl Tally {
 /// as they happen, so a run holds nothing proportional to its outputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
-    /// Whether Landlock confined the actions (seccomp and limits always apply).
+    /// Whether the sandbox gate passed ([`sandbox::ready`]); without it no
+    /// action ran.
     pub sandboxed: bool,
 }
 
@@ -264,7 +265,10 @@ pub fn run(
     obs: &mut dyn Observer,
     cancel: &CancelToken,
 ) -> Report {
-    let abi = sandbox::landlock_abi();
+    // The gate before anything else: no action runs without the whole
+    // sandbox, built-in or not, whether the catalog knows it from a fresh
+    // manifest run or from its cache.
+    let gate = sandbox::ready();
     let mut seen = HashSet::new();
     let uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
     let mut sink = Sink::new(obs, &uniq);
@@ -277,8 +281,8 @@ pub fn run(
         all(&mut sink, "invalid route");
         return sink.report(false);
     }
-    if refuse_without_landlock(abi.is_some(), route) {
-        all(&mut sink, "sandbox unavailable");
+    if let Err(e) = gate {
+        all(&mut sink, &format!("sandbox unavailable: {e}"));
         return sink.report(false);
     }
     let mut ok = Vec::new();
@@ -293,11 +297,6 @@ pub fn run(
                 Ok(_) => sink.fail(i, "not a regular file".to_owned()),
                 Err(e) => sink.fail(i, format!("cannot read input: {e}")),
             }
-        }
-    }
-    if abi.is_none() {
-        for &i in &ok {
-            sink.warn(i, "ran without sandbox".to_owned());
         }
     }
     let batch = route.iter().all(|a| a.batch);
@@ -335,11 +334,11 @@ pub fn run(
                 let _ = fs::create_dir_all(&g.target);
                 output::clean_stale(&g.target);
             }
-            run_group(route, &members, &g.target, abi.is_some(), cancel, &mut sink);
+            run_group(route, &members, &g.target, cancel, &mut sink);
         }
         sink.end_group();
     }
-    sink.report(abi.is_some())
+    sink.report(true)
 }
 
 /// Forwards outcomes to the observer, tracks progress.
@@ -518,7 +517,6 @@ fn run_group(
     route: &[&Action],
     members: &[usize],
     target: &Path,
-    landlock: bool,
     cancel: &CancelToken,
     sink: &mut Sink,
 ) {
@@ -553,7 +551,6 @@ fn run_group(
                 &dir,
                 &list,
                 &work.path,
-                landlock,
                 cancel,
                 sink,
             ),
@@ -577,18 +574,14 @@ fn run_group(
         // left the group (`setsid`, where seccomp does not deny it) may still
         // write its dir. So the next step's read rules are built here, from
         // the fds this check opens, and no path is resolved again.
-        let rules = if landlock {
-            match sandbox::create() {
-                Ok(r) => r,
-                Err(e) => {
-                    for &o in &step_in.origin {
-                        sink.fail(o, format!("sandbox setup failed: {e}"));
-                    }
-                    return;
+        let rules = match sandbox::create() {
+            Ok(r) => r,
+            Err(e) => {
+                for &o in &step_in.origin {
+                    sink.fail(o, format!("sandbox setup failed: {e}"));
                 }
+                return;
             }
-        } else {
-            None
         };
         let mut changed: Vec<usize> = Vec::new();
         for (j, outs) in outputs.iter().enumerate() {
@@ -599,10 +592,9 @@ fn run_group(
             for rel in outs {
                 let allowed = output::open_regular_beneath(&dir, rel)
                     .map_err(|_| "intermediate output changed".to_owned())
-                    .and_then(|fd| match &rules {
-                        Some(r) => sandbox::allow_read_fd(r, fd.as_fd(), &dir.join(rel))
-                            .map_err(|e| format!("sandbox setup failed: {e}")),
-                        None => Ok(()),
+                    .and_then(|fd| {
+                        sandbox::allow_read_fd(&rules, fd.as_fd(), &dir.join(rel))
+                            .map_err(|e| format!("sandbox setup failed: {e}"))
                     });
                 if let Err(reason) = allowed {
                     changed.push(o);
@@ -632,7 +624,7 @@ fn run_group(
             return;
         }
         step_in = next;
-        pre = rules;
+        pre = Some(rules);
     }
 }
 
@@ -919,13 +911,6 @@ fn last_line(tail: &[u8]) -> String {
         .to_owned()
 }
 
-/// Whether a route must be refused because Landlock is unavailable: only
-/// built-in actions (code we ship and trust) may run without it; a plugin
-/// anywhere in the route would run unconfined.
-fn refuse_without_landlock(landlock: bool, route: &[&Action]) -> bool {
-    !landlock && route.iter().any(|a| !a.builtin)
-}
-
 /// Where a step's Landlock ruleset comes from.
 #[derive(Debug, PartialEq, Eq)]
 enum RuleSource {
@@ -947,16 +932,10 @@ fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
     }
 }
 
-/// Whether a step must fail because it ended up without a ruleset: only
-/// built-in actions may run unconfined.
-fn refuse_unsandboxed(has_ruleset: bool, builtin: bool) -> bool {
-    !has_ruleset && !builtin
-}
-
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
-/// unfinished input is then failed as cancelled). With Landlock, an
-/// intermediate step's ruleset comes as `pre`, already granting its inputs.
+/// unfinished input is then failed as cancelled). An intermediate step's
+/// ruleset comes as `pre`, already granting its inputs.
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
@@ -965,7 +944,6 @@ fn run_step(
     dir: &Path,
     list: &Path,
     root: &Path,
-    landlock: bool,
     cancel: &CancelToken,
     sink: &mut Sink,
 ) -> Option<Vec<Vec<PathBuf>>> {
@@ -1011,23 +989,16 @@ fn run_step(
         read_exact: &exact,
         write: Some(dir),
     };
-    let ruleset = if landlock {
-        let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
-            (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| Some(r)),
-            (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
-            (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
-            (RuleSource::Build, _) => sandbox::build(&policy),
-        };
-        match built {
-            Ok(r) => r,
-            Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
-        }
-    } else {
-        None
+    let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
+        (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| r),
+        (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
+        (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
+        (RuleSource::Build, _) => sandbox::build(&policy),
     };
-    if refuse_unsandboxed(ruleset.is_some(), action.builtin) {
-        return fail_all(sink, "sandbox unavailable");
-    }
+    let ruleset = match built {
+        Ok(r) => r,
+        Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
+    };
     let total: u64 = step_in
         .paths
         .iter()
@@ -1035,8 +1006,14 @@ fn run_step(
         .map(|m| m.len())
         .sum();
     let limits = sandbox::limits_for(total);
-    let fd = ruleset.as_ref().map(|r| r.as_raw_fd());
+    let tmp = match sandbox::make_child_tmp(dir) {
+        Ok(t) => t,
+        Err(e) => return fail_all(sink, &format!("cannot create temp directory: {e}")),
+    };
+    let fd = ruleset.as_raw_fd();
     let mut cmd = Command::new(&action.bin);
+    // Inside the work dir, the one place the ruleset lets it write.
+    sandbox::configure_child_env(&mut cmd, Some(&tmp));
     cmd.arg("run")
         .arg(&action.id)
         .arg("--work")
@@ -1895,8 +1872,9 @@ mod tests {
 
     #[test]
     fn intermediate_rule_comes_from_the_checked_fd() {
-        if sandbox::landlock_abi().is_none() {
-            eprintln!("SKIPPED intermediate_rule_comes_from_the_checked_fd: no Landlock");
+        if crate::sandbox::tests::abi_or_skip("intermediate_rule_comes_from_the_checked_fd", 0)
+            .is_none()
+        {
             return;
         }
         let t = Tmp::new("ruleswap");
@@ -1963,23 +1941,132 @@ mod tests {
         assert!(t.is_cancelled(), "stays cancelled");
     }
 
+    /// Installs `body` as an executable `#!/bin/sh` script at `path`
+    /// without this process holding a writable fd on it (`cp` writes it):
+    /// a parallel test's fork could inherit one and make our exec fail
+    /// with ETXTBSY.
+    fn install_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let src = path.with_extension("src");
+        fs::write(&src, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let tmp = path.with_extension("tmp");
+        let ok = std::process::Command::new("/bin/cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&tmp, path).unwrap();
+    }
+
+    /// Copies the first input to `0/a.md` and reports it.
+    const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
+                        printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// Every action, built-in or a plugin's, runs only behind the whole
+    /// sandbox gate; a failure is a refusal of every input (never a
+    /// warning and an unconfined run), and the action never starts.
+    /// Positive control: the same action runs once the gate passes.
     #[test]
-    fn only_builtins_may_run_without_the_sandbox() {
-        let t = Tmp::new("decisions");
-        let builtin = script_action(&t, "b", "exit 0", "md");
-        let mut plugin = script_action(&t, "p", "exit 0", "md");
-        plugin.builtin = false;
-        assert!(!refuse_without_landlock(true, &[&builtin]));
-        assert!(!refuse_without_landlock(true, &[&plugin]));
-        assert!(!refuse_without_landlock(false, &[&builtin, &builtin]));
-        assert!(refuse_without_landlock(false, &[&plugin]));
-        assert!(refuse_without_landlock(false, &[&builtin, &plugin]));
-        assert!(refuse_without_landlock(false, &[&plugin, &builtin]));
-        // The same rule, once a step has (or lacks) its ruleset.
-        assert!(!refuse_unsandboxed(true, true));
-        assert!(!refuse_unsandboxed(true, false));
-        assert!(!refuse_unsandboxed(false, true));
-        assert!(refuse_unsandboxed(false, false));
+    fn every_action_needs_the_sandbox_gate() {
+        use crate::sandbox::tests::{GATE_FAILURES, abi_or_skip, inject_failure};
+        if abi_or_skip("every_action_needs_the_sandbox_gate", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("gate");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let out = t.0.join("a.md");
+        for builtin in [true, false] {
+            let bin = t.0.join(if builtin { "builtin" } else { "plugin" });
+            install_script(&bin, COPY);
+            let mut action = script_action(&t, "unused", "exit 1", "md");
+            action.bin = bin;
+            action.builtin = builtin;
+            let tok = CancelToken::install().unwrap();
+            for name in GATE_FAILURES {
+                let _g = inject_failure(name);
+                let mut seen = Seen::default();
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                // A setup error comes after the gate (which passed).
+                assert_eq!(
+                    r.sandboxed,
+                    name == "setup error",
+                    "builtin={builtin}, {name}"
+                );
+                match &seen.0[..] {
+                    [Outcome::Failed { reason, .. }] => assert!(
+                        reason.starts_with("sandbox unavailable: ")
+                            || reason.starts_with("sandbox setup failed: "),
+                        "builtin={builtin}, {name}: {reason}"
+                    ),
+                    other => panic!("builtin={builtin}, {name}: {other:?}"),
+                }
+                assert!(!out.exists(), "builtin={builtin}, {name}: the action ran");
+            }
+            let mut seen = Seen::default();
+            let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            assert!(r.sandboxed);
+            assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
+            assert_eq!(fs::read_to_string(&out).unwrap(), "a\n");
+            fs::remove_file(&out).unwrap();
+        }
+    }
+
+    /// An action the catalog knows from its cache (its manifest does not
+    /// run again) still meets the gate when it runs.
+    #[test]
+    fn a_cached_action_still_needs_the_sandbox_gate() {
+        use crate::catalog::Catalog;
+        use crate::sandbox::tests::{abi_or_skip, inject_failure};
+        if abi_or_skip("a_cached_action_still_needs_the_sandbox_gate", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("cached");
+        let dir = t.0.join("actions");
+        fs::create_dir(&dir).unwrap();
+        let cache = t.0.join("cache/catalog");
+        install_script(
+            &dir.join("conv"),
+            &format!(
+                "if [ \"$1\" = --manifest ]; then\n\
+                 printf 'inacircle-manifest 0\\naction\\tx.conv\\tfamily=x\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=C\\tgroup=g\\tcost=1\\tlossy=no\\tbatch=yes\\n'\n\
+                 exit 0\nfi\n{COPY}"
+            ),
+        );
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        // The manifest runs (sandboxed) and the cache is written.
+        let warm = Catalog::load_from(&[(dir.clone(), true)], &cache);
+        assert!(warm.get("x.conv").is_some());
+        assert!(cache.exists());
+        let tok = CancelToken::install().unwrap();
+        for name in ["no landlock", "root"] {
+            let _g = inject_failure(name);
+            // No manifest could run now: the action comes from the cache.
+            let cat = Catalog::load_from(&[(dir.clone(), true)], &cache);
+            let action = cat.get("x.conv").expect("known from the cache");
+            let mut seen = Seen::default();
+            let r = run(&[action], std::slice::from_ref(&input), &mut seen, &tok);
+            assert!(!r.sandboxed, "{name}");
+            assert!(
+                matches!(&seen.0[..], [Outcome::Failed { reason, .. }] if reason.starts_with("sandbox unavailable: ")),
+                "{name}: {:?}",
+                seen.0
+            );
+            assert!(!t.0.join("a.md").exists(), "{name}: the cached action ran");
+        }
+        // Control: the same cached action runs behind a passing gate.
+        let cat = Catalog::load_from(&[(dir, true)], &cache);
+        let mut seen = Seen::default();
+        run(
+            &[cat.get("x.conv").unwrap()],
+            std::slice::from_ref(&input),
+            &mut seen,
+            &tok,
+        );
+        assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
     }
 
     #[test]
@@ -2082,7 +2169,8 @@ mod tests {
         assert_eq!(left.len(), 2, "only the input and the script: {left:?}");
     }
 
-    /// Child side of the no-Landlock wiring tests; a no-op without the env.
+    /// Child side of the no-Landlock wiring test (the kernel itself has no
+    /// Landlock there, no injection); a no-op without the env.
     #[test]
     fn helper_no_landlock() {
         let (Some(dir), Some(case)) = (
@@ -2111,41 +2199,28 @@ mod tests {
         );
         let tok = CancelToken::install().unwrap();
         let mut seen = Seen::default();
-        match case.to_str().unwrap() {
-            "plugin" => {
-                action.builtin = false;
-                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
-                assert!(!r.sandboxed);
-                assert_eq!(
-                    seen.0,
-                    [Outcome::Failed {
-                        input: input.clone(),
-                        reason: "sandbox unavailable".to_owned()
-                    }]
-                );
-                assert!(!t.0.join("a.md").exists(), "a plugin ran unconfined");
-            }
-            "builtin" => {
-                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
-                assert!(!r.sandboxed);
-                assert_eq!(
-                    seen.0[0],
-                    Outcome::Warned {
-                        input: input.clone(),
-                        message: "ran without sandbox".to_owned()
-                    }
-                );
-                assert!(matches!(seen.0[1], Outcome::Done { .. }), "{:?}", seen.0);
-                assert_eq!(fs::read_to_string(t.0.join("a.md")).unwrap(), "a\n");
-            }
+        // Built-in or not, no action runs without Landlock.
+        action.builtin = match case.to_str().unwrap() {
+            "plugin" => false,
+            "builtin" => true,
             other => panic!("unknown case {other}"),
-        }
+        };
+        let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(!r.sandboxed);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "sandbox unavailable: Landlock unavailable".to_owned()
+            }]
+        );
+        assert!(!t.0.join("a.md").exists(), "an action ran unconfined");
         // SAFETY: skips the harness' teardown, which the filter may affect.
         unsafe { libc::_exit(0) };
     }
 
     #[test]
-    fn without_landlock_plugins_are_refused_and_builtins_warn() {
+    fn sandbox_without_landlock_refuses_every_action() {
         if !crate::sandbox::tests::seccomp_or_skip("without_landlock") {
             return;
         }

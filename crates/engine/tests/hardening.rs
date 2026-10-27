@@ -1082,13 +1082,35 @@ fn ruleset(exec: &[PathBuf], write: &Path) -> Ruleset {
         read_exact: &[],
         write: Some(write),
     };
-    sandbox::build(&policy)
-        .unwrap()
-        .expect("Landlock available")
+    sandbox::build(&policy).unwrap()
+}
+
+/// The least restrictive ruleset the API can express (everything beneath
+/// `/` writable; the scopes and the network stay handled), for the seccomp
+/// tests: every spawn now runs under a ruleset. Panics when the gate
+/// refuses (Landlock ABI < 6 or a privileged parent): nothing runs then.
+fn open_ruleset() -> Ruleset {
+    sandbox::build(&Policy {
+        exec: &[],
+        read: &[],
+        read_exact: &[],
+        write: Some(Path::new("/")),
+    })
+    .expect("the sandbox gate passes (Landlock ABI >= 6, unprivileged)")
+}
+
+/// The ruleset fd `sb` applies, opening an [`open_ruleset`] into `keep`
+/// for `Sb::On(None)`; `None` for `Sb::Off`.
+fn sandbox_fd(sb: Sb, keep: &mut Option<Ruleset>) -> Option<RawFd> {
+    match sb {
+        Sb::Off => None,
+        Sb::On(Some(fd)) => Some(fd),
+        Sb::On(None) => Some(keep.insert(open_ruleset()).as_raw_fd()),
+    }
 }
 
 /// How a probe runs: unsandboxed (the control), or through
-/// `apply_in_child` with an optional Landlock ruleset.
+/// `apply_in_child` with a Landlock ruleset (`None`: [`open_ruleset`]).
 #[derive(Clone, Copy, Debug)]
 enum Sb {
     Off,
@@ -1103,16 +1125,19 @@ where
     B: Fn() -> io::Result<S> + Send + Sync + 'static,
     A: Fn(S) -> io::Result<()> + Send + Sync + 'static,
 {
+    let mut keep = None;
+    let fd = sandbox_fd(sb, &mut keep);
     let mut cmd = Command::new("/bin/true");
     cmd.stdin(Stdio::null());
     // SAFETY: apply_in_child and every probe below only make
     // async-signal-safe calls (raw syscalls on stack or pre-built data);
-    // a ruleset fd is kept open by the caller for the whole spawn.
+    // a ruleset fd is kept open (by the caller, or `keep`) for the whole
+    // spawn.
     unsafe {
         cmd.pre_exec(move || {
             let state = before()?;
-            if let Sb::On(rs) = sb {
-                sandbox::apply_in_child(rs, &NO_LIMIT)?;
+            if let Some(fd) = fd {
+                sandbox::apply_in_child(fd, &NO_LIMIT)?;
             }
             after(state)
         });
@@ -1348,6 +1373,22 @@ fn seccomp_denied_syscalls_reach_the_kernel_only_without_the_filter() {
         eprintln!("note: {n}");
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // On a runner qualified for it, an unprovable control is a failure
+    // here, not a line for a log grep (parallel tests interleave output).
+    assert!(
+        !kernel_controls_required() || notes.is_empty(),
+        "unprovable kernel controls under {REQUIRE_KERNEL_CONTROLS}=1:\n{}",
+        notes.join("\n")
+    );
+}
+
+/// Set on the native CI runners, which allow unprivileged user namespaces
+/// with capabilities and unprivileged io_uring/bpf answers: every kernel
+/// control must be provable there.
+const REQUIRE_KERNEL_CONTROLS: &str = "INACIRCLE_REQUIRE_KERNEL_CONTROLS";
+
+fn kernel_controls_required() -> bool {
+    std::env::var_os(REQUIRE_KERNEL_CONTROLS).is_some_and(|v| v == "1")
 }
 
 // ---- sockets ----
@@ -1828,15 +1869,18 @@ fn run_child(mode: &str, sb: Sb, work: &Path, canary: RawFd) -> String {
         .env(CHILD_ENV, mode)
         .env(WORK_ENV, work)
         .stdin(Stdio::null());
+    let mut keep = None;
+    let fd = sandbox_fd(sb, &mut keep);
     // SAFETY: dup2 and apply_in_child are async-signal-safe; the ruleset
-    // and canary fds are kept open by the caller for the whole spawn.
+    // (by the caller, or `keep`) and canary fds stay open for the whole
+    // spawn.
     unsafe {
         cmd.pre_exec(move || {
             if canary >= 0 && libc::dup2(canary, CANARY_FD) < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if let Sb::On(rs) = sb {
-                sandbox::apply_in_child(rs, &NO_LIMIT)?;
+            if let Some(fd) = fd {
+                sandbox::apply_in_child(fd, &NO_LIMIT)?;
             }
             Ok(())
         });
@@ -1855,6 +1899,139 @@ fn run_child(mode: &str, sb: Sb, work: &Path, canary: RawFd) -> String {
             String::from_utf8_lossy(&out.stderr)
         ),
     }
+}
+
+// ---- real privileged parents ----
+
+/// Set on the native CI runners (passwordless `sudo -n`): the privileged
+/// cases must run there. Elsewhere the test is skipped, so a developer's
+/// suite never runs anything as root unasked.
+const REQUIRE_PRIVILEGED: &str = "INACIRCLE_REQUIRE_PRIVILEGED_TEST";
+const PRIV_ENV: &str = "INACIRCLE_HARDENING_PRIV";
+const PRIV_IDS_ENV: &str = "INACIRCLE_HARDENING_IDS";
+const PRIV_TAG: &str = "HARDENING-PRIV ";
+
+/// The gate against real (not injected) privileged parents: this binary
+/// re-run as root by `sudo -n`, then left as root, with a saved uid 0
+/// (setuid-like), or as the user with permitted capabilities kept
+/// (`PR_SET_KEEPCAPS`). Each is refused and no ruleset is built. Positive
+/// control: the same root child, fully dropped to the user, passes.
+#[test]
+fn sandbox_gate_refuses_real_privileged_parents() {
+    if std::env::var_os(REQUIRE_PRIVILEGED).is_none_or(|v| v != "1") {
+        eprintln!(
+            "SKIPPED sandbox_gate_refuses_real_privileged_parents: {REQUIRE_PRIVILEGED} unset"
+        );
+        return;
+    }
+    assert!(landlock_or_skip(
+        "sandbox_gate_refuses_real_privileged_parents"
+    ));
+    let exe = std::env::current_exe().unwrap();
+    // SAFETY: getuid/getgid have no preconditions.
+    let ids = format!("{}:{}", unsafe { libc::getuid() }, unsafe {
+        libc::getgid()
+    });
+    for (mode, want) in [
+        ("root", "refused"),
+        ("saved-root", "refused"),
+        ("kept-caps", "refused"),
+        ("dropped", "passed"),
+    ] {
+        let out = Command::new("sudo")
+            .arg("-n")
+            .arg("env")
+            .arg(format!("{PRIV_ENV}={mode}"))
+            .arg(format!("{PRIV_IDS_ENV}={ids}"))
+            .arg(&exe)
+            .args([
+                "--exact",
+                "privileged_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let got = stdout
+            .lines()
+            .find_map(|l| l.split_once(PRIV_TAG).map(|(_, r)| r.to_owned()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{mode}: no report ({}): {stdout}{}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                )
+            });
+        assert!(got.starts_with(want), "{mode}: {got}");
+    }
+}
+
+/// Child side of `sandbox_gate_refuses_real_privileged_parents`, run as
+/// root; a no-op without its env.
+#[test]
+fn privileged_child() {
+    let Ok(mode) = std::env::var(PRIV_ENV) else {
+        return;
+    };
+    let ids = std::env::var(PRIV_IDS_ENV).unwrap();
+    let (uid, gid) = ids.split_once(':').unwrap();
+    let (uid, gid): (libc::uid_t, libc::gid_t) = (uid.parse().unwrap(), gid.parse().unwrap());
+    let r = (|| -> io::Result<String> {
+        // SAFETY: the id calls and prctl take plain integers; glibc's
+        // setres[ug]id apply to every thread of this process.
+        unsafe {
+            match mode.as_str() {
+                "root" => {}
+                "saved-root" => {
+                    cvt(libc::setresgid(gid, gid, gid) as c_long)?;
+                    cvt(libc::setresuid(uid, uid, 0) as c_long)?;
+                }
+                "kept-caps" => {
+                    cvt(libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) as c_long)?;
+                    cvt(libc::setresgid(gid, gid, gid) as c_long)?;
+                    cvt(libc::setresuid(uid, uid, uid) as c_long)?;
+                }
+                "dropped" => {
+                    cvt(libc::setgroups(0, std::ptr::null()) as c_long)?;
+                    cvt(libc::setresgid(gid, gid, gid) as c_long)?;
+                    cvt(libc::setresuid(uid, uid, uid) as c_long)?;
+                }
+                m => return Err(io::Error::other(format!("unknown mode {m}"))),
+            }
+        }
+        let snap = sandbox::PrivilegeSnapshot::current()?;
+        let policy = Policy {
+            exec: &[],
+            read: &[],
+            read_exact: &[],
+            write: None,
+        };
+        match (
+            sandbox::validate_privilege(&snap),
+            sandbox::ready(),
+            sandbox::build(&policy),
+        ) {
+            (Ok(()), Ok(_), Ok(_)) => Ok(format!("passed {snap:?}")),
+            (Err(e), Err(g), Err(b))
+                if [e.kind(), g.kind(), b.kind()] == [io::ErrorKind::PermissionDenied; 3] =>
+            {
+                Ok(format!("refused {e} ({snap:?})"))
+            }
+            (v, g, b) => Ok(format!(
+                "inconsistent: validate {v:?}, ready {:?}, build {:?} ({snap:?})",
+                g.map(|_| ()),
+                b.map(|_| ())
+            )),
+        }
+    })();
+    match r {
+        Ok(s) => println!("{PRIV_TAG}{s}"),
+        Err(e) => println!("{PRIV_TAG}error {e}"),
+    }
+    let _ = io::stdout().flush();
+    std::process::exit(0);
 }
 
 /// The child side of `run_child`; a no-op in a normal test run.

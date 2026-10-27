@@ -394,7 +394,7 @@ fn servers(
 
 /// Body of a run that may have had no Landlock.
 fn plain_body(b: &str) -> bool {
-    b.is_empty() || b == "Ran without sandbox."
+    b.is_empty() || b == "Sandbox unavailable."
 }
 
 #[test]

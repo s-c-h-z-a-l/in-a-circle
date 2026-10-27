@@ -152,8 +152,9 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
             t
         }
     };
+    // The sandbox gate refused the run: no action started.
     if !s.sandboxed {
-        body.push("Ran without sandbox.".to_owned());
+        body.push("Sandbox unavailable.".to_owned());
     }
     (fit(&summary, false), body_of(&body, markup))
 }
@@ -824,13 +825,13 @@ mod tests {
         s.lossy = true;
         assert_eq!(
             lines(&final_text(&s, false).1),
-            ["Formatting was lost.", "b.txt: bad", "Ran without sandbox."]
+            ["Formatting was lost.", "b.txt: bad", "Sandbox unavailable."]
         );
         let mut s = summary(&[done("/d/a.txt", "/d/a.md")]);
         s.sandboxed = false;
         assert_eq!(
             final_text(&s, false),
-            ("a.md".into(), "Ran without sandbox.".into())
+            ("a.md".into(), "Sandbox unavailable.".into())
         );
     }
 

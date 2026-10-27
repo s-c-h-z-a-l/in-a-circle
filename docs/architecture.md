@@ -78,9 +78,10 @@ are in `CLAUDE.md`.
   the system directories and the binary), and `RLIMIT_FSIZE` 0 (a manifest
   writes only to its stdout pipe, which `FSIZE` does not cover, and may
   write no file). Its deadline, 64 KiB output limit and group kill are
-  unchanged. Without Landlock a plugin's manifest does not run ("sandbox
-  unavailable"; not cached, so a later start retries); a built-in one runs
-  under seccomp and the rlimits.
+  unchanged. It gets the same clean environment as `run`, with
+  `TMPDIR=/nonexistent`. Without the whole sandbox no manifest runs,
+  built-in or not ("sandbox unavailable"; not cached, so a later start
+  retries).
 - A whole catalog refresh shares one 10 s budget: each manifest gets
   min(2 s, the rest of the budget), so a run of hanging binaries cannot
   hold a start for N x 2 s. A binary cut by it keeps its old cache entry
@@ -169,17 +170,17 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
 Every action runs sandboxed, set up in the child between `fork` and
 `execve`, after the child's own `setsid`:
 
-- **Landlock** at the best ABI the kernel offers, handling every right
-  that ABI knows. Read and execute: `/usr`, `/lib`, `/lib64`,
+- **Landlock** at the best ABI the kernel offers, at least 6, handling
+  every right that ABI knows. Read and execute: `/usr`, `/lib`, `/lib64`,
   `/etc/ld.so.cache` (those that exist) and the action binary. Read: the
-  inputs and the input list. Everything inside the step's temp dir.
+  inputs and the input list. Everything inside the step's work dir.
   Nothing else: no `/tmp`, `/proc`, `/dev` or `/etc`. Also denied: TCP
   (ABI 4) and UDP (ABI 10) on existing sockets, pathname unix sockets
   outside the temp dir (ABI 9), abstract unix sockets and signals outside
   the sandbox (ABI 6). File names outside can still be probed (`stat`).
 - **seccomp**, one policy for x86_64 and aarch64 (each with its own
-  syscall numbers), always installed, also without Landlock; another
-  architecture runs no action. Denied: `socket` and `socketpair` for every
+  syscall numbers), always installed; another architecture runs no
+  action. Denied: `socket` and `socketpair` for every
   family, `AF_UNIX` included (`EACCES`); metadata changes (chmod, chown,
   utime, xattr, `file_setattr`); every ioctl but a few queries
   (`FIONREAD`, `TCGETS`, `TIOCGWINSZ`) and the ioctl forms of allowed
@@ -194,8 +195,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   descendant stay in one killable group. A syscall through another ABI
   (i386, AArch32) kills the process; x32 gets `EPERM`.
 - `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
-- **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB,
-  with or without Landlock. It is the last net against a faulty or missing
+- **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB.
+  It is the last net against a faulty or missing
   per-family limit, not the protection itself; over it an allocation fails
   and the input fails: a Rust action (allocation-failure line, then
   `SIGABRT`) with `out of memory (limit N MiB)`, any other action with its
@@ -203,10 +204,20 @@ Every action runs sandboxed, set up in the child between `fork` and
 - Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
   `RLIMIT_DATA` is per process, so each child of a forking action gets the
   cap again.
-- Without Landlock, actions from the user or plugin directory do not run
-  ("sandbox unavailable"); built-in actions run with a "ran without
-  sandbox" warning, and the history records `sandbox=no`. The same holds
-  for `--manifest`: a plugin's does not run, a built-in one does.
+- **Clean environment**: the parent's is cleared; the child gets only
+  `PATH=/usr/bin:/bin`, `LC_ALL` and `LANG` `C.UTF-8`, and `TMPDIR` (an
+  action's private `<work>/tmp`, mode 0700). No session socket, bus,
+  display, token or loader variable is passed through.
+- **Mandatory**: nothing runs without the whole sandbox, built-in actions
+  and manifests included, and an action the catalog knows from its cache
+  meets the same gate when it runs. The gate needs Landlock ABI >= 6 (the
+  signal and abstract unix socket scopes) and a parent that is not root,
+  has one real/effective/saved/filesystem uid and one gid, and holds no
+  permitted, effective or ambient capability (an inheritable one alone is
+  harmless under `no_new_privs` and is what systemd gives every session;
+  the bounding set does not count). Nothing is dropped instead. Otherwise
+  every input fails with "sandbox unavailable: <why>", and the history
+  records `sandbox=no`.
 
 ## Classifier
 
@@ -290,8 +301,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   problem lines `<input>: <reason>` (failures first), then `… and <r>
   more`. Nothing finished: `Nothing converted`. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. A lossy action that produced output starts
-  the body with `Formatting was lost.`; a run without the sandbox ends it
-  with `Ran without sandbox.`. Text is cut to 200 characters on a UTF-8
+  the body with `Formatting was lost.`; a run the sandbox gate refused ends
+  it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
   so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`

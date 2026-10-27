@@ -124,7 +124,7 @@ impl Catalog {
                     if let Some(i) = cached.iter().position(|e| e.bin == bin) {
                         return Some(cached.swap_remove(i));
                     }
-                    match run_manifest(&bin.path, bin.builtin, refresh_end) {
+                    match run_manifest(&bin.path, refresh_end) {
                         Some(lines) => Some(Entry { bin, lines }),
                         None => cached
                             .iter()
@@ -315,8 +315,8 @@ enum Fail {
 /// binary yields no lines (message on stderr); `None` means a transient
 /// failure: nothing new is cached, and the caller keeps the binary's old
 /// entry, if any.
-fn run_manifest(bin: &Path, builtin: bool, refresh_end: Instant) -> Option<Vec<Line>> {
-    match manifest_lines(bin, builtin, refresh_end) {
+fn run_manifest(bin: &Path, refresh_end: Instant) -> Option<Vec<Line>> {
+    match manifest_lines(bin, refresh_end) {
         Ok(lines) => Some(lines),
         Err(Fail::Deterministic(why)) => {
             eprintln!("inacircle: {}: {why}; skipped", bin.display());
@@ -335,10 +335,10 @@ fn step_deadline(now: Instant, refresh_end: Instant) -> Option<Instant> {
     (now < refresh_end).then(|| (now + DEADLINE).min(refresh_end))
 }
 
-fn manifest_lines(bin: &Path, builtin: bool, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
+fn manifest_lines(bin: &Path, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
     let deadline = step_deadline(Instant::now(), refresh_end)
         .ok_or_else(|| Fail::Transient("refresh budget spent".to_owned()))?;
-    let out = capture(bin, builtin, deadline)?;
+    let out = capture(bin, deadline)?;
     let bad = |why: String| Fail::Deterministic(why);
     let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
     match manifest::parse(&text, MANIFEST_MAGIC) {
@@ -360,14 +360,13 @@ fn manifest_lines(bin: &Path, builtin: bool, refresh_end: Instant) -> Result<Vec
 
 /// Stdout of `<bin> --manifest` within `deadline` and the size limit, run
 /// in the sandbox of `run` but narrower: Landlock lets it read and execute
-/// only the system directories and the binary, with no input and no
-/// writable directory. A plugin's code is not trusted, so without Landlock
-/// its manifest does not run (transient: a later start retries); a
-/// built-in one then runs under seccomp and the rlimits only, as a built-in
-/// `run` does. The child's whole process group is killed and reaped on
-/// failure.
-fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail> {
-    let mut child = spawn_manifest(bin, builtin)?;
+/// only the system directories and the binary, with no input, no writable
+/// directory and a clean environment. Without the whole sandbox (see
+/// [`sandbox::ready`](crate::sandbox::ready)) no manifest runs, built-in
+/// or not (transient: a later start retries). The child's whole process
+/// group is killed and reaped on failure.
+fn capture(bin: &Path, deadline: Instant) -> Result<Vec<u8>, Fail> {
+    let mut child = spawn_manifest(bin)?;
     let result = read_limited(&mut child, deadline);
     if result.is_err() {
         kill_group(&child);
@@ -382,7 +381,7 @@ fn capture(bin: &Path, builtin: bool, deadline: Instant) -> Result<Vec<u8>, Fail
 }
 
 /// Starts `<bin> --manifest` in the manifest sandbox (see [`capture`]).
-fn spawn_manifest(bin: &Path, builtin: bool) -> Result<std::process::Child, Fail> {
+fn spawn_manifest(bin: &Path) -> Result<std::process::Child, Fail> {
     use crate::sandbox::{self, Limits, Policy};
     use std::os::unix::process::CommandExt;
     // Paths that do not exist are skipped by the ruleset builder.
@@ -398,18 +397,17 @@ fn spawn_manifest(bin: &Path, builtin: bool) -> Result<std::process::Child, Fail
         write: None,
     };
     let ruleset = sandbox::build(&policy)
-        .map_err(|e| Fail::Transient(format!("sandbox setup failed: {e}")))?;
-    if !manifest_policy_allows(builtin, ruleset.is_some()) {
-        return Err(Fail::Transient("sandbox unavailable".to_owned()));
-    }
+        .map_err(|e| Fail::Transient(format!("sandbox unavailable: {e}")))?;
     // A manifest writes only to its stdout pipe, to which RLIMIT_FSIZE does
     // not apply, and may write no file: 0 makes any file write fail.
     let limits = Limits {
         fsize: 0,
         data: sandbox::data_cap(sandbox::total_ram()),
     };
-    let fd = ruleset.as_ref().map(|r| r.as_raw_fd());
+    let fd = ruleset.as_raw_fd();
     let mut cmd = Command::new(bin);
+    // No writable place, so no usable TMPDIR.
+    sandbox::configure_child_env(&mut cmd, None);
     cmd.arg("--manifest")
         .current_dir("/")
         .stdin(Stdio::null())
@@ -429,13 +427,6 @@ fn spawn_manifest(bin: &Path, builtin: bool) -> Result<std::process::Child, Fail
         .map_err(|e| Fail::Transient(format!("cannot run: {e}")))?;
     drop(ruleset);
     Ok(child)
-}
-
-/// Whether a manifest may run: a plugin's only inside Landlock (its code is
-/// not trusted, like its `run`); a built-in one also without it, under
-/// seccomp and the rlimits only, as a built-in `run` does.
-fn manifest_policy_allows(builtin: bool, landlock: bool) -> bool {
-    builtin || landlock
 }
 
 fn kill_group(child: &std::process::Child) {
@@ -740,11 +731,34 @@ mod tests {
         }
     }
 
+    /// Every manifest, built-in or a plugin's, runs only behind the whole
+    /// sandbox gate: no Landlock, ABI below the floor, a setup error or a
+    /// privileged parent each keep it from running (its actions do not
+    /// load). Positive control: the same manifest loads once the gate
+    /// passes again (the refusal is transient, not cached).
     #[test]
-    fn manifest_policy_without_landlock() {
-        assert!(manifest_policy_allows(true, false));
-        assert!(!manifest_policy_allows(false, false));
-        assert!(manifest_policy_allows(false, true));
+    fn every_manifest_needs_the_sandbox_gate() {
+        use crate::sandbox::tests::{GATE_FAILURES, abi_or_skip, inject_failure};
+        if abi_or_skip("every_manifest_needs_the_sandbox_gate", 0).is_none() {
+            return;
+        }
+        for builtin in [true, false] {
+            for name in GATE_FAILURES {
+                let f = Fix::new("mf-gate");
+                let d = f.dir("a");
+                manifest_script(&d.join("one"), &[act("x.a", "A")]);
+                {
+                    let _g = inject_failure(name);
+                    let c = Catalog::load_from(&[(d.clone(), builtin)], &f.cache());
+                    assert!(
+                        c.get("x.a").is_none(),
+                        "builtin={builtin}, {name}: the manifest ran"
+                    );
+                }
+                let c = Catalog::load_from(&[(d, builtin)], &f.cache());
+                assert!(c.get("x.a").is_some(), "builtin={builtin}, {name}: control");
+            }
+        }
     }
 
     #[test]
@@ -1147,7 +1161,7 @@ mod tests {
         let mut plain = Vec::new();
         for i in 0..WARMUP + RUNS {
             let t = Instant::now();
-            let mut c = spawn_manifest(&bin, true).ok().expect("sandboxed spawn");
+            let mut c = spawn_manifest(&bin).ok().expect("sandboxed spawn");
             let spawned = t.elapsed();
             let out = read_limited(&mut c, deadline()).ok().expect("output");
             wait_until(&mut c, deadline());

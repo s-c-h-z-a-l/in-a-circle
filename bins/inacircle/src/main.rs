@@ -388,7 +388,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     }
     let mut entry = None;
     let sandboxed = if inputs.is_empty() {
-        engine::sandbox::landlock_abi().is_some()
+        engine::sandbox::ready().is_ok()
     } else {
         let mut obs = Printer {
             running: &mut running,

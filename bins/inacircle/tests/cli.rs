@@ -79,10 +79,11 @@ impl Out {
         let n = |k| s[0].get(k).unwrap().parse().unwrap();
         (n("done"), n("skipped"), n("failed"))
     }
+    /// Whether the sandbox gate refused the run (no Landlock ABI >= 6).
     fn unsandboxed(&self) -> bool {
-        self.pairs("warn")
+        self.pairs("fail")
             .iter()
-            .any(|(_, m)| m == "ran without sandbox")
+            .any(|(_, m)| m.starts_with("sandbox unavailable"))
     }
 }
 
@@ -641,10 +642,7 @@ fn mid_step(e: &Env, after: &str) {
 
 /// True (and a note printed) when plugins could not run for lack of Landlock.
 fn skip_no_sandbox(test: &str, o: &Out) -> bool {
-    if o.pairs("fail")
-        .iter()
-        .any(|(_, m)| m == "sandbox unavailable")
-    {
+    if o.unsandboxed() {
         assert!(
             !landlock_required(),
             "{test}: Landlock unavailable but INACIRCLE_REQUIRE_LANDLOCK=1"
@@ -703,6 +701,101 @@ fn two_step_intermediate_symlink_swap_is_refused() {
             f.path().display()
         );
     }
+}
+
+/// Neither a manifest nor an action sees the parent's environment: no
+/// session socket, bus, display, loader switch or token, only the fixed
+/// PATH and locale, and for an action its own TMPDIR (its work dir).
+#[test]
+fn sandbox_children_get_a_clean_environment() {
+    let e = Env::with_actions("cleanenv", &[]);
+    let src = e.root.join("envdump.src");
+    // The manifest has no file to write: its verdict goes into the label.
+    fs::write(
+        &src,
+        "#!/bin/sh\n\
+         if [ \"$1\" = --manifest ]; then\n\
+         l=clean\n\
+         for v in SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY LD_PRELOAD \\\n\
+           INACIRCLE_FAKE_TOKEN HOME XDG_RUNTIME_DIR; do\n\
+           eval \"[ -z \\\"\\${$v+x}\\\" ]\" || l=leaked-$v\n\
+         done\n\
+         [ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C.UTF-8 ] && [ \"$LANG\" = C.UTF-8 ] \\\n\
+           && [ \"$TMPDIR\" = /nonexistent ] || l=badfixed\n\
+         printf 'inacircle-manifest 0\\naction\\tp.envdump\\tfamily=p\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=env-%s\\tgroup=p\\tcost=1\\tlossy=no\\tbatch=yes\\n' \"$l\"\n\
+         exit 0\nfi\n\
+         work=\"$4\"; list=\"$6\"\n\
+         in=$(head -n1 \"$list\"); mkdir -p \"$work/0\"; env > \"$work/0/env.md\"\n\
+         printf 'done\\t%s\\t0/env.md\\n' \"$in\"\n",
+    )
+    .unwrap();
+    let tmp = e.root.join("actions/.envdump.tmp");
+    assert!(
+        Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, e.root.join("actions/envdump")).unwrap();
+    let a = e.file("doc.txt", b"text\n");
+    let o = parse_out(
+        e.cmd(&["run", "--action", "p.envdump", "doc.txt"])
+            .env("SSH_AUTH_SOCK", "/run/user/1000/ssh-canary")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/canary-bus")
+            .env("WAYLAND_DISPLAY", "wayland-canary")
+            // A real library, so the loader of inacircle itself stays quiet.
+            .env("LD_PRELOAD", "libc.so.6")
+            .env("INACIRCLE_FAKE_TOKEN", "token-canary-4711")
+            .env("TMPDIR", "/tmp/parent-canary")
+            .output()
+            .unwrap(),
+    );
+    if skip_unsandboxed("sandbox_children_get_a_clean_environment", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("doc.md");
+    assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
+    let cache = fs::read_dir(e.root.join("cache/inacircle"))
+        .unwrap()
+        .map(|d| fs::read_to_string(d.unwrap().path()).unwrap_or_default())
+        .collect::<String>();
+    assert!(cache.contains("label=env-clean"), "manifest env: {cache}");
+    let env = fs::read_to_string(&out).unwrap();
+    for canary in [
+        "SSH_AUTH_SOCK",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "WAYLAND_DISPLAY",
+        "LD_PRELOAD",
+        "token-canary-4711",
+        "parent-canary",
+        "HOME=",
+        "XDG_",
+        "INACIRCLE_",
+    ] {
+        assert!(!env.contains(canary), "{canary} leaked: {env}");
+    }
+    let vars: Vec<&str> = env.lines().collect();
+    for want in ["PATH=/usr/bin:/bin", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"] {
+        assert!(vars.contains(&want), "{want} missing: {env}");
+    }
+    let tmpdir = vars
+        .iter()
+        .find_map(|v| v.strip_prefix("TMPDIR="))
+        .unwrap_or_else(|| panic!("no TMPDIR: {env}"));
+    let tmpdir = Path::new(tmpdir);
+    assert!(
+        tmpdir.ends_with("tmp")
+            && tmpdir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n.to_string_lossy().starts_with("step")),
+        "TMPDIR is not <work>/tmp: {}",
+        tmpdir.display()
+    );
 }
 
 // ---- contract and sandbox through inacircle-testaction ----

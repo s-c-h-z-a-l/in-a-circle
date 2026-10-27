@@ -1263,20 +1263,24 @@ pub(crate) mod tests {
     }
 
     /// Runs one test of this binary in a child under the seccomp filter
-    /// (which denies chmod), with `INACIRCLE_HELPER` set.
+    /// (which denies chmod) and an open ruleset, with `INACIRCLE_HELPER` set.
     fn run_helper_under_seccomp(name: &str, dir: &Path) {
+        use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         let limits = crate::sandbox::limits_for(0);
+        let open = crate::sandbox::tests::open_ruleset();
+        let fd = open.as_raw_fd();
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env("INACIRCLE_HELPER", dir)
             .stdin(std::process::Stdio::null());
-        // SAFETY: apply_in_child only makes async-signal-safe calls; no
-        // ruleset fd is passed.
+        // SAFETY: apply_in_child only makes async-signal-safe calls; `open`
+        // outlives the spawn.
         unsafe {
-            cmd.pre_exec(move || crate::sandbox::apply_in_child(None, &limits));
+            cmd.pre_exec(move || crate::sandbox::apply_in_child(fd, &limits));
         }
         let out = cmd.output().unwrap();
+        drop(open);
         assert!(
             out.status.success(),
             "helper failed: {}{}",
