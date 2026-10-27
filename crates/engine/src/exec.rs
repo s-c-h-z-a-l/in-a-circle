@@ -56,10 +56,19 @@ const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// Bytes read from one pipe per poll wakeup, so a flood cannot starve the
 /// cancel signalfd or the exit pidfd.
 const READ_QUOTA: usize = 64 * 1024;
-/// How long the group may take to be gone after its SIGKILL.
-const GROUP_GONE: Duration = Duration::from_secs(1);
+/// The cleanup after a child's exit, from its group's SIGKILL: the leader
+/// reaped, no process of the group left, and its pipes at EOF. A killed
+/// process is gone in milliseconds unless it sits in an uninterruptible
+/// kernel wait (a hung filesystem); 1 s covers a loaded machine with a wide
+/// margin and stays short next to the 5 s `TERM_GRACE`. Past it nothing of
+/// the process is accepted: its inputs fail, nothing is placed.
+pub(crate) const GROUP_GONE: Duration = Duration::from_secs(1);
+/// Longest sleep between two probes of a group that is not gone yet:
+/// short next to `GROUP_GONE`, and few wakeups while a stuck one is waited
+/// for.
+const GROUP_PROBE_MAX: Duration = Duration::from_millis(50);
 /// Poll period when the kernel has no pidfd (before Linux 5.3).
-const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
+pub(crate) const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
 
 /// What became of one input. One input can have several (warnings, or
 /// several outputs).
@@ -570,10 +579,10 @@ fn run_group(
         }
         // Each output was checked when its `done` arrived, but the action
         // could swap it for a symlink afterwards. Its whole process group is
-        // gone now (`outputs` is `None` otherwise), but a descendant that
-        // left the group (`setsid`, where seccomp does not deny it) may still
-        // write its dir. So the next step's read rules are built here, from
-        // the fds this check opens, and no path is resolved again.
+        // gone now and its pipes are at EOF (`outputs` is `None` otherwise;
+        // seccomp denies leaving the group), so nothing changes the dir any
+        // more. The next step's read rules are still built here, from the
+        // fds this check opens, and no path is resolved again.
         let rules = match sandbox::create() {
             Ok(r) => r,
             Err(e) => {
@@ -1114,7 +1123,7 @@ struct Supervisor<'a> {
     reaped: bool,
 }
 
-fn set_nonblocking(fd: RawFd) {
+pub(crate) fn set_nonblocking(fd: RawFd) {
     // SAFETY: fd is an open pipe fd owned by the Child handles.
     unsafe {
         let fl = libc::fcntl(fd, libc::F_GETFL);
@@ -1124,7 +1133,7 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
+pub(crate) fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
     // SAFETY: pidfd_open takes a pid and flags 0; the child is not reaped
     // yet, so the pid still names it.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
@@ -1134,7 +1143,7 @@ fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
 
 /// Whether our child `pid` has exited, observed without reaping it (the
 /// fallback for kernels without pidfd).
-fn exited_unreaped(pid: libc::pid_t) -> bool {
+pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
     // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
@@ -1145,13 +1154,55 @@ fn exited_unreaped(pid: libc::pid_t) -> bool {
     r == 0 && unsafe { info.si_pid() } != 0
 }
 
+/// Waits until our unreaped child `pid` has exited (it stays unreaped),
+/// by its pidfd or, without one, by `waitid(WNOWAIT)`; false if it has not
+/// by `until`.
+pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> bool {
+    let mut nap = Duration::from_millis(1);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match pidfd {
+            Some(fd) => {
+                let mut p = libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // Round up so the deadline has passed when poll times out.
+                let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+                // SAFETY: p is one valid pollfd.
+                let r = unsafe { libc::poll(&mut p, 1, ms) };
+                if r > 0 {
+                    return true;
+                }
+                if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if r < 0 {
+                    return exited_unreaped(pid);
+                }
+            }
+            None if exited_unreaped(pid) => return true,
+            None => {}
+        }
+        if left.is_zero() {
+            return false;
+        }
+        if pidfd.is_none() {
+            std::thread::sleep(nap.min(left));
+            nap = (nap * 2).min(GROUP_PROBE_MAX);
+        }
+    }
+}
+
 /// Waits, with signal 0 (which delivers nothing), until process group
-/// `pgid` has no member left; false if it still has one after
-/// `GROUP_GONE`. Called after the leader is reaped (a zombie leader still
-/// counts as a member). If the id were reused meanwhile, the probe could
-/// only report a false "left behind", never touch the other process.
-fn group_gone(pgid: libc::pid_t) -> bool {
-    let start = Instant::now();
+/// `pgid` has no member left; false if it still has one at `until`.
+/// Called after the leader is reaped (a zombie leader still counts as a
+/// member). While a member is left, even a zombie, the kernel keeps the
+/// id: it is never handed to a new process, so a member found is ours. Once
+/// none is left the id may be reused, and the probe can then only report a
+/// false "left behind", never touch the other process.
+pub(crate) fn group_gone(pgid: libc::pid_t, until: Instant) -> bool {
     let mut nap = Duration::from_millis(1);
     loop {
         // SAFETY: kill with signal 0 only checks for existence.
@@ -1159,11 +1210,12 @@ fn group_gone(pgid: libc::pid_t) -> bool {
         if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             return true;
         }
-        if start.elapsed() >= GROUP_GONE {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             return false;
         }
-        std::thread::sleep(nap);
-        nap = (nap * 2).min(Duration::from_millis(50));
+        std::thread::sleep(nap.min(left));
+        nap = (nap * 2).min(GROUP_PROBE_MAX);
     }
 }
 
@@ -1257,7 +1309,9 @@ impl<'a> Supervisor<'a> {
     }
 
     fn terminate(&mut self) {
-        if self.term_at.is_none() {
+        // Reaped: the group is being finished already, and its id is no
+        // longer ours to signal (a violation found in the final drain).
+        if self.term_at.is_none() && !self.reaped {
             self.signal(libc::SIGTERM);
             self.term_at = Some(Instant::now());
         }
@@ -1350,6 +1404,15 @@ impl<'a> Supervisor<'a> {
                 self.signal(libc::SIGKILL);
                 self.killed = true;
             }
+            let exited = match pid_at {
+                Some(_) => ready(pid_at),
+                None => exited_unreaped(self.pid),
+            };
+            // Once the leader is gone, nothing more is read until its whole
+            // group is: `finish` kills it, then reads the rest.
+            if exited {
+                return;
+            }
             // At most READ_QUOTA per pipe, then the signalfd and the pidfd
             // are looked at again: a flood cannot delay a cancel.
             if ready(out_at) {
@@ -1376,13 +1439,6 @@ impl<'a> Supervisor<'a> {
                     sink.cancelled = true;
                     self.terminate();
                 }
-            }
-            let exited = match pid_at {
-                Some(_) => ready(pid_at),
-                None => exited_unreaped(self.pid),
-            };
-            if exited {
-                return;
             }
         }
     }
@@ -1514,28 +1570,77 @@ impl<'a> Supervisor<'a> {
         !self.output_hashes.insert(h) && self.outputs.iter().any(|(_, p)| p == rel)
     }
 
-    /// After the exit (child still unreaped): kills what is left of the
-    /// group while its id is still ours, drains the pipes, reaps, waits for
-    /// the group to be gone, and settles every input without a result.
-    /// Nothing is placed unless the group is confirmed gone.
-    fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
-        self.signal(libc::SIGKILL);
-        // Bounded: the writers are dead or dying, the pipes hold what is left.
-        for _ in 0..64 {
-            let out = self.read_stdout(sink);
-            let err = self.read_stderr();
-            if !out && !err {
-                break;
+    /// Reads both pipes to EOF, parsing stdout, until `until`. True if
+    /// both reached EOF. Called once the group is gone: no process holds a
+    /// write end any more, so EOF comes as soon as the pipes are empty.
+    fn drain(&mut self, sink: &mut Sink, until: Instant) -> bool {
+        while self.stdout.is_some() || self.stderr.is_some() {
+            let out = self.stdout.as_ref().map(|s| s.as_raw_fd());
+            let err = self.stderr.as_ref().map(|s| s.as_raw_fd());
+            let mut fds: Vec<libc::pollfd> = [out, err]
+                .into_iter()
+                .flatten()
+                .map(|fd| libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            let left = until.saturating_duration_since(Instant::now());
+            let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            // SAFETY: fds is a valid array of fds.len() pollfds.
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+            if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if r <= 0 {
+                return false;
+            }
+            if out.is_some() && fds[0].revents != 0 {
+                self.read_stdout(sink);
+            }
+            let e = usize::from(out.is_some());
+            if err.is_some() && fds[e].revents != 0 {
+                self.read_stderr();
             }
         }
+        true
+    }
+
+    /// After the leader's exit (still unreaped, so its pid is still the
+    /// group's id): kills the whole group, reaps the leader, waits until no
+    /// process of the group is left, and only then reads the rest of the
+    /// pipes, to EOF. EOF is the kernel's word that no write end is open
+    /// anywhere, so no writer is left, whatever pids were reused. Then it
+    /// settles every input without a result. Nothing is accepted unless all
+    /// of this finishes within `GROUP_GONE`.
+    fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
+        self.signal(libc::SIGKILL);
+        let until = Instant::now() + GROUP_GONE;
+        if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
+            // Killed but not exiting: stuck in the kernel. It stays
+            // unreaped (its group id stays ours); nothing is accepted.
+            let why = if self.cancelled {
+                "cancelled"
+            } else {
+                "action left processes behind"
+            };
+            for &o in &self.step_in.origin {
+                sink.fail(o, why.to_owned());
+            }
+            return None;
+        }
+        // Exited: wait returns at once.
         let end = match self.child.wait() {
             Ok(s) => End::from(s),
             Err(_) => End::Exit(-1),
         };
         self.reaped = true;
+        let gone = group_gone(self.pid, until) && self.drain(sink, until);
         // A line cut off by a crash is not an event; after a normal exit it
         // is a broken one. (No signal: the child is reaped.)
-        if !self.line.is_empty()
+        if gone
+            && !self.line.is_empty()
             && !self.overlong
             && matches!(end, End::Exit(_))
             && self.violation.is_none()
@@ -1543,7 +1648,6 @@ impl<'a> Supervisor<'a> {
         {
             self.violation = Some("unterminated event line".to_owned());
         }
-        let gone = group_gone(self.pid);
         let origin = &self.step_in.origin;
         if self.cancelled {
             for &o in origin {

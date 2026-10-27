@@ -9,9 +9,10 @@
 //! it exactly; otherwise everything is rebuilt. A binary whose manifest is
 //! broken is cached with no actions, so it is not rerun until it changes.
 
+use crate::exec;
 use manifest::Line;
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -363,21 +364,11 @@ fn manifest_lines(bin: &Path, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
 /// only the system directories and the binary, with no input, no writable
 /// directory and a clean environment. Without the whole sandbox (see
 /// [`sandbox::ready`](crate::sandbox::ready)) no manifest runs, built-in
-/// or not (transient: a later start retries). The child's whole process
-/// group is killed and reaped on failure.
+/// or not (transient: a later start retries). See [`collect`] for how the
+/// child's whole process group is finished before its output counts.
 fn capture(bin: &Path, deadline: Instant) -> Result<Vec<u8>, Fail> {
     let mut child = spawn_manifest(bin)?;
-    let result = read_limited(&mut child, deadline);
-    if result.is_err() {
-        kill_group(&child);
-    }
-    let status = wait_until(&mut child, deadline);
-    let out = result?;
-    match status {
-        Some(s) if s.success() => Ok(out),
-        Some(s) => Err(Fail::Transient(format!("exited with {s}"))),
-        None => Err(Fail::Transient("did not exit in time".to_owned())),
-    }
+    collect(&mut child, deadline)
 }
 
 /// Starts `<bin> --manifest` in the manifest sandbox (see [`capture`]).
@@ -429,78 +420,161 @@ fn spawn_manifest(bin: &Path) -> Result<std::process::Child, Fail> {
     Ok(child)
 }
 
+/// Kills the child's whole process group. Only while the child is
+/// unreaped: its pid, which is the group id, is then still its own.
 fn kill_group(child: &std::process::Child) {
     // SAFETY: kill has no memory-safety preconditions. The child leads its own
-    // process group (it calls `setsid` in `apply_in_child`), so -pid
-    // addresses only its group.
+    // process group (it calls `setsid` in `apply_in_child`; seccomp denies
+    // leaving it) and is not reaped, so -pid addresses only its group.
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
 }
 
-fn read_limited(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>, Fail> {
+/// Reads the child's stdout until the child exits, `deadline` passes, the
+/// output passes `MAX_OUTPUT` or reading fails. Then, the child still
+/// unreaped, kills its whole group, reaps it, waits until no process of
+/// the group is left and reads the pipe to EOF: the kernel's word that no
+/// write end is open, so no descendant can add to the output any more.
+/// Only then does the output count, if the child exited with success.
+/// The cleanup has its own `exec::GROUP_GONE`; past it the manifest fails
+/// (transient). The child is always reaped unless it never exits.
+fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>, Fail> {
     let t = |s: &str| Fail::Transient(s.to_owned());
-    let stdout = child.stdout.as_ref().ok_or_else(|| t("no stdout"))?;
+    let pid = child.id() as libc::pid_t;
+    let pidfd = exec::pidfd_open(pid);
+    let Some(stdout) = child.stdout.take() else {
+        kill_group(child);
+        if exec::wait_exited(pid, pidfd.as_ref(), Instant::now() + exec::GROUP_GONE) {
+            let _ = child.wait();
+        }
+        return Err(t("no stdout"));
+    };
     let fd = stdout.as_raw_fd();
+    exec::set_nonblocking(fd);
     let mut out = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
+    let mut open = true;
+    let mut result = Ok(());
+    // While the child runs. Without a pidfd its exit is polled every
+    // `NO_PIDFD_POLL`, like the action supervisor does.
+    while result.is_ok() {
+        if pidfd.is_none() && exec::exited_unreaped(pid) {
+            break;
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(t("timed out"));
+            result = Err(t("timed out"));
+            break;
         }
+        let mut fds = Vec::with_capacity(2);
+        if open {
+            fds.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if let Some(p) = &pidfd {
+            fds.push(libc::pollfd {
+                fd: p.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        let wait = if pidfd.is_some() {
+            left
+        } else {
+            left.min(exec::NO_PIDFD_POLL)
+        };
+        let ms = wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+        // SAFETY: fds is a valid array of fds.len() pollfds (possibly 0).
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+        if r < 0 {
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                result = Err(t("poll failed"));
+            }
+            continue;
+        }
+        // The exit first: once it is seen, nothing more is read until the
+        // group is gone.
+        if pidfd.is_some() && fds.last().is_some_and(|p| p.revents != 0) {
+            break;
+        }
+        if open && fds[0].revents != 0 {
+            match read_some(fd, &mut out) {
+                Ok(true) => {}
+                Ok(false) => open = false,
+                Err(e) => result = Err(e),
+            }
+        }
+    }
+    kill_group(child);
+    let until = Instant::now() + exec::GROUP_GONE;
+    if !exec::wait_exited(pid, pidfd.as_ref(), until) {
+        // Killed but stuck in the kernel; left unreaped (its group id stays
+        // its own), nothing accepted.
+        return Err(t("did not exit after SIGKILL"));
+    }
+    let status = child.wait();
+    if !exec::group_gone(pid, until) {
+        return Err(t("left processes behind"));
+    }
+    while open {
+        let left = until.saturating_duration_since(Instant::now());
         let mut p = libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         };
-        let ms = left.as_millis().min(i32::MAX as u128) as i32 + 1;
+        let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
         // SAFETY: `p` is a valid pollfd and nfds is 1.
         let r = unsafe { libc::poll(&mut p, 1, ms) };
-        if r < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
+        if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if r <= 0 {
+            return Err(t("output still open"));
+        }
+        match read_some(fd, &mut out) {
+            Ok(true) => {}
+            Ok(false) => open = false,
+            Err(e) => {
+                result = result.and(Err(e));
+                break;
             }
-            return Err(t("poll failed"));
         }
-        if r == 0 {
-            continue; // re-check the deadline
-        }
-        // SAFETY: `buf` is valid for `buf.len()` bytes; `fd` is open (owned
-        // by `child.stdout`, which outlives this call).
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(t("read failed"));
-        }
-        if n == 0 {
-            return Ok(out);
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-        if out.len() > MAX_OUTPUT {
-            return Err(Fail::Deterministic("manifest larger than 64 KB".to_owned()));
-        }
+    }
+    drop(stdout);
+    result?;
+    match status {
+        Ok(s) if s.success() => Ok(out),
+        Ok(s) => Err(Fail::Transient(format!("exited with {s}"))),
+        Err(_) => Err(t("wait failed")),
     }
 }
 
-/// Waits for exit until `deadline`, then kills the group; always reaps.
-fn wait_until(
-    child: &mut std::process::Child,
-    deadline: Instant,
-) -> Option<std::process::ExitStatus> {
-    loop {
-        match child.try_wait() {
-            Ok(Some(s)) => return Some(s),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
-            _ => {
-                kill_group(child);
-                let _ = child.wait();
-                return None;
-            }
-        }
+/// One read from the non-blocking `fd` into `out`: true while open, false
+/// at EOF; an error past `MAX_OUTPUT`.
+fn read_some(fd: RawFd, out: &mut Vec<u8>) -> Result<bool, Fail> {
+    let mut buf = [0u8; 4096];
+    // SAFETY: `buf` is valid for `buf.len()` bytes; `fd` is open (owned by
+    // the caller's ChildStdout, which outlives this call).
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        let e = std::io::Error::last_os_error();
+        return match e.kind() {
+            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => Ok(true),
+            _ => Err(Fail::Transient("read failed".to_owned())),
+        };
     }
+    if n == 0 {
+        return Ok(false);
+    }
+    out.extend_from_slice(&buf[..n as usize]);
+    if out.len() > MAX_OUTPUT {
+        return Err(Fail::Deterministic("manifest larger than 64 KB".to_owned()));
+    }
+    Ok(true)
 }
 
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
@@ -986,6 +1060,56 @@ mod tests {
         }
     }
 
+    /// A manifest's descendants: one holds the stdout pipe and would write
+    /// a late action line after the leader's exit (a margin after it, by
+    /// which the engine has seen the exit), one lingers without the pipe
+    /// (closed: Landlock does not grant `/dev/null`). The manifest counts,
+    /// the late line does not, and neither survives: the whole group is
+    /// finished before the output is accepted. Fixture processes are found
+    /// by a token unique to this test in their command line, which a reused
+    /// pid would not carry.
+    #[test]
+    fn manifest_descendant_writer_outlives_leader() {
+        let f = Fix::new("mf-desc");
+        let d = f.dir("a");
+        let token = format!("51.{}{}", std::process::id(), line!());
+        let late = act("x.late", "Late").replace('\t', "\\t");
+        let pre = format!(
+            "sleep {token} >&- 2>&- &\n\
+             sh -c 'sleep 1; printf \"$1\\n\"' {token} '{late}' &"
+        );
+        script(&d.join("one"), &manifest_body(&pre, &[act("x.a", "A")]));
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert!(c.get("x.a").is_some(), "the manifest itself was refused");
+        let left = procs_with(&token);
+        assert!(left.is_empty(), "descendants left alive: {left:?}");
+        assert!(
+            c.get("x.late").is_none(),
+            "a descendant's late line was taken"
+        );
+    }
+
+    /// A manifest that hangs past its deadline, with a descendant that
+    /// ignores SIGTERM: the group is killed and nothing of it survives.
+    #[test]
+    fn manifest_descendant_reaped_on_timeout() {
+        let f = Fix::new("mf-desc-hang");
+        let d = f.dir("a");
+        let token = format!("52.{}{}", std::process::id(), line!());
+        let pre = format!("sh -c 'trap \"\" TERM; exec sleep \"$0\"' {token} &\nsleep {token}");
+        script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
+        let t = Instant::now();
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert!(
+            t.elapsed() < DEADLINE + Duration::from_secs(1),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(c.get("x.a").is_none());
+        let left = procs_with(&token);
+        assert!(left.is_empty(), "descendants left alive: {left:?}");
+    }
+
     #[test]
     fn hanging_manifest_killed_after_deadline() {
         let f = Fix::new("hang");
@@ -1163,15 +1287,17 @@ mod tests {
             let t = Instant::now();
             let mut c = spawn_manifest(&bin).ok().expect("sandboxed spawn");
             let spawned = t.elapsed();
-            let out = read_limited(&mut c, deadline()).ok().expect("output");
-            wait_until(&mut c, deadline());
+            let out = collect(&mut c, deadline()).ok().expect("output");
             let total = t.elapsed();
             assert!(!out.is_empty());
             if i >= WARMUP {
                 sandboxed.push((spawned.as_micros(), total.as_micros()));
             }
             let t = Instant::now();
+            use std::os::unix::process::CommandExt;
+            // Its own group, as the sandboxed child has (by `setsid`).
             let mut c = Command::new(&bin)
+                .process_group(0)
                 .arg("--manifest")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1179,8 +1305,7 @@ mod tests {
                 .spawn()
                 .expect("plain spawn");
             let spawned = t.elapsed();
-            let out = read_limited(&mut c, deadline()).ok().expect("output");
-            wait_until(&mut c, deadline());
+            let out = collect(&mut c, deadline()).ok().expect("output");
             let total = t.elapsed();
             assert!(!out.is_empty());
             if i >= WARMUP {

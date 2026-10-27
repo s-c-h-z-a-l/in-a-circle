@@ -787,3 +787,221 @@ fn no_child_event_means_no_start_marker() {
         assert!(obs.pids.is_empty(), "{:?}", obs.log);
     }
 }
+
+/// Watches the fixture processes (command line carries `token`) while
+/// the engine publishes: every outcome published while one of them was
+/// still alive is recorded.
+struct Watch {
+    token: String,
+    ran: common::Ran,
+    /// The fixture processes alive when the action's first event arrived.
+    seen: Vec<(u32, std::os::fd::OwnedFd)>,
+    /// Outcomes published while a fixture process was alive.
+    while_alive: Vec<String>,
+    /// Each placed output's content at the moment it was published.
+    placed: Vec<(std::path::PathBuf, Vec<u8>)>,
+    cancel_at: Option<std::time::Instant>,
+}
+
+impl Watch {
+    fn new(token: &str) -> Watch {
+        Watch {
+            token: token.to_owned(),
+            ran: common::Ran::default(),
+            seen: Vec::new(),
+            while_alive: Vec::new(),
+            placed: Vec::new(),
+            cancel_at: None,
+        }
+    }
+
+    /// Fixture processes still alive: those seen at the start, by pidfd,
+    /// and any other carrying the token now.
+    fn alive(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = self
+            .seen
+            .iter()
+            .filter(|(_, fd)| common::alive(fd))
+            .map(|&(p, _)| p)
+            .collect();
+        pids.extend(common::pidfds_with(&self.token).iter().map(|&(p, _)| p));
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+}
+
+impl Observer for Watch {
+    fn event(&mut self, o: &Outcome) {
+        let alive = self.alive();
+        if !alive.is_empty() {
+            self.while_alive
+                .push(format!("{o:?} while {alive:?} alive"));
+        }
+        if let Outcome::Done { output, .. } = o {
+            self.placed
+                .push((output.clone(), std::fs::read(output).unwrap_or_default()));
+        }
+        self.ran.event(o);
+    }
+    fn dir(&mut self, path: &std::path::Path) {
+        self.ran.dir(path);
+    }
+    fn progress(&mut self, d: usize, t: usize, f: f32) {
+        self.ran.progress(d, t, f);
+    }
+    fn started(&mut self, _pid: u32) {
+        self.seen = common::pidfds_with(&self.token);
+    }
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        self.cancel_at
+    }
+    fn wake(&mut self) -> Wake {
+        Wake::Cancel
+    }
+}
+
+/// A descendant holds the stdout pipe and an fd on the output, and forks
+/// a grandchild that holds both too. Its barrier is the leader's exit:
+/// it reads a FIFO only the leader holds open for writing, so EOF comes
+/// when the leader's fds are closed at exit; then, a margin later (the
+/// engine has seen the exit by then), it would write to the pipe and the
+/// output for as long as it lives. Nothing may be published while any
+/// fixture process lives, every one is dead at the end, and the placed
+/// output does not change after it was published.
+#[test]
+fn descendant_writer_outlives_leader() {
+    let t = Tmp::new("desc-writer");
+    let a = t.input("a.txt", "a");
+    let token = format!("41.{}{}", std::process::id(), line!());
+    let bin = t.script(
+        "writer",
+        &format!(
+            "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
+             mkfifo \"$work/bar\"\n\
+             sh -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; sleep \"$0\" & cat >/dev/null; sleep 0.1\n\
+             while :; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
+             {token} \"$work\" \"$in\" &\n\
+             exec 5>\"$work/bar\"\n\
+             printf leader > \"$work/0/a.md\"\n\
+             printf 'done\\t%s\\t0/a.md\\n' \"$in\""
+        ),
+    );
+    let act = action(&bin, "md");
+    let mut w = Watch::new(&token);
+    let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    assert!(
+        matches!(&w.ran.outcomes[..], [Outcome::Done { .. }, ..]),
+        "{:?}",
+        w.ran.outcomes
+    );
+    // Positive control: the descendant was running when the action began.
+    assert!(!w.seen.is_empty(), "the fixture descendant never ran");
+    assert!(w.while_alive.is_empty(), "{:#?}", w.while_alive);
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
+    let [(out, at_publish)] = &w.placed[..] else {
+        panic!("{:?}", w.placed);
+    };
+    assert!(at_publish.starts_with(b"leader"), "{at_publish:?}");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        &std::fs::read(out).unwrap(),
+        at_publish,
+        "written after publication"
+    );
+    // Not held up by the descendant: it was killed, not waited for.
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// Leaving the process group is denied in the sandbox: `setsid` and a new
+/// pid or user namespace fail with EPERM, and the descendants (the denied
+/// tries and a background one) all end with the action. Positive control:
+/// the same `setsid` succeeds outside the sandbox.
+#[test]
+fn descendant_cannot_escape_group() {
+    let st = std::process::Command::new("setsid")
+        .args(["sleep", "0"])
+        .status()
+        .unwrap();
+    assert!(st.success(), "control: setsid outside the sandbox failed");
+    let t = Tmp::new("desc-escape");
+    let a = t.input("a.txt", "a");
+    let token = format!("42.{}{}", std::process::id(), line!());
+    let bin = t.script(
+        "escape",
+        &format!(
+            "in=$(head -n1 \"$6\")\n\
+             sleep {token} &\n\
+             setsid sleep {token} 2>/dev/null; s=$?\n\
+             unshare --pid --fork sleep {token} 2>/dev/null; p=$?\n\
+             unshare --user sleep {token} 2>/dev/null; u=$?\n\
+             printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u\n\
+             printf 'skip\\t%s\\tnope\\n' \"$in\""
+        ),
+    );
+    let act = action(&bin, "md");
+    let mut w = Watch::new(&token);
+    run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    let warned: Vec<&str> = w
+        .ran
+        .outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Warned { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    // util-linux exits 1 when the syscall fails ("setsid failed",
+    // "unshare failed"); 127 would be a missing tool, 0 an escape.
+    assert_eq!(
+        warned,
+        ["setsid:1 pidns:1 userns:1"],
+        "{:?}",
+        w.ran.outcomes
+    );
+    assert!(
+        w.ran
+            .outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Skipped { .. })),
+        "{:?}",
+        w.ran.outcomes
+    );
+    assert!(!w.seen.is_empty(), "the background descendant never ran");
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// On cancel the leader dies of its SIGTERM, but a descendant and its
+/// forked grandchild ignore it and hold the pipes: both are killed with
+/// the group, and the cancellation is published only once they are dead.
+#[test]
+fn descendant_reaped_on_cancel() {
+    let t = Tmp::new("desc-cancel");
+    let a = t.input("a.txt", "a");
+    let token = format!("43.{}{}", std::process::id(), line!());
+    let bin = t.script(
+        "cancel",
+        &format!(
+            "work=$4\n\
+             sh -c 'trap \"\" TERM; sleep \"$0\" & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
+             while [ ! -e \"$work/up\" ]; do sleep 0.01; done\n\
+             printf 'progress\\t0.1\\n'\n\
+             sleep {token}"
+        ),
+    );
+    let act = action(&bin, "md");
+    let mut w = Watch::new(&token);
+    let start = std::time::Instant::now();
+    w.cancel_at = Some(start + Duration::from_millis(300));
+    let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    assert_eq!(failed(&w.ran), [(a, "cancelled".to_owned())]);
+    // The descendant, its grandchild and the leader's sleep.
+    assert!(w.seen.len() >= 2, "fixture not up: {:?}", w.seen);
+    assert!(w.while_alive.is_empty(), "{:#?}", w.while_alive);
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
+    // The leader obeys SIGTERM: no TERM_GRACE wait for the ignoring ones.
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(t.work_dirs_left().is_empty());
+}

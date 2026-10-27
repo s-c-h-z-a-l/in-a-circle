@@ -179,3 +179,54 @@ pub fn vm_hwm_kb() -> u64 {
         .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
         .unwrap()
 }
+
+/// The live processes whose command line carries `token` (unique to one
+/// test), each with a pidfd. The pidfd is opened first and the command
+/// line read again after it: if the pid had been reused in between, the
+/// new process would not carry the token, so every pidfd returned names a
+/// fixture process (start identity), never an unrelated one.
+pub fn pidfds_with(token: &str) -> Vec<(u32, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let has = |pid: u32| {
+        fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|c| String::from_utf8_lossy(&c).contains(token))
+    };
+    let Ok(d) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for e in d.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if !has(pid) {
+            continue;
+        }
+        // SAFETY: pidfd_open takes a pid and flags 0.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+        if fd < 0 {
+            continue; // gone meanwhile
+        }
+        // SAFETY: a non-negative result is a new fd that we now own.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+        if has(pid) && alive(&fd) {
+            found.push((pid, fd));
+        }
+    }
+    found
+}
+
+/// Whether the process behind `pidfd` has not exited (a pidfd polls
+/// readable once it has).
+pub fn alive(pidfd: &std::os::fd::OwnedFd) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: p is one valid pollfd; timeout 0 does not block.
+    let r = unsafe { libc::poll(&mut p, 1, 0) };
+    assert!(r >= 0, "poll on a pidfd failed");
+    p.revents == 0
+}
