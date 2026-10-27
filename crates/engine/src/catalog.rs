@@ -433,7 +433,8 @@ fn kill_group(child: &std::process::Child) {
 
 /// Reads the child's stdout until the child exits, `deadline` passes, the
 /// output passes `MAX_OUTPUT` or reading fails. Then, the child still
-/// unreaped, kills its whole group, reaps it, waits until no process of
+/// unreaped, notes whether another process of its group still runs (the
+/// manifest is then rejected), kills its whole group, reaps it, waits until no process of
 /// the group is left and reads the pipe to EOF: the kernel's word that no
 /// write end is open, so no descendant can add to the output any more.
 /// Only then does the output count, if the child exited with success.
@@ -508,6 +509,10 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
             }
         }
     }
+    // A descendant still running after the leader's exit rejects the
+    // manifest: its output is not finished. Looked at before the kill,
+    // while the unreaped leader keeps the group id ours.
+    let left_behind = result.is_ok() && exec::group_has_live_member(pid).unwrap_or(true);
     kill_group(child);
     let until = Instant::now() + exec::GROUP_GONE;
     if !exec::wait_exited(pid, pidfd.as_ref(), until) {
@@ -516,7 +521,7 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
         return Err(t("did not exit after SIGKILL"));
     }
     let status = child.wait();
-    if !exec::group_gone(pid, until) {
+    if !exec::group_gone(pid, until) || left_behind {
         return Err(t("left processes behind"));
     }
     while open {
@@ -1094,12 +1099,14 @@ mod tests {
     /// A manifest's descendants: one holds the stdout pipe, writes an
     /// early action line at once and would write a late one after the
     /// leader's exit (a margin after it, by which the engine has seen the
-    /// exit); one writes a line, closes the pipe and lingers. The manifest
-    /// counts with both early lines (the positive control that both ran),
-    /// the late line does not, and neither descendant survives: the whole
-    /// group is finished before the output is accepted. Fixture processes
-    /// are found by a token unique to this test in their command line,
-    /// which a reused pid would not carry.
+    /// exit); one writes a line, closes the pipe and lingers. Both are
+    /// alive at the leader's exit, so the whole manifest is rejected, and
+    /// neither survives. Their own lines cannot show through a rejected
+    /// manifest, so the proof that they ran is the processes themselves,
+    /// seen while the load runs; `manifest_descendant_waited_for_is_kept`
+    /// is the same fixture with a `wait`, accepted with both lines. Fixture
+    /// processes are found by a token unique to this test in their command
+    /// line, which a reused pid would not carry.
     #[test]
     fn manifest_descendant_writer_outlives_leader() {
         let f = Fix::new("mf-desc");
@@ -1115,16 +1122,34 @@ mod tests {
             manifest_body("", &[act("x.a", "A")])
         );
         bash_script(&d.join("one"), &body);
+        let during = max_count(&token, Duration::from_millis(250));
         let c = Catalog::load_from(&[(d, true)], &f.cache());
-        assert!(c.get("x.a").is_some(), "the manifest itself was refused");
-        assert!(c.get("x.early").is_some(), "the writer never ran");
-        assert!(c.get("x.lingers").is_some(), "the lingering one never ran");
+        // The sleeper and the writer (bash execs the leader's last
+        // command, `sleep 0.3`, which carries no token).
+        let n = during.join().unwrap();
+        assert!(n >= 2, "the descendants never ran: {n}");
+        for id in ["x.a", "x.early", "x.lingers", "x.late"] {
+            assert!(c.get(id).is_none(), "{id} was taken");
+        }
         let left = procs_with(&token);
         assert!(left.is_empty(), "descendants left alive: {left:?}");
-        assert!(
-            c.get("x.late").is_none(),
-            "a descendant's late line was taken"
+    }
+
+    /// The positive control of the test above: a background job the
+    /// manifest waits for is finished at its exit, and its line counts.
+    #[test]
+    fn manifest_descendant_waited_for_is_kept() {
+        let f = Fix::new("mf-desc-wait");
+        let d = f.dir("a");
+        let early = act("x.early", "L").replace('\t', "\\t");
+        let body = format!(
+            "{}\n{{ printf '{early}\\n'; }} &\nwait",
+            manifest_body("", &[act("x.a", "A")])
         );
+        bash_script(&d.join("one"), &body);
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert!(c.get("x.a").is_some());
+        assert!(c.get("x.early").is_some(), "the background job never ran");
     }
 
     /// A manifest that hangs past its deadline, with a descendant that

@@ -12,17 +12,23 @@ fn escaping_the_process_group_fails_and_nothing_survives() {
     let t = Tmp::new("escape");
     let a = t.input("a.txt", "a");
     let token = format!("31.{}{}", std::process::id(), line!());
+    // In the foreground: its exit code is the fixture's proof that it ran
+    // (util-linux `setsid` exits 1 when the syscall fails).
     let bin = t.script(
         "escape",
         &format!(
-            "setsid -f sleep {token}\n\
-             in=$(head -n1 \"$6\"); printf 'skip\\t%s\\tnope\\n' \"$in\""
+            "setsid sleep {token}; s=$?\n\
+             in=$(head -n1 \"$6\"); printf 'warn\\t%s\\tsetsid:%s\\n' \"$in\" $s\n\
+             printf 'skip\\t%s\\tnope\\n' \"$in\""
         ),
     );
     let act = action(&bin, "md");
     let (r, _) = run(&[&act], std::slice::from_ref(&a), None);
     assert!(
-        matches!(&r.outcomes[..], [Outcome::Skipped { .. }]),
+        matches!(
+            &r.outcomes[..],
+            [Outcome::Warned { message, .. }, Outcome::Skipped { .. }] if message == "setsid:1"
+        ),
         "{:?}",
         r.outcomes
     );
@@ -30,32 +36,81 @@ fn escaping_the_process_group_fails_and_nothing_survives() {
     assert!(t.work_dirs_left().is_empty());
 }
 
+/// A background descendant still running when the leader exits fails the
+/// action's input, though the leader reported its output: killed, the
+/// descendant may have been mid-write to it. Nothing is placed, and the
+/// descendant is dead when `run` returns. It proves it ran by its own
+/// warning.
 #[test]
-fn background_descendants_are_killed_before_placement() {
+fn background_descendant_fails_the_action_and_is_killed() {
     let t = Tmp::new("bg");
     let a = t.input("a.txt", "a");
     let token = format!("32.{}{}", std::process::id(), line!());
     // bash: dash never starts a background job in the sandbox (see
-    // `Tmp::script_in`), which made this pass without a descendant.
+    // `Tmp::script_in`).
     let bin = t.script_in(
         "/bin/bash",
         "bg",
         &format!(
-            "sleep {token} &\n\
-             work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
+            "work=$4; in=$(head -n1 \"$6\")\n\
+             {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
+             mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
     );
     let act = action(&bin, "md");
     let (r, _) = run(&[&act], std::slice::from_ref(&a), None);
     assert!(
-        matches!(&r.outcomes[..], [Outcome::Done { .. }]),
+        r.outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Warned { message, .. } if message == "bg up")),
+        "the background job never ran: {:?}",
+        r.outcomes
+    );
+    assert_eq!(
+        failed(&r),
+        [(a.clone(), "action left processes behind".to_owned())]
+    );
+    assert!(
+        !r.outcomes.iter().any(|o| matches!(o, Outcome::Done { .. })),
         "{:?}",
         r.outcomes
     );
+    assert!(!a.with_extension("md").exists(), "an output was placed");
     assert!(
         !process_with(&token),
         "background sleep {token} survived run()"
+    );
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// The positive control of the test above: a background job the action
+/// waits for is finished at its exit, and the result is placed.
+#[test]
+fn background_job_waited_for_keeps_the_result() {
+    let t = Tmp::new("bg-wait");
+    let a = t.input("a.txt", "a");
+    let bin = t.script_in(
+        "/bin/bash",
+        "bgwait",
+        "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
+         { echo x > \"$work/0/a.md\"; printf 'warn\\t%s\\tbg up\\n' \"$in\"; } &\n\
+         wait\n\
+         printf 'done\\t%s\\t0/a.md\\n' \"$in\"",
+    );
+    let act = action(&bin, "md");
+    let (r, _) = run(&[&act], std::slice::from_ref(&a), None);
+    assert!(
+        matches!(
+            &r.outcomes[..],
+            [Outcome::Warned { message, .. }, Outcome::Done { .. }] if message == "bg up"
+        ),
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.with_extension("md")).unwrap(),
+        "x\n"
     );
     assert!(t.work_dirs_left().is_empty());
 }
@@ -868,11 +923,12 @@ impl Observer for Watch {
 /// a grandchild that holds both too. Its barrier is the leader's exit:
 /// it reads a FIFO only the leader holds open for writing (the leader's
 /// open waits for the descendant's), so EOF comes when the leader's fds
-/// are closed at exit; then, a margin later (the
-/// engine has seen the exit by then), it would write to the pipe and the
-/// output for as long as it lives. Nothing may be published while any
-/// fixture process lives, every one is dead at the end, and the placed
-/// output does not change after it was published.
+/// are closed at exit; then, a margin later (the engine has seen the exit
+/// by then), it would write to the pipe and the output for as long as it
+/// lives. Alive after the leader's exit, it fails the input: nothing is
+/// placed, the failure is published only once every fixture process is
+/// dead, and none is left. The descendant proves it ran by its own
+/// warning, sent once the FIFO is open.
 #[test]
 fn descendant_writer_outlives_leader() {
     let t = Tmp::new("desc-writer");
@@ -884,7 +940,8 @@ fn descendant_writer_outlives_leader() {
         &format!(
             "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
              mkfifo \"$work/bar\"\n\
-             bash -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; sleep \"$0\" & while read -r _; do :; done; sleep 0.1\n\
+             bash -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; printf \"warn\\t%s\\tup\\n\" \"$2\"\n\
+             sleep \"$0\" & while read -r _; do :; done; sleep 0.1\n\
              while :; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
              {token} \"$work\" \"$in\" &\n\
              exec 5>\"$work/bar\"\n\
@@ -899,24 +956,28 @@ fn descendant_writer_outlives_leader() {
     w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
     let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
     assert!(
-        matches!(&w.ran.outcomes[..], [Outcome::Done { .. }, ..]),
-        "{:?}",
+        w.ran
+            .outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Warned { message, .. } if message == "up")),
+        "the fixture descendant never ran: {:?}",
         w.ran.outcomes
     );
-    // Positive control: the descendant was running when the action began.
-    assert!(!w.seen.is_empty(), "the fixture descendant never ran");
-    assert!(w.while_alive.is_empty(), "{:#?}", w.while_alive);
-    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
-    let [(out, at_publish)] = &w.placed[..] else {
-        panic!("{:?}", w.placed);
-    };
-    assert!(at_publish.starts_with(b"leader"), "{at_publish:?}");
-    std::thread::sleep(Duration::from_millis(200));
     assert_eq!(
-        &std::fs::read(out).unwrap(),
-        at_publish,
-        "written after publication"
+        failed(&w.ran),
+        [(a.clone(), "action left processes behind".to_owned())]
     );
+    assert!(w.placed.is_empty(), "{:?}", w.placed);
+    assert!(!a.with_extension("md").exists(), "an output was placed");
+    // Only the final failure counts here: the descendant's `up` warning
+    // was streamed while the leader ran, as every event is.
+    let late: Vec<_> = w
+        .while_alive
+        .iter()
+        .filter(|e| !e.contains("message: \"up\""))
+        .collect();
+    assert!(late.is_empty(), "{late:#?}");
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
     // Not held up by the descendant: it was killed, not waited for.
     assert!(took < Duration::from_secs(2), "{took:?}");
     assert!(t.work_dirs_left().is_empty());
@@ -924,7 +985,8 @@ fn descendant_writer_outlives_leader() {
 
 /// Leaving the process group is denied in the sandbox: `setsid` and a new
 /// pid or user namespace fail with EPERM, and the descendants (the denied
-/// tries and a background one) all end with the action. Positive control:
+/// tries and a background one, which fails the input) all end with the
+/// action. Positive control:
 /// the same `setsid` succeeds outside the sandbox.
 #[test]
 fn descendant_cannot_escape_group() {
@@ -941,12 +1003,11 @@ fn descendant_cannot_escape_group() {
         "escape",
         &format!(
             "in=$(head -n1 \"$6\")\n\
-             sleep {token} &\n\
+             {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
              setsid sleep {token}; s=$?\n\
              unshare --pid --fork sleep {token}; p=$?\n\
              unshare --user sleep {token}; u=$?\n\
-             printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u\n\
-             printf 'skip\\t%s\\tnope\\n' \"$in\""
+             printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u"
         ),
     );
     let act = action(&bin, "md");
@@ -963,21 +1024,19 @@ fn descendant_cannot_escape_group() {
         .collect();
     // util-linux exits 1 when the syscall fails ("setsid failed",
     // "unshare failed"); 127 would be a missing tool, 0 an escape.
-    assert_eq!(
-        warned,
-        ["setsid:1 pidns:1 userns:1"],
-        "{:?}",
-        w.ran.outcomes
-    );
     assert!(
-        w.ran
-            .outcomes
-            .iter()
-            .any(|o| matches!(o, Outcome::Skipped { .. })),
+        warned.contains(&"setsid:1 pidns:1 userns:1"),
         "{:?}",
         w.ran.outcomes
     );
-    assert!(!w.seen.is_empty(), "the background descendant never ran");
+    // The background descendant's own proof that it ran.
+    assert!(warned.contains(&"bg up"), "{:?}", w.ran.outcomes);
+    // Still running at the leader's exit: the input fails (with no final
+    // event of its own, which would already have settled it).
+    assert_eq!(
+        failed(&w.ran),
+        [(a.clone(), "action left processes behind".to_owned())]
+    );
     assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
     assert!(t.work_dirs_left().is_empty());
 }
@@ -985,6 +1044,8 @@ fn descendant_cannot_escape_group() {
 /// On cancel the leader dies of its SIGTERM, but a descendant and its
 /// forked grandchild ignore it and hold the pipes: both are killed with
 /// the group, and the cancellation is published only once they are dead.
+/// Each proves it ran by its own marker file, which the leader waits for
+/// (a 300 ms cancel ends the wait of a broken fixture).
 #[test]
 fn descendant_reaped_on_cancel() {
     let t = Tmp::new("desc-cancel");
@@ -995,8 +1056,8 @@ fn descendant_reaped_on_cancel() {
         "cancel",
         &format!(
             "work=$4\n\
-             bash -c 'trap \"\" TERM; sleep \"$0\" & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
-             while [ ! -e \"$work/up\" ]; do sleep 0.01; done\n\
+             bash -c 'trap \"\" TERM; {{ : > \"$1/g\"; exec sleep \"$0\"; }} & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
+             while [ ! -e \"$work/up\" ] || [ ! -e \"$work/g\" ]; do sleep 0.01; done\n\
              printf 'progress\\t0.1\\n'\n\
              sleep {token}"
         ),

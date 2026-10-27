@@ -1195,6 +1195,67 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
     }
 }
 
+/// Whether process group `pgid` has a live member other than its leader
+/// (`pgid` itself), read from `/proc`. Called while the leader is
+/// unreaped: it pins the id, so every process found in the group is the
+/// action's, never an unrelated one with a reused id. A member counts as
+/// live unless it has exited (zombie or dead, every thread of it): a
+/// zombie can no longer write. `Err` when `/proc` cannot be read; the
+/// caller then cannot tell and must not accept.
+pub(crate) fn group_has_live_member(pgid: libc::pid_t) -> io::Result<bool> {
+    let mut path = String::new();
+    let mut buf = Vec::new();
+    for e in fs::read_dir("/proc")? {
+        let e = e?;
+        let Some(pid) = e
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if pid == pgid {
+            continue;
+        }
+        path.clear();
+        use std::fmt::Write as _;
+        let _ = write!(path, "/proc/{pid}/stat");
+        buf.clear();
+        // Gone meanwhile: not a member any more.
+        let Ok(mut f) = fs::File::open(&path) else {
+            continue;
+        };
+        if f.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        // `pid (comm) state ppid pgrp ...`; comm may hold spaces and
+        // parentheses, so the fields start after the last ')'.
+        let Some(close) = buf.iter().rposition(|&b| b == b')') else {
+            continue;
+        };
+        let mut fields = buf[close + 1..]
+            .split(|&b| b == b' ')
+            .filter(|f| !f.is_empty());
+        let (Some(state), Some(_ppid), Some(pgrp)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if std::str::from_utf8(pgrp).ok().and_then(|g| g.parse().ok()) != Some(pgid) {
+            continue;
+        }
+        if !matches!(state, b"Z" | b"X") {
+            return Ok(true);
+        }
+        // A zombie main thread whose other threads still run.
+        path.clear();
+        let _ = write!(path, "/proc/{pid}/task");
+        if fs::read_dir(&path).is_ok_and(|d| d.count() > 1) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Waits, with signal 0 (which delivers nothing), until process group
 /// `pgid` has no member left; false if it still has one at `until`.
 /// Called after the leader is reaped (a zombie leader still counts as a
@@ -1608,13 +1669,20 @@ impl<'a> Supervisor<'a> {
     }
 
     /// After the leader's exit (still unreaped, so its pid is still the
-    /// group's id): kills the whole group, reaps the leader, waits until no
+    /// group's id): notes whether any other process of the group still
+    /// runs (then every input of this process fails, nothing is placed),
+    /// kills the whole group, reaps the leader, waits until no
     /// process of the group is left, and only then reads the rest of the
     /// pipes, to EOF. EOF is the kernel's word that no write end is open
     /// anywhere, so no writer is left, whatever pids were reused. Then it
     /// settles every input without a result. Nothing is accepted unless all
     /// of this finishes within `GROUP_GONE`.
     fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
+        // A descendant still running after the leader's exit fails the
+        // process, whatever it reported: once killed it may have been
+        // mid-write to an output. Looked at before the kill, while the
+        // unreaped leader keeps the group id ours. (Moot when cancelled.)
+        let left_behind = !self.cancelled && group_has_live_member(self.pid).unwrap_or(true);
         self.signal(libc::SIGKILL);
         let until = Instant::now() + GROUP_GONE;
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
@@ -1636,7 +1704,9 @@ impl<'a> Supervisor<'a> {
             Err(_) => End::Exit(-1),
         };
         self.reaped = true;
-        let gone = group_gone(self.pid, until) && self.drain(sink, until);
+        // Waited for even when left behind: nothing of it may outlive us.
+        let vanished = group_gone(self.pid, until);
+        let gone = vanished && !left_behind && self.drain(sink, until);
         // A line cut off by a crash is not an event; after a normal exit it
         // is a broken one. (No signal: the child is reaped.)
         if gone
