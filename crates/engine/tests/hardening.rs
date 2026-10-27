@@ -399,6 +399,12 @@ fn seccomp_eval_filters_are_well_formed() {
     }
 }
 
+/// Evaluator-only for AArch32 on aarch64: the kill branch for
+/// `AUDIT_ARCH_ARM` has no real-kernel test, because the native arm64 CI
+/// runners (Neoverse) cannot execute AArch32 EL0 code, so no compat
+/// syscall can be made there. The i386 branch on x86_64 does have one
+/// (`sandbox::tests::foreign_arch_syscall_kills_the_process`). On an
+/// AArch32-capable arm64 machine this stays a manual check.
 #[test]
 fn seccomp_eval_foreign_arch_is_killed() {
     let i386 = EM_386 | AUDIT_ARCH_LE;
@@ -1923,6 +1929,24 @@ fn run_child(mode: &str, sb: Sb, work: &Path, canary: RawFd) -> String {
             out.status,
             String::from_utf8_lossy(&out.stderr)
         ),
+    }
+}
+
+// ---- the musl build ----
+
+/// Set by the CI step that builds and runs this binary for
+/// `<arch>-unknown-linux-musl`: the run must really be musl's, so its
+/// thread start (musl's own clone flags, CLONE_DETACHED included) and
+/// fork + exec go through the filter in the workload tests above.
+const EXPECT_MUSL: &str = "INACIRCLE_EXPECT_MUSL";
+
+#[test]
+fn musl_run_is_really_musl() {
+    if std::env::var_os(EXPECT_MUSL).is_some_and(|v| v == "1") {
+        assert!(
+            cfg!(target_env = "musl"),
+            "{EXPECT_MUSL}=1 but not a musl build"
+        );
     }
 }
 

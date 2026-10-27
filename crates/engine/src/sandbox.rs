@@ -741,6 +741,14 @@ pub fn seccomp_filter() -> io::Result<&'static [libc::sock_filter]> {
     }
 }
 
+/// The type of `getrlimit`'s resource argument: glibc's own enum type,
+/// musl's plain int (the hardening tests also build for musl, to run
+/// musl's thread start under the filter).
+#[cfg(target_env = "gnu")]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(target_env = "gnu"))]
+type RlimitResource = libc::c_int;
+
 /// `want` clamped to the inherited hard limit of `resource`, as a rlimit
 /// with soft = hard. A limit is never raised: if the supervisor itself runs
 /// under a lower hard limit (`ulimit -d` / `-f`), raising the hard limit
@@ -750,7 +758,7 @@ pub fn seccomp_filter() -> io::Result<&'static [libc::sock_filter]> {
 /// Also called between fork and exec: getrlimit is not on the POSIX
 /// async-signal-safe list, but in glibc it is a plain `prlimit64` syscall,
 /// with no locks or allocation, so it is safe there.
-fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
+fn clamped(resource: RlimitResource, want: u64) -> io::Result<libc::rlimit> {
     let mut cur = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
