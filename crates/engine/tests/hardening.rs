@@ -1942,11 +1942,9 @@ const EXPECT_MUSL: &str = "INACIRCLE_EXPECT_MUSL";
 
 #[test]
 fn musl_run_is_really_musl() {
+    let is_musl = cfg!(target_env = "musl");
     if std::env::var_os(EXPECT_MUSL).is_some_and(|v| v == "1") {
-        assert!(
-            cfg!(target_env = "musl"),
-            "{EXPECT_MUSL}=1 but not a musl build"
-        );
+        assert!(is_musl, "{EXPECT_MUSL}=1 but not a musl build");
     }
 }
 
