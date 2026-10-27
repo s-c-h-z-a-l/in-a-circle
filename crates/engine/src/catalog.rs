@@ -1060,27 +1060,64 @@ mod tests {
         }
     }
 
-    /// A manifest's descendants: one holds the stdout pipe and would write
-    /// a late action line after the leader's exit (a margin after it, by
-    /// which the engine has seen the exit), one lingers without the pipe
-    /// (closed: Landlock does not grant `/dev/null`). The manifest counts,
-    /// the late line does not, and neither survives: the whole group is
-    /// finished before the output is accepted. Fixture processes are found
-    /// by a token unique to this test in their command line, which a reused
-    /// pid would not carry.
+    /// [`script`] run by bash. Background jobs (`&`) need it in the
+    /// sandbox: dash opens `/dev/null` as their stdin and, as Landlock does
+    /// not grant it, never starts them; bash goes on without it.
+    fn bash_script(path: &Path, body: &str) {
+        script(
+            path,
+            &format!(
+                "exec /bin/bash -c '{}' bash \"$@\"",
+                body.replace('\'', "'\\''")
+            ),
+        );
+    }
+
+    /// How many processes carry `token` `after` from now, counted on
+    /// another thread while the load runs: the positive control that the
+    /// fixture's descendants did start.
+    fn count_after(token: &str, after: Duration) -> std::thread::JoinHandle<usize> {
+        let token = token.to_owned();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            procs_with(&token).len()
+        })
+    }
+
+    /// A manifest's descendants: one holds the stdout pipe, writes an
+    /// early action line at once and would write a late one after the
+    /// leader's exit (a margin after it, by which the engine has seen the
+    /// exit); one lingers with the pipe closed. The manifest counts with
+    /// the early line, the late line does not, and neither descendant
+    /// survives: the whole group is finished before the output is
+    /// accepted. Fixture processes are found by a token unique to this
+    /// test in their command line, which a reused pid would not carry.
     #[test]
     fn manifest_descendant_writer_outlives_leader() {
         let f = Fix::new("mf-desc");
         let d = f.dir("a");
         let token = format!("51.{}{}", std::process::id(), line!());
-        let late = act("x.late", "Late").replace('\t', "\\t");
-        let pre = format!(
-            "sleep {token} >&- 2>&- &\n\
-             sh -c 'sleep 1; printf \"$1\\n\"' {token} '{late}' &"
+        let line = |id: &str| act(id, "L").replace('\t', "\\t");
+        let (early, late) = (line("x.early"), line("x.late"));
+        let body = format!(
+            "{}\n\
+             sleep {token} >&- 2>&- &\n\
+             {{ printf '{early}\\n'; sleep 1; printf '{late}\\n'; }} &\n\
+             sleep 0.3",
+            manifest_body("", &[act("x.a", "A")])
         );
-        script(&d.join("one"), &manifest_body(&pre, &[act("x.a", "A")]));
+        bash_script(&d.join("one"), &body);
+        let during = count_after(&token, Duration::from_millis(150));
         let c = Catalog::load_from(&[(d, true)], &f.cache());
+        // The sleeper and the writer (bash execs the leader's last
+        // command, `sleep 0.3`, which carries no token).
+        let n = during.join().unwrap();
+        assert!(n >= 2, "the descendants never ran: {n}");
         assert!(c.get("x.a").is_some(), "the manifest itself was refused");
+        assert!(
+            c.get("x.early").is_some(),
+            "the descendant's early line is missing"
+        );
         let left = procs_with(&token);
         assert!(left.is_empty(), "descendants left alive: {left:?}");
         assert!(
@@ -1096,8 +1133,10 @@ mod tests {
         let f = Fix::new("mf-desc-hang");
         let d = f.dir("a");
         let token = format!("52.{}{}", std::process::id(), line!());
-        let pre = format!("sh -c 'trap \"\" TERM; exec sleep \"$0\"' {token} &\nsleep {token}");
-        script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
+        // The descendant's command line carries the token too: `exec sleep`.
+        let pre = format!("(trap '' TERM; exec sleep {token}) &\nsleep {token}");
+        bash_script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
+        let during = count_after(&token, Duration::from_secs(1));
         let t = Instant::now();
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(
@@ -1105,6 +1144,10 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+        // The leader (bash execs its last command, the sleep) and the
+        // descendant.
+        let n = during.join().unwrap();
+        assert!(n >= 2, "the descendant never ran: {n}");
         assert!(c.get("x.a").is_none());
         let left = procs_with(&token);
         assert!(left.is_empty(), "descendants left alive: {left:?}");

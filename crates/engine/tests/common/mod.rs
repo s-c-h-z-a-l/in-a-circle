@@ -40,10 +40,17 @@ impl Tmp {
     /// with ETXTBSY. `cp` (its own process) writes a temporary name, which
     /// is then renamed into place.
     pub fn script(&self, name: &str, body: &str) -> PathBuf {
+        self.script_in("/bin/sh", name, body)
+    }
+
+    /// [`Tmp::script`] run by `shell`. Background jobs (`&`) need bash in
+    /// the sandbox: dash opens `/dev/null` as their stdin and, as Landlock
+    /// does not grant it, never starts them; bash goes on without it.
+    pub fn script_in(&self, shell: &str, name: &str, body: &str) -> PathBuf {
         let d = self.0.join("bin");
         fs::create_dir_all(&d).unwrap();
         let src = self.0.join(format!("{name}.src"));
-        fs::write(&src, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::write(&src, format!("#!{shell}\n{body}\n")).unwrap();
         let tmp = d.join(format!(".{name}.tmp"));
         let ok = std::process::Command::new("cp")
             .arg(&src)

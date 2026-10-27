@@ -35,7 +35,10 @@ fn background_descendants_are_killed_before_placement() {
     let t = Tmp::new("bg");
     let a = t.input("a.txt", "a");
     let token = format!("32.{}{}", std::process::id(), line!());
-    let bin = t.script(
+    // bash: dash never starts a background job in the sandbox (see
+    // `Tmp::script_in`), which made this pass without a descendant.
+    let bin = t.script_in(
+        "/bin/bash",
         "bg",
         &format!(
             "sleep {token} &\n\
@@ -863,8 +866,9 @@ impl Observer for Watch {
 
 /// A descendant holds the stdout pipe and an fd on the output, and forks
 /// a grandchild that holds both too. Its barrier is the leader's exit:
-/// it reads a FIFO only the leader holds open for writing, so EOF comes
-/// when the leader's fds are closed at exit; then, a margin later (the
+/// it reads a FIFO only the leader holds open for writing (the leader's
+/// open waits for the descendant's), so EOF comes when the leader's fds
+/// are closed at exit; then, a margin later (the
 /// engine has seen the exit by then), it would write to the pipe and the
 /// output for as long as it lives. Nothing may be published while any
 /// fixture process lives, every one is dead at the end, and the placed
@@ -874,12 +878,13 @@ fn descendant_writer_outlives_leader() {
     let t = Tmp::new("desc-writer");
     let a = t.input("a.txt", "a");
     let token = format!("41.{}{}", std::process::id(), line!());
-    let bin = t.script(
+    let bin = t.script_in(
+        "/bin/bash",
         "writer",
         &format!(
             "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
              mkfifo \"$work/bar\"\n\
-             sh -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; sleep \"$0\" & cat >/dev/null; sleep 0.1\n\
+             bash -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; sleep \"$0\" & while read -r _; do :; done; sleep 0.1\n\
              while :; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
              {token} \"$work\" \"$in\" &\n\
              exec 5>\"$work/bar\"\n\
@@ -889,6 +894,9 @@ fn descendant_writer_outlives_leader() {
     );
     let act = action(&bin, "md");
     let mut w = Watch::new(&token);
+    // A broken fixture (the descendant never opens the FIFO) would leave
+    // the leader waiting on its open: cancelled then, not a hung test.
+    w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
     let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
     assert!(
         matches!(&w.ran.outcomes[..], [Outcome::Done { .. }, ..]),
@@ -928,14 +936,15 @@ fn descendant_cannot_escape_group() {
     let t = Tmp::new("desc-escape");
     let a = t.input("a.txt", "a");
     let token = format!("42.{}{}", std::process::id(), line!());
-    let bin = t.script(
+    let bin = t.script_in(
+        "/bin/bash",
         "escape",
         &format!(
             "in=$(head -n1 \"$6\")\n\
              sleep {token} &\n\
-             setsid sleep {token} 2>/dev/null; s=$?\n\
-             unshare --pid --fork sleep {token} 2>/dev/null; p=$?\n\
-             unshare --user sleep {token} 2>/dev/null; u=$?\n\
+             setsid sleep {token}; s=$?\n\
+             unshare --pid --fork sleep {token}; p=$?\n\
+             unshare --user sleep {token}; u=$?\n\
              printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u\n\
              printf 'skip\\t%s\\tnope\\n' \"$in\""
         ),
@@ -981,11 +990,12 @@ fn descendant_reaped_on_cancel() {
     let t = Tmp::new("desc-cancel");
     let a = t.input("a.txt", "a");
     let token = format!("43.{}{}", std::process::id(), line!());
-    let bin = t.script(
+    let bin = t.script_in(
+        "/bin/bash",
         "cancel",
         &format!(
             "work=$4\n\
-             sh -c 'trap \"\" TERM; sleep \"$0\" & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
+             bash -c 'trap \"\" TERM; sleep \"$0\" & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
              while [ ! -e \"$work/up\" ]; do sleep 0.01; done\n\
              printf 'progress\\t0.1\\n'\n\
              sleep {token}"
