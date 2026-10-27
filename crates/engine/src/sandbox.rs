@@ -960,21 +960,25 @@ pub(crate) mod tests {
             .arg(script)
             .env("LC_ALL", "C")
             .stdin(Stdio::null());
-        if leak >= 0 {
-            // SAFETY: dup2 is async-signal-safe.
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::dup2(leak, 9) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        // SAFETY: apply_in_child only makes async-signal-safe calls; the
+        const LEAK_FD: RawFd = 9;
+        // SAFETY: fcntl, dup2 and apply_in_child are async-signal-safe; the
         // ruleset outlives the spawn (borrowed for this whole function).
         unsafe {
-            cmd.pre_exec(move || apply_in_child(fd, &limits));
+            cmd.pre_exec(move || {
+                let mut fd = fd;
+                if leak >= 0 && leak != LEAK_FD && fd == LEAK_FD {
+                    // The ruleset is fd 9: move it above, or dup2 replaces it.
+                    fd = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, LEAK_FD + 1);
+                    cvt(fd)?;
+                }
+                // dup2 onto itself changes nothing (O_CLOEXEC would stay).
+                if leak == LEAK_FD {
+                    cvt(libc::fcntl(LEAK_FD, libc::F_SETFD, 0))?;
+                } else if leak >= 0 {
+                    cvt(libc::dup2(leak, LEAK_FD))?;
+                }
+                apply_in_child(fd, &limits)
+            });
         }
         cmd.output().unwrap()
     }

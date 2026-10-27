@@ -1907,6 +1907,18 @@ fn run_child(mode: &str, sb: Sb, work: &Path, canary: RawFd) -> String {
     // spawn.
     unsafe {
         cmd.pre_exec(move || {
+            // The ruleset may itself be fd 9: move it out of the canary's
+            // way first (above it, close-on-exec), or dup2 replaces it.
+            let fd = match fd {
+                Some(CANARY_FD) if canary >= 0 && canary != CANARY_FD => {
+                    let moved = libc::fcntl(CANARY_FD, libc::F_DUPFD_CLOEXEC, CANARY_FD + 1);
+                    if moved < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Some(moved)
+                }
+                fd => fd,
+            };
             // dup2 onto itself changes nothing, so a canary that already
             // is fd 9 would keep its O_CLOEXEC: clear it instead.
             let inherited = match canary {
