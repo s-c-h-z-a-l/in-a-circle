@@ -87,31 +87,39 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # --no-fail-fast and `!cancelled()`: every gate runs and reports even
+      # after one failed; the job still fails if any did.
       - name: Test
-        run: cargo test --workspace
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --no-fail-fast
 
       # The hardening tests again as a static musl binary: musl's own thread
       # start and fork + exec under the filter and the full sandbox.
       - name: Hardening tests (musl)
+        if: ${{ !cancelled() }}
         env:
           INACIRCLE_EXPECT_MUSL: "1"
         run: cargo test -p engine --test hardening --target "$(uname -m)-unknown-linux-musl"
 
       - name: Fuzz target selection
+        if: ${{ !cancelled() }}
         run: bash scripts/tests/test_fuzz_target.sh
 
       - name: Shipped dependencies
+        if: ${{ !cancelled() }}
         run: scripts/check-shipped-deps.sh
 
       - name: Binary sizes
+        if: ${{ !cancelled() }}
         run: scripts/check-sizes.sh
 
   # Fuzz smoke: every target runs a short libFuzzer pass on a temporary copy
   # of its corpus (scripts/fuzz.sh never writes back to the committed one).
-  # Separate from `check`: it needs a nightly, and its caches must never mix
-  # with the stable job's.
+  # Separate from `native`: it needs a nightly, and its caches must never
+  # mix with the stable job's.
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.runner }})
     strategy:
