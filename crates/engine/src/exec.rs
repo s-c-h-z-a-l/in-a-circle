@@ -1057,6 +1057,11 @@ fn run_step(
         }
         return None;
     }
+    // Orphans of the action come back to us (see `members`); without
+    // that nothing could tell whether one still runs.
+    if let Err(e) = become_subreaper() {
+        return fail_all(sink, &format!("cannot supervise the action: {e}"));
+    }
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return fail_all(sink, &format!("cannot start action: {e}")),
@@ -1121,6 +1126,10 @@ struct Supervisor<'a> {
     /// The child is reaped: its pid, and so the group id, may now be
     /// reused by an unrelated process. Nothing is signalled after this.
     reaped: bool,
+    /// The leader's exit was seen (else `run` stopped on a poll error).
+    exited: bool,
+    /// `run` stopped because poll failed: nothing is accepted.
+    poll_failed: bool,
 }
 
 pub(crate) fn set_nonblocking(fd: RawFd) {
@@ -1195,119 +1204,98 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
     }
 }
 
-/// Whether process group `pgid` has a live member other than its leader
-/// (`pgid` itself), read from `/proc`. Called while the leader is
-/// unreaped and the group stopped (see [`freeze_and_scan`]): the leader
-/// pins the id, so every process found in the group is the action's,
-/// never an unrelated one with a reused id. A member counts as live unless
-/// it has exited (zombie or dead, every thread of it): a zombie can no
-/// longer write.
-///
-/// Fails closed: `Err` when the answer cannot be trusted, and the caller
-/// must then not accept. Only an entry that vanished meanwhile (`ENOENT`,
-/// `ESRCH`, or an empty read) is skipped; any other error is returned.
-/// The leader itself must be found, as a zombie leading `pgid`: otherwise
-/// this `/proc` shows another pid namespace (a container's or sandbox's
-/// own mount), where our pids mean other processes or nothing.
-pub(crate) fn group_has_live_member(pgid: libc::pid_t) -> io::Result<bool> {
-    group_has_live_member_in(Path::new("/proc"), pgid)
+/// Makes this process the subreaper of everything it starts: a process
+/// whose parent dies is reparented to us, not to init. With `setsid` and
+/// `setpgid` denied in the sandbox, every member of an action's process
+/// group then descends from one of our own children until it is reaped,
+/// and the kernel's child list ([`members`]) shows it whatever `/proc`
+/// shows (hidepid) and whatever the member made of itself (non-dumpable).
+/// Not inherited across fork (prctl(2)), so no child is one; kept across
+/// our own exec, which never happens. Idempotent and cheap: called before
+/// every spawn of a manifest or an action.
+pub(crate) fn become_subreaper() -> io::Result<()> {
+    // SAFETY: prctl with an int option and plain integer arguments.
+    let r = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
-/// [`group_has_live_member`] over the proc tree at `proc` (a fake one in
-/// tests).
-fn group_has_live_member_in(proc: &Path, pgid: libc::pid_t) -> io::Result<bool> {
-    let vanished =
-        |e: &io::Error| matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH));
-    let mut buf = Vec::new();
-    let mut live = false;
-    let mut leader_seen = false;
-    for e in fs::read_dir(proc)? {
-        let e = e?;
-        let Some(pid) = e
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<libc::pid_t>().ok())
-        else {
-            continue;
+/// Our children in process group `pgid`, once its leader is reaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Members {
+    /// None left: every member has been reaped.
+    Gone,
+    /// At least one runs. It is our unreaped child, so it pins `pgid`:
+    /// the id cannot name another group while we have not reaped it, and
+    /// `kill(-pgid)` is safe.
+    Live,
+}
+
+/// Reaps our exited children in process group `pgid` (`waitid(P_PGID,
+/// WEXITED | WNOHANG)`) until none is left or one still runs. Called with
+/// the group's leader reaped and [`become_subreaper`] in effect: a member
+/// that is not our child has a live ancestor that is, so `Gone` means the
+/// group is empty. A fork chain cannot slip past: a process's children are
+/// reparented to us before it becomes a zombie, so reaping a link shows
+/// the next one. Fails closed: any error but `ECHILD` (no such child) is
+/// returned, and so is a chain still reaped at `until`.
+pub(crate) fn members(pgid: libc::pid_t, until: Instant) -> io::Result<Members> {
+    loop {
+        // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        #[cfg(test)]
+        let injected = tests::WAITID_ERRNO.get();
+        #[cfg(not(test))]
+        let injected: Option<i32> = None;
+        let r = match injected {
+            Some(e) => {
+                // SAFETY: errno is thread-local storage of this thread.
+                unsafe { *libc::__errno_location() = e };
+                -1
+            }
+            // SAFETY: info is a valid out-pointer; pgid > 0 names a group.
+            None => unsafe {
+                libc::waitid(
+                    libc::P_PGID,
+                    pgid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG,
+                )
+            },
         };
-        buf.clear();
-        let read = fs::File::open(e.path().join("stat")).and_then(|mut f| f.read_to_end(&mut buf));
-        match read {
-            Ok(0) => continue,
-            Ok(_) => {}
-            Err(e) if vanished(&e) => continue,
-            Err(e) => return Err(e),
+        if r != 0 {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return Ok(Members::Gone),
+                _ => return Err(e),
+            }
         }
-        // `pid (comm) state ppid pgrp ...`; comm may hold spaces and
-        // parentheses, so the fields start after the last ')'.
-        let bad = || io::Error::new(io::ErrorKind::InvalidData, "unexpected /proc/<pid>/stat");
-        let close = buf.iter().rposition(|&b| b == b')').ok_or_else(bad)?;
-        let mut fields = buf[close + 1..]
-            .split(|&b| b == b' ')
-            .filter(|f| !f.is_empty());
-        let (Some(state), Some(_ppid), Some(pgrp)) = (fields.next(), fields.next(), fields.next())
-        else {
-            return Err(bad());
-        };
-        let pgrp: libc::pid_t = std::str::from_utf8(pgrp)
-            .ok()
-            .and_then(|g| g.parse().ok())
-            .ok_or_else(bad)?;
-        if pgrp != pgid {
-            continue;
+        // With WNOHANG and no exited child, si_pid stays 0.
+        // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(Members::Live);
         }
-        let exited = matches!(state, b"Z" | b"X");
-        if pid == pgid {
-            // The unreaped leader, as the caller left it.
-            leader_seen = exited;
-            continue;
-        }
-        if !exited {
-            live = true;
-            continue;
-        }
-        // A zombie main thread whose other threads still run.
-        match fs::read_dir(e.path().join("task")) {
-            Ok(d) => live |= d.count() > 1,
-            Err(e) if vanished(&e) => {}
-            Err(e) => return Err(e),
+        if Instant::now() >= until {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "still reaping the action's processes",
+            ));
         }
     }
-    if !leader_seen {
-        return Err(io::Error::other(
-            "the action's leader is not in /proc: another pid namespace",
-        ));
-    }
-    Ok(live)
 }
 
-/// Stops the whole group, then scans it ([`group_has_live_member`]). A
-/// stopped process cannot fork, so no fork chain can hop past the scan's
-/// cursor; a group signal racing a fork reaches the new child too. Only
-/// while the leader `pgid` is unreaped (the id is ours); the caller kills
-/// the group next (SIGKILL ends stopped processes too). True (fail closed)
-/// if the scan cannot be trusted.
-pub(crate) fn freeze_and_scan(pgid: libc::pid_t) -> bool {
-    // SAFETY: kill has no memory preconditions; the unreaped leader keeps
-    // `pgid` the action's group.
-    unsafe { libc::kill(-pgid, libc::SIGSTOP) };
-    group_has_live_member(pgid).unwrap_or(true)
-}
-
-/// Waits, with signal 0 (which delivers nothing), until process group
-/// `pgid` has no member left; false if it still has one at `until`.
-/// Called after the leader is reaped (a zombie leader still counts as a
-/// member). While a member is left, even a zombie, the kernel keeps the
-/// id: it is never handed to a new process, so a member found is ours. Once
-/// none is left the id may be reused, and the probe can then only report a
-/// false "left behind", never touch the other process.
-pub(crate) fn group_gone(pgid: libc::pid_t, until: Instant) -> bool {
+/// Reaps the members of `pgid` (leader reaped) until none is left; false
+/// if one is left at `until` or the child list cannot be read.
+pub(crate) fn members_gone(pgid: libc::pid_t, until: Instant) -> bool {
     let mut nap = Duration::from_millis(1);
     loop {
-        // SAFETY: kill with signal 0 only checks for existence.
-        let r = unsafe { libc::kill(-pgid, 0) };
-        if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            return true;
+        match members(pgid, until) {
+            Ok(Members::Gone) => return true,
+            Ok(Members::Live) => {}
+            Err(_) => return false,
         }
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -1391,6 +1379,8 @@ impl<'a> Supervisor<'a> {
             term_at: None,
             killed: false,
             reaped: false,
+            exited: false,
+            poll_failed: false,
         }
     }
 
@@ -1489,6 +1479,7 @@ impl<'a> Supervisor<'a> {
                 }
                 // Unexpected: stop supervising; finish kills and reaps.
                 self.signal(libc::SIGKILL);
+                self.poll_failed = true;
                 return;
             }
             let ready = |at: Option<usize>| at.is_some_and(|i| fds[i].revents != 0);
@@ -1510,6 +1501,7 @@ impl<'a> Supervisor<'a> {
             // Once the leader is gone, nothing more is read until its whole
             // group is: `finish` kills it, then reads the rest.
             if exited {
+                self.exited = true;
                 return;
             }
             // At most READ_QUOTA per pipe, then the signalfd and the pidfd
@@ -1706,12 +1698,12 @@ impl<'a> Supervisor<'a> {
         true
     }
 
-    /// After the leader's exit (still unreaped, so its pid is still the
-    /// group's id): notes whether any other process of the group still
-    /// runs (then every input of this process fails, nothing is placed),
-    /// kills the whole group, reaps the leader, waits until no
-    /// process of the group is left, and only then reads the rest of the
-    /// pipes, to EOF. EOF is the kernel's word that no write end is open
+    /// After the leader's exit: reaps it, asks the kernel's child list
+    /// whether any other process of the group still runs (then every
+    /// unsettled input of this process fails, nothing is placed, and the
+    /// group is killed while that member, our unreaped child, keeps its id
+    /// ours), reaps every member until none is left, and only then reads
+    /// the rest of the pipes, to EOF. EOF is the kernel's word that no write end is open
     /// anywhere, so no writer is left, whatever pids were reused. Then it
     /// settles every input without a result. Nothing is accepted unless all
     /// of this finishes within `GROUP_GONE`.
@@ -1720,13 +1712,11 @@ impl<'a> Supervisor<'a> {
         if self.cancel.is_cancelled() || sink.cancelled {
             self.cancelled = true;
         }
-        // A descendant still running after the leader's exit fails the
-        // process, whatever it reported: once killed it may have been
-        // mid-write to an output. Looked at with the group stopped, before
-        // the kill, while the unreaped leader keeps the group id ours.
-        // (Moot when cancelled.)
-        let left_behind = !self.cancelled && freeze_and_scan(self.pid);
-        self.signal(libc::SIGKILL);
+        if !self.exited {
+            // Poll failed with the leader maybe running: kill it all
+            // (unreaped, the id is ours).
+            self.signal(libc::SIGKILL);
+        }
         let until = Instant::now() + GROUP_GONE;
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
             // Killed but not exiting: stuck in the kernel. It stays
@@ -1747,8 +1737,22 @@ impl<'a> Supervisor<'a> {
             Err(_) => End::Exit(-1),
         };
         self.reaped = true;
+        // A descendant still running after the leader's exit fails the
+        // process, whatever it reported: once killed it may have been
+        // mid-write to an output. The kernel's child list tells (see
+        // `members`); a member found running is our unreaped child, which
+        // keeps the group id ours for the kill. An unreadable child list
+        // counts as running (fail closed).
+        let found = members(self.pid, until);
+        let left_behind = !matches!(found, Ok(Members::Gone));
+        if matches!(found, Ok(Members::Live)) {
+            // SAFETY: kill has no memory preconditions; the live member
+            // just found is our unreaped child, so `pid` is still the
+            // action's group id.
+            unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        }
         // Waited for even when left behind: nothing of it may outlive us.
-        let vanished = group_gone(self.pid, until);
+        let vanished = members_gone(self.pid, until);
         let gone = vanished && !left_behind && self.drain(sink, until);
         // A line cut off by a crash is not an event; after a normal exit it
         // is a broken one. (No signal: the child is reaped.)
@@ -1765,6 +1769,12 @@ impl<'a> Supervisor<'a> {
         if self.cancelled {
             for &o in origin {
                 sink.fail(o, "cancelled".to_owned());
+            }
+            return None;
+        }
+        if self.poll_failed {
+            for &o in origin {
+                sink.fail(o, "supervision failed (poll error)".to_owned());
             }
             return None;
         }
@@ -1815,7 +1825,7 @@ impl<'a> Supervisor<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1848,126 +1858,145 @@ mod tests {
         r.expect_err("expected a contract violation")
     }
 
-    /// A fake `/proc` for the group scan: `(pid, state, pgrp, tasks)`;
-    /// tasks are the entries of `<pid>/task`.
-    fn fake_proc(t: &Tmp, procs: &[(i32, &str, i32, usize)]) -> PathBuf {
-        let root = t.0.join("proc");
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(root.join("self")).unwrap();
-        for &(pid, state, pgrp, tasks) in procs {
-            let d = root.join(pid.to_string());
-            fs::create_dir_all(d.join("task")).unwrap();
-            // A comm with a space and a parenthesis, as real ones can have.
-            let stat = format!("{pid} (a b) c) {state} 1 {pgrp} {pgrp} 0 -1 0");
-            fs::write(d.join("stat"), stat).unwrap();
-            for k in 0..tasks {
-                fs::create_dir_all(d.join("task").join((pid + k as i32).to_string())).unwrap();
-            }
-        }
-        root
+    thread_local! {
+        /// The errno `members` gets from its `waitid`, on this thread.
+        pub(crate) static WAITID_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
     }
 
-    #[test]
-    fn group_scan_sees_live_members_and_not_exited_ones() {
-        let t = Tmp::new("scan-live");
-        let scan = |procs: &[(i32, &str, i32, usize)]| {
-            group_has_live_member_in(&fake_proc(&t, procs), 100).unwrap()
-        };
-        // Only the zombie leader, and a stranger in another group.
-        assert!(!scan(&[(100, "Z", 100, 1), (200, "S", 200, 1)]));
-        let _ = fs::remove_dir_all(t.0.join("proc"));
-        // A running, a stopped and a sleeping member each count.
-        for st in ["R", "T", "S", "D"] {
-            assert!(scan(&[(100, "Z", 100, 1), (101, st, 100, 1)]), "{st}");
-            let _ = fs::remove_dir_all(t.0.join("proc"));
-        }
-        // A zombie member is gone; one whose other threads run is not.
-        assert!(!scan(&[(100, "Z", 100, 1), (101, "Z", 100, 1)]));
-        let _ = fs::remove_dir_all(t.0.join("proc"));
-        assert!(scan(&[(100, "Z", 100, 1), (101, "Z", 100, 2)]));
-    }
-
-    /// An entry gone between the directory read and its `stat` (no file,
-    /// or an empty one) is skipped, not an error.
-    #[test]
-    fn group_scan_skips_vanished_entries() {
-        let t = Tmp::new("scan-vanished");
-        let root = fake_proc(&t, &[(100, "Z", 100, 1)]);
-        fs::create_dir_all(root.join("101")).unwrap();
-        fs::create_dir_all(root.join("102")).unwrap();
-        fs::write(root.join("102/stat"), "").unwrap();
-        assert!(!group_has_live_member_in(&root, 100).unwrap());
-    }
-
-    /// Fails closed: a `/proc` of another pid namespace (the leader is not
-    /// there, or not as our zombie), an unreadable or garbled `stat`.
-    #[test]
-    fn group_scan_fails_closed() {
-        use std::os::unix::fs::PermissionsExt;
-        let t = Tmp::new("scan-closed");
-        let err = |procs: &[(i32, &str, i32, usize)]| {
-            let root = fake_proc(&t, procs);
-            let r = group_has_live_member_in(&root, 100);
-            let _ = fs::remove_dir_all(&root);
-            r
-        };
-        assert!(err(&[(1, "S", 1, 1), (7, "S", 7, 1)]).is_err(), "no leader");
-        assert!(err(&[(100, "S", 100, 1)]).is_err(), "leader not a zombie");
-        assert!(
-            err(&[(100, "Z", 55, 1)]).is_err(),
-            "leader of another group"
-        );
-
-        let root = fake_proc(&t, &[(100, "Z", 100, 1)]);
-        fs::create_dir_all(root.join("101")).unwrap();
-        fs::write(root.join("101/stat"), "101 no parenthesis").unwrap();
-        assert!(group_has_live_member_in(&root, 100).is_err(), "garbled");
-        let _ = fs::remove_dir_all(&root);
-
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } == 0 {
-            eprintln!("group_scan_fails_closed: root reads a mode-0 file; EACCES case skipped");
-            return;
-        }
-        let root = fake_proc(&t, &[(100, "Z", 100, 1), (101, "S", 100, 1)]);
-        let stat = root.join("101/stat");
-        fs::set_permissions(&stat, fs::Permissions::from_mode(0o000)).unwrap();
-        let r = group_has_live_member_in(&root, 100);
-        assert_eq!(
-            r.unwrap_err().raw_os_error(),
-            Some(libc::EACCES),
-            "unreadable"
-        );
-    }
-
-    /// On the real `/proc`, from a child that leads its own group: a live
-    /// member is seen while the leader is an unreaped zombie, and none
-    /// after the member is gone. Positive control for the fake tree.
-    #[test]
-    fn group_scan_on_the_real_proc() {
-        use std::os::unix::process::CommandExt;
-        let mut leader = Command::new("sh")
-            .args(["-c", "sleep 30 & exit 0"])
+    /// Starts `sh -c script` as the leader of its own group and waits for
+    /// its exit; returns its pid, still unreaped, and the child.
+    fn leader(script: &str) -> (libc::pid_t, std::process::Child) {
+        become_subreaper().unwrap();
+        let child = Command::new("sh")
+            .args(["-c", script])
             .process_group(0)
             .spawn()
             .unwrap();
-        let pid = leader.id() as libc::pid_t;
+        let pid = child.id() as libc::pid_t;
         let pidfd = pidfd_open(pid);
-        assert!(wait_exited(
-            pid,
-            pidfd.as_ref(),
-            Instant::now() + Duration::from_secs(5)
-        ));
-        assert!(group_has_live_member(pid).unwrap(), "the sleep is a member");
-        // SAFETY: the leader is unreaped: the group id is ours.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-        // Its sleep, reparented, is reaped by init; until then a zombie.
         let until = Instant::now() + Duration::from_secs(5);
-        while group_has_live_member(pid).unwrap() {
-            assert!(Instant::now() < until, "the sleep did not die");
-            std::thread::sleep(Duration::from_millis(5));
+        assert!(wait_exited(pid, pidfd.as_ref(), until));
+        (pid, child)
+    }
+
+    /// The kernel's child list after the leader's exit: a background job
+    /// still running is found (and killed, and reaped), one the leader
+    /// waited for is not.
+    #[test]
+    fn members_sees_a_running_orphan_and_not_a_finished_one() {
+        let until = || Instant::now() + Duration::from_secs(5);
+        let (pid, mut c) = leader("sleep 30 & exit 0");
+        c.wait().unwrap();
+        assert_eq!(members(pid, until()).unwrap(), Members::Live);
+        // SAFETY: the live member is our unreaped child: the id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert!(members_gone(pid, until()));
+        assert_eq!(members(pid, until()).unwrap(), Members::Gone);
+
+        let (pid, mut c) = leader("sleep 0.01 & wait; exit 0");
+        c.wait().unwrap();
+        assert_eq!(members(pid, until()).unwrap(), Members::Gone);
+    }
+
+    /// A member that made itself unreadable in `/proc` (non-dumpable, by
+    /// executing a binary it may not read, as `hidepid` would hide any
+    /// foreign one) is still on the kernel's child list.
+    #[test]
+    fn members_sees_a_non_dumpable_member() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("nodump");
+        let bin = t.0.join("hidden-sleep");
+        // Copied by `cp`, not through a writable fd of ours (ETXTBSY).
+        let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+            .unwrap();
+        assert!(
+            Command::new("cp")
+                .arg(sleep)
+                .arg(&bin)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o111)).unwrap();
+        let token = format!("30.{}{}", std::process::id(), line!());
+        let (pid, mut c) = leader(&format!("{} {token} & exit 0", bin.display()));
+        c.wait().unwrap();
+        // Positive control: it is non-dumpable, so its environ (a
+        // ptrace-checked file) is closed to us, as all of it is to a
+        // foreign reader under hidepid.
+        let hidden = fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                fs::read(e.path().join("cmdline"))
+                    .is_ok_and(|c| String::from_utf8_lossy(&c).contains(&token))
+            })
+            .map(|e| fs::File::open(e.path().join("environ")).map(drop))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&hidden[..], [Err(e)] if e.raw_os_error() == Some(libc::EACCES)),
+            "{hidden:?}"
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        assert_eq!(members(pid, until).unwrap(), Members::Live);
+        // SAFETY: the live member is our unreaped child: the id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert!(members_gone(pid, until));
+    }
+
+    /// Fails closed: an error from `waitid` other than ECHILD is an error,
+    /// which the callers count as left behind.
+    #[test]
+    fn members_fails_closed_on_a_waitid_error() {
+        let (pid, mut c) = leader("exit 0");
+        c.wait().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let r = members(pid, Instant::now() + Duration::from_secs(1));
+        let gone = members_gone(pid, Instant::now() + Duration::from_millis(50));
+        WAITID_ERRNO.set(None);
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::EINVAL));
+        assert!(!gone);
+    }
+
+    /// The subreaper flag is not inherited across fork: a child (here,
+    /// in the gap between fork and exec) is not one.
+    #[test]
+    fn subreaper_is_not_inherited() {
+        use std::os::unix::process::CommandExt;
+        become_subreaper().unwrap();
+        let mut cmd = Command::new("/bin/true");
+        // SAFETY: prctl is async-signal-safe; `v` is on the child's stack.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut v: libc::c_int = -1;
+                libc::prctl(
+                    libc::PR_GET_CHILD_SUBREAPER,
+                    &mut v as *mut libc::c_int,
+                    0,
+                    0,
+                    0,
+                );
+                if v != 0 {
+                    return Err(io::Error::from_raw_os_error(libc::EEXIST));
+                }
+                Ok(())
+            });
         }
-        leader.wait().unwrap();
+        assert!(cmd.status().unwrap().success(), "the child is a subreaper");
+        let mut v: libc::c_int = -1;
+        // SAFETY: PR_GET_CHILD_SUBREAPER writes one int to `v`.
+        unsafe {
+            libc::prctl(
+                libc::PR_GET_CHILD_SUBREAPER,
+                &mut v as *mut libc::c_int,
+                0,
+                0,
+                0,
+            )
+        };
+        assert_eq!(v, 1, "control: we are one");
     }
 
     #[test]
@@ -2316,6 +2345,41 @@ mod tests {
     /// Copies the first input to `0/a.md` and reports it.
     const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
                         printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// A child list that cannot be read (an injected `waitid` error)
+    /// fails the action: nothing tells whether a descendant still runs.
+    /// Positive control: the same action, then, places its output.
+    #[test]
+    fn an_unreadable_child_list_fails_the_action() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_unreadable_child_list_fails_the_action", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("waitid-err");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let out = t.0.join("a.md");
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let mut seen = Seen::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        WAITID_ERRNO.set(None);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "action left processes behind".to_owned()
+            }]
+        );
+        assert!(!out.exists());
+        let mut seen = Seen::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
+    }
 
     /// Every action, built-in or a plugin's, runs only behind the whole
     /// sandbox gate; a failure is a refusal of every input (never a

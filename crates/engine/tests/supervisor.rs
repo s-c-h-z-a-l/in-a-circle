@@ -54,12 +54,18 @@ fn background_descendant_fails_the_action_and_is_killed() {
         &format!(
             "work=$4; in=$(head -n1 \"$6\")\n\
              {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
+             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
              mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
     );
     let act = action(&bin, "md");
-    let (r, _) = run(&[&act], std::slice::from_ref(&a), None);
+    let mut w = Watch::new(&token);
+    w.ack = Some(("bg up".to_owned(), a.clone()));
+    // Ends a broken fixture (no ack) instead of hanging.
+    w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
+    run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    let r = w.ran;
     assert!(
         r.outcomes
             .iter()
@@ -859,6 +865,12 @@ struct Watch {
     /// Each placed output's content at the moment it was published.
     placed: Vec<(std::path::PathBuf, Vec<u8>)>,
     cancel_at: Option<std::time::Instant>,
+    /// On a warning with this message, write `ack` into this file (an
+    /// input, so the sandboxed action can read it): the fixture's leader
+    /// waits for it before it exits, so its proof line is surely read.
+    /// Lines still unread at the exit of a process that left others
+    /// behind are never read.
+    ack: Option<(String, std::path::PathBuf)>,
 }
 
 impl Watch {
@@ -870,6 +882,7 @@ impl Watch {
             while_alive: Vec::new(),
             placed: Vec::new(),
             cancel_at: None,
+            ack: None,
         }
     }
 
@@ -895,6 +908,11 @@ impl Observer for Watch {
         if !alive.is_empty() {
             self.while_alive
                 .push(format!("{o:?} while {alive:?} alive"));
+        }
+        if let (Outcome::Warned { message, .. }, Some((on, file))) = (o, &self.ack)
+            && message == on
+        {
+            std::fs::write(file, "ack").unwrap();
         }
         if let Outcome::Done { output, .. } = o {
             self.placed
@@ -945,14 +963,16 @@ fn descendant_writer_outlives_leader() {
              while :; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
              {token} \"$work\" \"$in\" &\n\
              exec 5>\"$work/bar\"\n\
+             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
              printf leader > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
     );
     let act = action(&bin, "md");
     let mut w = Watch::new(&token);
-    // A broken fixture (the descendant never opens the FIFO) would leave
-    // the leader waiting on its open: cancelled then, not a hung test.
+    w.ack = Some(("up".to_owned(), a.clone()));
+    // A broken fixture (the descendant never opens the FIFO, or no ack)
+    // would leave the leader waiting: cancelled then, not a hung test.
     w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
     let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
     assert!(
@@ -1003,15 +1023,18 @@ fn descendant_cannot_escape_group() {
         "escape",
         &format!(
             "in=$(head -n1 \"$6\")\n\
-             {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
              setsid sleep {token}; s=$?\n\
              unshare --pid --fork sleep {token}; p=$?\n\
              unshare --user sleep {token}; u=$?\n\
-             printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u"
+             printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u\n\
+             {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
+             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done"
         ),
     );
     let act = action(&bin, "md");
     let mut w = Watch::new(&token);
+    w.ack = Some(("bg up".to_owned(), a.clone()));
+    w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
     run_with(&[&act], std::slice::from_ref(&a), &mut w);
     let warned: Vec<&str> = w
         .ran
@@ -1078,10 +1101,11 @@ fn descendant_reaped_on_cancel() {
 }
 
 /// A descendant that hops pids: each process forks the next and exits,
-/// so at any moment one or two are alive and none for long. The group is
-/// stopped before it is scanned, so the chain cannot step past the scan:
-/// the input fails, nothing is placed, no hop survives. The chain proves
-/// it ran by its first process's warning.
+/// so at any moment one or two are alive and none for long. It closes the
+/// pipes first, so only the kernel's child list can find it: each link's
+/// child is reparented to us before the link is a zombie, so reaping the
+/// links leads to the live one. The input fails, nothing is placed, no
+/// hop survives. The chain proves it ran by its first process's warning.
 #[test]
 fn descendant_fork_chain_is_caught() {
     let t = Tmp::new("desc-hop");
@@ -1092,14 +1116,16 @@ fn descendant_fork_chain_is_caught() {
         "hop",
         &format!(
             "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
-             bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; hop() {{ ( hop ) & exit 0; }}; hop' {token} \"$in\" &\n\
-             sleep 0.1\n\
+             bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; exec >&- 2>&-; hop() {{ ( hop ) & exit 0; }}; hop' {token} \"$in\" &\n\
+             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
              echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
     );
     let act = action(&bin, "md");
     let mut w = Watch::new(&token);
+    w.ack = Some(("hop".to_owned(), a.clone()));
+    w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
     run_with(&[&act], std::slice::from_ref(&a), &mut w);
     assert!(
         w.ran
@@ -1121,8 +1147,9 @@ fn descendant_fork_chain_is_caught() {
 }
 
 /// Cancels from inside the run, as the action reports its result and
-/// exits, so the cancel and the exit reach the supervisor in the same
-/// wake. The cancel wins: nothing is placed.
+/// exits: the observer sends the cancel, then waits on the action's pidfd
+/// for its exit, so the cancel and the exit reach the supervisor in the
+/// same wake. The cancel wins: nothing is placed.
 #[test]
 fn cancel_in_the_same_wake_as_the_exit_is_kept() {
     struct CancelAtStart(common::Ran);
@@ -1136,14 +1163,29 @@ fn cancel_in_the_same_wake_as_the_exit_is_kept() {
         fn progress(&mut self, d: usize, t: usize, f: f32) {
             self.0.progress(d, t, f);
         }
-        fn started(&mut self, _pid: u32) {
-            // Give the action time to exit after its line, so its pidfd
-            // is ready together with the signalfd.
-            std::thread::sleep(Duration::from_millis(50));
+        fn started(&mut self, pid: u32) {
+            use std::os::fd::FromRawFd;
             // SAFETY: SIGTERM to this (the supervisor's) thread, where the
             // cancel token blocks it: it only becomes readable on the
             // token's signalfd.
             unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+            // Then wait, on the action's own pidfd, until it has exited:
+            // the supervisor's next poll finds both ready, whatever the
+            // machine's speed. (Bounded: a broken fixture fails the test.)
+            // SAFETY: pidfd_open takes a pid and flags 0; the supervisor
+            // has not reaped the action yet (it is running this callback).
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            // SAFETY: a new fd that we now own.
+            let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+            let mut p = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd.
+            let r = unsafe { libc::poll(&mut p, 1, 5000) };
+            assert_eq!(r, 1, "the action did not exit");
         }
     }
     let t = Tmp::new("cancel-exit");

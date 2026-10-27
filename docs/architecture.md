@@ -166,7 +166,10 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   process fails ("action left processes behind"), nothing placed; an input
   the process already settled with its own `skip` or `fail` keeps that
   outcome (each input has one), as it placed nothing. After a contract
-  violation the reason stays the violation.
+  violation the reason stays the violation. The engine is the child
+  subreaper of what it starts, so the kernel's child list, not `/proc`,
+  tells whether a member still runs; if it cannot be read, nothing is
+  accepted.
 
 ### Sandbox
 
