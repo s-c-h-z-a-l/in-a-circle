@@ -163,7 +163,10 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   a contract violation fails with nothing of it placed; inputs finished
   before keep their results. If any process of the action's group is
   still alive after it exits, the group is killed and every input of that
-  process fails ("action left processes behind"), nothing placed.
+  process fails ("action left processes behind"), nothing placed; an input
+  the process already settled with its own `skip` or `fail` keeps that
+  outcome (each input has one), as it placed nothing. After a contract
+  violation the reason stays the violation.
 
 ### Sandbox
 
