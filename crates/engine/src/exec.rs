@@ -732,8 +732,17 @@ fn place_outputs(
         let mut cancelled = false;
         let published = {
             let mut before = |g: &OutputGroup, private: &Path| -> io::Result<()> {
+                #[cfg(test)]
+                tests::BEFORE_PREPARE.with_borrow_mut(|f| f.as_mut().map(|f| f()));
+                // Before the group is prepared (a later journal keeps a
+                // durable intent for it), so a cancel that came in during
+                // the copy leaves nothing behind but the private staging.
+                if sink.is_cancelled(cancel) {
+                    cancelled = true;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                }
                 sink.obs.prepare_group(g, private)?;
-                // The last point before the commit: a cancel stops here.
+                // And again right before the commit: preparing may take time.
                 if sink.is_cancelled(cancel) {
                     cancelled = true;
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -2358,6 +2367,14 @@ pub(crate) mod tests {
 
     type PublishHook = Option<Box<dyn FnMut(&Publication)>>;
 
+    thread_local! {
+        /// Runs in `place_outputs` as the first thing of each
+        /// `before_commit`, before the cancel check and `prepare_group`:
+        /// the window in which a cancel arrives during the copy.
+        pub(super) static BEFORE_PREPARE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     #[derive(Default)]
     struct Seen(Vec<Outcome>);
     impl Observer for Seen {
@@ -2449,6 +2466,55 @@ pub(crate) mod tests {
                 reason: "denied".to_owned()
             }]
         );
+    }
+
+    /// A cancel that arrives while the outputs are copied stops before
+    /// `prepare_group` (no intent for a group that is never published),
+    /// not only before the commit.
+    #[test]
+    fn cancel_during_the_copy_stops_before_prepare_group() {
+        #[derive(Default)]
+        struct Prep(Seen, usize);
+        impl Observer for Prep {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn prepare_group(&mut self, _: &OutputGroup, _: &Path) -> io::Result<()> {
+                self.1 += 1;
+                Ok(())
+            }
+        }
+        let t = Tmp::new("cancel-prepare");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        BEFORE_PREPARE.set(Some(Box::new(|| {
+            // SAFETY: signals this thread, which has SIGTERM blocked.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        })));
+        let mut seen = Prep::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        BEFORE_PREPARE.set(None);
+        assert_eq!(seen.1, 0, "prepare_group ran for a cancelled input");
+        assert_eq!(
+            seen.0.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cancelled".to_owned()
+            }]
+        );
+        let mut left: Vec<_> = fs::read_dir(&docs).unwrap().flatten().collect();
+        left.sort_by_key(|e| e.file_name());
+        let left: Vec<_> = left.iter().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["a.txt"], "something became visible");
     }
 
     #[test]
