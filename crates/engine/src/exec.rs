@@ -1057,7 +1057,7 @@ fn run_step(
         }
         return None;
     }
-    // Orphans of the action come back to us (see `members`); without
+    // Orphans of the action come back to us (see `reap_group`); without
     // that nothing could tell whether one still runs.
     if let Err(e) = become_subreaper() {
         return fail_all(sink, &format!("cannot supervise the action: {e}"));
@@ -1126,8 +1126,6 @@ struct Supervisor<'a> {
     /// The child is reaped: its pid, and so the group id, may now be
     /// reused by an unrelated process. Nothing is signalled after this.
     reaped: bool,
-    /// The leader's exit was seen (else `run` stopped on a poll error).
-    exited: bool,
     /// `run` stopped because poll failed: nothing is accepted.
     poll_failed: bool,
 }
@@ -1208,7 +1206,7 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
 /// whose parent dies is reparented to us, not to init. With `setsid` and
 /// `setpgid` denied in the sandbox, every member of an action's process
 /// group then descends from one of our own children until it is reaped,
-/// and the kernel's child list ([`members`]) shows it whatever `/proc`
+/// and the kernel's child list ([`reap_group`]) shows it whatever `/proc`
 /// shows (hidepid) and whatever the member made of itself (non-dumpable).
 /// Not inherited across fork (prctl(2)), so no child is one; kept across
 /// our own exec, which never happens. Idempotent and cheap: called before
@@ -1222,26 +1220,22 @@ pub(crate) fn become_subreaper() -> io::Result<()> {
     Ok(())
 }
 
-/// Our children in process group `pgid`, once its leader is reaped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Members {
-    /// None left: every member has been reaped.
-    Gone,
-    /// At least one runs. It is our unreaped child, so it pins `pgid`:
-    /// the id cannot name another group while we have not reaped it, and
-    /// `kill(-pgid)` is safe.
-    Live,
-}
-
-/// Reaps our exited children in process group `pgid` (`waitid(P_PGID,
-/// WEXITED | WNOHANG)`) until none is left or one still runs. Called with
-/// the group's leader reaped and [`become_subreaper`] in effect: a member
-/// that is not our child has a live ancestor that is, so `Gone` means the
-/// group is empty. A fork chain cannot slip past: a process's children are
-/// reparented to us before it becomes a zombie, so reaping a link shows
-/// the next one. Fails closed: any error but `ECHILD` (no such child) is
-/// returned, and so is a chain still reaped at `until`.
-pub(crate) fn members(pgid: libc::pid_t, until: Instant) -> io::Result<Members> {
+/// Reaps every member of process group `pgid` with `waitid(P_PGID,
+/// WEXITED | WNOHANG | __WALL)` until none is left (`ECHILD`). Called after
+/// the group got our SIGKILL (sent while its leader was unreaped, so to
+/// no other group) and with the leader reaped, under [`become_subreaper`]:
+/// every member then descends from one of our children, and a process's
+/// children become ours before it is a zombie, so `ECHILD` means the group
+/// is empty and no fork chain slips past.
+///
+/// True if any member was alive at the kill: one still running when
+/// looked at, or reaped as killed by SIGKILL. False if all had exited on
+/// their own. `__WALL` also reports a child whose exit signal is not
+/// SIGCHLD. Fails closed: any error but `ECHILD`, or members still there
+/// at `until`, is an error (the kill is already sent either way).
+pub(crate) fn reap_group(pgid: libc::pid_t, until: Instant) -> io::Result<bool> {
+    let mut alive = false;
+    let mut nap = Duration::from_millis(1);
     loop {
         // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -1261,7 +1255,7 @@ pub(crate) fn members(pgid: libc::pid_t, until: Instant) -> io::Result<Members> 
                     libc::P_PGID,
                     pgid as libc::id_t,
                     &mut info,
-                    libc::WEXITED | libc::WNOHANG,
+                    libc::WEXITED | libc::WNOHANG | libc::__WALL,
                 )
             },
         };
@@ -1269,40 +1263,36 @@ pub(crate) fn members(pgid: libc::pid_t, until: Instant) -> io::Result<Members> 
             let e = io::Error::last_os_error();
             match e.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::ECHILD) => return Ok(Members::Gone),
+                Some(libc::ECHILD) => return Ok(alive),
                 _ => return Err(e),
             }
         }
-        // With WNOHANG and no exited child, si_pid stays 0.
+        let timed_out = || {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the action's processes are not all gone",
+            )
+        };
+        // With WNOHANG and no exited child, si_pid stays 0: one still runs
+        // (dying of our SIGKILL, or stuck in the kernel).
         // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
         if unsafe { info.si_pid() } == 0 {
-            return Ok(Members::Live);
+            alive = true;
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(timed_out());
+            }
+            std::thread::sleep(nap.min(left));
+            nap = (nap * 2).min(GROUP_PROBE_MAX);
+            continue;
+        }
+        // SAFETY: as above; si_status is set for a reaped child.
+        if info.si_code == libc::CLD_KILLED && unsafe { info.si_status() } == libc::SIGKILL {
+            alive = true;
         }
         if Instant::now() >= until {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "still reaping the action's processes",
-            ));
+            return Err(timed_out());
         }
-    }
-}
-
-/// Reaps the members of `pgid` (leader reaped) until none is left; false
-/// if one is left at `until` or the child list cannot be read.
-pub(crate) fn members_gone(pgid: libc::pid_t, until: Instant) -> bool {
-    let mut nap = Duration::from_millis(1);
-    loop {
-        match members(pgid, until) {
-            Ok(Members::Gone) => return true,
-            Ok(Members::Live) => {}
-            Err(_) => return false,
-        }
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return false;
-        }
-        std::thread::sleep(nap.min(left));
-        nap = (nap * 2).min(GROUP_PROBE_MAX);
     }
 }
 
@@ -1379,7 +1369,6 @@ impl<'a> Supervisor<'a> {
             term_at: None,
             killed: false,
             reaped: false,
-            exited: false,
             poll_failed: false,
         }
     }
@@ -1501,7 +1490,6 @@ impl<'a> Supervisor<'a> {
             // Once the leader is gone, nothing more is read until its whole
             // group is: `finish` kills it, then reads the rest.
             if exited {
-                self.exited = true;
                 return;
             }
             // At most READ_QUOTA per pipe, then the signalfd and the pidfd
@@ -1712,11 +1700,11 @@ impl<'a> Supervisor<'a> {
         if self.cancel.is_cancelled() || sink.cancelled {
             self.cancelled = true;
         }
-        if !self.exited {
-            // Poll failed with the leader maybe running: kill it all
-            // (unreaped, the id is ours).
-            self.signal(libc::SIGKILL);
-        }
+        // The whole group is killed first, whatever happens next: the
+        // unreaped leader keeps `pid` the action's group id, so the kill
+        // cannot reach another group, and nothing of the action outlives
+        // us even if its members cannot be counted.
+        self.signal(libc::SIGKILL);
         let until = Instant::now() + GROUP_GONE;
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
             // Killed but not exiting: stuck in the kernel. It stays
@@ -1738,21 +1726,13 @@ impl<'a> Supervisor<'a> {
         };
         self.reaped = true;
         // A descendant still running after the leader's exit fails the
-        // process, whatever it reported: once killed it may have been
-        // mid-write to an output. The kernel's child list tells (see
-        // `members`); a member found running is our unreaped child, which
-        // keeps the group id ours for the kill. An unreadable child list
-        // counts as running (fail closed).
-        let found = members(self.pid, until);
-        let left_behind = !matches!(found, Ok(Members::Gone));
-        if matches!(found, Ok(Members::Live)) {
-            // SAFETY: kill has no memory preconditions; the live member
-            // just found is our unreaped child, so `pid` is still the
-            // action's group id.
-            unsafe { libc::kill(-self.pid, libc::SIGKILL) };
-        }
-        // Waited for even when left behind: nothing of it may outlive us.
-        let vanished = members_gone(self.pid, until);
+        // process, whatever it reported: killed, it may have been mid-write
+        // to an output. The kernel's child list tells (see `reap_group`),
+        // and fails closed: unreadable, or members left at the deadline,
+        // counts as left behind.
+        let reaped = reap_group(self.pid, until);
+        let vanished = reaped.is_ok();
+        let left_behind = !matches!(reaped, Ok(false));
         let gone = vanished && !left_behind && self.drain(sink, until);
         // A line cut off by a crash is not an event; after a normal exit it
         // is a broken one. (No signal: the child is reaped.)
@@ -1859,7 +1839,7 @@ pub(crate) mod tests {
     }
 
     thread_local! {
-        /// The errno `members` gets from its `waitid`, on this thread.
+        /// The errno `reap_group` gets from its `waitid`, on this thread.
         pub(crate) static WAITID_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
     }
 
@@ -1879,30 +1859,60 @@ pub(crate) mod tests {
         (pid, child)
     }
 
-    /// The kernel's child list after the leader's exit: a background job
-    /// still running is found (and killed, and reaped), one the leader
-    /// waited for is not.
-    #[test]
-    fn members_sees_a_running_orphan_and_not_a_finished_one() {
-        let until = || Instant::now() + Duration::from_secs(5);
-        let (pid, mut c) = leader("sleep 30 & exit 0");
-        c.wait().unwrap();
-        assert_eq!(members(pid, until()).unwrap(), Members::Live);
-        // SAFETY: the live member is our unreaped child: the id is ours.
+    /// Kills `pid`'s group (the leader exited, unreaped), reaps the
+    /// leader, then the group.
+    fn kill_and_reap(pid: libc::pid_t, mut c: std::process::Child) -> io::Result<bool> {
+        // SAFETY: the leader is unreaped: the group id is ours.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
-        assert!(members_gone(pid, until()));
-        assert_eq!(members(pid, until()).unwrap(), Members::Gone);
-
-        let (pid, mut c) = leader("sleep 0.01 & wait; exit 0");
         c.wait().unwrap();
-        assert_eq!(members(pid, until()).unwrap(), Members::Gone);
+        reap_group(pid, Instant::now() + Duration::from_secs(5))
+    }
+
+    /// The kernel's child list after the leader's exit: a background job
+    /// still running at the kill is found (and reaped); one the leader
+    /// waited for, or none at all, is not.
+    #[test]
+    fn reap_group_tells_a_running_orphan_from_a_finished_one() {
+        let (pid, c) = leader("sleep 30 & exit 0");
+        assert!(kill_and_reap(pid, c).unwrap());
+        let (pid, c) = leader("sleep 0.01 & wait; exit 0");
+        assert!(!kill_and_reap(pid, c).unwrap());
+        let (pid, c) = leader("exit 0");
+        assert!(!kill_and_reap(pid, c).unwrap());
+    }
+
+    /// A member already dead of our SIGKILL when the group is reaped (no
+    /// longer running) still counts as alive at the kill, by its status.
+    #[test]
+    fn reap_group_counts_a_member_killed_by_our_kill() {
+        let (pid, mut c) = leader("sleep 30 & exit 0");
+        // SAFETY: the leader is unreaped: the group id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        c.wait().unwrap();
+        // Wait, without reaping, until the sleep is a zombie.
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: zeroed siginfo is valid storage; WNOWAIT reaps nothing.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL;
+            // SAFETY: info is a valid out-pointer.
+            let r = unsafe { libc::waitid(libc::P_PGID, pid as libc::id_t, &mut info, flags) };
+            assert_eq!(r, 0, "{}", io::Error::last_os_error());
+            // SAFETY: waitid filled (or zeroed) the CLD fields.
+            if unsafe { info.si_pid() } != 0 {
+                break;
+            }
+            assert!(Instant::now() < until, "the sleep did not die");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(reap_group(pid, until).unwrap());
     }
 
     /// A member that made itself unreadable in `/proc` (non-dumpable, by
     /// executing a binary it may not read, as `hidepid` would hide any
     /// foreign one) is still on the kernel's child list.
     #[test]
-    fn members_sees_a_non_dumpable_member() {
+    fn reap_group_sees_a_non_dumpable_member() {
         use std::os::unix::fs::PermissionsExt;
         let t = Tmp::new("nodump");
         let bin = t.0.join("hidden-sleep");
@@ -1921,8 +1931,7 @@ pub(crate) mod tests {
         );
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o111)).unwrap();
         let token = format!("30.{}{}", std::process::id(), line!());
-        let (pid, mut c) = leader(&format!("{} {token} & exit 0", bin.display()));
-        c.wait().unwrap();
+        let (pid, c) = leader(&format!("{} {token} & exit 0", bin.display()));
         // Positive control: it is non-dumpable, so its environ (a
         // ptrace-checked file) is closed to us, as all of it is to a
         // foreign reader under hidepid.
@@ -1939,25 +1948,68 @@ pub(crate) mod tests {
             matches!(&hidden[..], [Err(e)] if e.raw_os_error() == Some(libc::EACCES)),
             "{hidden:?}"
         );
-        let until = Instant::now() + Duration::from_secs(5);
-        assert_eq!(members(pid, until).unwrap(), Members::Live);
-        // SAFETY: the live member is our unreaped child: the id is ours.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-        assert!(members_gone(pid, until));
+        assert!(kill_and_reap(pid, c).unwrap());
     }
 
     /// Fails closed: an error from `waitid` other than ECHILD is an error,
     /// which the callers count as left behind.
     #[test]
-    fn members_fails_closed_on_a_waitid_error() {
+    fn reap_group_fails_closed_on_a_waitid_error() {
         let (pid, mut c) = leader("exit 0");
         c.wait().unwrap();
         WAITID_ERRNO.set(Some(libc::EINVAL));
-        let r = members(pid, Instant::now() + Duration::from_secs(1));
-        let gone = members_gone(pid, Instant::now() + Duration::from_millis(50));
+        let r = reap_group(pid, Instant::now() + Duration::from_secs(1));
         WAITID_ERRNO.set(None);
         assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::EINVAL));
-        assert!(!gone);
+    }
+
+    /// `__WALL`: a child whose exit signal is not SIGCHLD (raw `clone`
+    /// with exit signal 0) is invisible to `waitid` without it. Our own
+    /// member children are reparented ones, which the kernel gives
+    /// SIGCHLD (`reparent_leader`), and the sandbox lets no action make
+    /// us such a child directly, so the case is built here: a direct
+    /// child in its own group, as a leader would be.
+    #[test]
+    fn reap_group_sees_a_child_without_exit_signal() {
+        // SAFETY: a raw clone with flags 0 is a fork with exit signal 0.
+        // The child only makes async-signal-safe calls (setpgid, pause,
+        // _exit), as after any fork of a threaded process.
+        let pid = unsafe { libc::syscall(libc::SYS_clone, 0, 0, 0, 0, 0) } as libc::pid_t;
+        if pid == 0 {
+            // SAFETY: as above.
+            unsafe {
+                libc::setpgid(0, 0);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        assert!(pid > 0, "clone: {}", io::Error::last_os_error());
+        let until = Instant::now() + Duration::from_secs(5);
+        // SAFETY: getpgid only reads; the child is ours and unreaped.
+        while unsafe { libc::getpgid(pid) } != pid {
+            assert!(Instant::now() < until, "the child never led its group");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Without __WALL the running child is not seen at all.
+        // SAFETY: zeroed siginfo is valid storage; WNOHANG does not block.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PGID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG,
+            )
+        };
+        assert_eq!(
+            (r, io::Error::last_os_error().raw_os_error()),
+            (-1, Some(libc::ECHILD)),
+            "control"
+        );
+        // SAFETY: our unreaped child leads the group: the id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert!(reap_group(pid, until).unwrap(), "missed the killed child");
     }
 
     /// The subreaper flag is not inherited across fork: a child (here,
@@ -2345,6 +2397,51 @@ pub(crate) mod tests {
     /// Copies the first input to `0/a.md` and reports it.
     const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
                         printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// The group is killed before its members are counted, so even when
+    /// they cannot be counted (an injected `waitid` error) nothing of the
+    /// action survives the run: not a lingering descendant, nor a chain
+    /// that hops pids with its pipes closed. Each is seen running first,
+    /// by its exact command line (the positive control).
+    #[test]
+    fn an_unreadable_child_list_still_kills_the_group() {
+        use crate::catalog::tests::{procs_with, seen_running};
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_unreadable_child_list_still_kills_the_group", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("waitid-kill");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let token = format!("36.{}{}", std::process::id(), line!());
+        let hop_token = format!("hop{}{}", std::process::id(), line!());
+        let hop = "exec >&- 2>&-; hop() { ( hop ) & exit 0; }; hop";
+        let script = format!(
+            "sleep {token} &\n\
+             bash -c \"{hop}\" {hop_token} &\n\
+             sleep 0.3\n\
+             read -r in < \"$6\"; printf \"skip\\t%s\\tx\\n\" \"$in\""
+        );
+        let bin = t.0.join("lingers");
+        install_script(&bin, &format!("exec /bin/bash -c '{script}' bash \"$@\""));
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let span = Duration::from_millis(250);
+        let sleeper = seen_running(&["sleep", &token], span);
+        let chain = seen_running(&["bash", "-c", hop, &hop_token], span);
+        let tok = CancelToken::install().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let mut seen = Seen::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        WAITID_ERRNO.set(None);
+        assert!(sleeper.join().unwrap(), "the lingering one never ran");
+        assert!(chain.join().unwrap(), "the chain never ran");
+        // Give a hop that escaped the kill time to show itself.
+        std::thread::sleep(Duration::from_millis(100));
+        let mut left = procs_with(&token);
+        left.extend(procs_with(&hop_token));
+        assert!(left.is_empty(), "survived the run: {left:?}");
+    }
 
     /// A child list that cannot be read (an injected `waitid` error)
     /// fails the action: nothing tells whether a descendant still runs.

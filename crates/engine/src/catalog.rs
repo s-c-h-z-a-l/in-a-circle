@@ -413,7 +413,7 @@ fn spawn_manifest(bin: &Path) -> Result<std::process::Child, Fail> {
     unsafe {
         cmd.pre_exec(move || sandbox::apply_in_child(fd, &limits));
     }
-    // Orphans of the manifest come back to us (see `exec::members`).
+    // Orphans of the manifest come back to us (see `exec::reap_group`).
     exec::become_subreaper().map_err(|e| Fail::Transient(format!("cannot supervise: {e}")))?;
     let child = cmd
         .spawn()
@@ -434,11 +434,10 @@ fn kill_group(child: &std::process::Child) {
 }
 
 /// Reads the child's stdout until the child exits, `deadline` passes, the
-/// output passes `MAX_OUTPUT` or reading fails (then kills its whole
-/// group, still unreaped). Reaps it, asks the kernel's child list whether
-/// another process of its group still runs (the manifest is then
-/// rejected, and the group killed), reaps every member until none is
-/// left and reads the pipe to EOF: the kernel's word that no
+/// output passes `MAX_OUTPUT` or reading fails. Then kills its whole
+/// group (the child still unreaped), reaps it, and reaps every member
+/// until none is left; if one was alive at the kill, the manifest is
+/// rejected. Then reads the pipe to EOF: the kernel's word that no
 /// write end is open, so no descendant can add to the output any more.
 /// Only then does the output count, if the child exited with success.
 /// The cleanup has its own `exec::GROUP_GONE`; past it the manifest fails
@@ -458,13 +457,11 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     exec::set_nonblocking(fd);
     let mut out = Vec::new();
     let mut open = true;
-    let mut exited = false;
     let mut result = Ok(());
     // While the child runs. Without a pidfd its exit is polled every
     // `NO_PIDFD_POLL`, like the action supervisor does.
     while result.is_ok() {
         if pidfd.is_none() && exec::exited_unreaped(pid) {
-            exited = true;
             break;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -504,7 +501,6 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
         // The exit first: once it is seen, nothing more is read until the
         // group is gone.
         if pidfd.is_some() && fds.last().is_some_and(|p| p.revents != 0) {
-            exited = true;
             break;
         }
         if open && fds[0].revents != 0 {
@@ -515,11 +511,11 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
             }
         }
     }
-    if !exited {
-        // Timed out, too large or unreadable, the leader maybe running:
-        // kill it all while it is unreaped (the group id is its own).
-        kill_group(child);
-    }
+    // The whole group is killed first, whatever happens next: the
+    // unreaped leader keeps `pid` the manifest's group id, so the kill
+    // cannot reach another group, and nothing of it outlives us even if
+    // its members cannot be counted.
+    kill_group(child);
     let until = Instant::now() + exec::GROUP_GONE;
     if !exec::wait_exited(pid, pidfd.as_ref(), until) {
         // Killed but stuck in the kernel; left unreaped (its group id stays
@@ -527,18 +523,10 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
         return Err(t("did not exit after SIGKILL"));
     }
     let status = child.wait();
-    // A descendant still running after the leader's exit rejects the
-    // manifest: its output is not finished. The kernel's child list tells
-    // (`exec::members`); a member found running is our unreaped child,
-    // which keeps the group id ours for the kill. Unreadable: rejected.
-    let found = exec::members(pid, until);
-    if found.as_ref().is_ok_and(|m| *m == exec::Members::Live) {
-        // SAFETY: kill has no memory preconditions; the live member is our
-        // unreaped child, so `pid` is still the manifest's group id.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-    }
-    let gone = exec::members_gone(pid, until);
-    if !gone || !matches!(found, Ok(exec::Members::Gone)) {
+    // A descendant alive at the leader's exit rejects the manifest: its
+    // output is not finished. The kernel's child list tells
+    // (`exec::reap_group`); unreadable, or not empty in time: rejected.
+    if !matches!(exec::reap_group(pid, until), Ok(false)) {
         return Err(t("left processes behind"));
     }
     while open {
@@ -671,7 +659,7 @@ fn write_cache(path: &Path, entries: &[Entry]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// Regression: a run without `INACIRCLE_ACTIONS_DIR` (other dirs, no
     /// binaries) wrote an empty catalog over the one the wheel reads from
@@ -1025,7 +1013,7 @@ mod tests {
     }
 
     /// Pids whose command line mentions `marker` (a unique fixture path).
-    fn procs_with(marker: &str) -> Vec<u32> {
+    pub(crate) fn procs_with(marker: &str) -> Vec<u32> {
         let mut found = Vec::new();
         for e in std::fs::read_dir("/proc").unwrap().flatten() {
             let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
@@ -1119,7 +1107,7 @@ mod tests {
     /// Whether a process running exactly `argv` was seen, sampled every
     /// `PERIOD` for `span` on another thread while the load runs: the
     /// positive control that a fixture's descendant did start.
-    fn seen_running(argv: &[&str], span: Duration) -> std::thread::JoinHandle<bool> {
+    pub(crate) fn seen_running(argv: &[&str], span: Duration) -> std::thread::JoinHandle<bool> {
         /// Often enough to see processes that live for a second.
         const PERIOD: Duration = Duration::from_millis(20);
         let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
@@ -1259,6 +1247,30 @@ mod tests {
         assert!(c.get("x.a").is_none(), "taken without the child list");
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(c.get("x.a").is_some(), "control");
+    }
+
+    /// The group is killed before its members are counted: even when
+    /// they cannot be counted (an injected `waitid` error), a manifest's
+    /// lingering descendant does not survive the load. It is seen running
+    /// first, by its exact command line.
+    #[test]
+    fn manifest_with_an_unreadable_child_list_still_kills_the_group() {
+        let f = Fix::new("mf-waitid-kill");
+        let d = f.dir("a");
+        let token = format!("54.{}{}", std::process::id(), line!());
+        let body = format!(
+            "{}\n{{ exec sleep {token} >&- 2>&-; }} &\nsleep 0.3",
+            manifest_body("", &[act("x.a", "A")])
+        );
+        bash_script(&d.join("one"), &body);
+        let seen = seen_running(&["sleep", &token], Duration::from_millis(250));
+        crate::exec::tests::WAITID_ERRNO.set(Some(libc::EINVAL));
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        crate::exec::tests::WAITID_ERRNO.set(None);
+        assert!(seen.join().unwrap(), "the descendant never ran");
+        assert!(c.get("x.a").is_none());
+        let left = procs_with(&token);
+        assert!(left.is_empty(), "survived the load: {left:?}");
     }
 
     #[test]
