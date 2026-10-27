@@ -2415,7 +2415,9 @@ pub(crate) mod tests {
         fs::write(&input, "a\n").unwrap();
         let token = format!("36.{}{}", std::process::id(), line!());
         let hop_token = format!("hop{}{}", std::process::id(), line!());
-        let hop = "exec >&- 2>&-; hop() { ( hop ) & exit 0; }; hop";
+        // Each link lives 50 ms before it forks the next and exits, long
+        // enough for the sampler to see one; the pid still moves on.
+        let hop = "exec >&- 2>&-; hop() { sleep 0.05; ( hop ) & exit 0; }; hop";
         let script = format!(
             "sleep {token} &\n\
              bash -c \"{hop}\" {hop_token} &\n\
