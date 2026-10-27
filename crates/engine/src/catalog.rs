@@ -1073,51 +1073,52 @@ mod tests {
         );
     }
 
-    /// How many processes carry `token` `after` from now, counted on
-    /// another thread while the load runs: the positive control that the
-    /// fixture's descendants did start.
-    fn count_after(token: &str, after: Duration) -> std::thread::JoinHandle<usize> {
+    /// The most processes carrying `token` seen at once, sampled every
+    /// `PERIOD` for `span` on another thread while the load runs: the
+    /// positive control that the fixture's descendants did start.
+    fn max_count(token: &str, span: Duration) -> std::thread::JoinHandle<usize> {
+        /// Often enough to see processes that live for a second.
+        const PERIOD: Duration = Duration::from_millis(50);
         let token = token.to_owned();
         std::thread::spawn(move || {
-            std::thread::sleep(after);
-            procs_with(&token).len()
+            let end = Instant::now() + span;
+            let mut most = 0;
+            while Instant::now() < end {
+                most = most.max(procs_with(&token).len());
+                std::thread::sleep(PERIOD);
+            }
+            most
         })
     }
 
     /// A manifest's descendants: one holds the stdout pipe, writes an
     /// early action line at once and would write a late one after the
     /// leader's exit (a margin after it, by which the engine has seen the
-    /// exit); one lingers with the pipe closed. The manifest counts with
-    /// the early line, the late line does not, and neither descendant
-    /// survives: the whole group is finished before the output is
-    /// accepted. Fixture processes are found by a token unique to this
-    /// test in their command line, which a reused pid would not carry.
+    /// exit); one writes a line, closes the pipe and lingers. The manifest
+    /// counts with both early lines (the positive control that both ran),
+    /// the late line does not, and neither descendant survives: the whole
+    /// group is finished before the output is accepted. Fixture processes
+    /// are found by a token unique to this test in their command line,
+    /// which a reused pid would not carry.
     #[test]
     fn manifest_descendant_writer_outlives_leader() {
         let f = Fix::new("mf-desc");
         let d = f.dir("a");
         let token = format!("51.{}{}", std::process::id(), line!());
         let line = |id: &str| act(id, "L").replace('\t', "\\t");
-        let (early, late) = (line("x.early"), line("x.late"));
+        let (early, lingers, late) = (line("x.early"), line("x.lingers"), line("x.late"));
         let body = format!(
             "{}\n\
-             sleep {token} >&- 2>&- &\n\
+             {{ printf '{lingers}\\n'; exec sleep {token} >&- 2>&-; }} &\n\
              {{ printf '{early}\\n'; sleep 1; printf '{late}\\n'; }} &\n\
              sleep 0.3",
             manifest_body("", &[act("x.a", "A")])
         );
         bash_script(&d.join("one"), &body);
-        let during = count_after(&token, Duration::from_millis(150));
         let c = Catalog::load_from(&[(d, true)], &f.cache());
-        // The sleeper and the writer (bash execs the leader's last
-        // command, `sleep 0.3`, which carries no token).
-        let n = during.join().unwrap();
-        assert!(n >= 2, "the descendants never ran: {n}");
         assert!(c.get("x.a").is_some(), "the manifest itself was refused");
-        assert!(
-            c.get("x.early").is_some(),
-            "the descendant's early line is missing"
-        );
+        assert!(c.get("x.early").is_some(), "the writer never ran");
+        assert!(c.get("x.lingers").is_some(), "the lingering one never ran");
         let left = procs_with(&token);
         assert!(left.is_empty(), "descendants left alive: {left:?}");
         assert!(
@@ -1136,7 +1137,7 @@ mod tests {
         // The descendant's command line carries the token too: `exec sleep`.
         let pre = format!("(trap '' TERM; exec sleep {token}) &\nsleep {token}");
         bash_script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
-        let during = count_after(&token, Duration::from_secs(1));
+        let during = max_count(&token, DEADLINE - Duration::from_millis(500));
         let t = Instant::now();
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(
