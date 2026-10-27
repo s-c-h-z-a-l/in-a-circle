@@ -30,8 +30,9 @@
 //!   process_vm_*, the pidfd calls, kcmp; keyrings; namespaces; clone
 //!   flags beyond fork/vfork/thread (clone3 gets `ENOSYS`); scheduler and
 //!   priority setters; prlimit64 on another pid; migrate/move_pages; the
-//!   lifecycle prctls; mounts and file handles; io_uring, bpf, perf,
-//!   userfaultfd; System V IPC and POSIX queues; async fcntls.
+//!   lifecycle prctls; mounts, mount queries and file handles; inotify
+//!   and fanotify groups (Landlock does not mediate their marks); io_uring,
+//!   bpf, perf, userfaultfd; System V IPC and POSIX queues; async fcntls.
 //! - `setsid` and `setpgid` are denied (`EPERM`; x86_64 has no `setpgrp`
 //!   syscall): the filter is installed after the child's own `setsid`, so
 //!   the action and every descendant stay in one killable process group.

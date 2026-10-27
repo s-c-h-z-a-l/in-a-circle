@@ -215,8 +215,23 @@ const POLICY: &[Sys] = &[
     both(428, 428, Eperm),  // open_tree
     both(429, 429, Eperm),  // move_mount
     both(442, 442, Eperm),  // mount_setattr
+    both(467, 467, Eperm),  // open_tree_attr: open_tree with mount_setattr's attrs
     both(304, 265, Eperm),  // open_by_handle_at
     both(303, 264, Eperm),  // name_to_handle_at
+    // Mount queries: they only read, but what they read is the mount
+    // table, which Landlock hides (/proc is not granted); no converter
+    // needs it.
+    both(457, 457, Eperm),  // statmount
+    both(458, 458, Eperm),  // listmount
+
+    // File notification groups: Landlock does not mediate inotify or
+    // fanotify marks, so an action could watch file activity (names,
+    // opens, writes) in any directory it can search, outside its rules.
+    // An offline converter needs no events; without a group fd no mark
+    // can be added.
+    x86_only(253, Eperm),   // inotify_init
+    both(294, 26, Eperm),   // inotify_init1
+    both(300, 262, Eperm),  // fanotify_init
 
     // Programmable and asynchronous kernel interfaces: io_uring's SOCKET
     // and xattr ops would bypass this filter; bpf, perf and userfaultfd

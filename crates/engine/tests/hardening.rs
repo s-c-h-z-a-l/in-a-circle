@@ -48,8 +48,8 @@ type Row = (&'static str, Option<u32>, Option<u32>, V);
 
 /// Every syscall of the T0 inventory, grouped as there. Numbers: libc
 /// 0.2.191 GNU LP64 tables (`x86_64/not_x32.rs`, `aarch64/mod.rs`); the
-/// ones libc lacks (setxattrat, removexattrat, file_setattr, io_pgetevents;
-/// fchmodat2 on aarch64) from the Linux 7.1 UAPI `asm/unistd_64.h` and
+/// ones libc lacks (setxattrat, removexattrat, file_setattr, io_pgetevents,
+/// open_tree_attr, statmount, listmount; fchmodat2 on aarch64) from the Linux 7.1 UAPI `asm/unistd_64.h` and
 /// `asm-generic/unistd.h`. `seccomp_native_numbers_match_libc` checks the
 /// native column against libc on every test run.
 const POLICY: &[Row] = &[
@@ -146,8 +146,15 @@ const POLICY: &[Row] = &[
     ("open_tree", Some(428), Some(428), Eperm),
     ("move_mount", Some(429), Some(429), Eperm),
     ("mount_setattr", Some(442), Some(442), Eperm),
+    ("open_tree_attr", Some(467), Some(467), Eperm),
     ("open_by_handle_at", Some(304), Some(265), Eperm),
     ("name_to_handle_at", Some(303), Some(264), Eperm),
+    ("statmount", Some(457), Some(457), Eperm),
+    ("listmount", Some(458), Some(458), Eperm),
+    // notify_groups
+    ("inotify_init", Some(253), None, Eperm),
+    ("inotify_init1", Some(294), Some(26), Eperm),
+    ("fanotify_init", Some(300), Some(262), Eperm),
     // programmable_async
     ("io_uring_setup", Some(425), Some(425), Eperm),
     ("io_uring_enter", Some(426), Some(426), Eperm),
@@ -929,6 +936,7 @@ fn seccomp_native_numbers_match_libc() {
         ("fsmount", libc::SYS_fsmount), ("fspick", libc::SYS_fspick),
         ("open_tree", libc::SYS_open_tree), ("move_mount", libc::SYS_move_mount),
         ("mount_setattr", libc::SYS_mount_setattr),
+        ("inotify_init1", libc::SYS_inotify_init1), ("fanotify_init", libc::SYS_fanotify_init),
         ("open_by_handle_at", libc::SYS_open_by_handle_at),
         ("name_to_handle_at", libc::SYS_name_to_handle_at),
         ("io_uring_setup", libc::SYS_io_uring_setup),
@@ -984,7 +992,7 @@ fn seccomp_native_numbers_match_libc() {
         ("utime", libc::SYS_utime), ("utimes", libc::SYS_utimes),
         ("futimesat", libc::SYS_futimesat), ("poll", libc::SYS_poll),
         ("epoll_wait", libc::SYS_epoll_wait), ("fork", libc::SYS_fork),
-        ("vfork", libc::SYS_vfork),
+        ("vfork", libc::SYS_vfork), ("inotify_init", libc::SYS_inotify_init),
     ];
     #[cfg(not(target_arch = "x86_64"))]
     let only: &[(&str, c_long)] = &[];
@@ -995,6 +1003,9 @@ fn seccomp_native_numbers_match_libc() {
         "file_setattr",
         "io_pgetevents",
         "fchmodat2",
+        "open_tree_attr",
+        "statmount",
+        "listmount",
     ];
     let mut wrong = Vec::new();
     for row in POLICY {
@@ -1274,7 +1285,21 @@ fn denial_case(name: &str) -> Option<([c_long; 6], How)> {
         "mount" => (a(&[]), Plain),
         // Unknown flags: EINVAL first.
         "umount2" => (a(&[NULL, 0x7fff_0000]), Plain),
-        "open_tree" | "mount_setattr" => (a(&[BAD_FD, NULL, 0x7fff_0000]), Plain),
+        "open_tree" | "mount_setattr" | "open_tree_attr" => {
+            (a(&[BAD_FD, NULL, 0x7fff_0000]), Plain)
+        }
+        // Unknown flags: EINVAL before the request is read.
+        "statmount" | "listmount" => (a(&[NULL, NULL, 0, 0x7fff_0000]), Plain),
+        // inotify_init makes a group fd (gone with the probe process);
+        // inotify_init1 with unknown flags is EINVAL first.
+        "inotify_init" => (a(&[]), Plain),
+        "inotify_init1" => (a(&[0x7fff_0000]), Plain),
+        // FAN_REPORT_FID (0x200), what an unprivileged group needs (5.13+);
+        // without that support the kernel answers EPERM first.
+        "fanotify_init" => (
+            a(&[0x200, c_long::from(libc::O_RDONLY)]),
+            KernelMayDeny("unprivileged fanotify"),
+        ),
         "fsconfig" => (a(&[BAD_FD, 0xffff]), Plain),
         "pivot_root" | "fsopen" | "fsmount" | "fspick" | "move_mount" => {
             (a(&[NULL, NULL, BAD_FD]), Userns)

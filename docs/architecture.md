@@ -190,7 +190,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   (`clone3` gets `ENOSYS`, so libc falls back to `clone`); scheduler and
   priority setters; `prlimit64` on another pid; `migrate_pages` and
   `move_pages`; the parent-death, subreaper and ptracer prctls; mounts
-  and file handles; io_uring, bpf, perf, userfaultfd; System V IPC and
+  (`open_tree_attr` too), the mount queries `statmount` and `listmount`
+  (Landlock hides `/proc`'s mount table), and file handles; inotify and
+  fanotify groups (Landlock does not mediate their marks); io_uring, bpf, perf, userfaultfd; System V IPC and
   POSIX queues; `setsid` and `setpgid`, so the action and every
   descendant stay in one killable group. A syscall through another ABI
   (i386, AArch32) kills the process; x32 gets `EPERM`.
