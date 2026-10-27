@@ -98,9 +98,13 @@ jobs:
 
       # D-27: the RSS budget guard measures the shipped (release) binary.
       # The step fails unless exactly that test ran and passed (a filter
-      # that matches nothing would otherwise pass silently).
+      # that matches nothing would otherwise pass silently), and the test
+      # itself fails under INACIRCLE_RSS_GATE if it did not measure a
+      # release binary.
       - name: Memory budget (release)
         if: ${{ !cancelled() }}
+        env:
+          INACIRCLE_RSS_GATE: "1"
         run: |
           cargo test --release -p inacircle --test cli -- --exact many_groups_many_outputs_stay_within_rss_budget 2>&1 | tee rss.log
           grep -q "test result: ok. 1 passed" rss.log

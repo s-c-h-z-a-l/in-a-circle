@@ -1167,7 +1167,9 @@ fn undo_removes_a_multi_output_folder() {
 /// build is not the shipped artifact: its 15 MB binary's code pages
 /// (kernel fault-around) dominate its RSS (after T7: 5048-5140 kB here,
 /// 5428 kB on ARM CI, with the heap, RssAnon ~850 kB, unchanged; release
-/// ~3.9 MB, D-27), so there the number is printed, not judged.
+/// ~3.9 MB, D-27), so there the number is printed, not judged, unless
+/// `INACIRCLE_RSS_GATE` is set (CI), which makes a non-release build a
+/// failure.
 #[test]
 fn many_groups_many_outputs_stay_within_rss_budget() {
     let release = Path::new(BIN)
@@ -1190,6 +1192,13 @@ fn many_groups_many_outputs_stay_within_rss_budget() {
         .and_then(|(_, r)| r.split_whitespace().next())
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| panic!("no measure line: {}", o.stderr));
+    // CI sets the gate: that step must measure the shipped binary, so a
+    // changed profile or target layout fails it instead of passing as a
+    // diagnostic.
+    assert!(
+        release || std::env::var_os("INACIRCLE_RSS_GATE").is_none(),
+        "INACIRCLE_RSS_GATE is set but {BIN} is not a release build"
+    );
     if !release {
         eprintln!("diagnostic only (debug build, not gated): VmHWM {kb} kB");
         return;
