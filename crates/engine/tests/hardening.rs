@@ -1902,12 +1902,19 @@ fn run_child(mode: &str, sb: Sb, work: &Path, canary: RawFd) -> String {
         .stdin(Stdio::null());
     let mut keep = None;
     let fd = sandbox_fd(sb, &mut keep);
-    // SAFETY: dup2 and apply_in_child are async-signal-safe; the ruleset
+    // SAFETY: dup2, fcntl and apply_in_child are async-signal-safe; the ruleset
     // (by the caller, or `keep`) and canary fds stay open for the whole
     // spawn.
     unsafe {
         cmd.pre_exec(move || {
-            if canary >= 0 && libc::dup2(canary, CANARY_FD) < 0 {
+            // dup2 onto itself changes nothing, so a canary that already
+            // is fd 9 would keep its O_CLOEXEC: clear it instead.
+            let inherited = match canary {
+                c if c < 0 => 0,
+                CANARY_FD => libc::fcntl(CANARY_FD, libc::F_SETFD, 0),
+                c => libc::dup2(c, CANARY_FD),
+            };
+            if inherited < 0 {
                 return Err(io::Error::last_os_error());
             }
             if let Some(fd) = fd {
