@@ -1133,8 +1133,11 @@ fn locate(target: &Path, parent: &Fd, leaf: &CStr, object: (u64, u64)) -> Option
 ///
 /// The outputs are copied into fresh files of a private 0700 staging
 /// folder on the target's filesystem (a producer's old fd cannot reach
-/// them), validated (regular, unchanged during the copy, TXT/MD as UTF-8
-/// up to 32 MiB), given their final umask modes (still private: the
+/// them), validated on the stream that is written (the source is regular
+/// and unchanged during the copy, the bytes written to the private file are
+/// UTF-8 for TXT/MD, up to 32 MiB; the finished copy is checked only for
+/// type, owner, link count and size, not read again, which is equivalent
+/// for a dead producer, a fresh inode and a 0700 staging folder), given their final umask modes (still private: the
 /// staging folder is 0700), synced, and their baseline taken; then the
 /// wrapper (its final mode likewise), the
 /// staging folder, `before_commit(group, private path)`, and one

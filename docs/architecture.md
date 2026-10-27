@@ -366,18 +366,24 @@ In the engine, in one place:
 4. Per input, all or nothing: the outputs are copied into fresh files in a
    private 0700 staging folder on the target's filesystem (`.inacircle-
    <random>/`), checked (regular files, unchanged while copied, TXT/MD
-   valid UTF-8 up to 32 MiB), given their final modes as `cp` would (0666
-   and 0777 minus the umask) while still inside the private folder,
-   synced, and their identity recorded; then the folder is published by one `renameat2`
-   `RENAME_NOREPLACE`. A filesystem without it is refused, with no
-   fallback. Before that commit an error removes only the engine's own
-   staging; after it nothing is removed: a failed sync is reported as
-   unconfirmed, and a folder whose place cannot be proved right after the
-   commit (an ancestor renamed meanwhile) is reported as converted at an
-   unknown place, with its operation id and anchor, never with a guessed
-   path. Other inputs' published results are never taken back.
-5. Extraction: a single top-level folder is extracted as is; loose files go
-   into a folder named after the archive.
+   valid UTF-8 up to 32 MiB, validated on the stream that is written),
+   given their final modes as `cp` would (0666 and 0777 minus the umask,
+   but the owner always keeps rw on files and rwx on the folder, and a
+   setgid target's S_ISGID is kept) while still inside the private folder,
+   synced, and their identity recorded; then the folder is published by one
+   `renameat2` `RENAME_NOREPLACE`. A filesystem without it is refused, with
+   no fallback. Before that commit an error (or a cancel) removes only the
+   engine's own staging; after it nothing is removed: a failed sync is
+   reported as unconfirmed, and a result that cannot be proved right after
+   the commit is reported as converted at an unknown place or state, with
+   its operation id and anchor, never with a guessed path: either an
+   ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
+   changed since the baseline (`BaselineChanged`, "files changed while
+   saved"). Other inputs' published results are never taken back.
+5. Extraction: the extracted files go, flattened, into one folder named
+   after the archive; a single top-level folder inside the archive is not
+   kept as such. (Every input gets its wrapper folder, also a single
+   output.)
 6. The temp dir is `.inacircle-<random>` inside the target folder, always
    removed at the end through the folder's fd (never by a path that may
    name something else by then); stale ones from a crash are cleaned by
