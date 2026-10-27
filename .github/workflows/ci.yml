@@ -33,76 +33,55 @@ jobs:
           path: sandbox-qualification.json
           if-no-files-found: error
 
-  # The sandbox's seccomp policy, Landlock and CLI sandbox tests on both
-  # native architectures (`check` runs on x86_64 only). These runners pass
-  # the Landlock ABI 6 qualification above, so a skipped test fails here.
-  hardening:
-    name: Hardening (${{ matrix.runner }})
+  # The full gate, on both native architectures, on runners the job above
+  # qualified (Landlock ABI >= 6, seccomp installable). The sandbox is
+  # mandatory, so every test runs: a skip of a required test fails inside
+  # the test itself (INACIRCLE_REQUIRE_*), not through a log grep.
+  native:
+    name: Native (${{ matrix.runner }})
+    needs: sandbox-qualification
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
-    # A cold debug build of the workspace's test targets plus the tests
-    # themselves (well under a minute); 30 minutes still stops a hang early.
-    timeout-minutes: 30
+    # A cold debug + release build of the workspace, the musl build of the
+    # hardening tests and the suite itself take ~10 minutes; 45 still
+    # stops a hang well before the six-hour default.
+    timeout-minutes: 45
     env:
       INACIRCLE_REQUIRE_LANDLOCK: "1"
+      # Every kernel control of the seccomp matrix must be provable here
+      # (unprivileged user namespaces are allowed below).
+      INACIRCLE_REQUIRE_KERNEL_CONTROLS: "1"
+      # Passwordless sudo: the real root/setuid/capability parents run.
+      INACIRCLE_REQUIRE_PRIVILEGED_TEST: "1"
     steps:
       - uses: actions/checkout@v4
 
+      # Version and components come from rust-toolchain.toml; the musl
+      # target is for the hardening tests below.
       - name: Install toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$(uname -m)-unknown-linux-musl"
+          rustc -vV
 
+      # The key carries the architecture and the toolchain file, so an
+      # x86_64 and an arm64 build, or two toolchains, never share target/.
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-hardening-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-hardening-
+          key: ${{ runner.os }}-${{ runner.arch }}-native-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-native-${{ hashFiles('rust-toolchain.toml') }}-
 
       # Ubuntu's AppArmor takes capabilities away inside unprivileged user
       # namespaces; the kernel controls for capability-checked syscalls
       # (pivot_root, fsopen, ...) need one to reach the argument checks.
       - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-
-      # Every hardening and CLI sandbox test must run, not skip, and every
-      # kernel control must be provable (no `note:` from the hardening
-      # tests, which the general `check` job tolerates).
-      - name: Hardening and CLI sandbox tests
-        shell: bash
-        run: |
-          {
-            cargo test -p engine --test hardening -- --nocapture
-            cargo test -p inacircle --test cli sandbox_ -- --nocapture
-          } 2>&1 | tee hardening.log
-          if grep -E "SKIPPED|: skipped|^note: " hardening.log; then
-            echo "a hardening test was skipped or a control unprovable"; exit 1
-          fi
-
-      # The sandbox unit tests; some skip by design where the runner's file
-      # system or kernel lacks a feature (fs-verity, SCTP, MPTCP).
-      - name: Sandbox unit tests
-        run: cargo test -p engine --lib "sandbox::" -- --nocapture
-
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Version and components come from rust-toolchain.toml.
-      - name: Install toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Format
         run: cargo fmt --all --check
@@ -110,23 +89,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Tests skip their Landlock parts when it is unavailable; this step
-      # makes the runner's status visible in the log. Syscall 444 is
-      # landlock_create_ruleset on every architecture; flag 1 returns the ABI.
-      - name: Landlock availability
-        run: |
-          python3 - <<'PY'
-          import ctypes, os
-          libc = ctypes.CDLL(None, use_errno=True)
-          abi = libc.syscall(444, None, 0, 1)
-          if abi > 0:
-              print(f"Landlock ABI {abi}")
-          else:
-              print(f"Landlock unavailable ({os.strerror(ctypes.get_errno())})")
-          PY
-
       - name: Test
         run: cargo test --workspace
+
+      # The hardening tests again as a static musl binary: musl's own thread
+      # start and fork + exec under the filter and the full sandbox.
+      - name: Hardening tests (musl)
+        env:
+          INACIRCLE_EXPECT_MUSL: "1"
+        run: cargo test -p engine --test hardening --target "$(uname -m)-unknown-linux-musl"
+
+      - name: Fuzz target selection
+        run: bash scripts/tests/test_fuzz_target.sh
 
       - name: Shipped dependencies
         run: scripts/check-shipped-deps.sh
@@ -139,7 +113,12 @@ jobs:
   # Separate from `check`: it needs a nightly, and its caches must never mix
   # with the stable job's.
   fuzz-smoke:
-    runs-on: ubuntu-latest
+    name: Fuzz smoke (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
     # Seven targets at 30 s each run one after another (~4 min), plus a cold
     # build of the fuzz crate and of cargo-fuzz (~10 min). 30 minutes leaves
     # headroom for a slow runner and still stops a hung job well before the
@@ -165,8 +144,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/bin/cargo-fuzz
             fuzz/target
-          key: ${{ runner.os }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-${{ hashFiles('fuzz/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ env.FUZZ_VERSION }}-
 
       - name: Install cargo-fuzz
         run: |
@@ -182,5 +161,5 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-runs
+          name: fuzz-runs-${{ matrix.runner }}
           path: fuzz/runs/**
