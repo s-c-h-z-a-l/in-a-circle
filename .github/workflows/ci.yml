@@ -96,14 +96,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --workspace --no-fail-fast
 
-      # D-10: the Trash undo's tests on the runner's own filesystem. Their
-      # fixtures live in the temp dir; the step names its filesystem, fails
-      # unless it is ext4 (GNU stat: "ext2/ext3"), and fails unless the
-      # tests ran and passed there.
+      # D-10: the Trash undo's tests on the runner's disk filesystem. Their
+      # fixtures live in the temp dir, and the runners' /tmp is a tmpfs, so
+      # TMPDIR points at the runner's temp folder on its root disk. The step
+      # names that filesystem, fails unless it is ext4 (GNU stat:
+      # "ext2/ext3"), and fails unless the tests ran and passed there.
       - name: Undo tests on ext4
         if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
-          dir="${TMPDIR:-/tmp}"
+          dir="$TMPDIR"
           fs=$(stat -f -c %T "$dir")
           echo "undo fixtures in $dir: $fs"
           test "$fs" = ext2/ext3
