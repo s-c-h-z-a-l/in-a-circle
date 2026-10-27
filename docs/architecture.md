@@ -365,9 +365,10 @@ In the engine, in one place:
    Never overwrite: `name (1)/`, `name (2)/`, without asking.
 4. Per input, all or nothing: the outputs are copied into fresh files in a
    private 0700 staging folder on the target's filesystem (`.inacircle-
-   <random>/`, files 0600), checked (regular files, unchanged while
-   copied, TXT/MD valid UTF-8 up to 32 MiB), synced, and their identity
-   recorded; then the folder is published by one `renameat2`
+   <random>/`), checked (regular files, unchanged while copied, TXT/MD
+   valid UTF-8 up to 32 MiB), given their final modes as `cp` would (0666
+   and 0777 minus the umask) while still inside the private folder,
+   synced, and their identity recorded; then the folder is published by one `renameat2`
    `RENAME_NOREPLACE`. A filesystem without it is refused, with no
    fallback. Before that commit an error removes only the engine's own
    staging; after it nothing is removed: a failed sync is reported as

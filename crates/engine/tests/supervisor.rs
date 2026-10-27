@@ -1548,8 +1548,8 @@ fn publication_moved_ancestor_is_published_unknown() {
     assert_eq!(names(&moved), ["a", "a.txt"]);
 }
 
-/// The group's baseline is fixed in private (wrapper 0700, child 0600,
-/// one link) and is the same, with the same ids, after the commit; the
+/// The group's baseline is fixed in private (the final umask modes, one
+/// link) and is the same, with the same ids, after the commit; the
 /// private path is gone once published.
 #[test]
 fn publication_baseline_reaches_the_observer_unchanged() {
@@ -1565,7 +1565,15 @@ fn publication_baseline_reaches_the_observer_unchanged() {
     let [(group, location, durability)] = &obs.groups[..] else {
         panic!("{:?}", obs.groups)
     };
-    assert_eq!(*mode, 0o700);
+    // The final modes follow the umask (D-23), set before the baseline.
+    let umask = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("Umask:"))
+        .map(|v| u32::from_str_radix(v.trim(), 8).unwrap())
+        .unwrap();
+    let (dmode, fmode) = (0o777 & !umask, 0o666 & !umask);
+    assert_eq!(*mode, dmode);
     assert!(!private.exists());
     assert_eq!(prepared, group);
     assert_eq!(*durability, engine::exec::Durability::Synced);
@@ -1574,14 +1582,14 @@ fn publication_baseline_reaches_the_observer_unchanged() {
     let wm = std::fs::symlink_metadata(&w).unwrap();
     assert_eq!(
         (group.id.dev, group.id.ino, group.id.mode),
-        (wm.dev(), wm.ino(), 0o700)
+        (wm.dev(), wm.ino(), dmode)
     );
     let [c] = &group.children[..] else {
         panic!("{:?}", group.children)
     };
     let cm = std::fs::symlink_metadata(w.join(&c.rel)).unwrap();
     assert_eq!(c.kind, engine::exec::NodeKind::File);
-    assert_eq!((c.uid, c.mode, c.nlink), (cm.uid(), 0o600, 1));
+    assert_eq!((c.uid, c.mode, c.nlink), (cm.uid(), fmode, 1));
     assert_eq!(
         (c.file_id.dev, c.file_id.ino, c.file_id.size),
         (cm.dev(), cm.ino(), 1)

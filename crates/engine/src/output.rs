@@ -658,13 +658,41 @@ pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedF
 /// of several MB, and one small heap buffer (well inside the 5 MB PSS
 /// budget). Any value works; this one only sets the syscall count.
 const COPY_CHUNK: usize = 64 * 1024;
-/// The largest TXT/Markdown output published: `document_output_bytes`
-/// (32 MiB) of the hardening parameters, proposed and not frozen. A text
+/// The largest TXT/Markdown output published (which must also be valid
+/// UTF-8): `document_output_bytes` (32 MiB) of the hardening parameters,
+/// proposed, finalised at G0-P/T10 (D-23/D-24 accepted it provisionally). A text
 /// output past it is refused before it is copied, so a runaway converter
 /// cannot fill the user's folder with a text nobody can open.
 const TEXT_OUTPUT_MAX: u64 = 32 << 20;
 /// The wrapper's name inside its private staging folder.
 const WRAPPER: &CStr = c"w";
+
+/// The process's umask, read once. Published outputs follow it like `cp`
+/// and file managers do (D-23). It is read from `/proc/self/status`
+/// (`Umask:`, Linux 4.7+), which changes nothing. Only without that line
+/// is it read by `umask(0)` and an immediate restore: that briefly zeroes
+/// the mask for the whole process, which is safe here because the engine
+/// publishes on the supervisor's thread, and `inacircle` starts no other
+/// thread that creates files (the cancel token's contract keeps it
+/// single-threaded).
+fn process_umask() -> libc::mode_t {
+    static UMASK: std::sync::OnceLock<libc::mode_t> = std::sync::OnceLock::new();
+    *UMASK.get_or_init(|| {
+        let from_proc = fs::read_to_string("/proc/self/status").ok().and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Umask:"))
+                .and_then(|v| libc::mode_t::from_str_radix(v.trim(), 8).ok())
+        });
+        from_proc.unwrap_or_else(|| {
+            // SAFETY: umask has no preconditions; the old mask is restored
+            // at once (see above for why the window is safe).
+            let old = unsafe { libc::umask(0) };
+            // SAFETY: as above.
+            unsafe { libc::umask(old) };
+            old
+        }) & 0o777
+    })
+}
 
 /// Points of a publication where the tests inject a fault or a race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1003,12 +1031,19 @@ fn copy_one(
     staging
         .children
         .push((child.clone(), ident(&fstat(dst.0)?)));
-    // Independent of the umask.
+    // Private (0600) while written, independent of the umask.
     // SAFETY: dst is an open fd.
     if unsafe { libc::fchmod(dst.0, 0o600) } != 0 {
         return last_err();
     }
     let copied = copy_checked(src.0, dst.0, is_text(ext), buf)?;
+    // The final mode, as `cp` would make it, before the sync (so it is
+    // durable) and before the baseline (so it records it). Still private:
+    // the 0700 staging folder above keeps everyone else out.
+    // SAFETY: dst is an open fd.
+    if unsafe { libc::fchmod(dst.0, 0o666 & !process_umask()) } != 0 {
+        return last_err();
+    }
     sync(dst.0, Point::SyncChild)?;
     let st = fstat(dst.0)?;
     // SAFETY: geteuid has no preconditions and cannot fail.
@@ -1075,7 +1110,9 @@ fn locate(target: &Path, parent: &Fd, leaf: &CStr, object: (u64, u64)) -> Option
 /// The outputs are copied into fresh files of a private 0700 staging
 /// folder on the target's filesystem (a producer's old fd cannot reach
 /// them), validated (regular, unchanged during the copy, TXT/MD as UTF-8
-/// up to 32 MiB), synced, and their baseline taken; then the wrapper, the
+/// up to 32 MiB), given their final umask modes (still private: the
+/// staging folder is 0700), synced, and their baseline taken; then the
+/// wrapper (its final mode likewise), the
 /// staging folder, `before_commit(group, private path)`, and one
 /// `renameat2(RENAME_NOREPLACE)` of the wrapper: the commit. Until it,
 /// any error removes only this publication's own staging and nothing is
@@ -1124,6 +1161,12 @@ pub fn publish_beneath(
     drop(buf);
     let (wrapper, wid) = staging.wrapper();
     let (wrapper, wid) = (wrapper.0, *wid);
+    // The wrapper's final mode, likewise before its sync and baseline; the
+    // staging folder (0700) stays private until it is removed.
+    // SAFETY: wrapper is an open fd.
+    if unsafe { libc::fchmod(wrapper, 0o777 & !process_umask()) } != 0 {
+        return last_err();
+    }
     sync(wrapper, Point::SyncWrapper)?;
     let st = fstat(wrapper)?;
     let id = DirectoryId {
@@ -1873,6 +1916,66 @@ pub(crate) mod tests {
                 assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "theirs");
                 assert!(root.join("0/a.md").exists(), "source left alone");
             }
+            "umask_022" | "umask_077" => {
+                let (mask, file, dir_mode) = if case == "umask_022" {
+                    (0o022, 0o644, 0o755)
+                } else {
+                    (0o077, 0o600, 0o700)
+                };
+                // SAFETY: umask only sets this process's mask; the child
+                // is single-threaded here.
+                unsafe { libc::umask(mask) };
+                let (root, target) = (dir.join("root"), dir.join("target"));
+                fs::create_dir(&target).unwrap();
+                produced(&root, "0/a.png", b"1");
+                produced(&root, "0/b.png", b"2");
+                let mut private = None;
+                let p = publish_beneath(
+                    &root,
+                    &rels(&["0/a.png", "0/b.png"]),
+                    &target,
+                    "doc",
+                    "png",
+                    &mut |g, path| {
+                        // Final modes already, before the commit, while the
+                        // staging folder above still keeps others out.
+                        let staging = path.parent().unwrap();
+                        let sm = fs::symlink_metadata(staging).unwrap().mode() & 0o7777;
+                        private = Some((g.clone(), sm));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let (prepared, staging_mode) = private.unwrap();
+                assert_eq!(staging_mode, 0o700);
+                assert_eq!(prepared, p.group);
+                let w = target.join("doc");
+                assert_eq!(fs::symlink_metadata(&w).unwrap().mode() & 0o7777, dir_mode);
+                assert_eq!(p.group.id.mode, dir_mode);
+                for c in &p.group.children {
+                    let m = fs::symlink_metadata(w.join(&c.rel)).unwrap().mode() & 0o7777;
+                    assert_eq!((m, c.mode), (file, file), "{:?}", c.rel);
+                }
+                assert_eq!(postcheck(&p).unwrap().len(), 2);
+            }
+            "private_modes_before_chmod" => {
+                // umask 022, the process dies while the first output is
+                // written: everything left is private.
+                // SAFETY: as above.
+                unsafe { libc::umask(0o022) };
+                let (root, target) = (dir.join("root"), dir.join("target"));
+                fs::create_dir(&target).unwrap();
+                produced(&root, "0/a.md", b"a");
+                FAULT.set(Some(Box::new(|p| {
+                    if p == Point::Write {
+                        // SAFETY: ends this helper process at once.
+                        unsafe { libc::_exit(7) };
+                    }
+                    None
+                })));
+                let _ = publish(&root, &["0/a.md"], &target, "a", "md");
+                panic!("did not reach the write");
+            }
             "crash_before_commit" | "crash_after_commit" => {
                 // The process dies at the point: a crash, not an error.
                 let point = if case == "crash_before_commit" {
@@ -2237,7 +2340,8 @@ pub(crate) mod tests {
         assert_eq!(fs::read(wrapper.join("a.md")).unwrap(), b"# a\n");
         let wm = fs::symlink_metadata(&wrapper).unwrap();
         assert!(wm.is_dir());
-        assert_eq!(wm.mode() & 0o7777, 0o700);
+        let (dmode, fmode) = (0o777 & !process_umask(), 0o666 & !process_umask());
+        assert_eq!(wm.mode() & 0o7777, dmode);
         // The wrapper's private identity is the published one.
         assert_eq!(
             p.group.id,
@@ -2246,7 +2350,7 @@ pub(crate) mod tests {
                 ino: wm.ino(),
                 kind: NodeKind::Directory,
                 uid: uid(),
-                mode: 0o700
+                mode: dmode
             }
         );
         assert_eq!(
@@ -2268,7 +2372,7 @@ pub(crate) mod tests {
         assert_eq!(c.rel, Path::new("a.md"));
         assert_eq!(
             (c.kind, c.uid, c.mode, c.nlink),
-            (NodeKind::File, uid(), 0o600, 1)
+            (NodeKind::File, uid(), fmode, 1)
         );
         assert_eq!(c.file_id.ino, cm.ino());
         assert_eq!(c.file_id.size, 4);
@@ -2397,7 +2501,7 @@ pub(crate) mod tests {
                 let m = fs::symlink_metadata(private).unwrap();
                 assert_eq!(
                     (m.dev(), m.ino(), m.mode() & 0o7777),
-                    (g.id.dev, g.id.ino, 0o700)
+                    (g.id.dev, g.id.ino, 0o777 & !process_umask())
                 );
                 let c = &g.children[0];
                 let cm = fs::symlink_metadata(private.join(&c.rel)).unwrap();
@@ -2884,6 +2988,34 @@ pub(crate) mod tests {
     /// name the stale cleanup knows (and takes after a day); one after the
     /// commit leaves the published folder, which the cleanup never takes,
     /// and at most the empty staging. A foreign folder is left alone.
+    /// Published modes follow the umask like `cp` (0666/0777 & ~umask),
+    /// set while still private, so the baseline holds the final mode.
+    #[test]
+    fn publication_modes_follow_the_umask() {
+        for case in ["umask_022", "umask_077"] {
+            let t = Tmp::new("pub-umask");
+            assert_case_ok(case, &t.0);
+        }
+    }
+
+    /// Before the final modes are set everything is 0700/0600: a crash
+    /// while writing leaves only private staging, even under umask 022.
+    #[test]
+    fn publication_private_phase_stays_private() {
+        let t = Tmp::new("pub-private");
+        let out = run_case("private_modes_before_chmod", &t.0);
+        assert_eq!(out.status.code(), Some(7), "{out:?}");
+        let target = t.0.join("target");
+        let [staging] = &names(&target)[..] else {
+            panic!("{:?}", names(&target))
+        };
+        let mode = |p: &Path| fs::symlink_metadata(p).unwrap().mode() & 0o7777;
+        let s = target.join(staging);
+        assert_eq!(mode(&s), 0o700);
+        assert_eq!(mode(&s.join("w")), 0o700);
+        assert_eq!(mode(&s.join("w/a.md")), 0o600);
+    }
+
     #[test]
     fn publication_crash_leaves_only_recognizable_staging() {
         for case in ["crash_before_commit", "crash_after_commit"] {
