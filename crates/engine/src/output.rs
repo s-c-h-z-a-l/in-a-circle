@@ -694,6 +694,25 @@ fn process_umask() -> libc::mode_t {
     })
 }
 
+/// A published file's final mode: `cp`'s `0666 & !umask`, but the owner
+/// keeps read and write whatever the umask, because the baseline reads the
+/// file back through the same user (a mask like `0o200` or `0o400` would
+/// otherwise make our own check fail and report a false `BaselineChanged`).
+fn published_file_mode() -> libc::mode_t {
+    0o600 | (0o666 & !process_umask())
+}
+
+/// A published wrapper's final mode: `0777 & !umask`, but the owner keeps
+/// `rwx` whatever the umask. Without owner `w` the kernel refuses to move
+/// the directory out of its staging parent; without owner `x` our own
+/// baseline cannot look inside it. `S_ISGID` of the created directory is
+/// carried over (`mkdirat` inherits it from a setgid target, a plain
+/// `chmod` mode would drop it, and the children would then get the user's
+/// primary group instead of the folder's).
+fn published_dir_mode(created: libc::mode_t) -> libc::mode_t {
+    0o700 | (0o777 & !process_umask()) | (created & libc::S_ISGID)
+}
+
 /// Points of a publication where the tests inject a fault or a race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Point {
@@ -777,10 +796,15 @@ fn make_private_dir(dir: RawFd, name: &CStr) -> io::Result<(Fd, (u64, u64))> {
     if unsafe { libc::mkdirat(dir, name.as_ptr(), 0o700) } != 0 {
         return last_err();
     }
-    let made = stat_at(At { dir, name }).map(|st| ident(&st));
+    let made_st = stat_at(At { dir, name });
+    let made = made_st.as_ref().map(ident).map_err(|_| ());
     let opened = (|| {
+        // Setgid is inherited from a setgid target and kept (the group of
+        // everything made below follows it); the permission bits are
+        // private regardless of the umask.
+        let mode = 0o700 | (made_st.as_ref().map_or(0, |st| st.st_mode) & libc::S_ISGID);
         // SAFETY: as above; the name is the directory just made.
-        if unsafe { libc::fchmodat(dir, name.as_ptr(), 0o700, 0) } != 0 {
+        if unsafe { libc::fchmodat(dir, name.as_ptr(), mode, 0) } != 0 {
             return last_err();
         }
         let fd = open_at(dir, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
@@ -1041,7 +1065,7 @@ fn copy_one(
     // durable) and before the baseline (so it records it). Still private:
     // the 0700 staging folder above keeps everyone else out.
     // SAFETY: dst is an open fd.
-    if unsafe { libc::fchmod(dst.0, 0o666 & !process_umask()) } != 0 {
+    if unsafe { libc::fchmod(dst.0, published_file_mode()) } != 0 {
         return last_err();
     }
     sync(dst.0, Point::SyncChild)?;
@@ -1163,8 +1187,9 @@ pub fn publish_beneath(
     let (wrapper, wid) = (wrapper.0, *wid);
     // The wrapper's final mode, likewise before its sync and baseline; the
     // staging folder (0700) stays private until it is removed.
+    let created = fstat(wrapper)?.st_mode;
     // SAFETY: wrapper is an open fd.
-    if unsafe { libc::fchmod(wrapper, 0o777 & !process_umask()) } != 0 {
+    if unsafe { libc::fchmod(wrapper, published_dir_mode(created)) } != 0 {
         return last_err();
     }
     sync(wrapper, Point::SyncWrapper)?;
@@ -1916,11 +1941,14 @@ pub(crate) mod tests {
                 assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "theirs");
                 assert!(root.join("0/a.md").exists(), "source left alone");
             }
-            "umask_022" | "umask_077" => {
-                let (mask, file, dir_mode) = if case == "umask_022" {
-                    (0o022, 0o644, 0o755)
-                } else {
-                    (0o077, 0o600, 0o700)
+            "umask_022" | "umask_077" | "umask_222" | "umask_100" => {
+                // (mask, file mode, wrapper mode). The owner keeps what
+                // our own baseline needs: file rw, wrapper rwx.
+                let (mask, file, dir_mode) = match case.to_str().unwrap() {
+                    "umask_022" => (0o022, 0o644, 0o755),
+                    "umask_077" => (0o077, 0o600, 0o700),
+                    "umask_222" => (0o222, 0o644, 0o755),
+                    _ => (0o100, 0o666, 0o777),
                 };
                 // SAFETY: umask only sets this process's mask; the child
                 // is single-threaded here.
@@ -2340,7 +2368,7 @@ pub(crate) mod tests {
         assert_eq!(fs::read(wrapper.join("a.md")).unwrap(), b"# a\n");
         let wm = fs::symlink_metadata(&wrapper).unwrap();
         assert!(wm.is_dir());
-        let (dmode, fmode) = (0o777 & !process_umask(), 0o666 & !process_umask());
+        let (dmode, fmode) = (published_dir_mode(0), published_file_mode());
         assert_eq!(wm.mode() & 0o7777, dmode);
         // The wrapper's private identity is the published one.
         assert_eq!(
@@ -2501,7 +2529,7 @@ pub(crate) mod tests {
                 let m = fs::symlink_metadata(private).unwrap();
                 assert_eq!(
                     (m.dev(), m.ino(), m.mode() & 0o7777),
-                    (g.id.dev, g.id.ino, 0o777 & !process_umask())
+                    (g.id.dev, g.id.ino, published_dir_mode(0))
                 );
                 let c = &g.children[0];
                 let cm = fs::symlink_metadata(private.join(&c.rel)).unwrap();
@@ -2518,6 +2546,105 @@ pub(crate) mod tests {
         assert_eq!(e.to_string(), "journal write failed");
         assert_eq!(names(&target), Vec::<String>::new());
         assert!(!seen.unwrap().exists(), "private staging left behind");
+    }
+
+    /// A setgid target keeps its group semantics: the staging folder and
+    /// the wrapper keep S_ISGID (a plain chmod would drop it, and the
+    /// children would get the user's primary group).
+    #[test]
+    fn publication_keeps_setgid_of_the_target() {
+        let (_t, root, target) = pub_fixture("pub-setgid");
+        produced(&root, "0/a.md", b"a");
+        let tm = fs::symlink_metadata(&target).unwrap().mode() & 0o7777;
+        fs::set_permissions(&target, fs::Permissions::from_mode(tm | 0o2000)).unwrap();
+        assert_ne!(
+            fs::symlink_metadata(&target).unwrap().mode() & 0o2000,
+            0,
+            "this filesystem does not keep setgid on a folder"
+        );
+        let mut staging_mode = 0;
+        let p = publish_beneath(
+            &root,
+            &rels(&["0/a.md"]),
+            &target,
+            "a",
+            "md",
+            &mut |_, private| {
+                let staging = private.parent().unwrap();
+                staging_mode = fs::symlink_metadata(staging).unwrap().mode() & 0o7777;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(staging_mode, 0o2700);
+        let wm = fs::symlink_metadata(target.join("a")).unwrap().mode() & 0o7777;
+        assert_eq!(wm, published_dir_mode(0) | 0o2000);
+        assert_eq!(p.group.id.mode, wm);
+        assert_eq!(postcheck(&p).unwrap().len(), 1);
+    }
+
+    /// A name taken between the check and the rename: `before_commit`
+    /// runs again, for the same group and operation, with the new folder.
+    #[test]
+    fn publication_reruns_before_commit_for_the_next_name() {
+        let (_t, root, target) = pub_fixture("pub-rerun");
+        produced(&root, "0/a.md", b"a");
+        let racer = target.join("a");
+        let mut calls: Vec<(GroupId, OperationId, PathBuf)> = Vec::new();
+        let p = with_fault(
+            move |pt| {
+                if pt == Point::BeforeRename && !racer.exists() {
+                    fs::create_dir(&racer).unwrap();
+                }
+                None
+            },
+            || {
+                publish_beneath(
+                    &root,
+                    &rels(&["0/a.md"]),
+                    &target,
+                    "a",
+                    "md",
+                    &mut |g, _| {
+                        calls.push((g.group, g.op, g.directory.clone()));
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!((calls[0].0, calls[0].1), (calls[1].0, calls[1].1));
+        assert_eq!(calls[0].2, target.join("a"));
+        assert_eq!(calls[1].2, target.join("a (1)"));
+        assert_eq!((p.group.group, p.group.op), (calls[1].0, calls[1].1));
+        assert_eq!(p.group.directory, target.join("a (1)"));
+    }
+
+    /// An edit of the private copy after its baseline (while the journal
+    /// prepares, before the commit) is no new baseline: the postcheck
+    /// refuses the published folder.
+    #[test]
+    fn publication_edit_of_the_private_copy_before_commit_is_detected() {
+        let (_t, root, target) = pub_fixture("pub-private-edit");
+        produced(&root, "0/a.md", b"a");
+        let mut prepared = None;
+        let p = publish_beneath(
+            &root,
+            &rels(&["0/a.md"]),
+            &target,
+            "a",
+            "md",
+            &mut |g, private| {
+                prepared = Some(g.clone());
+                fs::write(private.join("a.md"), "edited").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.unwrap().children, p.group.children);
+        assert_eq!(p.group.children[0].file_id.size, 1);
+        assert_eq!(postcheck(&p), Err(PublicationReason::BaselineChanged));
     }
 
     fn stat_of(p: &Path) -> libc::stat {
@@ -2992,7 +3119,7 @@ pub(crate) mod tests {
     /// set while still private, so the baseline holds the final mode.
     #[test]
     fn publication_modes_follow_the_umask() {
-        for case in ["umask_022", "umask_077"] {
+        for case in ["umask_022", "umask_077", "umask_222", "umask_100"] {
             let t = Tmp::new("pub-umask");
             assert_case_ok(case, &t.0);
         }
