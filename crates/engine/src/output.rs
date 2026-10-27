@@ -1465,10 +1465,12 @@ pub(crate) mod tests {
     }
 
     fn mkdir_syscalls() -> Vec<libc::c_long> {
-        let mut v = vec![libc::SYS_mkdirat];
-        #[cfg(target_arch = "x86_64")]
-        v.push(libc::SYS_mkdir);
-        v
+        // x86_64 also has the legacy mkdir.
+        vec![
+            libc::SYS_mkdirat,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_mkdir,
+        ]
     }
 
     fn open_fds() -> usize {
@@ -1589,9 +1591,11 @@ pub(crate) mod tests {
                 if fallback {
                     // chmod (the magic-link route) refused, fchmod allowed:
                     // a mode change of the impostor stays visible.
-                    let mut nrs = vec![libc::SYS_fchmodat];
-                    #[cfg(target_arch = "x86_64")]
-                    nrs.push(libc::SYS_chmod);
+                    let nrs = [
+                        libc::SYS_fchmodat,
+                        #[cfg(target_arch = "x86_64")]
+                        libc::SYS_chmod,
+                    ];
                     deny_syscalls(&nrs, libc::EPERM as u32);
                 }
                 let d = dir.join("d");
