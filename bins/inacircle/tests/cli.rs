@@ -269,14 +269,32 @@ fn txt_to_md_end_to_end() {
         "{job}"
     );
 
+    // The group is recorded with its baseline before the publishing rename
+    // and its committed place after it.
     let history = e.history();
-    let out_line = history
+    assert!(history.starts_with("inacircle-history 1\n"), "{history}");
+    let records: Vec<Line> = history
         .lines()
         .filter_map(|l| parse_line(l).ok())
-        .find(|l| l.kind == "out" && l.get("job") == Some(&job))
-        .unwrap_or_else(|| panic!("no out line for {job}: {history}"));
-    assert_eq!(out_line.get("path"), Some(out.to_str().unwrap()));
-    assert_eq!(out_line.get("in"), Some(src.to_str().unwrap()));
+        .filter(|l| l.get("job") == Some(&job))
+        .collect();
+    let kinds: Vec<&str> = records.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "group-begin",
+            "child",
+            "group-end",
+            "publish-intent",
+            "publish-commit"
+        ],
+        "{history}"
+    );
+    assert_eq!(records[1].get("rel"), Some("jegyzet.md"));
+    let folder = e.files().join("jegyzet");
+    assert_eq!(records[3].get("target"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[4].get("actual"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[4].get("durability"), Some("synced"));
     assert!(
         history
             .lines()
@@ -1134,7 +1152,7 @@ fn undo_removes_a_multi_output_folder() {
     assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
     let folder = e.files().join("t");
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 3);
-    assert!(e.history().contains("dir\tjob="), "{}", e.history());
+    assert!(e.history().contains("\tchildren=3\n"), "{}", e.history());
     let u = e.run(&["undo", &o.job()]);
     assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
     assert_eq!(u.kind("removed").len(), 3, "{}", u.stdout);
@@ -1336,10 +1354,13 @@ fn jobs_empty_when_idle() {
     assert!(o.stdout.is_empty());
 }
 
+/// Without a history nothing can be recorded before the publishing rename,
+/// so nothing is published: the input fails with the reason, the source
+/// stays, and the warning comes once.
 #[test]
-fn unwritable_history_warns_once_and_the_run_proceeds() {
+fn unwritable_history_refuses_publication_and_warns_once() {
     let e = Env::new("nohistory");
-    e.file("a.txt", b"hi\n");
+    let src = e.file("a.txt", b"hi\n");
     // The state home is a regular file: no history can be opened under it.
     let state = e.root.join("state-file");
     fs::write(&state, b"").unwrap();
@@ -1349,15 +1370,47 @@ fn unwritable_history_warns_once_and_the_run_proceeds() {
             .output()
             .unwrap(),
     );
-    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    assert_eq!(o.summary(), (1, 0, 0));
-    assert!(e.files().join("a/a.md").exists());
+    assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 0, 1));
+    let fails = o.pairs("fail");
+    assert!(fails[0].1.contains("history not written"), "{fails:?}");
+    assert!(!e.files().join("a").exists());
+    assert_eq!(fs::read(&src).unwrap(), b"hi\n");
     let warns = o
         .stderr
         .lines()
-        .filter(|l| l.starts_with("inacircle: history not written: "))
+        .filter(|l| l.contains("history not written"))
         .count();
     assert_eq!(warns, 1, "{}", o.stderr);
+}
+
+/// A history of the previous format is archived on the first run, never
+/// overwritten; its jobs cannot be undone (with the reason), and their
+/// outputs stay.
+#[test]
+fn v0_history_is_archived_and_its_jobs_refused() {
+    let e = Env::new("v0");
+    let old_out = e.file("old.md", b"old\n");
+    let v0 = format!(
+        "inacircle-history 0\nout\tjob=1-1\tin=/i\tpath={}\tsize=4\tmtime=1\tctime=1\tdev=1\tino=1\njob\tid=1-1\ttime=1\taction=a\tstatus=done\tsandbox=yes\n",
+        old_out.display()
+    );
+    let dir = e.root.join("state/inacircle");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("history"), &v0).unwrap();
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(fs::read_to_string(dir.join("history.v0")).unwrap(), v0);
+    assert!(e.history().starts_with("inacircle-history 1\n"));
+    let u = e.run(&["undo", "1-1"]);
+    assert_eq!(u.code, Some(1), "{}{}", u.stdout, u.stderr);
+    assert!(u.stderr.contains("older version"), "{}", u.stderr);
+    assert!(old_out.exists());
+    // The new job undoes as usual.
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(0), "{}", u.stderr);
+    assert!(!e.files().join("a").exists());
 }
 
 /// The value of `key` in the first `measure <what>` stderr line.

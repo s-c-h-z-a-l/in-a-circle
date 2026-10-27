@@ -46,7 +46,9 @@ use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
-use engine::exec::{self, CancelToken, Observer, Outcome, Wake};
+use engine::exec::{
+    self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
+};
 use engine::journal::{self, JobId, Recorder, Running};
 use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
@@ -250,8 +252,19 @@ impl Observer for Printer<'_> {
         }
     }
 
-    fn dir(&mut self, path: &Path) {
-        self.rec.dir(path);
+    /// Never called: [`Observer::group`] is forwarded whole below.
+    fn dir(&mut self, _path: &Path) {}
+
+    /// The group's manifest and intent go to the history (synced) before
+    /// the publishing rename; an error refuses the publication.
+    fn prepare_group(&mut self, group: &OutputGroup, private_path: &Path) -> io::Result<()> {
+        self.rec.prepare_group(group, private_path)
+    }
+
+    /// The commit (or the uncertain place) goes to the history; no new
+    /// baseline is taken of the visible files.
+    fn group(&mut self, group: &OutputGroup, location: &LocationEvidence, d: &Durability) {
+        self.rec.group(group, location, d);
     }
 
     fn progress(&mut self, done: usize, total: usize, fraction: f32) {
@@ -470,7 +483,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // The job is closed in the history and gone from the registry, so an
     // Undo click can undo it. The token stays: a signal in the Undo window
     // ends the window, not the process.
-    if let Some(n) = notifier {
+    if let Some(mut n) = notifier {
+        n.record_warning(closed.warning.as_deref());
         n.finish(
             &job,
             sandboxed,

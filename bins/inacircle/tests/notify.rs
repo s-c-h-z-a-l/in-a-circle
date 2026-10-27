@@ -1113,3 +1113,108 @@ fn no_update_once_all_inputs_are_done() {
     );
     assert!(n[0].has_button("cancel") && n[1].has_button("undo"));
 }
+
+/// Where `needle` starts in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The history record after the publishing rename cannot be written (the
+/// history may not grow past the intent: the commit record is cut short):
+/// the output stays, the run is a success, the warning is shown and Undo is
+/// not offered.
+#[test]
+fn history_failure_after_the_commit_keeps_the_output_without_undo() {
+    use std::os::unix::process::CommandExt;
+    let e = Env::new("histfail");
+    e.file("a.txt", "hello\n");
+    e.file("b.txt", "hello\n");
+    let hist = e.root.join("state/inacircle/history");
+    // Calibration: what an ordinary run of the same shape writes before
+    // its commit record.
+    let (fake, _rx) = server(|p, g| close(p, g.id));
+    let r = plain_run(e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "a.txt"],
+    ));
+    fake.join();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    let text = fs::read(&hist).unwrap();
+    let begin = find(&text, b"\ngroup-begin\t").expect("no group record") + 1;
+    let commit = find(&text, b"\npublish-commit\t").expect("no commit record") + 1;
+    // The next run may grow the history by that and 40 bytes more: its
+    // intent fits (the lengths differ by a few digits at most), its commit
+    // record (well over 100 bytes) is cut short.
+    let limit = text.len() as u64 + (commit - begin) as u64 + 40;
+    let (fake, rx) = server(|p, g| close(p, g.id));
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "b.txt"],
+    );
+    // SAFETY: only async-signal-safe calls (signal, setrlimit) between
+    // fork and exec.
+    unsafe {
+        c.pre_exec(move || {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let lim = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: libc::RLIM_INFINITY,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let r = plain_run(c);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+    assert_eq!(
+        fs::read_to_string(e.files().join("b/b.md")).unwrap(),
+        "hello\n"
+    );
+    assert!(r.stderr.contains("history not written"), "{}", r.stderr);
+    let last = n.last().unwrap();
+    assert_eq!(last.summary, "b.md");
+    assert!(last.body.contains("history not written"), "{}", last.body);
+    assert!(last.body.contains("undo unavailable"), "{}", last.body);
+    assert!(last.actions.is_empty(), "{:?}", last.actions);
+    // The cut record is no commit: nothing in the history grants an undo.
+    let text = fs::read(&hist).unwrap();
+    assert_eq!(text.len() as u64, limit);
+    let lines: Vec<&[u8]> = text.split(|&b| b == b'\n').collect();
+    let (cut, whole) = lines.split_last().unwrap();
+    assert!(cut.starts_with(b"publish-commit\t"), "{cut:?}");
+    let commits = whole
+        .iter()
+        .filter(|l| l.starts_with(b"publish-commit\t"))
+        .count();
+    assert_eq!(commits, 1, "only the calibration run's");
+}
+
+/// No history at all: nothing is published (an intent cannot be recorded),
+/// the notice says why, and offers no Undo.
+#[test]
+fn unwritable_history_offers_no_undo_and_says_why() {
+    let e = Env::new("nohist");
+    e.file("a.txt", "hello\n");
+    let state = e.root.join("state-file");
+    fs::write(&state, b"").unwrap();
+    let (fake, rx) = server(|p, g| close(p, g.id));
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "a.txt"],
+    );
+    c.env("XDG_STATE_HOME", &state);
+    let r = plain_run(c);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    let last = n.last().unwrap();
+    assert!(last.actions.is_empty(), "{:?}", last.actions);
+    assert!(last.body.contains("history not written"), "{}", last.body);
+    assert!(!e.files().join("a").exists());
+    assert!(e.files().join("a.txt").exists());
+    assert_eq!(r.code, Some(1), "{}{}", r.stdout, r.stderr);
+}

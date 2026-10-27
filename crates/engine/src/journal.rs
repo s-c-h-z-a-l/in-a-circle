@@ -1,29 +1,65 @@
-//! The journal: an append-only history log, the running-jobs registry and
-//! undo. All formats go through the `manifest` crate.
+//! The journal: the history log, the running-jobs registry and undo. All
+//! formats go through the `manifest` crate.
 //!
-//! History (`$XDG_STATE_HOME/inacircle/history`), header `inacircle-history 0`:
-//! `job`, `out`, `dir`, `skip`, `fail` and `undo` lines, each written with a
-//! single `write` on an `O_APPEND` descriptor. A job's `out`, `dir`, `skip`
-//! and `fail` lines are written as they happen, its `job` line (with the
-//! status) when it ends; any of them makes the job known to undo. Running
-//! jobs live in `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line
-//! per file.
+//! History (`$XDG_STATE_HOME/inacircle/history`), header
+//! `inacircle-history 1`. Every published output group is recorded before
+//! its publishing rename (`group-begin`, one `child` per output with its
+//! private baseline, `group-end`, `publish-intent`: one block on an
+//! `O_APPEND` descriptor, written in whole-line chunks under the history's
+//! append lock, then `fsync`) and after it (`publish-commit`, or
+//! `publish-uncertain` when its place could not be proved; written and
+//! synced). A name taken at the rename adds another `publish-intent` for
+//! the same group and operation; a publication that failed after its
+//! intent gets `publish-abort`. `skip`, `fail` and `unknown` lines come as
+//! they happen, the `job` line when the run ends, `undo` once undone.
+//! Undo acts only on a job whose every group is complete (strict framing,
+//! counts, a synced commit); anything else refuses the whole job before
+//! anything is removed. Paths are byte-exact (`%XX` for a byte that is not
+//! printable ASCII, and for `%` and `\\`).
+//!
+//! A version 0 history is archived (`history.v0`, never overwritten) under
+//! an exclusive lock the first time a run writes; its jobs cannot be
+//! undone. Every state file (history, registry entries, the catalog cache)
+//! is created exclusively under a random name, never through a symlink, in
+//! a folder opened once and checked (ours, not writable by others), and
+//! renamed or linked into place relative to that folder. Running jobs live
+//! in `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line per file.
 
 use crate::exec::{Durability, FileId, Outcome, Tally};
+use crate::output::{ChildBaseline, DirectoryId, LocationEvidence, NodeKind, OutputGroup};
 use crate::xdg;
 use manifest::{Line, parse_line, write_line};
-use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::DirBuilderExt;
+use std::ffi::{CStr, CString, OsStr};
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, FileExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAGIC: &str = "inacircle-history";
-const VERSION: u32 = 0;
+const VERSION: u32 = 1;
+/// The format before group records: archived, never undone.
+const OLD_VERSION: u32 = 0;
+const HISTORY: &str = "history";
+/// Taken (`flock`) by whoever creates or archives the history.
+const INIT_LOCK: &str = "history.lock";
+/// The longest header line read: the proposed `history_header_bytes`
+/// (256 B, `parameters.json`, not frozen; T9 fixes the reader's limits).
+/// The real header is 20 bytes; a longer first line is not a header.
+const HEADER_MAX: usize = 256;
+/// Archive names tried (`history.v0`, `history.v0.1`, ...): one per
+/// downgrade-and-upgrade cycle, which is rare; past this many the history
+/// is left alone and nothing is recorded (so nothing is published).
+const ARCHIVE_ATTEMPTS: u32 = 8;
+/// Fresh random temp names tried: a 64-bit random name only clashes with a
+/// planted or leftover file; past a few the folder is not ours to use.
+const TEMP_ATTEMPTS: u32 = 4;
+/// A registry entry is one `job` line of about 200 bytes; a bigger file is
+/// not ours and is skipped unread.
+const REGISTRY_ENTRY_MAX: u64 = 4096;
 /// Running-job files are rewritten at most this often.
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
 
@@ -52,69 +88,593 @@ pub fn new_job_id() -> JobId {
     ))
 }
 
-fn history_path() -> io::Result<PathBuf> {
-    Ok(xdg::state_home()?.join("inacircle").join("history"))
+fn history_dir() -> io::Result<PathBuf> {
+    Ok(xdg::state_home()?.join("inacircle"))
 }
 
 fn jobs_dir() -> Option<PathBuf> {
     xdg::runtime_dir().map(|r| r.join("inacircle").join("jobs"))
 }
 
-/// Opens the history for appending. The header is written when the file is
-/// created: a temp file holding it is hard-linked into place, which is atomic
-/// and fails if the file exists, so no line can ever precede the header. On a
-/// filesystem without hard links, the file is created with `O_EXCL` and the
-/// header written after (a tiny window in which another process's first line
-/// could precede it is accepted).
-fn open_history() -> io::Result<File> {
-    open_history_with(|from, to| fs::hard_link(from, to))
+// ---- private state folders ----
+
+fn last_err<T>() -> io::Result<T> {
+    Err(io::Error::last_os_error())
 }
 
-fn open_history_with(link: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<File> {
-    let path = history_path()?;
-    let dir = path.parent().expect("history path has a parent");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let append = || OpenOptions::new().append(true).open(&path);
-    if path.exists() {
-        return append();
+fn c_name(name: &[u8]) -> io::Result<CString> {
+    CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a name"))
+}
+
+fn fstat(fd: RawFd) -> io::Result<libc::stat> {
+    // SAFETY: zeroed stat is valid storage; fd is an open descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } == 0 {
+        Ok(st)
+    } else {
+        last_err()
     }
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".history.{}.{seq}.tmp", std::process::id()));
-    fs::write(&tmp, manifest::header(MAGIC, VERSION))?;
-    let linked = link(&tmp, &path);
-    let _ = fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => append(),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => append(),
-        Err(_) => {
-            // No hard links here: create it ourselves.
-            match OpenOptions::new().append(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    f.write_all(manifest::header(MAGIC, VERSION).as_bytes())?;
-                    Ok(f)
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => append(),
-                Err(e) => Err(e),
+}
+
+/// `fstatat` without following a symlink at `name`.
+fn stat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+    // SAFETY: zeroed stat is valid storage; name is NUL-terminated and dir
+    // an open directory fd.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        Ok(st)
+    } else {
+        last_err()
+    }
+}
+
+/// `openat` with `O_NOFOLLOW | O_CLOEXEC` added.
+fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
+    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: name is NUL-terminated, dir an open directory fd (or
+    // AT_FDCWD); the returned fd is owned here.
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, libc::c_uint::from(mode)) };
+    if fd < 0 {
+        return last_err();
+    }
+    // SAFETY: fd was just opened and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `(st_dev, st_ino)`; their widths differ between targets.
+#[allow(clippy::unnecessary_cast)]
+fn ident(st: &libc::stat) -> (u64, u64) {
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// A private state folder, opened once (never through a symlink at its own
+/// name) and checked: a directory owned by this user. One writable by
+/// others is tightened first (`fchmod` on the descriptor: it is ours), so
+/// no other user can plant or swap names in it. Every file operation is
+/// relative to this descriptor, so a later rename or symlink swap of the
+/// path cannot redirect it.
+pub(crate) struct StateDir {
+    fd: OwnedFd,
+}
+
+impl StateDir {
+    /// Creates what is missing (mode 0700), then opens and checks it.
+    pub(crate) fn create(path: &Path) -> io::Result<StateDir> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        StateDir::open(path)
+    }
+
+    pub(crate) fn open(path: &Path) -> io::Result<StateDir> {
+        let c = c_name(path.as_os_str().as_bytes())?;
+        let fd = open_at(libc::AT_FDCWD, &c, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let st = fstat(fd.as_raw_fd())?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(io::Error::other("state folder is not a directory"));
+        }
+        if st.st_uid != euid() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "state folder is not owned by this user",
+            ));
+        }
+        let mode = st.st_mode & 0o7777;
+        // SAFETY: fd is an open directory we own.
+        if mode & 0o022 != 0 && unsafe { libc::fchmod(fd.as_raw_fd(), mode & !0o022) } != 0 {
+            return last_err();
+        }
+        Ok(StateDir { fd })
+    }
+
+    fn raw(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
+    /// Opens `name` in the folder (never through a symlink): a regular file
+    /// owned by this user.
+    pub(crate) fn open_file(
+        &self,
+        name: &str,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> io::Result<File> {
+        let fd = open_at(self.raw(), &c_name(name.as_bytes())?, flags, mode)?;
+        let st = fstat(fd.as_raw_fd())?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(io::Error::other(format!("{name} is not a regular file")));
+        }
+        if st.st_uid != euid() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{name} is not owned by this user"),
+            ));
+        }
+        Ok(File::from(fd))
+    }
+
+    fn stat(&self, name: &str) -> io::Result<libc::stat> {
+        stat_at(self.raw(), &c_name(name.as_bytes())?)
+    }
+
+    /// `bytes` in a fresh file under a random name (exclusive, never
+    /// through a symlink, 0600), synced when asked.
+    fn temp(&self, base: &str, bytes: &[u8], sync: bool) -> io::Result<(String, File)> {
+        for _ in 0..TEMP_ATTEMPTS {
+            let name = format!(".{base}.{:016x}.tmp", crate::output::random_u64()?);
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
+            let mut f = match self.open_file(&name, flags, 0o600) {
+                Ok(f) => f,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            };
+            let written = f
+                .write_all(bytes)
+                .and_then(|()| if sync { f.sync_all() } else { Ok(()) });
+            if let Err(e) = written {
+                self.remove_own(&name, &f);
+                return Err(e);
             }
+            return Ok((name, f));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free temporary name",
+        ))
+    }
+
+    /// Unlinks `name` only while it still names `f`'s inode.
+    fn remove_own(&self, name: &str, f: &File) {
+        if let Ok(st) = fstat(f.as_raw_fd()) {
+            let _ = self.unlink_if(name, ident(&st));
+        }
+    }
+
+    /// Unlinks `name` if it is still the inode `id` (never another file
+    /// that took its place). The check and the unlink are two steps: a
+    /// same-user swap in between is the remaining window.
+    pub(crate) fn unlink_if(&self, name: &str, id: (u64, u64)) -> io::Result<()> {
+        let c = c_name(name.as_bytes())?;
+        if ident(&stat_at(self.raw(), &c)?) != id {
+            return Err(io::Error::other(format!("{name} was replaced")));
+        }
+        // SAFETY: c is NUL-terminated, the fd an open directory.
+        if unsafe { libc::unlinkat(self.raw(), c.as_ptr(), 0) } != 0 {
+            return last_err();
+        }
+        Ok(())
+    }
+
+    /// Replaces `name` with a file holding `bytes` (a temp file renamed
+    /// over it; a symlink at `name` is replaced, not followed). Returns the
+    /// new file's `(dev, ino)`.
+    pub(crate) fn replace(&self, name: &str, bytes: &[u8], sync: bool) -> io::Result<(u64, u64)> {
+        let (tmp, f) = self.temp(name, bytes, sync)?;
+        let id = ident(&fstat(f.as_raw_fd())?);
+        let (from, to) = (c_name(tmp.as_bytes())?, c_name(name.as_bytes())?);
+        // SAFETY: both names are NUL-terminated, the fd an open directory.
+        if unsafe { libc::renameat(self.raw(), from.as_ptr(), self.raw(), to.as_ptr()) } != 0 {
+            let e = io::Error::last_os_error();
+            self.remove_own(&tmp, &f);
+            return Err(e);
+        }
+        if sync {
+            self.sync()?;
+        }
+        Ok(id)
+    }
+
+    /// `renameat2(RENAME_NOREPLACE)` within the folder.
+    fn rename_noreplace(&self, from: &str, to: &str) -> io::Result<()> {
+        let (from, to) = (c_name(from.as_bytes())?, c_name(to.as_bytes())?);
+        // SAFETY: both names are NUL-terminated, the fd an open directory.
+        let r = unsafe {
+            libc::renameat2(
+                self.raw(),
+                from.as_ptr(),
+                self.raw(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if r == 0 { Ok(()) } else { last_err() }
+    }
+
+    /// `linkat` within the folder: fails if `to` exists.
+    fn link(&self, from: &str, to: &str) -> io::Result<()> {
+        let (from, to) = (c_name(from.as_bytes())?, c_name(to.as_bytes())?);
+        // SAFETY: both names are NUL-terminated, the fd an open directory.
+        let r = unsafe { libc::linkat(self.raw(), from.as_ptr(), self.raw(), to.as_ptr(), 0) };
+        if r == 0 { Ok(()) } else { last_err() }
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        // SAFETY: the fd is an open directory.
+        if unsafe { libc::fsync(self.raw()) } == 0 {
+            Ok(())
+        } else {
+            last_err()
         }
     }
 }
 
-/// One line, one `write`.
-fn append_line(f: &mut File, line: &Line) -> io::Result<()> {
-    let text = write_line(line);
-    let n = f.write(text.as_bytes())?;
-    if n < text.len() {
-        // A short write to a regular file only happens on a full disk or a
-        // signal; finish the line (it may then interleave, and a reader skips
-        // a line that does not parse).
-        f.write_all(&text.as_bytes()[n..])?;
+// ---- the history file ----
+
+/// The header's version; `None` for an empty file (one being created).
+/// Anything that is not a header is `InvalidData`.
+fn read_header(f: &File) -> io::Result<Option<u32>> {
+    let mut buf = [0u8; HEADER_MAX];
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read_at(&mut buf[n..], n as u64) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    parse_header(&buf[..n]).map(Some)
+}
+
+/// The version of a header line at the start of `bytes` (its newline
+/// included).
+fn parse_header(bytes: &[u8]) -> io::Result<u32> {
+    let bad = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad or unsupported history header",
+        )
+    };
+    let end = bytes.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
+    let head = std::str::from_utf8(&bytes[..end]).map_err(|_| bad())?;
+    let (m, v) = head.split_once(' ').ok_or_else(bad)?;
+    let v: u32 = v.parse().map_err(|_| bad())?;
+    if m != MAGIC || v.to_string() != head[m.len() + 1..] {
+        return Err(bad());
+    }
+    Ok(v)
+}
+
+fn archive_name(n: u32) -> String {
+    if n == 0 {
+        "history.v0".to_owned()
+    } else {
+        format!("history.v0.{n}")
+    }
+}
+
+/// The version 1 history if it is there, `None` if it must be made (no
+/// file, an empty one, or version 0). Another version is an error: never
+/// archived, rewritten or appended to.
+fn open_v1(dir: &StateDir) -> io::Result<Option<File>> {
+    match dir.open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0) {
+        Ok(f) => match read_header(&f)? {
+            Some(VERSION) => Ok(Some(f)),
+            None | Some(OLD_VERSION) => Ok(None),
+            Some(v) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("history version {v} is not supported; left alone"),
+            )),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Opens the version 1 history for appending, making it if needed. Who
+/// makes it (or archives a version 0 one) holds the exclusive lock (`lock`,
+/// the append lock) and decides again under it, so racing runs make one
+/// header and one archive; a history of another version is never touched.
+fn open_history(dir: &StateDir, lock: &File) -> io::Result<File> {
+    if let Some(f) = open_v1(dir)? {
+        return Ok(f);
+    }
+    let _held = Held::take(lock)?;
+    if let Some(f) = open_v1(dir)? {
+        return Ok(f);
+    }
+    match dir.open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0) {
+        Ok(mut f) => match read_header(&f)? {
+            // Made by a run that died before its header (no hard links
+            // here, see below): the empty file is ours to finish.
+            None => {
+                f.write_all(manifest::header(MAGIC, VERSION).as_bytes())?;
+                f.sync_all()?;
+                return Ok(f);
+            }
+            Some(OLD_VERSION) => archive(dir)?,
+            Some(v) => {
+                return Err(io::Error::other(format!(
+                    "history version {v} appeared while being made"
+                )));
+            }
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    create_history(dir)
+}
+
+/// Moves a version 0 history to the first free archive name: a no-replace
+/// rename, so neither it nor an earlier archive is ever overwritten. A
+/// filesystem that cannot rename without replacing refuses.
+fn archive(dir: &StateDir) -> io::Result<()> {
+    for n in 0..ARCHIVE_ATTEMPTS {
+        match dir.rename_noreplace(HISTORY, &archive_name(n)) {
+            Ok(()) => return dir.sync(),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free name to archive the old history; left alone",
+    ))
+}
+
+/// A new private history holding only its header: written and synced
+/// under a temp name, then hard-linked into place (atomic, never replacing:
+/// no line can precede the header). Without hard links, created
+/// exclusively and the header written after (the init lock keeps other
+/// makers out; an appender that finds it empty waits for the lock).
+fn create_history(dir: &StateDir) -> io::Result<File> {
+    let header = manifest::header(MAGIC, VERSION);
+    let (tmp, f) = dir.temp(HISTORY, header.as_bytes(), true)?;
+    let linked = dir.link(&tmp, HISTORY);
+    dir.remove_own(&tmp, &f);
+    if let Err(e) = linked
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        let flags = libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL;
+        let mut f = dir.open_file(HISTORY, flags, 0o600)?;
+        f.write_all(header.as_bytes())?;
+        f.sync_all()?;
+        dir.sync()?;
+        return Ok(f);
+    }
+    dir.sync()?;
+    match open_v1(dir)? {
+        Some(f) => Ok(f),
+        None => Err(io::Error::other("history changed while being made")),
+    }
+}
+
+/// One `write` of all of `bytes`. A short write is an error (a newline is
+/// tried after it so the next writer starts a line of its own); the rest
+/// is not written after it.
+fn write_whole(f: &mut File, bytes: &[u8]) -> io::Result<()> {
+    let n = loop {
+        match f.write(bytes) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            r => break r?,
+        }
+    };
+    if n < bytes.len() {
+        if n > 0 {
+            let _ = f.write(b"\n");
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("short write ({n} of {} bytes)", bytes.len()),
+        ));
     }
     Ok(())
+}
+
+/// The history's append lock (`flock` on `history.lock`), held while one
+/// block of records is written, so a block written in several chunks is
+/// never interleaved with another writer's lines. Released on drop.
+struct Held<'a>(&'a File);
+
+impl<'a> Held<'a> {
+    fn take(lock: &'a File) -> io::Result<Held<'a>> {
+        lock_with_deadline(lock, LOCK_WAIT)?;
+        Ok(Held(lock))
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the fd is open for the duration of the call.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Lines gathered up to this many bytes per `write`: a group of 1024
+/// outputs makes about 200 kB of records, which held whole would take a
+/// visible share of the run's 5 MB memory budget; 16 KiB is a few dozen
+/// lines per write.
+const CHUNK: usize = 16 * 1024;
+
+/// A block of records written in chunks of whole lines (under [`Held`]).
+struct Block<'a> {
+    f: &'a mut File,
+    buf: Vec<u8>,
+}
+
+impl Block<'_> {
+    fn line(&mut self, l: &Line) -> io::Result<()> {
+        self.text(&write_line(l))
+    }
+
+    /// A record whose values need no manifest escape (numbers, ids and
+    /// [`enc`] output), formatted straight into one line.
+    fn raw(&mut self, args: std::fmt::Arguments) -> io::Result<()> {
+        self.text(&std::fmt::format(args))
+    }
+
+    fn text(&mut self, t: &str) -> io::Result<()> {
+        if self.buf.len() + t.len() > CHUNK {
+            self.flush()?;
+        }
+        if t.len() > CHUNK {
+            return write_whole(self.f, t.as_bytes());
+        }
+        self.buf.extend_from_slice(t.as_bytes());
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            write_whole(self.f, &self.buf)?;
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+/// Writes one block under the append lock, then syncs it when asked.
+fn append(
+    f: &mut File,
+    lock: &File,
+    sync: bool,
+    lines: impl FnOnce(&mut Block) -> io::Result<()>,
+) -> io::Result<()> {
+    {
+        let _held = Held::take(lock)?;
+        let mut b = Block {
+            f,
+            buf: Vec::with_capacity(CHUNK),
+        };
+        lines(&mut b)?;
+        b.flush()?;
+    }
+    if sync {
+        f.sync_all()?;
+    }
+    Ok(())
+}
+
+/// A history whose last line was cut off (a run died mid-write) gets a
+/// newline, so this run's first record starts a line of its own.
+fn end_line(f: &mut File, lock: &File) -> io::Result<()> {
+    let _held = Held::take(lock)?;
+    let len = f.metadata()?.len();
+    let mut last = [0u8];
+    if len > 0 && f.read_at(&mut last, len - 1)? == 1 && last[0] != b'\n' {
+        write_whole(f, b"\n")?;
+    }
+    Ok(())
+}
+
+// ---- record encoding ----
+
+/// Path bytes as printable ASCII, losslessly: a byte that is not printable
+/// ASCII (space and controls included), `%` and `\\` become `%XX` (upper
+/// case). The result never needs a manifest escape in a pair value.
+pub(crate) fn enc(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len());
+    for &c in b {
+        if c > b' ' && c < 0x7f && c != b'%' && c != b'\\' {
+            s.push(char::from(c));
+        } else {
+            let _ = write!(s, "%{c:02X}");
+        }
+    }
+    s
+}
+
+/// The inverse of [`enc`], for its exact output only (anything else, a
+/// lower-case escape included, is `None`).
+fn dec(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(s.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    (enc(&out) == s).then_some(out)
+}
+
+fn hex(v: u64) -> String {
+    format!("{v:016x}")
+}
+
+fn kind_str(k: NodeKind) -> &'static str {
+    match k {
+        NodeKind::File => "file",
+        NodeKind::Directory => "dir",
+    }
+}
+
+/// `synced`, or `unconfirmed` (the cause goes to the outcome's own report).
+pub fn durability_str(d: &Durability) -> &'static str {
+    match d {
+        Durability::Synced => "synced",
+        Durability::Unconfirmed(_) => "unconfirmed",
+    }
+}
+
+/// A group's manifest: `group-begin`, a `child` per output, `group-end`
+/// with the count and the total bytes of the names. `job` is escaped.
+fn manifest_lines(b: &mut Block, job: &str, g: &OutputGroup) -> io::Result<()> {
+    let (group, w, n) = (g.group.0, &g.id, g.children.len());
+    b.raw(format_args!(
+        "group-begin\tjob={job}\tgroup={group:016x}\top={:016x}\twrapper_dev={}\twrapper_ino={}\twrapper_type={}\twrapper_uid={}\twrapper_mode={:o}\tchildren={n}\n",
+        g.op.0,
+        w.dev,
+        w.ino,
+        kind_str(w.kind),
+        w.uid,
+        w.mode,
+    ))?;
+    let mut bytes = 0usize;
+    for c in &g.children {
+        let rel = c.rel.as_os_str().as_bytes();
+        bytes += rel.len();
+        let id = &c.file_id;
+        b.raw(format_args!(
+            "child\tjob={job}\tgroup={group:016x}\trel={}\ttype={}\tdev={}\tino={}\tuid={}\tmode={:o}\tnlink={}\tsize={}\tmtime={}\tctime={}\n",
+            enc(rel),
+            kind_str(c.kind),
+            id.dev,
+            id.ino,
+            c.uid,
+            c.mode,
+            c.nlink,
+            id.size,
+            id.mtime_ns,
+            id.ctime_ns,
+        ))?;
+    }
+    b.raw(format_args!(
+        "group-end\tjob={job}\tgroup={group:016x}\tchildren={n}\tbytes={bytes}\n"
+    ))
 }
 
 /// `done` when every input that ended is done, `partial` when some are,
@@ -130,42 +690,21 @@ fn status(t: &Tally) -> &'static str {
     }
 }
 
-/// The path as text, and whether that was lossless.
-fn path_str(p: &Path) -> (String, bool) {
-    match p.to_str() {
-        Some(s) => (s.to_owned(), true),
-        None => (p.to_string_lossy().into_owned(), false),
-    }
+fn path_enc(p: &Path) -> String {
+    enc(p.as_os_str().as_bytes())
 }
 
-/// The history line of an outcome (`None` for a warning). `out` lines carry
-/// the identity the executor took right after placing the file, so a later
-/// undo can tell whether it is still the file we made.
+/// The history line of an outcome: `skip`, `fail` and `unknown`. A `Done`
+/// has none (its group's records hold its file); a warning neither.
 fn outcome_line(job: &str, o: &Outcome) -> Option<Line> {
     Some(match o {
-        Outcome::Done { input, output, id } => {
-            let (path, ok) = path_str(output);
-            let mut l = Line::new("out")
-                .pair("job", job)
-                .pair("in", &path_str(input).0)
-                .pair("path", &path)
-                .pair("size", &id.size.to_string())
-                .pair("mtime", &id.mtime_ns.to_string())
-                .pair("ctime", &id.ctime_ns.to_string())
-                .pair("dev", &id.dev.to_string())
-                .pair("ino", &id.ino.to_string());
-            if !ok {
-                l = l.pair("undo", "no");
-            }
-            l
-        }
         Outcome::Skipped { input, reason } => Line::new("skip")
             .pair("job", job)
-            .pair("in", &path_str(input).0)
+            .pair("in", &path_enc(input))
             .pair("reason", reason),
         Outcome::Failed { input, reason } => Line::new("fail")
             .pair("job", job)
-            .pair("in", &path_str(input).0)
+            .pair("in", &path_enc(input))
             .pair("reason", reason),
         Outcome::PublishedUnknown {
             input,
@@ -177,129 +716,317 @@ fn outcome_line(job: &str, o: &Outcome) -> Option<Line> {
             let a = &location.anchor;
             let mut l = Line::new("unknown")
                 .pair("job", job)
-                .pair("in", &path_str(input).0)
-                .pair("group", &format!("{:016x}", group.0))
-                .pair("op", &format!("{:016x}", a.op.0))
+                .pair("in", &path_enc(input))
+                .pair("group", &hex(group.0))
+                .pair("op", &hex(a.op.0))
                 .pair("reason", reason.as_str())
                 .pair("durability", durability_str(durability))
                 .pair("parent", &format!("{}:{}", a.parent_dev, a.parent_ino))
                 .pair("object", &format!("{}:{}", a.object_dev, a.object_ino))
-                .pair("leaf", &a.leaf.to_string_lossy());
+                .pair("leaf", &enc(a.leaf.as_bytes()));
             if let Some(p) = &location.path_at_check {
-                l = l.pair("path", &path_str(p).0);
+                l = l.pair("path", &path_enc(p));
             }
             l
         }
-        Outcome::Warned { .. } => return None,
+        Outcome::Done { .. } | Outcome::Warned { .. } => return None,
     })
-}
-
-/// `synced`, or `unconfirmed` (the cause goes to the outcome's own report).
-pub fn durability_str(d: &Durability) -> &'static str {
-    match d {
-        Durability::Synced => "synced",
-        Durability::Unconfirmed(_) => "unconfirmed",
-    }
 }
 
 /// Why undo refuses a job with a publication of unknown place or baseline.
 pub const UNKNOWN_REFUSAL: &str =
     "an output was published where it could not be confirmed; nothing undone";
+/// Why undo refuses a job of the previous history format.
+pub const OLD_REFUSAL: &str =
+    "recorded by an older version of inacircle; undo unavailable, its outputs are kept";
+/// Why undo refuses a job with a publication not confirmed on disk.
+pub const UNCONFIRMED_REFUSAL: &str =
+    "an output was not confirmed on disk when it was published; nothing undone";
+/// Why undo refuses a job whose run could not record itself completely.
+pub const WITHDRAWN_REFUSAL: &str =
+    "the run could not record its outputs completely; nothing undone";
 
-/// Writes a job into the history as it runs: each outcome and folder is
-/// appended when it arrives (one `write` per line, so nothing waits in a
-/// buffer), and the `job` line with the final status at [`finish`]. A run
-/// that dies midway leaves its lines so far, all of placed files, and undo
-/// still finds them. Holds one tally entry per input, nothing per outcome.
-/// History failures are reported once on stderr and otherwise ignored: the
-/// history must never fail the action.
-///
-/// [`finish`]: Recorder::finish
+// ---- recording a run ----
+
+/// Writes a job into the history as it runs. Before each group's
+/// publishing rename, its manifest and intent ([`Recorder::prepare_group`],
+/// written and synced: an error refuses that publication); after it, the
+/// commit ([`Recorder::group`]); `skip`, `fail` and `unknown` lines as they
+/// arrive, and the `job` line at [`Recorder::finish`]. A run that dies
+/// midway leaves its complete groups, which undo still finds. The first
+/// write or sync error is sticky: nothing more is recorded (so nothing more
+/// is published), and the job is not undoable. A recording error never
+/// takes back a published output. Holds one tally entry per input and at
+/// most one group (the one being published).
 pub struct Recorder {
-    file: Option<File>,
+    /// The history and its append lock.
+    file: Option<(File, File)>,
+    /// The first recording error: sticky.
+    failed: Option<String>,
     job: String,
+    /// `job` as a record value (escaped once, for the raw records).
+    job_field: String,
     action: String,
     /// Also holds the inputs published at a place (or with a baseline)
-    /// that could not be proved (once per input): sticky, the job is then
-    /// not undoable.
+    /// that could not be proved (once per input).
     tally: Tally,
+    /// The group whose intent is written and whose commit is not (yet):
+    /// its identity, not a copy of its children (up to 1024 of them).
+    pending: Option<Pending>,
+    /// Committed groups not synced to disk.
+    unconfirmed: usize,
+    /// Committed groups whose place could not be proved.
+    uncertain: usize,
+    /// Committed groups that had no intent of this recorder.
+    unprepared: usize,
 }
 
-/// A closed job: the per-input tally, whether undo may be offered, and the
-/// warning that goes with a job that may not.
+/// What a re-run of [`Recorder::prepare_group`] for the same group must
+/// match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pending {
+    group: crate::output::GroupId,
+    op: crate::output::OperationId,
+    id: DirectoryId,
+    children: usize,
+}
+
+impl Pending {
+    fn of(g: &OutputGroup) -> Pending {
+        Pending {
+            group: g.group,
+            op: g.op,
+            id: g.id,
+            children: g.children.len(),
+        }
+    }
+}
+
+/// A closed job: the per-input tally, whether undo may be offered (every
+/// group complete, durable and synced in the history), and the warning
+/// that goes with a job that may not.
 #[derive(Debug)]
-pub struct Finished {
+pub struct Recorded {
     pub tally: Tally,
     pub undoable: bool,
     pub warning: Option<String>,
 }
 
 impl Recorder {
+    /// Opens the history (making or archiving it as needed). An error is
+    /// not reported here: it is sticky, refuses every publication and comes
+    /// back as [`Recorded::warning`].
     pub fn open(job: &JobId, action: &str) -> Recorder {
-        let file = open_history()
-            .inspect_err(|e| eprintln!("inacircle: history not written: {e}"))
-            .ok();
+        let file = history_dir()
+            .and_then(|d| StateDir::create(&d))
+            .and_then(|d| {
+                let lock = d.open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+                let mut f = open_history(&d, &lock)?;
+                end_line(&mut f, &lock)?;
+                Ok((f, lock))
+            });
+        let (file, failed) = match file {
+            Ok(f) => (Some(f), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         Recorder {
             file,
+            failed,
             job: job.0.clone(),
+            job_field: manifest::escape(&job.0),
             action: action.to_owned(),
             tally: Tally::default(),
+            pending: None,
+            unconfirmed: 0,
+            uncertain: 0,
+            unprepared: 0,
         }
     }
 
-    fn append(&mut self, line: &Line) {
-        if let Some(f) = &mut self.file {
-            let _ = append_line(f, line);
+    /// One block of records (see [`append`]); the first error is sticky.
+    fn write(
+        &mut self,
+        sync: bool,
+        lines: impl FnOnce(&mut Block) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let not_written = |why: &str| io::Error::other(format!("history not written: {why}"));
+        if let Some(why) = &self.failed {
+            return Err(not_written(why));
+        }
+        let Some((f, lock)) = &mut self.file else {
+            return Err(not_written("not open"));
+        };
+        append(f, lock, sync, lines).map_err(|e| {
+            let why = e.to_string();
+            let err = not_written(&why);
+            self.failed = Some(why);
+            err
+        })
+    }
+
+    /// A group's outputs, complete and fixed in private at `private_path`:
+    /// its whole manifest (wrapper identity, every child's baseline, count
+    /// and name bytes) and the publish intent for its planned name, as one
+    /// block, synced, before the publishing rename. Called again for the
+    /// same group (the name was taken), only a new intent is written. An
+    /// error refuses the publication: nothing becomes visible.
+    pub fn prepare_group(&mut self, group: &OutputGroup, private_path: &Path) -> io::Result<()> {
+        let again = match self.pending {
+            Some(p) if p.group == group.group => {
+                if p != Pending::of(group) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "a group was prepared again with another baseline",
+                    ));
+                }
+                true
+            }
+            _ => {
+                self.abort_pending();
+                self.pending = Some(Pending::of(group));
+                false
+            }
+        };
+        let (job, private) = (self.job_field.clone(), path_enc(private_path));
+        let target = path_enc(&group.directory);
+        let (op, gid) = (group.op.0, group.group.0);
+        self.write(true, |b| {
+            if !again {
+                manifest_lines(b, &job, group)?;
+            }
+            b.raw(format_args!(
+                "publish-intent\top={op:016x}\tjob={job}\tgroup={gid:016x}\tprivate={private}\ttarget={target}\n"
+            ))
+        })
+    }
+
+    /// The prepared group was not committed (its publication failed after
+    /// the intent: nothing of it is visible, see `publish_beneath`).
+    fn abort_pending(&mut self) {
+        if let Some(p) = self.pending.take() {
+            let job = self.job_field.clone();
+            let _ = self.write(false, |b| {
+                b.raw(format_args!(
+                    "publish-abort\top={:016x}\tjob={job}\tgroup={:016x}\n",
+                    p.op.0, p.group.0
+                ))
+            });
         }
     }
 
+    /// A group after its commit: `publish-commit` with the proved place, or
+    /// `publish-uncertain` with the anchor when it could not be proved.
+    /// Written and synced; an error leaves the output and its success and
+    /// makes the job not undoable.
+    pub fn group(&mut self, group: &OutputGroup, location: &LocationEvidence, d: &Durability) {
+        match self.pending {
+            Some(p) if p.group == group.group && p.op == group.op => self.pending = None,
+            _ => self.unprepared += 1,
+        }
+        if let Durability::Unconfirmed(_) = d {
+            self.unconfirmed += 1;
+        }
+        let (op, gid, job) = (group.op.0, group.group.0, self.job_field.clone());
+        let d = durability_str(d);
+        let line = match &location.path_at_check {
+            Some(p) => format!(
+                "publish-commit\top={op:016x}\tjob={job}\tgroup={gid:016x}\tactual={}\tdurability={d}\n",
+                path_enc(p)
+            ),
+            None => {
+                self.uncertain += 1;
+                let a = &location.anchor;
+                format!(
+                    "publish-uncertain\top={op:016x}\tjob={job}\tgroup={gid:016x}\tlocation_known=no\tparent_dev={}\tparent_ino={}\tleaf={}\tobject_dev={}\tobject_ino={}\treason=AncestorChanged\tdurability={d}\n",
+                    a.parent_dev,
+                    a.parent_ino,
+                    enc(a.leaf.as_bytes()),
+                    a.object_dev,
+                    a.object_ino,
+                )
+            }
+        };
+        let _ = self.write(true, |b| b.text(&line));
+    }
+
+    /// Counts the outcome; `skip`, `fail` and `unknown` get their line (an
+    /// `unknown` one synced: it refuses undo). A `Done` stats nothing: the
+    /// group's baseline is its record.
     pub fn outcome(&mut self, o: &Outcome) {
         self.tally.add(o);
         if let Some(l) = outcome_line(&self.job, o) {
-            self.append(&l);
+            let sync = matches!(o, Outcome::PublishedUnknown { .. });
+            let _ = self.write(sync, |b| b.line(&l));
         }
     }
 
-    /// A folder made for several outputs (non-UTF-8 ones are not recorded,
-    /// so undo never removes them).
-    pub fn dir(&mut self, d: &Path) {
-        if let (path, true) = path_str(d) {
-            let l = Line::new("dir").pair("job", &self.job).pair("path", &path);
-            self.append(&l);
-        }
-    }
-
-    /// Appends the `job` line (with `undo=no` after a `PublishedUnknown`)
-    /// and closes the job.
-    pub fn finish(mut self, sandboxed: bool) -> Finished {
+    /// Closes the job: a group still prepared did not commit (aborted),
+    /// then the `job` line (with `undo=no` when not undoable; tried even
+    /// after an earlier error, which may have been a sync alone).
+    pub fn finish(mut self, sandboxed: bool) -> Recorded {
+        self.abort_pending();
+        let unknown = self.tally.unknown();
+        let refused = unknown + self.unconfirmed + self.uncertain + self.unprepared;
+        let mut undoable = self.failed.is_none() && refused == 0;
         let mut l = Line::new("job")
             .pair("id", &self.job)
             .pair("time", &unix_secs().to_string())
             .pair("action", &self.action)
             .pair("status", status(&self.tally))
             .pair("sandbox", if sandboxed { "yes" } else { "no" });
-        let unknown = self.tally.unknown();
-        let undoable = unknown == 0;
         if !undoable {
             l = l.pair("undo", "no");
         }
-        self.append(&l);
-        Finished {
+        if self.failed.is_some() {
+            if let Some((f, lock)) = &mut self.file {
+                let _ = append(f, lock, false, |b| b.line(&l));
+            }
+        } else if self.write(false, |b| b.line(&l)).is_err() {
+            undoable = false;
+        }
+        let mut warning = Vec::new();
+        if unknown > 0 {
+            warning.push(format!(
+                "{unknown} input(s) published where it could not be confirmed"
+            ));
+        }
+        if let Some(why) = &self.failed {
+            warning.push(format!("history not written: {why}; outputs kept"));
+        }
+        if self.unconfirmed > 0 {
+            warning.push(format!(
+                "{} output folder(s) not confirmed on disk",
+                self.unconfirmed
+            ));
+        }
+        if self.unprepared > 0 {
+            warning.push(format!(
+                "{} output folder(s) committed without a record",
+                self.unprepared
+            ));
+        }
+        Recorded {
             tally: self.tally,
             undoable,
             warning: (!undoable).then(|| {
-                format!(
-                    "{} input(s) published where it could not be confirmed; undo unavailable",
-                    unknown
-                )
+                if warning.is_empty() {
+                    "undo unavailable".to_owned()
+                } else {
+                    format!("{}; undo unavailable", warning.join("; "))
+                }
             }),
         }
     }
 }
 
-/// A registered running job. The file is removed on drop.
+// ---- the running-jobs registry ----
+
+/// A registered running job. Its file is written by rename in the
+/// registry folder opened at the start, and removed on drop if it is
+/// still the file written last.
 pub struct Running {
-    path: Option<PathBuf>,
+    dir: Option<StateDir>,
+    written: Option<(u64, u64)>,
     job: String,
     action: String,
     inputs: usize,
@@ -311,16 +1038,9 @@ impl Running {
     /// Registers the job; without `$XDG_RUNTIME_DIR` (or on any I/O error)
     /// the registry is skipped silently.
     pub fn start(job: &JobId, action: &str, inputs: usize) -> Running {
-        let path = jobs_dir().and_then(|d| {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&d)
-                .ok()?;
-            Some(d.join(&job.0))
-        });
         let mut r = Running {
-            path,
+            dir: jobs_dir().and_then(|d| StateDir::create(&d).ok()),
+            written: None,
             job: job.0.clone(),
             action: action.to_owned(),
             inputs,
@@ -344,7 +1064,7 @@ impl Running {
     }
 
     fn write(&mut self, done: usize, progress: f32) {
-        let Some(path) = &self.path else { return };
+        let Some(dir) = &self.dir else { return };
         let line = Line::new("job")
             .pair("id", &self.job)
             .pair("pid", &std::process::id().to_string())
@@ -353,17 +1073,16 @@ impl Running {
             .pair("done", &done.to_string())
             .pair("progress", &format!("{progress:.3}"))
             .pair("started", &self.started.to_string());
-        let tmp = path.with_file_name(format!(".{}.tmp", self.job));
-        if fs::write(&tmp, write_line(&line)).is_ok() && fs::rename(&tmp, path).is_err() {
-            let _ = fs::remove_file(&tmp);
+        if let Ok(id) = dir.replace(&self.job, write_line(&line).as_bytes(), false) {
+            self.written = Some(id);
         }
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        if let Some(p) = &self.path {
-            let _ = fs::remove_file(p);
+        if let (Some(dir), Some(id)) = (&self.dir, self.written) {
+            let _ = dir.unlink_if(&self.job, id);
         }
     }
 }
@@ -408,22 +1127,32 @@ fn job_alive(pid: u32, started: Option<u64>) -> bool {
 }
 
 /// Running jobs: `(id, action, pid, progress)`. An entry whose process is
-/// gone is deleted and left out.
+/// gone is deleted and left out. Entries are read through the folder's
+/// descriptor, never through a symlink.
 pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
-    let Some(dir) = jobs_dir() else {
+    let Some(path) = jobs_dir() else {
         return Vec::new();
     };
-    let Ok(rd) = fs::read_dir(&dir) else {
+    let (Ok(dir), Ok(rd)) = (StateDir::open(&path), fs::read_dir(&path)) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for e in rd.flatten() {
-        if e.file_name().as_bytes().starts_with(b".") {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(e.path()) else {
+        let name = e.file_name();
+        let Some(name) = name.to_str().filter(|n| !n.starts_with('.')) else {
             continue;
         };
+        let Ok(f) = dir.open_file(name, libc::O_RDONLY, 0) else {
+            continue;
+        };
+        let mut text = String::new();
+        if f.take(REGISTRY_ENTRY_MAX + 1)
+            .read_to_string(&mut text)
+            .is_err()
+            || text.len() as u64 > REGISTRY_ENTRY_MAX
+        {
+            continue;
+        }
         let Ok(line) = parse_line(&text) else {
             continue;
         };
@@ -436,7 +1165,9 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
         };
         let started = line.get("started").and_then(|s| s.parse().ok());
         if !job_alive(pid, started) {
-            let _ = fs::remove_file(e.path());
+            if let Ok(st) = dir.stat(name) {
+                let _ = dir.unlink_if(name, ident(&st));
+            }
             continue;
         }
         let progress = line
@@ -453,102 +1184,41 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
     out
 }
 
+// ---- reading a job back ----
+
 #[derive(Debug, Default)]
 pub struct UndoResult {
     pub removed: Vec<PathBuf>,
     pub kept: Vec<(PathBuf, String)>,
 }
 
+/// One group as its records say.
 #[derive(Debug)]
-struct Out {
-    path: PathBuf,
-    id: FileId,
-    /// False when the path was not valid UTF-8 and the history holds only a
-    /// lossy copy.
-    undoable: bool,
+struct GroupRec {
+    group: u64,
+    op: u64,
+    wrapper: DirectoryId,
+    declared: usize,
+    children: Vec<ChildBaseline>,
+    /// The names' total bytes so far.
+    bytes: usize,
+    ended: bool,
+    /// Every intent's target (several after a taken name).
+    intents: Vec<Vec<u8>>,
+    /// The committed place.
+    commit: Option<Vec<u8>>,
+    synced: bool,
+    /// Committed at a place that could not be proved.
+    uncertain: bool,
+    /// Its publication failed after the intent: nothing was published.
+    aborted: bool,
 }
 
-enum Gone {
-    Removed,
-    Kept(String),
-}
-
-/// Removes the file only if it still has the recorded identity. Never
-/// follows a symlink at the file's name: the parent directory is opened, the
-/// name is lstat'ed relative to it and unlinked relative to it. A parent
-/// swapped for another directory or symlink holds a file with another
-/// identity, so nothing is removed.
-fn remove_if_unchanged(o: &Out) -> Gone {
-    if !o.undoable {
-        return Gone::Kept("name not representable".to_owned());
+impl GroupRec {
+    /// Whether a commit, an uncertain commit or an abort closed it.
+    fn closed(&self) -> bool {
+        self.commit.is_some() || self.uncertain || self.aborted
     }
-    let (Some(parent), Some(name)) = (o.path.parent(), o.path.file_name()) else {
-        return Gone::Kept("no parent".to_owned());
-    };
-    let (Ok(cparent), Ok(cname)) = (
-        CString::new(parent.as_os_str().as_bytes()),
-        CString::new(name.as_bytes()),
-    ) else {
-        return Gone::Kept("invalid path".to_owned());
-    };
-    // SAFETY: cparent is a valid NUL-terminated string.
-    let dfd = unsafe {
-        libc::open(
-            cparent.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if dfd < 0 {
-        return match io::Error::last_os_error().kind() {
-            io::ErrorKind::NotFound => Gone::Kept("missing".to_owned()),
-            e => Gone::Kept(format!("cannot open parent: {e}")),
-        };
-    }
-    let r = (|| {
-        // SAFETY: an all-zero stat is a valid out-parameter.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: dfd is open, cname is NUL-terminated, st is writable.
-        let rc = unsafe { libc::fstatat(dfd, cname.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-        if rc != 0 {
-            return match io::Error::last_os_error().kind() {
-                io::ErrorKind::NotFound => Gone::Kept("missing".to_owned()),
-                e => Gone::Kept(format!("cannot stat: {e}")),
-            };
-        }
-        if st.st_mode & libc::S_IFMT != libc::S_IFREG || FileId::from_stat(&st) != o.id {
-            return Gone::Kept("changed since".to_owned());
-        }
-        // SAFETY: dfd is open and cname is NUL-terminated.
-        if unsafe { libc::unlinkat(dfd, cname.as_ptr(), 0) } != 0 {
-            return Gone::Kept(format!("cannot remove: {}", io::Error::last_os_error()));
-        }
-        Gone::Removed
-    })();
-    // SAFETY: dfd is an open descriptor owned here.
-    unsafe { libc::close(dfd) };
-    r
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
-fn parse_out(l: &Line) -> Option<Out> {
-    let n = |k: &str| l.get(k)?.parse::<u64>().ok();
-    let t = |k: &str| l.get(k)?.parse::<i128>().ok();
-    Some(Out {
-        path: PathBuf::from(std::ffi::OsString::from_vec(
-            l.get("path")?.as_bytes().to_vec(),
-        )),
-        id: FileId {
-            dev: n("dev")?,
-            ino: n("ino")?,
-            size: n("size")?,
-            mtime_ns: t("mtime")?,
-            ctime_ns: t("ctime")?,
-        },
-        undoable: l.get("undo") != Some("no"),
-    })
 }
 
 /// What the history says about one job.
@@ -556,72 +1226,353 @@ fn parse_out(l: &Line) -> Option<Out> {
 struct JobRecords {
     known: bool,
     undone: bool,
-    /// A `PublishedUnknown` (or a job line with `undo=no`): undo refuses.
+    /// A `PublishedUnknown`: undo refuses.
     unknown: bool,
-    outs: Vec<Out>,
-    dirs: Vec<PathBuf>,
+    /// The `job` line says `undo=no`: undo refuses.
+    withdrawn: bool,
+    /// Found in a version 0 history: undo refuses.
+    old: bool,
+    groups: Vec<GroupRec>,
+    /// The first framing fault: undo refuses the whole job.
+    broken: Option<&'static str>,
+}
+
+type Fault = &'static str;
+
+/// The values of exactly `keys` (each once, in any order, nothing else),
+/// in the order of `keys`.
+fn fields<'a>(l: &'a Line, keys: &[&str]) -> Result<Vec<&'a str>, Fault> {
+    let mut out = vec![None; keys.len()];
+    if l.items.len() != keys.len() {
+        return Err("a record with missing or extra fields");
+    }
+    for item in &l.items {
+        let manifest::Item::Pair(k, v) = item else {
+            return Err("a record with a bare field");
+        };
+        let i = keys
+            .iter()
+            .position(|x| x == k)
+            .ok_or("a record with an unknown field")?;
+        if out[i].replace(v.as_str()).is_some() {
+            return Err("a record with a field twice");
+        }
+    }
+    Ok(out.into_iter().flatten().collect())
+}
+
+/// A number in its one canonical decimal form.
+fn num(s: &str) -> Result<u64, Fault> {
+    s.parse::<u64>()
+        .ok()
+        .filter(|v| v.to_string() == s)
+        .ok_or("a bad number")
+}
+
+fn small(s: &str) -> Result<u32, Fault> {
+    u32::try_from(num(s)?).map_err(|_| "a bad number")
+}
+
+fn count(s: &str) -> Result<usize, Fault> {
+    usize::try_from(num(s)?).map_err(|_| "a bad number")
+}
+
+/// Nanoseconds since the epoch (may be negative).
+fn time(s: &str) -> Result<i128, Fault> {
+    s.parse::<i128>()
+        .ok()
+        .filter(|v| v.to_string() == s)
+        .ok_or("a bad time")
+}
+
+fn octal(s: &str) -> Result<u32, Fault> {
+    u32::from_str_radix(s, 8)
+        .ok()
+        .filter(|v| format!("{v:o}") == s)
+        .ok_or("a bad mode")
+}
+
+fn hex_id(s: &str) -> Result<u64, Fault> {
+    u64::from_str_radix(s, 16)
+        .ok()
+        .filter(|v| hex(*v) == s)
+        .ok_or("a bad id")
+}
+
+fn path_dec(s: &str) -> Result<Vec<u8>, Fault> {
+    dec(s).ok_or("a bad path encoding")
+}
+
+fn node_kind(s: &str) -> Result<NodeKind, Fault> {
+    match s {
+        "file" => Ok(NodeKind::File),
+        "dir" => Ok(NodeKind::Directory),
+        _ => Err("a bad type"),
+    }
+}
+
+const BEGIN: &[&str] = &[
+    "job",
+    "group",
+    "op",
+    "wrapper_dev",
+    "wrapper_ino",
+    "wrapper_type",
+    "wrapper_uid",
+    "wrapper_mode",
+    "children",
+];
+const CHILD: &[&str] = &[
+    "job", "group", "rel", "type", "dev", "ino", "uid", "mode", "nlink", "size", "mtime", "ctime",
+];
+const END: &[&str] = &["job", "group", "children", "bytes"];
+const INTENT: &[&str] = &["op", "job", "group", "private", "target"];
+const COMMIT: &[&str] = &["op", "job", "group", "actual", "durability"];
+const UNCERTAIN: &[&str] = &[
+    "op",
+    "job",
+    "group",
+    "location_known",
+    "parent_dev",
+    "parent_ino",
+    "leaf",
+    "object_dev",
+    "object_ino",
+    "reason",
+    "durability",
+];
+const ABORT: &[&str] = &["op", "job", "group"];
+
+impl JobRecords {
+    /// The begun group `id` (with operation `op`, when given).
+    fn group(&mut self, id: &str, op: Option<&str>) -> Result<&mut GroupRec, Fault> {
+        let id = hex_id(id)?;
+        let g = self
+            .groups
+            .iter_mut()
+            .find(|g| g.group == id)
+            .ok_or("a record of a group without its begin")?;
+        if let Some(op) = op
+            && hex_id(op)? != g.op
+        {
+            return Err("an operation that is not the group's");
+        }
+        Ok(g)
+    }
+
+    /// Takes one parsed line; an error is a framing fault of this job.
+    fn take(&mut self, l: &Line, job: &str) -> Result<(), Fault> {
+        let mine = |k: &str| l.get(k) == Some(job);
+        match l.kind.as_str() {
+            "job" if mine("id") => {
+                self.known = true;
+                self.withdrawn |= l.get("undo") == Some("no");
+            }
+            "job" => {}
+            _ if !mine("job") => {}
+            "undo" => self.undone = true,
+            "skip" | "fail" => self.known = true,
+            "unknown" => {
+                self.known = true;
+                self.unknown = true;
+            }
+            "group-begin" => self.begin(&fields(l, BEGIN)?)?,
+            "child" => self.child(&fields(l, CHILD)?)?,
+            "group-end" => {
+                let v = fields(l, END)?;
+                let (n, bytes) = (count(v[2])?, count(v[3])?);
+                let g = self.group(v[1], None)?;
+                if g.ended {
+                    return Err("a duplicate group end");
+                }
+                if n != g.declared || n != g.children.len() {
+                    return Err("a child count that does not match");
+                }
+                if bytes != g.bytes {
+                    return Err("name bytes that do not match");
+                }
+                g.ended = true;
+            }
+            "publish-intent" => {
+                let v = fields(l, INTENT)?;
+                path_dec(v[3])?;
+                let target = path_dec(v[4])?;
+                let g = self.group(v[2], Some(v[0]))?;
+                if !g.ended || g.closed() {
+                    return Err("an intent out of order");
+                }
+                g.intents.push(target);
+            }
+            "publish-commit" => {
+                let v = fields(l, COMMIT)?;
+                let actual = path_dec(v[3])?;
+                let synced = match v[4] {
+                    "synced" => true,
+                    "unconfirmed" => false,
+                    _ => return Err("a bad durability"),
+                };
+                let g = self.group(v[2], Some(v[0]))?;
+                if g.closed() {
+                    return Err("a duplicate commit");
+                }
+                // D-24(b): the place is the committed name, which must be
+                // one of the intents.
+                if !g.intents.contains(&actual) {
+                    return Err("a commit at a place no intent named");
+                }
+                g.commit = Some(actual);
+                g.synced = synced;
+            }
+            "publish-uncertain" => {
+                let v = fields(l, UNCERTAIN)?;
+                if v[3] != "no" {
+                    return Err("an uncertain place said known");
+                }
+                for n in [v[4], v[5], v[7], v[8]] {
+                    num(n)?;
+                }
+                path_dec(v[6])?;
+                let g = self.group(v[2], Some(v[0]))?;
+                if g.closed() || g.intents.is_empty() {
+                    return Err("an uncertain commit out of order");
+                }
+                g.uncertain = true;
+            }
+            "publish-abort" => {
+                let v = fields(l, ABORT)?;
+                let g = self.group(v[2], Some(v[0]))?;
+                if g.closed() {
+                    return Err("an abort after the outcome");
+                }
+                g.aborted = true;
+            }
+            _ => return Err("an unknown record"),
+        }
+        Ok(())
+    }
+
+    fn begin(&mut self, v: &[&str]) -> Result<(), Fault> {
+        self.known = true;
+        let (group, op) = (hex_id(v[1])?, hex_id(v[2])?);
+        if self.groups.iter().any(|g| g.group == group) {
+            return Err("a duplicate group");
+        }
+        if self.groups.iter().any(|g| g.op == op) {
+            return Err("a duplicate operation");
+        }
+        if node_kind(v[5])? != NodeKind::Directory {
+            return Err("a wrapper that is not a directory");
+        }
+        self.groups.push(GroupRec {
+            group,
+            op,
+            wrapper: DirectoryId {
+                dev: num(v[3])?,
+                ino: num(v[4])?,
+                kind: NodeKind::Directory,
+                uid: small(v[6])?,
+                mode: octal(v[7])?,
+            },
+            declared: count(v[8])?,
+            children: Vec::new(),
+            bytes: 0,
+            ended: false,
+            intents: Vec::new(),
+            commit: None,
+            synced: false,
+            uncertain: false,
+            aborted: false,
+        });
+        Ok(())
+    }
+
+    fn child(&mut self, v: &[&str]) -> Result<(), Fault> {
+        let rel = path_dec(v[2])?;
+        if rel.is_empty() || rel == b"." || rel == b".." || rel.contains(&b'/') {
+            return Err("a child name that is not one plain component");
+        }
+        let child = ChildBaseline {
+            rel: PathBuf::from(OsStr::from_bytes(&rel)),
+            file_id: FileId {
+                dev: num(v[4])?,
+                ino: num(v[5])?,
+                size: num(v[9])?,
+                mtime_ns: time(v[10])?,
+                ctime_ns: time(v[11])?,
+            },
+            kind: node_kind(v[3])?,
+            uid: small(v[6])?,
+            mode: octal(v[7])?,
+            nlink: num(v[8])?,
+        };
+        let g = self.group(v[1], None)?;
+        if g.ended {
+            return Err("a child after its group's end");
+        }
+        if g.children.len() == g.declared {
+            return Err("more children than declared");
+        }
+        if g.children.iter().any(|c| c.rel == child.rel) {
+            return Err("a duplicate child");
+        }
+        g.bytes += rel.len();
+        g.children.push(child);
+        Ok(())
+    }
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Reads a history stream (header, then lines) and collects the records of
 /// one job. Pure: no file, no lock. It streams (only lines that mention the
 /// job are parsed), so `undo` hands it the locked file and the fuzz target
-/// a byte slice. A bad or unsupported header is `InvalidData`; a last line
-/// without its newline (cut off mid-write), a line that is not UTF-8 and a
-/// line that does not parse are skipped.
-fn job_records(mut rd: impl BufRead, job: &JobId) -> io::Result<JobRecords> {
+/// a byte slice. A bad or unsupported header is `InvalidData`; a version 0
+/// history only says whether it names the job (`old`). In version 1 a line
+/// that may be the job's (it holds `job=<id>` or `id=<id>`) but is cut off,
+/// not UTF-8 or does not parse, and any framing fault of the job's records,
+/// is `broken`: undo then refuses. Other jobs' lines are skipped.
+fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
     let mut r = JobRecords::default();
     let mut buf = Vec::new();
-    rd.read_until(b'\n', &mut buf)?;
-    let head = String::from_utf8_lossy(&buf);
-    let head = head.trim_end_matches('\n');
-    let ok = head
-        .split_once(' ')
-        .is_some_and(|(m, v)| m == MAGIC && v.parse::<u32>().is_ok_and(|v| v == VERSION));
-    if !ok {
+    rd.take(HEADER_MAX as u64).read_until(b'\n', &mut buf)?;
+    let version = parse_header(&buf)?;
+    let needle = format!("job={}", job.0);
+    let id_needle = format!("id={}", job.0);
+    let mentions = |b: &[u8]| contains(b, needle.as_bytes()) || contains(b, id_needle.as_bytes());
+    if version != VERSION && version != OLD_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bad or unsupported history header",
         ));
     }
-    let needle = format!("job={}", job.0);
-    let id_needle = format!("id={}", job.0);
     loop {
         buf.clear();
         if rd.read_until(b'\n', &mut buf)? == 0 {
             break;
         }
-        // A last line cut off mid-write has no newline: skip it.
-        if buf.pop() != Some(b'\n') {
-            break;
-        }
-        if !(contains(&buf, needle.as_bytes()) || contains(&buf, id_needle.as_bytes())) {
+        if !mentions(&buf) {
             continue;
         }
-        let Ok(text) = std::str::from_utf8(&buf) else {
-            continue;
+        if version == OLD_VERSION {
+            r.old = true;
+            return Ok(r);
+        }
+        let fault = if buf.pop() != Some(b'\n') {
+            Err("a record cut off")
+        } else {
+            std::str::from_utf8(&buf)
+                .map_err(|_| "a record that is not UTF-8")
+                .and_then(|t| parse_line(t).map_err(|_| "a garbled record"))
+                .and_then(|l| r.take(&l, &job.0))
         };
-        let Ok(l) = parse_line(text) else { continue };
-        match l.kind.as_str() {
-            "job" if l.get("id") == Some(&job.0) => {
-                r.known = true;
-                r.unknown |= l.get("undo") == Some("no");
-            }
-            "unknown" if l.get("job") == Some(&job.0) => {
-                r.known = true;
-                r.unknown = true;
-            }
-            "undo" if l.get("job") == Some(&job.0) => r.undone = true,
-            "out" if l.get("job") == Some(&job.0) => {
-                r.known = true;
-                r.outs.extend(parse_out(&l));
-            }
-            "dir" if l.get("job") == Some(&job.0) => {
-                r.known = true;
-                r.dirs.extend(l.get("path").map(PathBuf::from));
-            }
-            "skip" | "fail" if l.get("job") == Some(&job.0) => r.known = true,
-            _ => {}
+        if let Err(why) = fault {
+            r.broken.get_or_insert(why);
         }
+    }
+    if r.groups.iter().any(|g| !g.ended) {
+        r.broken.get_or_insert("a group without its end");
     }
     Ok(r)
 }
@@ -647,13 +1598,16 @@ pub fn fuzz_history(bytes: &[u8]) {
         "0-0".to_owned(),
     ];
     for id in ids {
-        let _ = job_records(bytes, &JobId(id));
+        let _ = job_records(&mut &bytes[..], &JobId(id));
     }
 }
 
-/// How long `undo` waits for the history lock before giving up.
-const UNDO_LOCK_WAIT: Duration = Duration::from_secs(2);
-const UNDO_LOCK_STEP: Duration = Duration::from_millis(50);
+/// How long `undo` and the history's makers wait for a lock before giving
+/// up: a held lock is another run making the history or another undo, each
+/// a matter of milliseconds; past 2 s something hangs, and waiting longer
+/// would only hold up the user.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+const LOCK_STEP: Duration = Duration::from_millis(50);
 
 /// Takes the exclusive `flock` without ever blocking for good: retries
 /// every 50 ms until `wait` has passed, then `WouldBlock` "history is busy".
@@ -671,17 +1625,180 @@ fn lock_with_deadline(file: &File, wait: Duration) -> io::Result<()> {
         if Instant::now() >= end {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "history is busy"));
         }
-        std::thread::sleep(UNDO_LOCK_STEP);
+        std::thread::sleep(LOCK_STEP);
     }
 }
 
-/// Undoes a job: deletes the files it created, but only those still having
-/// the recorded identity (dev, inode, size, mtime, ctime); the rest are kept
-/// with the reason. Folders recorded as made for this job are removed if
-/// empty afterwards. The history is held under an exclusive `flock` for the
-/// whole undo (waiting at most 2 s for it), so two undos of one job cannot
-/// both run. A job that is still running is refused (`ResourceBusy`): it
-/// could place more files.
+/// `OLD_REFUSAL` if an archived version 0 history names the job, else
+/// "unknown job".
+fn old_or_unknown(dir: &StateDir, job: &JobId) -> io::Error {
+    for n in 0..ARCHIVE_ATTEMPTS {
+        let Ok(f) = dir.open_file(&archive_name(n), libc::O_RDONLY, 0) else {
+            continue;
+        };
+        if job_records(&mut BufReader::new(f), job).is_ok_and(|r| r.old) {
+            return io::Error::other(OLD_REFUSAL);
+        }
+    }
+    io::Error::new(io::ErrorKind::NotFound, "unknown job")
+}
+
+/// D-25: where a group without its commit record is, if anywhere: an
+/// intent's target that holds the wrapper itself (same device and inode,
+/// never through a symlink). A lookalike at a target is not it.
+fn recovered_place(g: &GroupRec) -> Option<PathBuf> {
+    g.intents.iter().find_map(|t| {
+        let st = stat_at(libc::AT_FDCWD, &c_name(t).ok()?).ok()?;
+        (st.st_mode & libc::S_IFMT == libc::S_IFDIR && ident(&st) == (g.wrapper.dev, g.wrapper.ino))
+            .then(|| PathBuf::from(OsStr::from_bytes(t)))
+    })
+}
+
+/// Why undo refuses the job, if it does, before anything is touched.
+fn refusal(r: &JobRecords) -> Option<io::Error> {
+    if r.old {
+        return Some(io::Error::other(OLD_REFUSAL));
+    }
+    if r.undone {
+        return Some(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "already undone",
+        ));
+    }
+    // A group whose place or baseline was not proved could be anything by
+    // now.
+    if r.unknown || r.groups.iter().any(|g| g.uncertain) {
+        return Some(io::Error::other(UNKNOWN_REFUSAL));
+    }
+    if let Some(why) = &r.broken {
+        return Some(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("this job's history record is damaged ({why}); nothing undone"),
+        ));
+    }
+    if let Some(g) = r.groups.iter().find(|g| g.commit.is_none() && !g.aborted) {
+        let place = match recovered_place(g) {
+            Some(p) => format!("its folder is at {}, ", p.display()),
+            None => String::new(),
+        };
+        return Some(io::Error::other(format!(
+            "an output's record is incomplete ({place}the run ended before its commit was recorded); nothing undone"
+        )));
+    }
+    if r.groups.iter().any(|g| g.commit.is_some() && !g.synced) {
+        return Some(io::Error::other(UNCONFIRMED_REFUSAL));
+    }
+    if r.withdrawn {
+        return Some(io::Error::other(WITHDRAWN_REFUSAL));
+    }
+    None
+}
+
+/// Removes a committed group's files that still match their baselines,
+/// then its wrapper if that is left empty. All through the wrapper opened
+/// without following a symlink and checked against its recorded identity:
+/// a folder that took its place (a lookalike, a symlink) is left alone.
+fn undo_group(place: &Path, g: &GroupRec, res: &mut UndoResult) {
+    let keep_all = |res: &mut UndoResult, why: &str| {
+        for c in &g.children {
+            res.kept.push((place.join(&c.rel), why.to_owned()));
+        }
+    };
+    let (Some(parent), Some(leaf)) = (place.parent(), place.file_name()) else {
+        return keep_all(res, "no parent");
+    };
+    let (Ok(cparent), Ok(cleaf)) = (
+        c_name(parent.as_os_str().as_bytes()),
+        c_name(leaf.as_bytes()),
+    ) else {
+        return keep_all(res, "invalid path");
+    };
+    // The parent path is followed (a symlink the user made along it is
+    // fine): the wrapper is checked against its recorded identity below.
+    // SAFETY: cparent is NUL-terminated.
+    let fd = unsafe {
+        libc::open(
+            cparent.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return keep_all(res, "missing");
+    }
+    // SAFETY: fd was just opened and nothing else owns it.
+    let pfd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let wrapper = (g.wrapper.dev, g.wrapper.ino);
+    let wfd = match open_at(
+        pfd.as_raw_fd(),
+        &cleaf,
+        libc::O_RDONLY | libc::O_DIRECTORY,
+        0,
+    ) {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return keep_all(res, "missing"),
+        Err(_) => return keep_all(res, "changed since"),
+    };
+    if fstat(wfd.as_raw_fd()).map(|st| ident(&st)).ok() != Some(wrapper) {
+        return keep_all(res, "changed since");
+    }
+    for c in &g.children {
+        let path = place.join(&c.rel);
+        let Ok(name) = c_name(c.rel.as_os_str().as_bytes()) else {
+            res.kept.push((path, "invalid path".to_owned()));
+            continue;
+        };
+        let st = match stat_at(wfd.as_raw_fd(), &name) {
+            Ok(st) => st,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                res.kept.push((path, "missing".to_owned()));
+                continue;
+            }
+            Err(e) => {
+                res.kept.push((path, format!("cannot stat: {e}")));
+                continue;
+            }
+        };
+        let (want, flag) = match c.kind {
+            NodeKind::File => (libc::S_IFREG, 0),
+            NodeKind::Directory => (libc::S_IFDIR, libc::AT_REMOVEDIR),
+        };
+        // st_nlink's width differs between targets.
+        #[allow(clippy::unnecessary_cast)]
+        let same = st.st_mode & libc::S_IFMT == want
+            && st.st_uid == c.uid
+            && st.st_mode & 0o7777 == c.mode
+            && st.st_nlink as u64 == c.nlink
+            && FileId::from_stat(&st) == c.file_id;
+        if !same {
+            res.kept.push((path, "changed since".to_owned()));
+            continue;
+        }
+        // SAFETY: the fd is an open directory and name NUL-terminated.
+        if unsafe { libc::unlinkat(wfd.as_raw_fd(), name.as_ptr(), flag) } != 0 {
+            let e = io::Error::last_os_error();
+            res.kept.push((path, format!("cannot remove: {e}")));
+            continue;
+        }
+        res.removed.push(path);
+    }
+    // Only the wrapper itself, and only if empty (rmdir fails otherwise).
+    if stat_at(pfd.as_raw_fd(), &cleaf).is_ok_and(|st| ident(&st) == wrapper) {
+        // SAFETY: the fd is an open directory and cleaf NUL-terminated.
+        unsafe { libc::unlinkat(pfd.as_raw_fd(), cleaf.as_ptr(), libc::AT_REMOVEDIR) };
+    }
+}
+
+/// Undoes a job: deletes the files its groups published, but only those
+/// still matching their private baselines (device, inode, size, mtime,
+/// ctime, type, owner, mode, link count) in the wrapper the commit recorded
+/// (same device and inode); the rest are kept with the reason. Each emptied
+/// wrapper goes too. The whole job is refused, before anything is touched,
+/// when any record is incomplete, damaged or unknown, when a group's place
+/// or durability was not confirmed, and for a job of the previous history
+/// format. The history is held under an exclusive `flock` for the whole
+/// undo (waiting at most 2 s for it), so two undos of one job cannot both
+/// run. A job that is still running is refused (`ResourceBusy`): it could
+/// place more files.
 ///
 /// The history is streamed: only lines that mention the job are parsed.
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
@@ -691,68 +1808,74 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
             "job is running; cancel it first",
         ));
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .open(history_path()?)?;
-    lock_with_deadline(&file, UNDO_LOCK_WAIT)?;
-    let JobRecords {
-        known,
-        undone,
-        unknown,
-        outs,
-        dirs,
-    } = job_records(BufReader::new(&file), job)?;
-    if !known {
+    let dir = match StateDir::open(&history_dir()?) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
+        }
+        Err(e) => return Err(e),
+    };
+    let mut file = match dir.open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(old_or_unknown(&dir, job)),
+        Err(e) => return Err(e),
+    };
+    lock_with_deadline(&file, LOCK_WAIT)?;
+    let r = job_records(&mut BufReader::new(&file), job)?;
+    // Taken before anything is removed: the undo line needs it.
+    let lock = dir.open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+    if !r.known && !r.old && !r.undone {
+        return Err(old_or_unknown(&dir, job));
+    }
+    if let Some(e) = refusal(&r) {
+        return Err(e);
+    }
+    if !r.known {
         return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
     }
-    if undone {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "already undone",
-        ));
-    }
-    // Before anything is removed: a group whose place or baseline was not
-    // proved could be anything by now.
-    if unknown {
-        return Err(io::Error::other(UNKNOWN_REFUSAL));
-    }
     let mut res = UndoResult::default();
-    for o in &outs {
-        match remove_if_unchanged(o) {
-            Gone::Removed => res.removed.push(o.path.clone()),
-            Gone::Kept(why) => res.kept.push((o.path.clone(), why)),
+    for g in &r.groups {
+        if let Some(place) = &g.commit {
+            undo_group(Path::new(OsStr::from_bytes(place)), g, &mut res);
         }
     }
-    for d in &dirs {
-        let _ = fs::remove_dir(d); // never follows a symlink; fails unless empty
-    }
-    append_line(
-        &mut file,
-        &Line::new("undo")
-            .pair("job", &job.0)
-            .pair("time", &unix_secs().to_string())
-            .pair("removed", &res.removed.len().to_string())
-            .pair("kept", &res.kept.len().to_string()),
-    )?;
+    let l = Line::new("undo")
+        .pair("job", &job.0)
+        .pair("time", &unix_secs().to_string())
+        .pair("removed", &res.removed.len().to_string())
+        .pair("kept", &res.kept.len().to_string());
+    append(&mut file, &lock, true, |b| b.line(&l))?;
     Ok(res)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+    use crate::output::{
+        self, ChildBaseline, DirectoryId, NodeKind, OutputGroup, Publication, PublicationReason,
+    };
     use crate::xdg::tests::with_env;
-    use std::os::unix::fs::symlink;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
+    /// A private root per test. Unique per call (tag, pid and a counter):
+    /// two tests sharing a tag once shared the directory, and one's cleanup
+    /// removed the other's files while it waited for the environment lock.
     struct Tmp(PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Tmp {
-            let p =
-                std::env::temp_dir().join(format!("engine-journal-{tag}-{}", std::process::id()));
+            static N: AtomicU32 = AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "engine-journal-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
             let _ = fs::remove_dir_all(&p);
-            fs::create_dir_all(p.join("state")).unwrap();
-            fs::create_dir_all(p.join("run")).unwrap();
-            fs::create_dir_all(p.join("out")).unwrap();
+            for d in ["state", "run", "out"] {
+                fs::create_dir_all(p.join(d)).unwrap();
+            }
             Tmp(p)
         }
         fn env<R>(&self, f: impl FnOnce() -> R) -> R {
@@ -766,6 +1889,9 @@ mod tests {
                 f,
             )
         }
+        fn out(&self) -> PathBuf {
+            self.0.join("out")
+        }
     }
     impl Drop for Tmp {
         fn drop(&mut self) {
@@ -773,86 +1899,90 @@ mod tests {
         }
     }
 
-    fn zero_id() -> FileId {
-        FileId {
-            dev: 0,
-            ino: 0,
-            size: 0,
-            mtime_ns: 0,
-            ctime_ns: 0,
-        }
+    fn history_path() -> PathBuf {
+        history_dir().unwrap().join(HISTORY)
     }
 
-    fn id_of(p: &Path) -> FileId {
-        use std::os::unix::fs::MetadataExt;
-        let m = fs::symlink_metadata(p).unwrap();
-        FileId {
-            dev: m.dev(),
-            ino: m.ino(),
-            size: m.len(),
-            mtime_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
-            ctime_ns: i128::from(m.ctime()) * 1_000_000_000 + i128::from(m.ctime_nsec()),
-        }
+    fn history() -> String {
+        fs::read_to_string(history_path()).unwrap()
     }
 
-    /// An outcome as the executor makes it: identity taken now, at placement.
-    fn done(input: &str, output: &Path) -> Outcome {
-        Outcome::Done {
-            input: PathBuf::from(input),
-            output: output.to_owned(),
-            id: id_of(output),
-        }
+    type Before<'a> = &'a mut dyn FnMut(&OutputGroup, &Path) -> io::Result<()>;
+
+    /// One input's outputs (`(name, content)`) published into `out/` by the
+    /// real publication, with `rec` writing its intent as the executor's
+    /// `before_commit` does, then `extra`.
+    fn try_publish(
+        t: &Tmp,
+        rec: &mut Recorder,
+        stem: &str,
+        files: &[(&str, &str)],
+        extra: Before,
+    ) -> io::Result<Publication> {
+        let files: Vec<(&std::ffi::OsStr, &str)> = files
+            .iter()
+            .map(|(n, b)| (std::ffi::OsStr::new(*n), *b))
+            .collect();
+        try_publish_raw(t, rec, stem, &files, extra)
     }
 
-    /// A finished job's outcomes, as the old one-shot record took them.
-    struct Rec {
-        outcomes: Vec<Outcome>,
-        dirs: Vec<PathBuf>,
+    fn try_publish_raw(
+        t: &Tmp,
+        rec: &mut Recorder,
+        stem: &str,
+        files: &[(&std::ffi::OsStr, &str)],
+        extra: Before,
+    ) -> io::Result<Publication> {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let root =
+            t.0.join(format!("producer-{}", N.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(root.join("0")).unwrap();
+        let mut rels = Vec::new();
+        for (name, body) in files {
+            let rel = Path::new("0").join(name);
+            fs::write(root.join(&rel), body).unwrap();
+            rels.push(rel);
+        }
+        output::publish_beneath(&root, &rels, &t.out(), stem, "md", &mut |g, p| {
+            rec.prepare_group(g, p)?;
+            extra(g, p)
+        })
     }
 
-    fn report(outcomes: Vec<Outcome>) -> Rec {
-        Rec {
-            outcomes,
-            dirs: Vec::new(),
+    /// What the executor does after a commit: the group record, then one
+    /// `Done` per file with its private baseline. Returns the files.
+    fn commit(rec: &mut Recorder, input: &str, p: &Publication) -> Vec<PathBuf> {
+        rec.group(&p.group, &p.location, &p.durability);
+        let files = output::postcheck(p).unwrap();
+        for (path, id) in &files {
+            rec.outcome(&Outcome::Done {
+                input: input.into(),
+                output: path.clone(),
+                id: *id,
+            });
         }
+        files.into_iter().map(|(p, _)| p).collect()
     }
 
-    /// Records a whole job through the incremental recorder.
-    fn record(job: &JobId, action: &str, r: &Rec) {
-        let mut rec = Recorder::open(job, action);
-        for d in &r.dirs {
-            rec.dir(d);
-        }
-        for o in &r.outcomes {
-            rec.outcome(o);
-        }
-        rec.finish(true);
+    /// A published, recorded group: its files.
+    fn publish(t: &Tmp, rec: &mut Recorder, stem: &str, files: &[(&str, &str)]) -> Vec<PathBuf> {
+        let p = try_publish(t, rec, stem, files, &mut |_, _| Ok(())).unwrap();
+        commit(rec, &format!("/in/{stem}"), &p)
     }
 
-    #[test]
-    fn lines_are_written_as_outcomes_arrive_and_a_dead_run_is_undoable() {
-        let t = Tmp::new("stream");
-        t.env(|| {
-            let (a, b) = (t.0.join("out/a.png"), t.0.join("out/b.png"));
-            fs::write(&a, "aaa").unwrap();
-            let job = new_job_id();
-            let mut rec = Recorder::open(&job, "convert");
-            rec.outcome(&done("/in/a", &a));
-            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
-            assert!(hist.contains("out\tjob="), "{hist}");
-            assert!(!hist.contains("id="), "job line only at the end: {hist}");
-            fs::write(&b, "bb").unwrap();
-            rec.outcome(&done("/in/b", &b));
-            // The run dies here: no finish, no `job` line.
-            drop(rec);
-            let r = undo(&job).unwrap();
-            assert_eq!(r.removed, vec![a.clone(), b.clone()]);
-            assert!(!a.exists() && !b.exists());
-        });
+    /// A whole job of single-file groups `(stem, content)`.
+    fn job_of(t: &Tmp, job: &JobId, groups: &[(&str, &str)]) -> Vec<PathBuf> {
+        let mut rec = Recorder::open(job, "convert");
+        let mut files = Vec::new();
+        for (stem, body) in groups {
+            files.extend(publish(t, &mut rec, stem, &[("x.md", body)]));
+        }
+        let r = rec.finish(true);
+        assert!(r.undoable, "{:?}", r.warning);
+        files
     }
 
     fn unknown(input: &str) -> Outcome {
-        use crate::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
         Outcome::PublishedUnknown {
             input: PathBuf::from(input),
             group: GroupId(0xab),
@@ -863,39 +1993,239 @@ mod tests {
                     parent_ino: 2,
                     object_dev: 1,
                     object_ino: 3,
-                    leaf: "b".into(),
+                    leaf: std::ffi::OsStr::from_bytes(b"b\xff%").into(),
                     op: OperationId(0xcd),
                 },
                 checked_at: CheckPoint::PostPublish,
             },
-            reason: crate::exec::PublicationReason::AncestorChanged,
+            reason: PublicationReason::AncestorChanged,
             durability: Durability::Unconfirmed("folder sync failed".into()),
         }
     }
 
+    // ---- recording ----
+
+    /// The whole manifest and the intent are on disk (synced) before the
+    /// rename, the commit after it; the history has no digest of any kind.
+    #[test]
+    fn intent_is_written_before_the_rename_and_the_commit_after() {
+        let t = Tmp::new("order");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let target = t.out().join("doc");
+            let mut seen = None;
+            let p = try_publish(
+                &t,
+                &mut rec,
+                "doc",
+                &[("1.md", "one"), ("2.md", "two")],
+                &mut |_, _| {
+                    seen = Some((history(), target.exists()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let (before, visible) = seen.unwrap();
+            assert!(!visible, "intent written after the rename");
+            let kinds: Vec<String> = before
+                .lines()
+                .skip(1)
+                .map(|l| parse_line(l).unwrap().kind)
+                .collect();
+            assert_eq!(
+                kinds,
+                [
+                    "group-begin",
+                    "child",
+                    "child",
+                    "group-end",
+                    "publish-intent"
+                ]
+            );
+            assert!(before.starts_with("inacircle-history 1\n"));
+            commit(&mut rec, "/in/doc", &p);
+            let after = history();
+            let last = parse_line(after.lines().last().unwrap()).unwrap();
+            assert_eq!(last.kind, "publish-commit");
+            assert_eq!(last.get("durability"), Some("synced"));
+            assert_eq!(
+                last.get("actual"),
+                Some(&*enc(target.as_os_str().as_bytes()))
+            );
+            for word in ["digest", "hash", "sha"] {
+                assert!(!after.contains(word), "{after}");
+            }
+            let r = rec.finish(true);
+            assert!(r.undoable && r.warning.is_none(), "{:?}", r.warning);
+            assert_eq!(r.tally.counts(), (1, 0, 0));
+        });
+    }
+
+    /// The baseline T6 fixed in private is what the history holds, field
+    /// for field: read back, it equals the group (no restat, no digest).
+    #[test]
+    fn recorded_baseline_equals_the_published_group() {
+        let t = Tmp::new("baseline");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let p = try_publish(
+                &t,
+                &mut rec,
+                "doc",
+                &[("a.md", "a"), ("b\tc%\u{e9}.md", "b")],
+                &mut |_, _| Ok(()),
+            )
+            .unwrap();
+            commit(&mut rec, "/in/doc", &p);
+            rec.finish(true);
+            let r = job_records(&mut history().as_bytes(), &job).unwrap();
+            assert!(r.broken.is_none(), "{:?}", r.broken);
+            let [g] = &r.groups[..] else {
+                panic!("{:?}", r.groups)
+            };
+            assert_eq!(
+                (g.group, g.op, g.wrapper),
+                (p.group.group.0, p.group.op.0, p.group.id)
+            );
+            assert_eq!(g.children, p.group.children);
+            assert_eq!(
+                g.commit.as_deref(),
+                Some(p.location.path_at_check.unwrap().as_os_str().as_bytes())
+            );
+        });
+    }
+
+    /// D-24(b): a name taken at the rename re-runs the intent for the same
+    /// group and operation; only the committed name is the group's place,
+    /// and the other name's folder is not touched by undo.
+    #[test]
+    fn a_retried_name_adds_an_intent_and_only_the_committed_name_counts() {
+        let t = Tmp::new("retry");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let theirs = t.out().join("a");
+            let mut first = true;
+            let p = try_publish(&t, &mut rec, "a", &[("x.md", "x")], &mut |_, _| {
+                if std::mem::take(&mut first) {
+                    fs::create_dir(&theirs).unwrap();
+                    fs::write(theirs.join("a.md"), "theirs").unwrap();
+                }
+                Ok(())
+            })
+            .unwrap();
+            let files = commit(&mut rec, "/in/a", &p);
+            assert_eq!(files, [t.out().join("a (1)/a.md")]);
+            let r = rec.finish(true);
+            assert!(r.undoable, "{:?}", r.warning);
+            let h = history();
+            let count = |k: &str| h.lines().filter(|l| l.starts_with(k)).count();
+            assert_eq!((count("group-begin\t"), count("publish-intent\t")), (1, 2));
+            let u = undo(&job).unwrap();
+            assert_eq!(u.removed, files);
+            assert!(!t.out().join("a (1)").exists());
+            assert_eq!(fs::read_to_string(theirs.join("a.md")).unwrap(), "theirs");
+        });
+    }
+
+    /// A publication that failed after its intent (a cancel, no free name)
+    /// is closed with `publish-abort`; the job stays undoable.
+    #[test]
+    fn a_publication_that_fails_after_its_intent_is_aborted() {
+        let t = Tmp::new("abort");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let a = publish(&t, &mut rec, "a", &[("x.md", "a")]);
+            let e = try_publish(&t, &mut rec, "b", &[("x.md", "b")], &mut |_, _| {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+            })
+            .unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+            assert!(!t.out().join("b").exists());
+            let r = rec.finish(true);
+            assert!(r.undoable, "{:?}", r.warning);
+            assert!(history().contains("publish-abort\t"), "{}", history());
+            assert_eq!(undo(&job).unwrap().removed, a);
+        });
+    }
+
+    /// D-25: after a crash between the rename and the commit record, an
+    /// intent's target is the group's only if it holds the wrapper (same
+    /// device and inode); a lookalike there is not. Either way the job is
+    /// refused and nothing is removed.
+    #[test]
+    fn an_intent_target_is_accepted_only_with_the_wrapper_identity() {
+        let t = Tmp::new("crash");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let p = try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| Ok(())).unwrap();
+            // The process dies here: no commit record, no finish.
+            drop(rec);
+            let place = p.location.path_at_check.unwrap();
+            let e = undo(&job).unwrap_err();
+            let msg = e.to_string();
+            assert!(msg.contains("incomplete"), "{msg}");
+            assert!(msg.contains(&*place.to_string_lossy()), "{msg}");
+            assert!(place.join("a.md").exists());
+            // The real wrapper moves away, a lookalike takes the name.
+            fs::rename(&place, t.out().join("moved")).unwrap();
+            fs::create_dir(&place).unwrap();
+            fs::write(place.join("a.md"), "a").unwrap();
+            let msg = undo(&job).unwrap_err().to_string();
+            assert!(msg.contains("incomplete"), "{msg}");
+            assert!(!msg.contains(&*place.to_string_lossy()), "{msg}");
+            assert!(place.join("a.md").exists() && t.out().join("moved/a.md").exists());
+        });
+    }
+
+    /// An unconfirmed publication (a sync after the commit failed) is
+    /// recorded as such: no Undo, a warning, and undo refuses.
+    #[test]
+    fn an_unconfirmed_publication_is_not_undoable() {
+        let t = Tmp::new("unconfirmed");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let mut p =
+                try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| Ok(())).unwrap();
+            p.durability = Durability::Unconfirmed("folder sync failed".into());
+            let files = commit(&mut rec, "/in/a", &p);
+            let r = rec.finish(true);
+            assert_eq!(r.tally.counts(), (1, 0, 0));
+            assert!(!r.undoable);
+            let w = r.warning.unwrap();
+            assert!(w.contains("not confirmed on disk"), "{w}");
+            assert!(history().contains("durability=unconfirmed"));
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.to_string(), UNCONFIRMED_REFUSAL);
+            assert!(files[0].exists());
+        });
+    }
+
     /// A publication of unknown place counts as a conversion once, however
-    /// often it is seen, is recorded with its operation and anchor, makes
-    /// the job not undoable (sticky, with a warning), and undo refuses the
-    /// whole job before removing anything.
+    /// often it is seen, is recorded with its operation and a lossless
+    /// anchor leaf, makes the job not undoable (sticky, with a warning),
+    /// and undo refuses the whole job before removing anything.
     #[test]
     fn published_unknown_counts_once_warns_and_refuses_undo() {
         let t = Tmp::new("unknown");
         t.env(|| {
-            let a = t.0.join("out/a.png");
-            fs::write(&a, "a").unwrap();
             let job = new_job_id();
             let mut rec = Recorder::open(&job, "convert");
-            rec.outcome(&done("/in/a", &a));
+            let a = publish(&t, &mut rec, "a", &[("x.md", "a")]);
             rec.outcome(&unknown("/in/b"));
             rec.outcome(&unknown("/in/b"));
             let closed = rec.finish(true);
             assert_eq!(closed.tally.counts(), (2, 0, 0));
             assert!(!closed.undoable);
-            // Two events, one input: one.
             let warning = closed.warning.unwrap();
             assert!(warning.starts_with("1 input(s) published"), "{warning}");
             assert!(warning.contains("undo unavailable"));
-            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
+            let hist = history();
             let line = hist.lines().find(|l| l.starts_with("unknown\t")).unwrap();
             for part in [
                 "\tin=/in/b\t",
@@ -905,6 +2235,7 @@ mod tests {
                 "\tdurability=unconfirmed\t",
                 "\tparent=1:2\t",
                 "\tobject=1:3\t",
+                "\tleaf=b%FF%25",
             ] {
                 assert!(line.contains(part), "{part}: {line}");
             }
@@ -915,7 +2246,7 @@ mod tests {
             );
             let e = undo(&job).unwrap_err();
             assert_eq!(e.to_string(), UNKNOWN_REFUSAL);
-            assert!(a.exists(), "undo removed a file of a refused job");
+            assert!(a[0].exists(), "undo removed a file of a refused job");
             // Refused, not done: still refused, not "already undone".
             assert_eq!(undo(&job).unwrap_err().to_string(), UNKNOWN_REFUSAL);
             // A run that dies before its job line is refused all the same.
@@ -927,15 +2258,41 @@ mod tests {
         });
     }
 
+    /// A committed group whose place could not be proved is recorded as
+    /// `publish-uncertain` (anchor, no invented path): not undoable.
+    #[test]
+    fn a_commit_of_unknown_place_is_recorded_uncertain() {
+        let t = Tmp::new("uncertain");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let p = try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| Ok(())).unwrap();
+            let mut location = p.location.clone();
+            location.path_at_check = None;
+            rec.group(&p.group, &location, &p.durability);
+            let o = unknown("/in/a");
+            rec.outcome(&o);
+            let r = rec.finish(true);
+            assert!(!r.undoable);
+            let h = history();
+            let line = h
+                .lines()
+                .find(|l| l.starts_with("publish-uncertain\t"))
+                .unwrap();
+            assert!(line.contains("\tlocation_known=no\t"), "{line}");
+            assert!(!h.contains("publish-commit\t"), "{h}");
+            assert_eq!(undo(&job).unwrap_err().to_string(), UNKNOWN_REFUSAL);
+            assert!(t.out().join("a/a.md").exists());
+        });
+    }
+
     #[test]
     fn finish_writes_status_and_returns_tally() {
         let t = Tmp::new("finish");
         t.env(|| {
-            let a = t.0.join("out/a.png");
-            fs::write(&a, "a").unwrap();
             let job = new_job_id();
             let mut rec = Recorder::open(&job, "convert");
-            rec.outcome(&done("/in/a", &a));
+            publish(&t, &mut rec, "a", &[("x.md", "a")]);
             rec.outcome(&Outcome::Failed {
                 input: "/in/b".into(),
                 reason: "broken".into(),
@@ -943,7 +2300,7 @@ mod tests {
             let closed = rec.finish(false);
             assert_eq!(closed.tally.counts(), (1, 0, 1));
             assert!(closed.undoable && closed.warning.is_none());
-            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
+            let hist = history();
             let last = hist.lines().last().unwrap();
             assert!(last.starts_with(&format!("job\tid={}\t", job.0)), "{last}");
             assert!(
@@ -953,128 +2310,707 @@ mod tests {
         });
     }
 
+    // ---- recording failures (child processes with injected faults) ----
+
+    /// Runs the child side `case` of `helper_case` in a fresh process of
+    /// this binary (its own rlimits and seccomp filters).
+    fn assert_case_ok(case: &str) {
+        let t = Tmp::new(case);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "journal::tests::helper_case",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("INACIRCLE_HELPER", &t.0)
+            .env("INACIRCLE_CASE", case)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "case {case} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("ran case"));
+    }
+
+    /// Lets the history grow by `n` more bytes only: the next write that
+    /// crosses it is cut short there (`SIGXFSZ` ignored, so it returns the
+    /// bytes it wrote, then `EFBIG`). Child side only.
+    fn limit_history_growth(n: u64) {
+        let len = fs::metadata(history_path()).unwrap().len();
+        let lim = libc::rlimit {
+            rlim_cur: len + n,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        // SAFETY: plain calls with valid arguments; this is a helper
+        // process of its own.
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &lim), 0);
+        }
+    }
+
     #[test]
-    fn record_and_undo_removes_outputs() {
+    fn a_history_sync_failure_after_the_commit_keeps_the_output() {
+        assert_case_ok("commit_fsync_fails");
+    }
+
+    #[test]
+    fn a_short_history_write_after_the_commit_keeps_the_output() {
+        assert_case_ok("commit_write_short");
+    }
+
+    #[test]
+    fn a_short_history_write_before_the_rename_refuses_the_publication() {
+        assert_case_ok("prepare_write_short");
+    }
+
+    /// Child side of the fault cases; a no-op without the env.
+    #[test]
+    fn helper_case() {
+        let (Some(dir), Some(case)) = (
+            std::env::var_os("INACIRCLE_HELPER"),
+            std::env::var_os("INACIRCLE_CASE"),
+        ) else {
+            return;
+        };
+        // SAFETY: alarm has no preconditions; a hang dies by SIGALRM.
+        unsafe { libc::alarm(10) };
+        let t = Tmp(PathBuf::from(dir));
+        // The parent's Tmp owns the directory.
+        let t = std::mem::ManuallyDrop::new(t);
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            match case.to_str().unwrap() {
+                "commit_fsync_fails" | "commit_write_short" => {
+                    let p = try_publish(&t, &mut rec, "a", &[("x.md", "mine")], &mut |_, _| Ok(()))
+                        .unwrap();
+                    if case == "commit_fsync_fails" {
+                        crate::output::tests::deny_syscalls(
+                            &[libc::SYS_fsync, libc::SYS_fdatasync],
+                            libc::EIO as u32,
+                        );
+                    } else {
+                        limit_history_growth(10);
+                    }
+                    let files = commit(&mut rec, "/in/a", &p);
+                    let r = rec.finish(true);
+                    // The output and its success stay; only Undo goes.
+                    assert_eq!(r.tally.counts(), (1, 0, 0));
+                    assert!(!r.undoable);
+                    let w = r.warning.unwrap();
+                    assert!(w.contains("history not written"), "{w}");
+                    assert!(w.contains("undo unavailable"), "{w}");
+                    assert_eq!(fs::read_to_string(&files[0]).unwrap(), "mine");
+                    let e = undo(&job).unwrap_err();
+                    assert_ne!(e.kind(), io::ErrorKind::NotFound, "{e}");
+                    assert!(files[0].exists(), "undo removed after a refusal");
+                }
+                "prepare_write_short" => {
+                    limit_history_growth(10);
+                    let e = try_publish(&t, &mut rec, "a", &[("x.md", "mine")], &mut |_, _| Ok(()))
+                        .unwrap_err();
+                    assert!(e.to_string().contains("history not written"), "{e}");
+                    // Nothing visible, the private copy gone.
+                    let names: Vec<_> = fs::read_dir(t.out()).unwrap().collect();
+                    assert!(names.is_empty(), "{names:?}");
+                    let r = rec.finish(true);
+                    assert!(!r.undoable);
+                    assert!(r.warning.unwrap().contains("history not written"));
+                }
+                c => panic!("unknown case {c}"),
+            }
+        });
+        println!("ran case");
+    }
+
+    // ---- private state files ----
+
+    /// A same-user process plants symlinks at every temp name the old code
+    /// would use: their targets' bytes stay as they were.
+    #[test]
+    fn temp_symlinks_of_history_and_registry_are_not_followed() {
+        let t = Tmp::new("tempsym");
+        t.env(|| {
+            let sentinel = t.0.join("sentinel");
+            fs::write(&sentinel, "SENTINEL").unwrap();
+            let state = history_dir().unwrap();
+            fs::create_dir_all(&state).unwrap();
+            for seq in 0..8 {
+                let name = format!(".history.{}.{seq}.tmp", std::process::id());
+                symlink(&sentinel, state.join(name)).unwrap();
+            }
+            let jobs = jobs_dir().unwrap();
+            fs::create_dir_all(&jobs).unwrap();
+            let job = JobId("10-1".into());
+            symlink(&sentinel, jobs.join(".10-1.tmp")).unwrap();
+            let running = Running::start(&job, "convert", 1);
+            let rec = Recorder::open(&job, "convert");
+            assert!(rec.finish(true).undoable);
+            assert!(history().starts_with("inacircle-history 1\n"));
+            assert_eq!(list_running().len(), 1);
+            drop(running);
+            assert_eq!(fs::read_to_string(&sentinel).unwrap(), "SENTINEL");
+        });
+    }
+
+    /// The history name itself a symlink: never followed, the run records
+    /// nothing and publishes nothing.
+    #[test]
+    fn a_symlinked_history_is_refused() {
+        let t = Tmp::new("histsym");
+        t.env(|| {
+            let sentinel = t.0.join("sentinel");
+            fs::write(&sentinel, "inacircle-history 1\n").unwrap();
+            fs::create_dir_all(history_dir().unwrap()).unwrap();
+            symlink(&sentinel, history_path()).unwrap();
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let e =
+                try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| Ok(())).unwrap_err();
+            assert!(e.to_string().contains("history not written"), "{e}");
+            assert!(!t.out().join("a").exists());
+            assert!(!rec.finish(true).undoable);
+            assert_eq!(
+                fs::read_to_string(&sentinel).unwrap(),
+                "inacircle-history 1\n"
+            );
+        });
+    }
+
+    /// A state folder writable by others is tightened before use; one that
+    /// is a symlink is refused.
+    #[test]
+    fn state_folder_properties_are_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("stateperm");
+        t.env(|| {
+            let dir = history_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+            let rec = Recorder::open(&new_job_id(), "a");
+            assert!(rec.finish(true).undoable);
+            assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o755);
+            let elsewhere = t.0.join("elsewhere");
+            fs::create_dir(&elsewhere).unwrap();
+            fs::rename(&dir, t.0.join("old-state")).unwrap();
+            symlink(&elsewhere, &dir).unwrap();
+            let rec = Recorder::open(&new_job_id(), "a");
+            assert!(!rec.finish(true).undoable);
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        });
+    }
+
+    /// The registry works through the folder it opened: a folder swapped
+    /// for a symlink later is never written through, and a job file
+    /// replaced by another file is not removed at the end.
+    #[test]
+    fn registry_folder_and_file_swaps_are_not_followed() {
+        let t = Tmp::new("regswap");
+        t.env(|| {
+            let jobs = jobs_dir().unwrap();
+            let job = JobId("10-2".into());
+            let mut r = Running::start(&job, "convert", 4);
+            let moved = t.0.join("moved-jobs");
+            fs::rename(&jobs, &moved).unwrap();
+            let elsewhere = t.0.join("elsewhere");
+            fs::create_dir(&elsewhere).unwrap();
+            symlink(&elsewhere, &jobs).unwrap();
+            std::thread::sleep(UPDATE_EVERY + Duration::from_millis(20));
+            r.update(3, 0.75);
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+            let f = fs::read_to_string(moved.join("10-2")).unwrap();
+            assert!(f.contains("\tdone=3\t"), "{f}");
+            // The user's own file under the job's name stays.
+            fs::remove_file(moved.join("10-2")).unwrap();
+            fs::write(moved.join("10-2"), "mine").unwrap();
+            drop(r);
+            assert_eq!(fs::read_to_string(moved.join("10-2")).unwrap(), "mine");
+        });
+    }
+
+    // ---- history versions ----
+
+    const V0: &str = "inacircle-history 0\nout\tjob=1-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\njob\tid=1-1\ttime=1\taction=a\tstatus=done\tsandbox=yes\n";
+
+    /// A version 0 history is archived (no overwrite, no delete) under the
+    /// init lock and a private version 1 history published; an old job is
+    /// refused with its reason, its outputs kept.
+    #[test]
+    fn a_v0_history_is_archived_and_its_jobs_refused() {
+        let t = Tmp::new("v0");
+        t.env(|| {
+            let dir = history_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let old_out = t.out().join("old.md");
+            fs::write(&old_out, "o").unwrap();
+            fs::write(history_path(), V0).unwrap();
+            let job = new_job_id();
+            job_of(&t, &job, &[("a", "a")]);
+            assert_eq!(fs::read_to_string(dir.join("history.v0")).unwrap(), V0);
+            assert!(history().starts_with("inacircle-history 1\n"));
+            assert_eq!(fs::metadata(history_path()).unwrap().mode() & 0o777, 0o600);
+            let e = undo(&JobId("1-1".into())).unwrap_err();
+            assert_eq!(e.to_string(), OLD_REFUSAL);
+            assert!(old_out.exists());
+            // A later v0 history (a downgrade, then this version again) gets
+            // the next free archive name.
+            fs::rename(history_path(), dir.join("v1-saved")).unwrap();
+            fs::write(history_path(), V0.replace("1-1", "2-2")).unwrap();
+            drop(Recorder::open(&new_job_id(), "a"));
+            assert_eq!(fs::read_to_string(dir.join("history.v0")).unwrap(), V0);
+            assert_eq!(
+                fs::read_to_string(dir.join("history.v0.1")).unwrap(),
+                V0.replace("1-1", "2-2")
+            );
+            assert_eq!(
+                undo(&JobId("2-2".into())).unwrap_err().to_string(),
+                OLD_REFUSAL
+            );
+            assert_eq!(
+                undo(&JobId("9-9".into())).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        });
+    }
+
+    /// While another process holds the init lock, a v0 history is neither
+    /// archived nor written: the publication is refused instead.
+    #[test]
+    fn a_held_init_lock_refuses_and_leaves_v0_alone() {
+        let t = Tmp::new("v0lock");
+        t.env(|| {
+            let dir = history_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(history_path(), V0).unwrap();
+            let holder = File::create(dir.join("history.lock")).unwrap();
+            // SAFETY: the fd is open for the duration of the call.
+            assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
+            let mut rec = Recorder::open(&new_job_id(), "a");
+            let e =
+                try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| Ok(())).unwrap_err();
+            assert!(e.to_string().contains("busy"), "{e}");
+            assert!(!rec.finish(true).undoable);
+            assert_eq!(history(), V0);
+            assert!(!dir.join("history.v0").exists());
+        });
+    }
+
+    /// A history of an unknown version or with a garbled header is never
+    /// archived, rewritten or appended to.
+    #[test]
+    fn an_unknown_history_header_is_left_alone() {
+        let t = Tmp::new("v2");
+        t.env(|| {
+            fs::create_dir_all(history_dir().unwrap()).unwrap();
+            for text in ["inacircle-history 2\n", "garbage\nmore\n"] {
+                fs::write(history_path(), text).unwrap();
+                let rec = Recorder::open(&new_job_id(), "a");
+                assert!(!rec.finish(true).undoable);
+                assert_eq!(history(), text);
+                assert_eq!(
+                    undo(&JobId("1-1".into())).unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        });
+    }
+
+    /// Header collision: runs racing to create (or to archive) the history
+    /// make exactly one header and one archive.
+    #[test]
+    fn racing_first_runs_make_one_header_and_one_archive() {
+        let t = Tmp::new("hdrrace");
+        t.env(|| {
+            let dir = history_dir().unwrap();
+            for v0 in [false, true] {
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).unwrap();
+                if v0 {
+                    fs::write(history_path(), V0).unwrap();
+                }
+                let hs: Vec<_> = (0..8)
+                    .map(|i| {
+                        std::thread::spawn(move || {
+                            let mut rec = Recorder::open(&JobId(format!("5-{i}")), "a");
+                            rec.outcome(&Outcome::Skipped {
+                                input: "/i".into(),
+                                reason: "r".into(),
+                            });
+                            rec.finish(true).undoable
+                        })
+                    })
+                    .collect();
+                for h in hs {
+                    assert!(h.join().unwrap());
+                }
+                let text = history();
+                let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
+                assert_eq!((v, lines.len()), (1, 16), "{text}");
+                let names: Vec<_> = fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().into_string().unwrap())
+                    .filter(|n| n.starts_with("history.v0"))
+                    .collect();
+                assert_eq!(names.len(), usize::from(v0), "{names:?}");
+            }
+        });
+    }
+
+    /// A history whose last line was cut off (a crash) gets a newline before
+    /// the next run's first record, so that record stays whole.
+    #[test]
+    fn a_cut_off_last_line_does_not_spoil_the_next_run() {
+        let t = Tmp::new("cutoff");
+        t.env(|| {
+            let job = new_job_id();
+            job_of(&t, &job, &[("a", "a")]);
+            let mut h = OpenOptions::new()
+                .append(true)
+                .open(history_path())
+                .unwrap();
+            h.write_all(b"publish-commit\top=1\tjob=").unwrap();
+            drop(h);
+            let next = new_job_id();
+            let files = job_of(&t, &next, &[("b", "b")]);
+            assert_eq!(undo(&next).unwrap().removed, files);
+        });
+    }
+
+    // ---- the strict reader ----
+
+    const J: &str = "10-1";
+
+    /// A complete record of one job: one group of two files, committed.
+    fn good() -> Vec<String> {
+        let child = |rel: &str, ino: u64| {
+            write_line(
+                &Line::new("child")
+                    .pair("job", J)
+                    .pair("group", "00000000000000aa")
+                    .pair("rel", rel)
+                    .pair("type", "file")
+                    .pair("dev", "1")
+                    .pair("ino", &ino.to_string())
+                    .pair("uid", "1000")
+                    .pair("mode", "644")
+                    .pair("nlink", "1")
+                    .pair("size", "3")
+                    .pair("mtime", "5")
+                    .pair("ctime", "6"),
+            )
+        };
+        vec![
+            write_line(
+                &Line::new("group-begin")
+                    .pair("job", J)
+                    .pair("group", "00000000000000aa")
+                    .pair("op", "00000000000000bb")
+                    .pair("wrapper_dev", "1")
+                    .pair("wrapper_ino", "2")
+                    .pair("wrapper_type", "dir")
+                    .pair("wrapper_uid", "1000")
+                    .pair("wrapper_mode", "755")
+                    .pair("children", "2"),
+            ),
+            child("a.md", 3),
+            child("b%25.md", 4),
+            write_line(
+                &Line::new("group-end")
+                    .pair("job", J)
+                    .pair("group", "00000000000000aa")
+                    .pair("children", "2")
+                    .pair("bytes", "9"),
+            ),
+            write_line(
+                &Line::new("publish-intent")
+                    .pair("op", "00000000000000bb")
+                    .pair("job", J)
+                    .pair("group", "00000000000000aa")
+                    .pair("private", "/o/.inacircle-x/w")
+                    .pair("target", "/o/a"),
+            ),
+            write_line(
+                &Line::new("publish-commit")
+                    .pair("op", "00000000000000bb")
+                    .pair("job", J)
+                    .pair("group", "00000000000000aa")
+                    .pair("actual", "/o/a")
+                    .pair("durability", "synced"),
+            ),
+        ]
+    }
+
+    fn read(lines: &[String]) -> io::Result<JobRecords> {
+        let text = format!("inacircle-history 1\n{}", lines.concat());
+        job_records(&mut text.as_bytes(), &JobId(J.into()))
+    }
+
+    #[test]
+    fn a_complete_record_reads_back_whole() {
+        let r = read(&good()).unwrap();
+        assert!(r.known && r.broken.is_none(), "{:?}", r.broken);
+        let [g] = &r.groups[..] else { panic!() };
+        assert_eq!(g.children.len(), 2);
+        assert_eq!(g.children[1].rel, Path::new("b%.md"));
+        assert_eq!(g.commit.as_deref(), Some(&b"/o/a"[..]));
+        // Another job's identical record is not this job's.
+        let other: Vec<String> = good()
+            .iter()
+            .map(|l| l.replace("job=10-1", "job=10-10"))
+            .collect();
+        let r = read(&other).unwrap();
+        assert!(!r.known && r.groups.is_empty());
+    }
+
+    /// Every framing fault refuses the job: nothing incomplete, duplicated
+    /// or unknown grants undo.
+    #[test]
+    fn framing_faults_are_refused() {
+        type Edit = fn(&mut Vec<String>);
+        let cases: &[(&str, Edit)] = &[
+            ("duplicate group", |l| {
+                let b = l[0].clone();
+                l.insert(4, b)
+            }),
+            ("duplicate child", |l| {
+                let c = l[1].clone();
+                l[2] = c
+            }),
+            ("duplicate commit", |l| {
+                let c = l[5].clone();
+                l.push(c)
+            }),
+            ("duplicate end", |l| {
+                let e = l[3].clone();
+                l.insert(4, e)
+            }),
+            ("missing begin", |l| {
+                l.remove(0);
+            }),
+            ("missing end", |l| {
+                l.remove(3);
+            }),
+            ("count", |l| l[3] = l[3].replace("children=2", "children=3")),
+            ("declared", |l| {
+                l[0] = l[0].replace("children=2", "children=1")
+            }),
+            ("bytes", |l| l[3] = l[3].replace("bytes=9", "bytes=10")),
+            ("op", |l| {
+                l[4] = l[4].replace("op=00000000000000bb", "op=00000000000000cc")
+            }),
+            ("target", |l| {
+                l[5] = l[5].replace("actual=/o/a", "actual=/o/b")
+            }),
+            ("unknown record", |l| {
+                l.push(format!("publish-later\tjob={J}\n"))
+            }),
+            ("unknown field", |l| {
+                l[1] = l[1].replace("\tctime=6", "\tctime=6\textra=1")
+            }),
+            ("missing field", |l| l[1] = l[1].replace("\tnlink=1", "")),
+            ("number", |l| l[1] = l[1].replace("ino=3", "ino=+3")),
+            ("encoding", |l| l[2] = l[2].replace("b%25.md", "b%2.md")),
+            ("encoding", |l| l[2] = l[2].replace("b%25.md", "b%2f.md")),
+            ("bad name", |l| {
+                l[2] = l[2].replace("b%25.md", "..");
+                l[3] = l[3].replace("bytes=9", "bytes=6")
+            }),
+            ("bad name", |l| {
+                l[2] = l[2].replace("b%25.md", "x/y");
+                l[3] = l[3].replace("bytes=9", "bytes=7")
+            }),
+            ("cut", |l| l[1] = l[1].replace("\tctime=6\n", "\tct\n")),
+            ("cut", |l| {
+                let last = l.pop().unwrap();
+                l.push(last.trim_end_matches('\n').to_owned())
+            }),
+            ("garbled", |l| l.push(format!("child\tjob={J}\\q\n"))),
+        ];
+        for (what, edit) in cases {
+            let mut l = good();
+            edit(&mut l);
+            let r = read(&l).unwrap();
+            assert!(r.broken.is_some(), "{what}: accepted {l:?}");
+        }
+        // A wrong version is refused before any record is read.
+        let text = format!("inacircle-history 2\n{}", good().concat());
+        let e = job_records(&mut text.as_bytes(), &JobId(J.into())).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The reader on a whole history file: a broken record is a refusal by
+    /// `undo`, with nothing removed.
+    #[test]
+    fn undo_refuses_a_broken_record() {
+        let t = Tmp::new("broken");
+        t.env(|| {
+            let job = new_job_id();
+            let files = job_of(&t, &job, &[("a", "a")]);
+            let text = history();
+            let dup = text
+                .lines()
+                .find(|l| l.starts_with("child\t"))
+                .unwrap()
+                .to_owned();
+            let mut h = OpenOptions::new()
+                .append(true)
+                .open(history_path())
+                .unwrap();
+            writeln!(h, "{dup}").unwrap();
+            drop(h);
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            assert!(files[0].exists());
+        });
+    }
+
+    #[test]
+    fn path_encoding_is_lossless_and_canonical() {
+        let all: Vec<u8> = (0..=255).collect();
+        let e = enc(&all);
+        assert!(e.bytes().all(|b| (0x21..0x7f).contains(&b)), "{e}");
+        assert_eq!(dec(&e).unwrap(), all);
+        for bad in ["%", "%2", "%2f", "%zz", "a b", "%41", "%+1"] {
+            assert_eq!(dec(bad), None, "{bad}");
+        }
+    }
+
+    // ---- undo ----
+
+    #[test]
+    fn undo_removes_unchanged_outputs_and_their_folders() {
         let t = Tmp::new("undo");
         t.env(|| {
-            let (a, b) = (t.0.join("out/a.png"), t.0.join("out/b.png"));
-            fs::write(&a, "aaa").unwrap();
-            fs::write(&b, "bb").unwrap();
             let job = new_job_id();
-            record(
-                &job,
-                "convert",
-                &report(vec![done("/in/a", &a), done("/in/b", &b)]),
-            );
-            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
-            assert!(hist.starts_with("inacircle-history 0\n"));
-            assert!(hist.contains("status=done\tsandbox=yes"));
+            let mut rec = Recorder::open(&job, "convert");
+            let a = publish(&t, &mut rec, "a", &[("x.md", "aaa")]);
+            let many = publish(&t, &mut rec, "doc", &[("1.md", "1"), ("2.md", "22")]);
+            rec.finish(true);
             let r = undo(&job).unwrap();
-            assert_eq!(r.removed, vec![a.clone(), b.clone()]);
+            let mut want = a.clone();
+            want.extend(many.clone());
+            assert_eq!(r.removed, want);
             assert!(r.kept.is_empty());
-            assert!(!a.exists() && !b.exists());
-            assert!(
-                t.0.join("out").exists(),
-                "a user directory is never removed"
-            );
+            assert!(!t.out().join("a").exists() && !t.out().join("doc").exists());
+            assert!(t.out().exists(), "a user folder is never removed");
         });
     }
 
+    /// A run that dies midway leaves complete groups: undo still finds them.
     #[test]
-    fn undo_removes_recorded_empty_folder_only() {
-        let t = Tmp::new("folder");
+    fn a_dead_run_is_undoable() {
+        let t = Tmp::new("dead-run");
         t.env(|| {
-            let dir = t.0.join("out/doc");
-            fs::create_dir(&dir).unwrap();
-            let (a, b) = (dir.join("1.png"), dir.join("2.png"));
-            fs::write(&a, "1").unwrap();
-            fs::write(&b, "22").unwrap();
-            let mut rep = report(vec![done("/in/doc.pdf", &a), done("/in/doc.pdf", &b)]);
-            rep.dirs = vec![dir.clone()];
-            let job = JobId("1-1".into());
-            record(&job, "pdf", &rep);
-            undo(&job).unwrap();
-            assert!(!dir.exists());
-
-            // A kept file keeps its folder.
-            fs::create_dir(&dir).unwrap();
-            fs::write(&a, "1").unwrap();
-            fs::write(&b, "22").unwrap();
-            let job = JobId("1-2".into());
-            let mut rep = report(vec![done("/in/doc.pdf", &a), done("/in/doc.pdf", &b)]);
-            rep.dirs = vec![dir.clone()];
-            record(&job, "pdf", &rep);
-            fs::write(&b, "edited!").unwrap();
-            let r = undo(&job).unwrap();
-            assert_eq!(r.kept.len(), 1);
-            assert!(dir.exists() && b.exists() && !a.exists());
-
-            // An unrecorded folder (the user's own) is never removed, even
-            // with two outputs in it.
-            let own = t.0.join("out/own");
-            fs::create_dir(&own).unwrap();
-            let (f, g) = (own.join("x"), own.join("y"));
-            fs::write(&f, "1").unwrap();
-            fs::write(&g, "1").unwrap();
-            let job = JobId("1-3".into());
-            record(&job, "a", &report(vec![done("/i", &f), done("/i", &g)]));
-            undo(&job).unwrap();
-            assert!(own.exists());
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let a = publish(&t, &mut rec, "a", &[("x.md", "a")]);
+            drop(rec);
+            assert_eq!(undo(&job).unwrap().removed, a);
         });
     }
 
     #[test]
-    fn undo_keeps_changed_file() {
+    fn undo_keeps_what_changed() {
         let t = Tmp::new("changed");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "one").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            fs::write(&f, "longer content").unwrap();
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let f = publish(&t, &mut rec, "doc", &[("1.md", "one"), ("2.md", "two")]);
+            rec.finish(true);
+            fs::write(&f[1], "longer content").unwrap();
             let r = undo(&job).unwrap();
-            assert!(r.removed.is_empty());
-            assert_eq!(r.kept, vec![(f.clone(), "changed since".to_owned())]);
-            assert_eq!(fs::read_to_string(&f).unwrap(), "longer content");
+            assert_eq!(r.removed, [f[0].clone()]);
+            assert_eq!(r.kept, vec![(f[1].clone(), "changed since".to_owned())]);
+            assert_eq!(fs::read_to_string(&f[1]).unwrap(), "longer content");
+            assert!(t.out().join("doc").exists(), "a kept file keeps its folder");
         });
     }
 
+    /// Same size, other inode; same inode with mtime put back (ctime
+    /// catches it); a symlink in its place; a hard link added (nlink); a
+    /// mode change: each is kept.
     #[test]
-    fn undo_keeps_replaced_same_size_file() {
-        let t = Tmp::new("replaced");
+    fn every_identity_change_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("ident");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "one").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            // Same size, other inode (and mtime forced equal is not needed:
-            // the inode differs).
-            let other = t.0.join("out/y");
-            fs::write(&other, "two").unwrap();
-            fs::rename(&other, &f).unwrap();
-            let r = undo(&job).unwrap();
-            assert_eq!(r.kept, vec![(f.clone(), "changed since".to_owned())]);
-            assert!(f.exists());
+            type Change = fn(&Path, &Path);
+            let changes: [(&str, Change); 5] = [
+                ("replaced", |f, t| {
+                    let o = t.join("other");
+                    fs::write(&o, "one").unwrap();
+                    fs::rename(&o, f).unwrap();
+                }),
+                ("mtime restored", |f, _| {
+                    let before = fs::metadata(f).unwrap().modified().unwrap();
+                    std::thread::sleep(Duration::from_millis(5));
+                    let h = File::options().write(true).open(f).unwrap();
+                    (&h).write_all(b"two").unwrap();
+                    h.set_modified(before).unwrap();
+                }),
+                ("symlink", |f, t| {
+                    let v = t.join("victim");
+                    fs::write(&v, "one").unwrap();
+                    fs::remove_file(f).unwrap();
+                    symlink(&v, f).unwrap();
+                }),
+                ("hard link", |f, t| {
+                    fs::hard_link(f, t.join("link")).unwrap()
+                }),
+                ("mode", |f, _| {
+                    fs::set_permissions(f, fs::Permissions::from_mode(0o600)).unwrap()
+                }),
+            ];
+            for (n, (what, change)) in changes.iter().enumerate() {
+                let job = JobId(format!("30-{n}"));
+                let stem = format!("s{n}");
+                let f = job_of(&t, &job, &[(&stem, "one")]);
+                change(&f[0], &t.0);
+                let r = undo(&job).unwrap();
+                assert!(r.removed.is_empty(), "{what}");
+                assert_eq!(
+                    r.kept,
+                    vec![(f[0].clone(), "changed since".to_owned())],
+                    "{what}"
+                );
+                assert!(fs::symlink_metadata(&f[0]).is_ok(), "{what}");
+            }
+            assert_eq!(fs::read_to_string(t.0.join("victim")).unwrap(), "one");
         });
     }
 
+    /// The wrapper moved away and a lookalike folder (same names, same
+    /// bytes) put in its place, or a symlink to one: nothing is removed.
     #[test]
-    fn undo_never_follows_or_deletes_symlinks() {
-        let t = Tmp::new("symlink");
+    fn a_swapped_wrapper_keeps_the_lookalike() {
+        let t = Tmp::new("wrapswap");
         t.env(|| {
-            let f = t.0.join("out/x");
-            let victim = t.0.join("victim");
-            fs::write(&f, "data").unwrap();
-            fs::write(&victim, "data").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            fs::remove_file(&f).unwrap();
-            symlink(&victim, &f).unwrap();
-            let r = undo(&job).unwrap();
-            assert!(r.removed.is_empty());
-            assert_eq!(r.kept[0].1, "changed since");
-            assert!(victim.exists());
-            assert!(fs::symlink_metadata(&f).unwrap().file_type().is_symlink());
+            for (n, link) in [false, true].into_iter().enumerate() {
+                let job = JobId(format!("31-{n}"));
+                let stem = format!("w{n}");
+                let f = job_of(&t, &job, &[(&stem, "data")]);
+                let wrapper = f[0].parent().unwrap().to_owned();
+                let moved = t.0.join(format!("moved{n}"));
+                fs::rename(&wrapper, &moved).unwrap();
+                let look = t.0.join(format!("look{n}"));
+                fs::create_dir(&look).unwrap();
+                fs::write(look.join(f[0].file_name().unwrap()), "data").unwrap();
+                if link {
+                    symlink(&look, &wrapper).unwrap();
+                } else {
+                    fs::rename(&look, &wrapper).unwrap();
+                }
+                let r = undo(&job).unwrap();
+                assert!(r.removed.is_empty(), "link={link}");
+                assert_eq!(r.kept[0].1, "changed since");
+                assert!(f[0].exists() && moved.join(f[0].file_name().unwrap()).exists());
+            }
         });
     }
 
@@ -1082,13 +3018,11 @@ mod tests {
     fn undo_reports_missing() {
         let t = Tmp::new("missing");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "d").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            fs::remove_file(&f).unwrap();
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "d")]);
+            fs::remove_file(&f[0]).unwrap();
             let r = undo(&job).unwrap();
-            assert_eq!(r.kept, vec![(f, "missing".to_owned())]);
+            assert_eq!(r.kept, vec![(f[0].clone(), "missing".to_owned())]);
         });
     }
 
@@ -1096,10 +3030,8 @@ mod tests {
     fn undo_twice_is_already_exists() {
         let t = Tmp::new("twice");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "d").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
+            let job = new_job_id();
+            job_of(&t, &job, &[("a", "d")]);
             undo(&job).unwrap();
             assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         });
@@ -1107,14 +3039,14 @@ mod tests {
 
     #[test]
     fn unknown_job_not_found() {
-        let t = Tmp::new("unknown");
+        let t = Tmp::new("nojob");
         t.env(|| {
             // No history at all, then a history without that job.
             assert_eq!(
                 undo(&JobId("9-9".into())).unwrap_err().kind(),
                 io::ErrorKind::NotFound
             );
-            record(&JobId("1-1".into()), "a", &report(vec![]));
+            Recorder::open(&JobId("1-1".into()), "a").finish(true);
             assert_eq!(
                 undo(&JobId("9-9".into())).unwrap_err().kind(),
                 io::ErrorKind::NotFound
@@ -1122,76 +3054,49 @@ mod tests {
         });
     }
 
+    /// Tabs, newlines, `=`, backslashes and bytes that are not UTF-8 in a
+    /// name are recorded losslessly: undo finds the exact file.
     #[test]
-    fn paths_with_tabs_newlines_eq_roundtrip() {
+    fn any_name_bytes_roundtrip() {
         let t = Tmp::new("weird");
         t.env(|| {
-            let f = t.0.join("out/a\tb\nc=d\\e #x");
-            fs::write(&f, "d").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a=b", &report(vec![done("/in/p\tq\n=", &f)]));
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "a=b");
+            let name = std::ffi::OsStr::from_bytes(b"a\tb\nc=d\\e #x\xff%.md");
+            let p = try_publish_raw(
+                &t,
+                &mut rec,
+                "w",
+                &[(std::ffi::OsStr::new("1.md"), "1"), (name, "2")],
+                &mut |_, _| Ok(()),
+            )
+            .unwrap();
+            let files = commit(&mut rec, "/in/p\tq\n=", &p);
+            assert_eq!(files[1].file_name(), Some(name));
+            assert!(rec.finish(true).undoable);
             let r = undo(&job).unwrap();
-            assert_eq!(r.removed, vec![f.clone()]);
-            assert!(!f.exists());
+            assert_eq!(r.removed, files);
         });
     }
 
-    #[test]
-    fn corrupt_and_partial_last_line_is_skipped() {
-        let t = Tmp::new("corrupt");
-        t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "d").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            let mut h = OpenOptions::new()
-                .append(true)
-                .open(history_path().unwrap())
-                .unwrap();
-            h.write_all(b"garbage\\q\tzz\nundo\tjob=10-1\ttime=5\trem")
-                .unwrap();
-            let r = undo(&job).unwrap();
-            assert_eq!(r.removed, vec![f]);
-        });
-    }
-
-    /// Undo is scoped to its job: with the history holding interleaved lines
-    /// of three jobs, two of whose ids are prefixes of the third's (`10-1`,
-    /// `10-10`, `10-100`; the reader's `job=10-1` prefilter matches all of
-    /// them), undoing one removes exactly its own files and folders, the
-    /// others stay on disk and stay undoable.
+    /// Undo is scoped to its job: interleaved records of three jobs whose
+    /// ids prefix each other (`10-1`, `10-10`, `10-100`).
     #[test]
     fn undo_touches_only_its_own_job_among_interleaved_prefix_ids() {
         let t = Tmp::new("interleaved");
         t.env(|| {
             let ids = ["10-1", "10-10", "10-100"];
-            let files: Vec<[PathBuf; 2]> = ids
-                .iter()
-                .map(|i| {
-                    [
-                        t.0.join(format!("out/{i}-a")),
-                        t.0.join(format!("out/{i}-b")),
-                    ]
-                })
-                .collect();
-            let dirs: Vec<PathBuf> = ids.iter().map(|i| t.0.join(format!("out/d{i}"))).collect();
-            for (fs_, d) in files.iter().zip(&dirs) {
-                fs::create_dir(d).unwrap();
-                for f in fs_ {
-                    fs::write(f, "x").unwrap();
-                }
-            }
             let jobs: Vec<JobId> = ids.iter().map(|i| JobId((*i).into())).collect();
             let mut recs: Vec<Recorder> =
                 jobs.iter().map(|j| Recorder::open(j, "convert")).collect();
-            // One line of each job at a time: out, dir, skip, fail all interleave.
+            let mut files: Vec<Vec<PathBuf>> = vec![Vec::new(); 3];
             for n in 0..2 {
-                for (r, fs_) in recs.iter_mut().zip(&files) {
-                    r.outcome(&done("/in/x", &fs_[n]));
+                for (k, r) in recs.iter_mut().enumerate() {
+                    let stem = format!("{}-{n}", ids[k]);
+                    files[k].extend(publish(&t, r, &stem, &[("x.md", "x")]));
                 }
             }
-            for (r, d) in recs.iter_mut().zip(&dirs) {
-                r.dir(d);
+            for r in &mut recs {
                 r.outcome(&Outcome::Skipped {
                     input: PathBuf::from("/in/s"),
                     reason: "same".into(),
@@ -1202,126 +3107,18 @@ mod tests {
                 });
             }
             for r in recs {
-                r.finish(true);
+                assert!(r.finish(true).undoable);
             }
-
-            // Undo the middle one: only its files go.
-            let r = undo(&jobs[1]).unwrap();
-            assert_eq!(r.removed, files[1].to_vec());
-            assert!(r.kept.is_empty());
-            assert!(!dirs[1].exists(), "its own emptied folder goes");
+            assert_eq!(undo(&jobs[1]).unwrap().removed, files[1]);
             for k in [0, 2] {
                 assert!(files[k].iter().all(|f| f.exists()), "{} untouched", ids[k]);
-                assert!(dirs[k].exists());
             }
-            // Its undo line does not mark the prefix-sharing jobs as undone,
-            // and they are still undoable, each removing only its own.
-            let r = undo(&jobs[0]).unwrap();
-            assert_eq!(r.removed, files[0].to_vec());
-            assert!(files[2].iter().all(|f| f.exists()));
-            let r = undo(&jobs[2]).unwrap();
-            assert_eq!(r.removed, files[2].to_vec());
+            assert_eq!(undo(&jobs[0]).unwrap().removed, files[0]);
+            assert_eq!(undo(&jobs[2]).unwrap().removed, files[2]);
             for j in &jobs {
                 assert_eq!(undo(j).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
             }
         });
-    }
-
-    /// Every kind of line alone makes its own job known and no other: a
-    /// job's id is not found through a line of a job whose id it prefixes
-    /// (`10-1` vs `10-10`). The `undo` line alone marks only its own job.
-    #[test]
-    fn each_line_kind_counts_for_its_own_job_only() {
-        let kinds = [
-            "job\tid=%\ttime=1\taction=a\tstatus=done\tsandbox=yes\n",
-            "skip\tjob=%\tin=/i\treason=r\n",
-            "fail\tjob=%\tin=/i\treason=r\n",
-            "dir\tjob=%\tpath=/nonexistent-dir-x\n",
-            "out\tjob=%\tin=/i\tpath=/nonexistent-x\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n",
-        ];
-        let t = Tmp::new("kinds");
-        t.env(|| {
-            let hist = history_path().unwrap();
-            fs::create_dir_all(hist.parent().unwrap()).unwrap();
-            for k in kinds {
-                fs::write(
-                    &hist,
-                    format!("inacircle-history 0\n{}", k.replace('%', "10-10")),
-                )
-                .unwrap();
-                assert_eq!(
-                    undo(&JobId("10-1".into())).unwrap_err().kind(),
-                    io::ErrorKind::NotFound,
-                    "{k:?} of 10-10 is not a record of 10-1"
-                );
-                fs::write(
-                    &hist,
-                    format!("inacircle-history 0\n{}", k.replace('%', "10-1")),
-                )
-                .unwrap();
-                undo(&JobId("10-1".into())).unwrap_or_else(|e| panic!("{k:?}: {e}"));
-            }
-            // Another job's undo line neither refuses this job nor makes it known.
-            let other_undone = "undo\tjob=10-10\ttime=5\tremoved=0\tkept=0\n";
-            fs::write(
-                &hist,
-                format!(
-                    "inacircle-history 0\n{}{other_undone}",
-                    kinds[1].replace('%', "10-1")
-                ),
-            )
-            .unwrap();
-            undo(&JobId("10-1".into())).unwrap();
-            fs::write(&hist, format!("inacircle-history 0\n{other_undone}")).unwrap();
-            assert_eq!(
-                undo(&JobId("10-1".into())).unwrap_err().kind(),
-                io::ErrorKind::NotFound
-            );
-        });
-    }
-
-    const OUT: &str = "out\tjob=10-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\n";
-
-    #[test]
-    fn job_records_collects_one_jobs_lines() {
-        let h = format!(
-            "inacircle-history 0\n{OUT}out\tjob=11-1\tin=/i\tpath=/o/b\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\ndir\tjob=10-1\tpath=/o\n"
-        );
-        let r = job_records(h.as_bytes(), &JobId("10-1".into())).unwrap();
-        assert!(r.known && !r.undone);
-        assert_eq!(r.outs.len(), 1);
-        assert_eq!(r.outs[0].path, Path::new("/o/a"));
-        assert_eq!(r.dirs, vec![PathBuf::from("/o")]);
-        let r = job_records(
-            &b"inacircle-history 0\nundo\tjob=10-1\ttime=5\n"[..],
-            &JobId("10-1".into()),
-        )
-        .unwrap();
-        assert!(r.undone && !r.known);
-        let none = job_records(h.as_bytes(), &JobId("99-9".into())).unwrap();
-        assert!(!none.known && none.outs.is_empty());
-    }
-
-    #[test]
-    fn job_records_skips_truncated_and_garbled_lines_and_rejects_a_bad_header() {
-        let job = JobId("10-1".into());
-        // The last line has no newline: skipped.
-        let cut = format!("inacircle-history 0\n{OUT}out\tjob=10-1\tin=/i\tpa");
-        assert_eq!(job_records(cut.as_bytes(), &job).unwrap().outs.len(), 1);
-        // Not UTF-8 and unparsable lines naming the job: skipped.
-        let mut bad = b"inacircle-history 0\nout\tjob=10-1\t\xff\ngarbage job=10-1\\q\n".to_vec();
-        bad.extend(OUT.as_bytes());
-        assert_eq!(job_records(&bad[..], &job).unwrap().outs.len(), 1);
-        for head in [
-            &b""[..],
-            b"inacircle-history",
-            b"inacircle-history 1\n",
-            b"other 0\n",
-            b"\xff\n",
-        ] {
-            let e = job_records(head, &job).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{head:?}");
-        }
     }
 
     #[test]
@@ -1329,7 +3126,13 @@ mod tests {
         let d = Outcome::Done {
             input: "/a".into(),
             output: "/o".into(),
-            id: zero_id(),
+            id: FileId {
+                dev: 0,
+                ino: 0,
+                size: 0,
+                mtime_ns: 0,
+                ctime_ns: 0,
+            },
         };
         let s = Outcome::Skipped {
             input: "/b".into(),
@@ -1352,6 +3155,8 @@ mod tests {
         assert_eq!(st(&[]), "failed");
     }
 
+    // ---- registry ----
+
     #[test]
     fn running_file_lifecycle() {
         let t = Tmp::new("running");
@@ -1361,6 +3166,7 @@ mod tests {
             {
                 let mut r = Running::start(&job, "convert", 3);
                 assert!(path.exists());
+                assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
                 let l = list_running();
                 assert_eq!(l.len(), 1);
                 assert_eq!(l[0].0, job);
@@ -1374,6 +3180,8 @@ mod tests {
             }
             assert!(!path.exists());
             assert!(list_running().is_empty());
+            let names: Vec<_> = fs::read_dir(jobs_dir().unwrap()).unwrap().collect();
+            assert!(names.is_empty(), "temp files left: {names:?}");
         });
     }
 
@@ -1396,19 +3204,16 @@ mod tests {
     fn undo_of_a_running_job_is_refused() {
         let t = Tmp::new("undorun");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "x").unwrap();
             let job = JobId("10-1".into());
             let running = Running::start(&job, "a", 1);
             let mut rec = Recorder::open(&job, "a");
-            rec.outcome(&done("/i", &f));
+            let f = publish(&t, &mut rec, "a", &[("x.md", "x")]);
             let e = undo(&job).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
-            assert!(f.exists());
+            assert!(f[0].exists());
             drop(running);
             drop(rec.finish(true));
-            assert_eq!(undo(&job).unwrap().removed, std::slice::from_ref(&f));
-            assert!(!f.exists());
+            assert_eq!(undo(&job).unwrap().removed, f);
         });
     }
 
@@ -1416,14 +3221,10 @@ mod tests {
     fn undo_gives_up_on_a_held_history_lock() {
         let t = Tmp::new("undolock");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "x").unwrap();
             let job = JobId("10-3".into());
-            let mut rec = Recorder::open(&job, "a");
-            rec.outcome(&done("/i", &f));
-            drop(rec.finish(true));
+            let f = job_of(&t, &job, &[("a", "x")]);
             // A second open file description conflicts even in-process.
-            let holder = File::open(history_path().unwrap()).unwrap();
+            let holder = File::open(history_path()).unwrap();
             // SAFETY: the fd is open for the duration of the call.
             assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
             let start = Instant::now();
@@ -1432,9 +3233,9 @@ mod tests {
             assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
             assert_eq!(e.to_string(), "history is busy");
             assert!(took <= Duration::from_millis(2100), "took {took:?}");
-            assert!(f.exists(), "nothing is deleted without the lock");
+            assert!(f[0].exists(), "nothing is deleted without the lock");
             drop(holder);
-            assert_eq!(undo(&job).unwrap().removed, std::slice::from_ref(&f));
+            assert_eq!(undo(&job).unwrap().removed, f);
         });
     }
 
@@ -1468,8 +3269,8 @@ mod tests {
                 let job = JobId("10-1".into());
                 drop(Running::start(&job, "a", 1));
                 assert!(list_running().is_empty());
-                record(&job, "a", &report(vec![]));
-                assert!(history_path().unwrap().exists());
+                Recorder::open(&job, "a").finish(true);
+                assert!(history_path().exists());
             },
         );
     }
@@ -1496,175 +3297,85 @@ mod tests {
     }
 
     #[test]
+    fn reused_pid_entry_is_pruned() {
+        let t = Tmp::new("reuse");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            // A live pid (ours) that registered the job long before it started.
+            let old = Line::new("job")
+                .pair("id", "5-5")
+                .pair("pid", &std::process::id().to_string())
+                .pair("action", "x")
+                .pair("started", &(unix_secs() - 100_000).to_string());
+            fs::write(dir.join("5-5"), write_line(&old)).unwrap();
+            assert!(list_running().is_empty());
+            assert!(!dir.join("5-5").exists());
+        });
+    }
+
+    /// A fake group: `n` children with long names, nothing on disk.
+    fn fake_group(seed: u64, n: usize, long: &str) -> OutputGroup {
+        let id = FileId {
+            dev: 1,
+            ino: 0,
+            size: 1,
+            mtime_ns: 1,
+            ctime_ns: 1,
+        };
+        OutputGroup {
+            group: GroupId(seed),
+            op: OperationId(!seed),
+            directory: PathBuf::from("/nonexistent/g"),
+            id: DirectoryId {
+                dev: 1,
+                ino: seed,
+                kind: NodeKind::Directory,
+                uid: 1000,
+                mode: 0o755,
+            },
+            children: (0..n)
+                .map(|i| ChildBaseline {
+                    rel: PathBuf::from(format!("{i}{long}")),
+                    file_id: id,
+                    kind: NodeKind::File,
+                    uid: 1000,
+                    mode: 0o644,
+                    nlink: 1,
+                })
+                .collect(),
+        }
+    }
+
+    /// Each record block is one `write` on an `O_APPEND` descriptor:
+    /// concurrent runs never interleave inside one.
+    #[test]
     fn concurrent_appends_do_not_interleave() {
         let t = Tmp::new("conc");
         t.env(|| {
-            let long = "x".repeat(6000);
-            let work = |tag: &'static str| {
+            let long = "x".repeat(3000);
+            let work = |tag: u64| {
                 let long = long.clone();
                 std::thread::spawn(move || {
-                    for i in 0..1000 {
-                        let out = Outcome::Done {
-                            input: "/in".into(),
-                            output: Path::new("/nonexistent").join(format!("{tag}{i}{long}")),
-                            id: zero_id(),
-                        };
-                        record(&JobId(format!("{tag}-{i}")), "a", &report(vec![out]));
+                    for i in 0..200u64 {
+                        let mut rec = Recorder::open(&JobId(format!("{tag}-{i}")), "a");
+                        let g = fake_group(tag << 32 | i, 2, &long);
+                        rec.prepare_group(&g, Path::new("/nonexistent/p")).unwrap();
+                        rec.finish(true);
                     }
                 })
             };
-            let (a, b) = (work("a"), work("b"));
+            let (a, b) = (work(1), work(2));
             a.join().unwrap();
             b.join().unwrap();
-            let text = fs::read_to_string(history_path().unwrap()).unwrap();
+            let text = history();
             let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
-            assert_eq!(v, 0);
-            assert_eq!(lines.len(), 4000);
-            assert_eq!(lines.iter().filter(|l| l.kind == "job").count(), 2000);
-            assert!(
-                lines
-                    .iter()
-                    .filter(|l| l.kind == "out")
-                    .all(|l| l.get("ino") == Some("0"))
-            );
-        });
-    }
-
-    #[test]
-    fn edit_between_placement_and_record_is_kept() {
-        let t = Tmp::new("late");
-        t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "ours").unwrap();
-            // The executor took the identity at placement ...
-            let outcome = done("/i", &f);
-            // ... the user edited the file before the run ended ...
-            std::thread::sleep(Duration::from_millis(5));
-            fs::write(&f, "user edit").unwrap();
-            // ... and only then is the history written.
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![outcome]));
-            let r = undo(&job).unwrap();
-            assert!(r.removed.is_empty());
-            assert_eq!(r.kept, vec![(f.clone(), "changed since".to_owned())]);
-            assert_eq!(fs::read_to_string(&f).unwrap(), "user edit");
-        });
-    }
-
-    #[test]
-    fn every_identity_field_must_match() {
-        let t = Tmp::new("fields");
-        t.env(|| {
-            let f = t.0.join("out/x");
-            type Change = fn(&mut FileId);
-            let variants: [(&str, Change); 5] = [
-                ("dev", |i| i.dev += 1),
-                ("ino", |i| i.ino += 1),
-                ("size", |i| i.size += 1),
-                ("mtime", |i| i.mtime_ns += 1),
-                ("ctime", |i| i.ctime_ns += 1),
-            ];
-            for (n, (name, change)) in variants.iter().enumerate() {
-                fs::write(&f, "d").unwrap();
-                let mut id = id_of(&f);
-                change(&mut id);
-                let out = Outcome::Done {
-                    input: "/i".into(),
-                    output: f.clone(),
-                    id,
-                };
-                let job = JobId(format!("20-{n}"));
-                record(&job, "a", &report(vec![out]));
-                let r = undo(&job).unwrap();
-                assert!(f.exists(), "{name} differing must keep the file");
-                assert_eq!(r.kept.len(), 1, "{name}");
-            }
-        });
-    }
-
-    #[test]
-    fn replaced_file_with_restored_mtime_is_kept() {
-        let t = Tmp::new("restored");
-        t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "one").unwrap();
-            let rec = id_of(&f);
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            // Same size, other inode, mtime put back by hand.
-            let other = t.0.join("out/y");
-            fs::write(&other, "two").unwrap();
-            let when = UNIX_EPOCH
-                + Duration::new(
-                    (rec.mtime_ns / 1_000_000_000) as u64,
-                    (rec.mtime_ns % 1_000_000_000) as u32,
-                );
-            File::options()
-                .write(true)
-                .open(&other)
-                .unwrap()
-                .set_modified(when)
-                .unwrap();
-            fs::rename(&other, &f).unwrap();
-            assert_eq!(id_of(&f).mtime_ns, rec.mtime_ns);
-            let r = undo(&job).unwrap();
-            assert_eq!(r.kept.len(), 1);
-            assert_eq!(fs::read_to_string(&f).unwrap(), "two");
-        });
-    }
-
-    #[test]
-    fn edit_with_restored_mtime_is_kept_by_ctime() {
-        let t = Tmp::new("ctime");
-        t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "one").unwrap();
-            let rec = id_of(&f);
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            std::thread::sleep(Duration::from_millis(5));
-            let h = File::options().write(true).open(&f).unwrap();
-            (&h).write_all(b"two").unwrap(); // same size, same inode
-            let when = UNIX_EPOCH
-                + Duration::new(
-                    (rec.mtime_ns / 1_000_000_000) as u64,
-                    (rec.mtime_ns % 1_000_000_000) as u32,
-                );
-            h.set_modified(when).unwrap();
-            drop(h);
-            let now = id_of(&f);
-            assert_eq!(
-                (now.ino, now.size, now.mtime_ns),
-                (rec.ino, rec.size, rec.mtime_ns)
-            );
-            let r = undo(&job).unwrap();
-            assert_eq!(r.kept.len(), 1);
-            assert_eq!(fs::read_to_string(&f).unwrap(), "two");
-        });
-    }
-
-    #[test]
-    fn swapped_parent_symlink_keeps_lookalike() {
-        let t = Tmp::new("parent");
-        t.env(|| {
-            let sub = t.0.join("out/sub");
-            fs::create_dir(&sub).unwrap();
-            let f = sub.join("x");
-            fs::write(&f, "data").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            // The folder is moved away and a symlink to another directory
-            // holding a same-named, same-content file takes its place.
-            let elsewhere = t.0.join("elsewhere");
-            fs::create_dir(&elsewhere).unwrap();
-            fs::write(elsewhere.join("x"), "data").unwrap();
-            fs::rename(&sub, t.0.join("moved")).unwrap();
-            symlink(&elsewhere, &sub).unwrap();
-            let r = undo(&job).unwrap();
-            assert!(r.removed.is_empty());
-            assert_eq!(r.kept[0].1, "changed since");
-            assert!(elsewhere.join("x").exists());
-            assert!(t.0.join("moved/x").exists());
+            assert_eq!(v, 1);
+            let count = |k: &str| lines.iter().filter(|l| l.kind == k).count();
+            assert_eq!(count("group-begin"), 400);
+            assert_eq!(count("child"), 800);
+            assert_eq!(count("publish-abort"), 400);
+            assert_eq!(count("job"), 400);
         });
     }
 
@@ -1672,10 +3383,8 @@ mod tests {
     fn concurrent_undos_one_wins() {
         let t = Tmp::new("race");
         t.env(|| {
-            let f = t.0.join("out/x");
-            fs::write(&f, "d").unwrap();
             let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
+            job_of(&t, &job, &[("a", "d")]);
             let results: Vec<_> = (0..4)
                 .map(|_| {
                     let j = job.clone();
@@ -1694,76 +3403,13 @@ mod tests {
                 })
                 .count();
             assert_eq!((ok, dup), (1, 3));
-            let text = fs::read_to_string(history_path().unwrap()).unwrap();
-            assert_eq!(text.lines().filter(|l| l.starts_with("undo\t")).count(), 1);
-        });
-    }
-
-    #[test]
-    fn non_utf8_path_is_recorded_lossy_and_kept() {
-        let t = Tmp::new("bytes");
-        t.env(|| {
-            let f = t.0.join(std::ffi::OsStr::from_bytes(b"out/bad\xff.png"));
-            fs::write(&f, "d").unwrap();
-            let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
-            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
-            assert!(hist.contains("undo=no"));
-            assert!(hist.contains("bad\u{fffd}.png"));
-            let r = undo(&job).unwrap();
-            assert!(r.removed.is_empty());
-            assert_eq!(r.kept.len(), 1);
-            assert_eq!(r.kept[0].1, "name not representable");
-            assert!(f.exists());
-        });
-    }
-
-    #[test]
-    fn unsupported_header_version_is_rejected() {
-        let t = Tmp::new("version");
-        t.env(|| {
-            let p = history_path().unwrap();
-            fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::write(&p, "inacircle-history 1\njob\tid=1-1\n").unwrap();
-            let e = undo(&JobId("1-1".into())).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-        });
-    }
-
-    #[test]
-    fn history_is_created_without_hard_links() {
-        let t = Tmp::new("nolink");
-        t.env(|| {
-            let f = open_history_with(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM)));
-            drop(f.unwrap());
             assert_eq!(
-                fs::read_to_string(history_path().unwrap()).unwrap(),
-                "inacircle-history 0\n"
+                history()
+                    .lines()
+                    .filter(|l| l.starts_with("undo\t"))
+                    .count(),
+                1
             );
-            // And an existing file is just appended to.
-            drop(open_history_with(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap());
-            assert_eq!(
-                fs::read_to_string(history_path().unwrap()).unwrap(),
-                "inacircle-history 0\n"
-            );
-        });
-    }
-
-    #[test]
-    fn reused_pid_entry_is_pruned() {
-        let t = Tmp::new("reuse");
-        t.env(|| {
-            let dir = jobs_dir().unwrap();
-            fs::create_dir_all(&dir).unwrap();
-            // A live pid (ours) that registered the job long before it started.
-            let old = Line::new("job")
-                .pair("id", "5-5")
-                .pair("pid", &std::process::id().to_string())
-                .pair("action", "x")
-                .pair("started", &(unix_secs() - 100_000).to_string());
-            fs::write(dir.join("5-5"), write_line(&old)).unwrap();
-            assert!(list_running().is_empty());
-            assert!(!dir.join("5-5").exists());
         });
     }
 
@@ -1803,7 +3449,11 @@ mod tests {
         let Some(dir) = std::env::var_os("INACIRCLE_HELPER").map(PathBuf::from) else {
             return;
         };
-        let state = dir.join("state");
+        if std::env::var_os("INACIRCLE_CASE").is_some() {
+            return;
+        }
+        let t = std::mem::ManuallyDrop::new(Tmp(dir));
+        let state = t.0.join("state");
         let state_s = state.to_str().unwrap().to_owned();
         // No registry: the env inherited from the parent may name another
         // test's runtime dir, whose "running" job 10-1 would block the undo.
@@ -1812,23 +3462,15 @@ mod tests {
             ("XDG_RUNTIME_DIR", None),
         ];
         with_env(&v, || {
-            fs::create_dir_all(dir.join("out")).unwrap();
-            let f = dir.join("out/x");
-            fs::write(&f, "d").unwrap();
             let job = JobId("10-1".into());
-            record(&job, "a", &report(vec![done("/i", &f)]));
+            let f = job_of(&t, &job, &[("a", "d")]);
             // ~50 MB of other jobs' lines in front of ours.
-            let p = history_path().unwrap();
+            let p = history_path();
             let mut w = io::BufWriter::new(OpenOptions::new().append(true).open(&p).unwrap());
-            let filler = Line::new("out")
+            let filler = Line::new("child")
                 .pair("job", "99-9")
-                .pair("in", "/some/input/file")
-                .pair("path", &format!("/some/output/{}", "p".repeat(120)))
-                .pair("size", "1")
-                .pair("mtime", "1")
-                .pair("ctime", "1")
-                .pair("dev", "1")
-                .pair("ino", "1");
+                .pair("group", "00000000000000aa")
+                .pair("rel", &"p".repeat(200));
             let text = write_line(&filler);
             let n = 50_000_000 / text.len() + 1;
             for _ in 0..n {
@@ -1840,7 +3482,7 @@ mod tests {
             let before = vm_hwm_kb();
             let r = undo(&job).unwrap();
             let after = vm_hwm_kb();
-            assert_eq!(r.removed, vec![f]);
+            assert_eq!(r.removed, f);
             assert!(
                 after.saturating_sub(before) < 8 * 1024,
                 "peak RSS grew by {} kB",

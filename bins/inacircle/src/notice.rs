@@ -68,6 +68,9 @@ pub struct Summary {
     pub unknown_count: usize,
     /// The inputs of `unknown`, so a repeated event for one counts once.
     unknown_inputs: Vec<PathBuf>,
+    /// The run's recording warning (no Undo, and why), from
+    /// `journal::Recorded`.
+    pub warning: Option<String>,
 }
 
 impl Summary {
@@ -204,6 +207,12 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
             "{} not confirmed where it was saved; Undo unavailable.",
             s.unknown_count
         ));
+    }
+    // Why Undo is not offered (the unknown lines above already say so).
+    if s.unknown_count == 0
+        && let Some(w) = &s.warning
+    {
+        body.push(w.clone());
     }
     // The sandbox gate refused the run: no action started.
     if !s.sandboxed {
@@ -503,9 +512,18 @@ impl Notifier {
         }
     }
 
+    /// The run's recording warning (`journal::Recorded::warning`), shown in
+    /// the final notification.
+    pub fn record_warning(&mut self, warning: Option<&str>) {
+        self.summary.warning = warning.map(str::to_owned);
+    }
+
     /// The result of the run with Undo, then the Undo window: an Undo click
-    /// undoes `job` and says how it went; at the end of the window the
-    /// notification is sent again without the button. `counts` are the
+    /// undoes `job` and says how it went. Undo is offered only when the
+    /// history holds the run complete, durable and synced (`undoable`, from
+    /// `journal::Recorded`), with the warning of
+    /// [`Notifier::record_warning`] shown otherwise; at the end of the
+    /// window the notification is sent again without the button. `counts` are the
     /// run's `(done, skipped, failed)` inputs; `cancelled`: a cancel signal
     /// stopped the run (a Cancel click seen here counts too). A signal on
     /// `stop` during the window ends it. The run's history and job registry
@@ -771,6 +789,24 @@ mod tests {
         assert_eq!(running_text("Markdown", 0, 0, f32::NAN).2, 0);
         assert_eq!(running_text("Markdown", 5, 5, 1.7).2, 100);
         assert_eq!(running_text("Markdown", 0, 5, -0.2).2, 0);
+    }
+
+    /// A recording warning is a body line; next to the unknown lines (which
+    /// already say Undo is unavailable) it is not repeated.
+    #[test]
+    fn recording_warning_is_shown_once() {
+        let mut s = summary(&[done("/d/a.txt", "/d/a/a.md")]);
+        s.set_counts((1, 0, 0, 0));
+        s.warning = Some("history not written: disk full; undo unavailable".into());
+        let (summary, body) = final_text(&s, false);
+        assert_eq!(summary, "a.md");
+        assert_eq!(
+            lines(&body),
+            ["history not written: disk full; undo unavailable"]
+        );
+        s.set_counts((1, 0, 0, 1));
+        let (_, body) = final_text(&s, false);
+        assert!(!body.contains("history not written"), "{body}");
     }
 
     #[test]

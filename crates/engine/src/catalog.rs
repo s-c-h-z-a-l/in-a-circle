@@ -11,7 +11,6 @@
 
 use crate::exec;
 use manifest::Line;
-use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -587,8 +586,19 @@ fn read_some(fd: RawFd, out: &mut Vec<u8>) -> Result<bool, Fail> {
     Ok(true)
 }
 
+/// The cache, never read through a symlink at its name.
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
-    parse_cache(&std::fs::read(path).ok()?)
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut bytes = Vec::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?
+        .read_to_end(&mut bytes)
+        .ok()?;
+    parse_cache(&bytes)
 }
 
 /// The cache file's content as entries; `None` for anything that is not
@@ -629,7 +639,7 @@ pub fn fuzz_read_cache(bytes: &[u8]) {
     let _ = parse_cache(bytes);
 }
 
-/// Atomic (temp file + rename); any failure just means no cache.
+/// Atomic (temp file + rename).
 fn write_cache(path: &Path, entries: &[Entry]) {
     let mut s = manifest::header(CACHE_MAGIC, 0);
     for e in entries {
@@ -644,17 +654,16 @@ fn write_cache(path: &Path, entries: &[Entry]) {
             s.push_str(&manifest::write_line(l));
         }
     }
+    // Any failure just means no cache. A private folder (opened once,
+    // checked), a fresh temp file under a random name (exclusive, never
+    // through a symlink), renamed over the cache relative to the folder.
     let _ = (|| -> std::io::Result<()> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!(".catalog.{}.tmp", std::process::id()));
-        let r = std::fs::File::create(&tmp)
-            .and_then(|mut f| f.write_all(s.as_bytes()))
-            .and_then(|()| std::fs::rename(&tmp, path));
-        if r.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        r
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+        else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        crate::journal::StateDir::create(dir)?.replace(name, s.as_bytes(), false)?;
+        Ok(())
     })();
 }
 
@@ -937,6 +946,32 @@ pub(crate) mod tests {
         std::fs::write(f.root.join("blocker"), "").unwrap();
         let c = Catalog::load_from(&[(d, true)], &f.root.join("blocker/inacircle/catalog"));
         assert_eq!(c.actions.len(), 1);
+    }
+
+    /// Symlinks planted at the temp name the old code used and at the cache
+    /// name itself are never followed: their targets' bytes stay, and the
+    /// cache becomes a regular file of our own.
+    #[test]
+    fn cache_temp_and_final_symlinks_are_not_followed() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let f = Fix::new("cachesym");
+        let d = f.dir("a");
+        manifest_script(&d.join("one"), &[act("x.a", "A")]);
+        let sentinel = f.root.join("sentinel");
+        std::fs::write(&sentinel, CACHE_OK).unwrap();
+        let cache = f.cache();
+        let dir = cache.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let tmp = dir.join(format!(".catalog.{}.tmp", std::process::id()));
+        symlink(&sentinel, &tmp).unwrap();
+        symlink(&sentinel, &cache).unwrap();
+        let c = Catalog::load_from(&[(d, true)], &cache);
+        assert_eq!(c.actions.len(), 1);
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), CACHE_OK);
+        let m = std::fs::symlink_metadata(&cache).unwrap();
+        assert!(m.file_type().is_file());
+        assert_eq!(m.mode() & 0o777, 0o600);
+        assert!(read_cache(&cache).is_some());
     }
 
     const CACHE_OK: &str = "inacircle-catalog 0\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes\n";
