@@ -63,8 +63,11 @@ pub struct Summary {
     /// The first inputs published where it could not be confirmed:
     /// `(file name, why, op)`.
     pub unknown: Vec<(String, String, String)>,
-    /// Inputs published where it could not be confirmed (sticky: no Undo).
+    /// Inputs (not events) published where it could not be confirmed
+    /// (sticky: no Undo).
     pub unknown_count: usize,
+    /// The inputs of `unknown`, so a repeated event for one counts once.
+    unknown_inputs: Vec<PathBuf>,
 }
 
 impl Summary {
@@ -106,7 +109,11 @@ impl Summary {
                 durability,
                 ..
             } => {
+                if self.unknown_inputs.contains(input) {
+                    return;
+                }
                 if self.unknown.len() < KEEP_PROBLEMS {
+                    self.unknown_inputs.push(input.clone());
                     let mut why = unknown_reason(*reason);
                     if let Durability::Unconfirmed(d) = durability {
                         why.push_str(&format!("; not confirmed on disk: {d}"));
@@ -120,8 +127,10 @@ impl Summary {
         }
     }
 
-    /// `(done, skipped, failed)` inputs, as the batch rule counts them.
-    pub fn set_counts(&mut self, (done, skipped, failed): (usize, usize, usize)) {
+    /// `(done, skipped, failed, unknown)` inputs, as the batch rule counts
+    /// them (`unknown`: the inputs of those done that are not confirmed).
+    pub fn set_counts(&mut self, (done, skipped, failed, unknown): (usize, usize, usize, usize)) {
+        self.unknown_count = unknown;
         self.done_count = done;
         self.skipped = skipped;
         self.failed = failed;
@@ -505,7 +514,7 @@ impl Notifier {
         mut self,
         job: &JobId,
         sandboxed: bool,
-        counts: (usize, usize, usize),
+        counts: (usize, usize, usize, usize),
         cancelled: bool,
         undoable: bool,
         stop: &CancelToken,
@@ -786,7 +795,7 @@ mod tests {
             durability: Durability::Unconfirmed("folder sync failed".into()),
         };
         let mut s = summary(&[done("/d/a.txt", "/d/a/a.md"), unknown]);
-        s.set_counts((2, 0, 0));
+        s.set_counts((2, 0, 0, 1));
         let (summary, body) = final_text(&s, false);
         assert_eq!(summary, "2 done");
         assert_eq!(
@@ -797,6 +806,39 @@ mod tests {
                 "1 not confirmed where it was saved; Undo unavailable."
             ]
         );
+    }
+
+    /// Two events for one input are one input not confirmed.
+    #[test]
+    fn repeated_unknown_for_one_input_counts_once() {
+        use engine::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+        let unknown = |input: &str| Outcome::PublishedUnknown {
+            input: input.into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 1,
+                    object_ino: 3,
+                    leaf: "b".into(),
+                    op: OperationId(0xcd),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::BaselineChanged,
+            durability: Durability::Synced,
+        };
+        let s = summary(&[
+            unknown("/d/b.txt"),
+            unknown("/d/b.txt"),
+            unknown("/d/c.txt"),
+        ]);
+        assert_eq!(s.unknown_count, 2);
+        assert_eq!(s.unknown.len(), 2);
+        let (_, body) = final_text(&s, false);
+        assert!(body.contains("2 not confirmed where"), "{body}");
     }
 
     #[test]
@@ -824,7 +866,7 @@ mod tests {
             done("/d/a.pdf", "/d/a/1.png"),
             done("/d/a.pdf", "/d/a/2.png"),
         ]);
-        s.set_counts((1, 0, 0));
+        s.set_counts((1, 0, 0, 0));
         assert_eq!(final_text(&s, false).0, "1 done");
     }
 
@@ -838,7 +880,7 @@ mod tests {
             skip("/d/s3", "unsupported"),
             fail("/d/f2", "y"),
         ]);
-        s.set_counts((1, 3, 2));
+        s.set_counts((1, 3, 2, 0));
         let (sum, body) = final_text(&s, false);
         assert_eq!(sum, "1 done, 3 skipped, 2 failed");
         // Failures first, then skips, then the rest as a count.
@@ -886,7 +928,7 @@ mod tests {
         let mut s = summary(&[done("/d/a.txt", "/d/a.md"), done("/d/b.txt", "/d/b.md")]);
         s.lossy = true;
         assert_eq!(lines(&final_text(&s, false).1), ["Formatting was lost."]);
-        s.set_counts((2, 1, 0));
+        s.set_counts((2, 1, 0, 0));
         s.problems.push(("c.png".into(), "unsupported".into()));
         assert_eq!(
             lines(&final_text(&s, false).1),

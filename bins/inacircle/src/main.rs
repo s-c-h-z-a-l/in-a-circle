@@ -474,7 +474,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         n.finish(
             &job,
             sandboxed,
-            (done, skipped, failed),
+            (done, skipped, failed, closed.tally.unknown()),
             cancelled,
             closed.undoable,
             &cancel,

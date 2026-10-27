@@ -219,10 +219,10 @@ pub struct Recorder {
     file: Option<File>,
     job: String,
     action: String,
+    /// Also holds the inputs published at a place (or with a baseline)
+    /// that could not be proved (once per input): sticky, the job is then
+    /// not undoable.
     tally: Tally,
-    /// Inputs published at a place (or with a baseline) that could not be
-    /// proved: sticky, the job is then not undoable.
-    unknown: usize,
 }
 
 /// A closed job: the per-input tally, whether undo may be offered, and the
@@ -244,7 +244,6 @@ impl Recorder {
             job: job.0.clone(),
             action: action.to_owned(),
             tally: Tally::default(),
-            unknown: 0,
         }
     }
 
@@ -256,9 +255,6 @@ impl Recorder {
 
     pub fn outcome(&mut self, o: &Outcome) {
         self.tally.add(o);
-        if matches!(o, Outcome::PublishedUnknown { .. }) {
-            self.unknown += 1;
-        }
         if let Some(l) = outcome_line(&self.job, o) {
             self.append(&l);
         }
@@ -282,7 +278,8 @@ impl Recorder {
             .pair("action", &self.action)
             .pair("status", status(&self.tally))
             .pair("sandbox", if sandboxed { "yes" } else { "no" });
-        let undoable = self.unknown == 0;
+        let unknown = self.tally.unknown();
+        let undoable = unknown == 0;
         if !undoable {
             l = l.pair("undo", "no");
         }
@@ -293,7 +290,7 @@ impl Recorder {
             warning: (!undoable).then(|| {
                 format!(
                     "{} input(s) published where it could not be confirmed; undo unavailable",
-                    self.unknown
+                    unknown
                 )
             }),
         }
@@ -894,7 +891,10 @@ mod tests {
             let closed = rec.finish(true);
             assert_eq!(closed.tally.counts(), (2, 0, 0));
             assert!(!closed.undoable);
-            assert!(closed.warning.unwrap().contains("undo unavailable"));
+            // Two events, one input: one.
+            let warning = closed.warning.unwrap();
+            assert!(warning.starts_with("1 input(s) published"), "{warning}");
+            assert!(warning.contains("undo unavailable"));
             let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             let line = hist.lines().find(|l| l.starts_with("unknown\t")).unwrap();
             for part in [

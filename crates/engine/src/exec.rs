@@ -115,10 +115,15 @@ pub enum Outcome {
 #[derive(Debug, Default)]
 pub struct Tally {
     rank: HashMap<PathBuf, u8>,
+    /// Inputs with a `PublishedUnknown`, once each however often it is seen.
+    unknown: HashSet<PathBuf>,
 }
 
 impl Tally {
     pub fn add(&mut self, o: &Outcome) {
+        if let Outcome::PublishedUnknown { input, .. } = o {
+            self.unknown.insert(input.clone());
+        }
         let (input, rank) = match o {
             Outcome::Done { input, .. } | Outcome::PublishedUnknown { input, .. } => (input, 3),
             Outcome::Failed { input, .. } => (input, 2),
@@ -131,6 +136,12 @@ impl Tally {
                 self.rank.insert(input.clone(), rank);
             }
         }
+    }
+
+    /// Inputs published where it could not be confirmed (counted in
+    /// `done` too: the conversion happened).
+    pub fn unknown(&self) -> usize {
+        self.unknown.len()
     }
 
     /// `(done, skipped, failed)` inputs.
@@ -2706,6 +2717,7 @@ pub(crate) mod tests {
             tally.add(&seen.0.0[0]);
             tally.add(&seen.0.0[0]);
             assert_eq!(tally.counts(), (1, 0, 0));
+            assert_eq!(tally.unknown(), 1, "one input, two events");
         }
     }
 
