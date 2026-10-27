@@ -177,13 +177,22 @@ Every action runs sandboxed, set up in the child between `fork` and
   (ABI 4) and UDP (ABI 10) on existing sockets, pathname unix sockets
   outside the temp dir (ABI 9), abstract unix sockets and signals outside
   the sandbox (ABI 6). File names outside can still be probed (`stat`).
-- **seccomp** (x86_64 only; other architectures get Landlock only), also
-  applied without Landlock. Denied: sockets other than `AF_UNIX`;
-  metadata changes (chmod, chown, utime, xattr, `file_setattr`); the
-  ioctls `FS_IOC_SETFLAGS`, `FS_IOC32_SETFLAGS`, `FS_IOC_FSSETXATTR` and
-  `FS_IOC_ENABLE_VERITY`; `io_uring`; `setsid` and `setpgid`, so the
-  action and every descendant stay in one killable group. A syscall
-  through another ABI (i386) kills the process; x32 gets `EPERM`.
+- **seccomp**, one policy for x86_64 and aarch64 (each with its own
+  syscall numbers), always installed, also without Landlock; another
+  architecture runs no action. Denied: `socket` and `socketpair` for every
+  family, `AF_UNIX` included (`EACCES`); metadata changes (chmod, chown,
+  utime, xattr, `file_setattr`); every ioctl but a few queries
+  (`FIONREAD`, `TCGETS`, `TIOCGWINSZ`) and the ioctl forms of allowed
+  fcntls; async fcntls (owner, signal, lease, notify, seals, `O_ASYNC`);
+  other processes (ptrace, `process_vm_*`, the pidfd calls, `kcmp`);
+  keyrings; namespaces; clone flags beyond fork, vfork and threads
+  (`clone3` gets `ENOSYS`, so libc falls back to `clone`); scheduler and
+  priority setters; `prlimit64` on another pid; `migrate_pages` and
+  `move_pages`; the parent-death, subreaper and ptracer prctls; mounts
+  and file handles; io_uring, bpf, perf, userfaultfd; System V IPC and
+  POSIX queues; `setsid` and `setpgid`, so the action and every
+  descendant stay in one killable group. A syscall through another ABI
+  (i386, AArch32) kills the process; x32 gets `EPERM`.
 - `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
 - **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB,
   with or without Landlock. It is the last net against a faulty or missing
@@ -194,7 +203,6 @@ Every action runs sandboxed, set up in the child between `fork` and
 - Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
   `RLIMIT_DATA` is per process, so each child of a forking action gets the
   cap again.
-- Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
 - Without Landlock, actions from the user or plugin directory do not run
   ("sandbox unavailable"); built-in actions run with a "ran without
   sandbox" warning, and the history records `sandbox=no`. The same holds

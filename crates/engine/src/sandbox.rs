@@ -1,5 +1,6 @@
 //! The sandbox every action runs in: Landlock (filesystem, network, scope),
-//! a seccomp filter (sockets, metadata) and resource limits.
+//! a seccomp filter (sockets, metadata, other processes, escapes; see
+//! [`seccomp`]) and resource limits.
 //!
 //! The parent builds the ruleset before spawning ([`build`], or [`create`]
 //! then [`allow_read_fd`] and [`add`]); the child applies everything
@@ -11,12 +12,11 @@
 //! - Filesystem (Landlock): read + execute the exec paths, read the read
 //!   paths, everything inside the write path; nothing else. Covers write,
 //!   create, remove, rename/link out of place (REFER), truncate.
-//! - Network: seccomp lets `socket`/`socketpair` create only `AF_UNIX`
-//!   sockets (`EACCES` otherwise), which shuts out TCP, UDP, MPTCP, SCTP,
-//!   ICMP, raw, netlink, packet. Landlock additionally denies TCP (ABI 4)
-//!   and UDP (ABI 10) bind/connect/send on sockets that already exist.
-//! - Unix sockets: pathname sockets outside the write path (ABI 9) and
-//!   abstract sockets outside the sandbox (ABI 6) are denied.
+//! - Sockets: seccomp denies `socket` and `socketpair` for every family,
+//!   `AF_UNIX` included (`EACCES`). Landlock additionally denies TCP
+//!   (ABI 4) and UDP (ABI 10) bind/connect/send on sockets that already
+//!   exist, pathname unix sockets outside the write path (ABI 9) and
+//!   abstract ones outside the sandbox (ABI 6).
 //! - Signals to processes outside the sandbox (ABI 6) are denied.
 //! - Metadata: seccomp denies (`EPERM`), everywhere and by path or fd:
 //!   chmod, fchmod, fchmodat, fchmodat2; chown, fchown, lchown, fchownat;
@@ -24,13 +24,17 @@
 //!   lsetxattr, fsetxattr, setxattrat, removexattr, lremovexattr,
 //!   fremovexattr, removexattrat; file_setattr; and the ioctls
 //!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr) and
-//!   FS_IOC_ENABLE_VERITY (makes a file immutable). Every other ioctl is
-//!   allowed.
+//!   FS_IOC_ENABLE_VERITY (makes a file immutable), as every ioctl but a
+//!   few queries is denied.
+//! - Other processes and escapes (seccomp, `EPERM`): ptrace,
+//!   process_vm_*, the pidfd calls, kcmp; keyrings; namespaces; clone
+//!   flags beyond fork/vfork/thread (clone3 gets `ENOSYS`); scheduler and
+//!   priority setters; prlimit64 on another pid; migrate/move_pages; the
+//!   lifecycle prctls; mounts and file handles; io_uring, bpf, perf,
+//!   userfaultfd; System V IPC and POSIX queues; async fcntls.
 //! - `setsid` and `setpgid` are denied (`EPERM`; x86_64 has no `setpgrp`
 //!   syscall): the filter is installed after the child's own `setsid`, so
 //!   the action and every descendant stay in one killable process group.
-//! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
-//!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
 //!   opened before the sandbox reaches the action.
 //! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`, and
@@ -39,25 +43,20 @@
 //! # What is not covered
 //!
 //! - Per Landlock ABI: below 3, truncate of any DAC-writable file; below
-//!   4, Landlock does not restrict the network (seccomp still blocks
-//!   non-unix sockets); below 5, device ioctls; below 6, abstract unix
-//!   sockets and signals; below 9, pathname unix sockets (e.g. D-Bus),
-//!   whose peer could also pass in a network socket via SCM_RIGHTS.
-//! - Without Landlock, protection from ptrace-family access (ptrace,
-//!   process_vm_*, pidfd_getfd) to the user's other processes depends on
-//!   Yama (`kernel.yama.ptrace_scope`).
+//!   4, Landlock does not restrict the network on inherited sockets
+//!   (seccomp still blocks creating any socket); below 5, device ioctls
+//!   (seccomp still denies all but a few queries); below 6, signals.
 //! - Without Landlock only seccomp, the fd sweep and the limits apply.
 //! - File names outside the sandbox can still be probed (`stat`, path
 //!   lookup are not restricted).
 //! - `RLIMIT_FSIZE` caps each file, not their sum: many files can still
 //!   fill a disk.
-//! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
-//!   installs none (sockets and metadata are then not restricted).
+//! - The seccomp filter exists for x86_64 and aarch64; elsewhere
+//!   [`apply_in_child`] fails (`ENOSYS`) and nothing runs.
 //! - No `RLIMIT_NPROC`: an action can fork-bomb until it is cancelled.
 //! - `RLIMIT_DATA` is per process, not per process tree: a forking action
 //!   gets the cap once per child. File mmaps and shared memory are not
 //!   counted.
-//! - Keyring syscalls (`keyctl`, `add_key`, `request_key`) are allowed.
 
 use std::fs::OpenOptions;
 use std::io;
@@ -427,168 +426,21 @@ pub fn total_ram() -> u64 {
     (si.totalram as u64).saturating_mul(u64::from(si.mem_unit))
 }
 
-/// The seccomp filter: deny non-unix sockets, metadata writes and io_uring.
-/// Syscall numbers from arch/x86/entry/syscalls/syscall_64.tbl, the
-/// `seccomp_data` layout from include/uapi/linux/seccomp.h.
-#[cfg(target_arch = "x86_64")]
-mod seccomp {
-    use libc::{
-        BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
-        SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, sock_filter,
-    };
+pub mod seccomp;
 
-    /// EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE (not in libc).
-    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
-    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-    // Offsets in struct seccomp_data.
-    const NR: u32 = 0;
-    const ARCH: u32 = 4;
-    const ARG0_LOW: u32 = 16; // little endian
-    const ARG1_LOW: u32 = 24; // ioctl's cmd is an unsigned int
-    const SYS_SOCKET: u32 = 41;
-    const SYS_SOCKETPAIR: u32 = 53;
-    const SYS_IOCTL: u32 = 16;
-    /// ioctl commands denied with EPERM: the inode flag setters
-    /// (include/uapi/linux/fs.h) and fs-verity enabling
-    /// (include/uapi/linux/fsverity.h), which all work through a read-only fd.
-    const FS_IOC_SETFLAGS: u32 = 0x4008_6602; // _IOW('f', 2, long)
-    const FS_IOC32_SETFLAGS: u32 = 0x4004_6602; // _IOW('f', 2, int)
-    const FS_IOC_FSSETXATTR: u32 = 0x401c_5820; // _IOW('X', 32, struct fsxattr)
-    const FS_IOC_ENABLE_VERITY: u32 = 0x4080_6685; // _IOW('f', 133, 128-byte arg)
-    /// Denied with EPERM.
-    const DENIED: [u32; 26] = [
-        90,  // chmod
-        91,  // fchmod
-        92,  // chown
-        93,  // fchown
-        94,  // lchown
-        109, // setpgid
-        112, // setsid
-        132, // utime
-        188, // setxattr
-        189, // lsetxattr
-        190, // fsetxattr
-        197, // removexattr
-        198, // lremovexattr
-        199, // fremovexattr
-        235, // utimes
-        260, // fchownat
-        261, // futimesat
-        268, // fchmodat
-        280, // utimensat
-        425, // io_uring_setup
-        426, // io_uring_enter
-        427, // io_uring_register
-        452, // fchmodat2 (not in every libc)
-        463, // setxattrat (not in libc)
-        466, // removexattrat (not in libc)
-        469, // file_setattr (not in libc)
-    ];
+/// The Landlock ABI the hardening policy builds on: 6 adds the abstract
+/// unix socket and signal scopes (`LANDLOCK_SCOPE_*`,
+/// include/uapi/linux/landlock.h), which seccomp cannot express.
+pub const MIN_LANDLOCK_ABI: u32 = 6;
 
-    // mutants: the three `+ -> *` mutants on the layout constants below are
-    // equivalent in behavior: ALLOW, SOCKET and IOCTL_EPERM move further out
-    // and `program()` leaves the gap as `stmt(0, 0)` (a load of 0 into the
-    // accumulator, no jump), which every path that reaches it runs through
-    // before the next real instruction. No syscall gets another verdict; the
-    // filter only gets longer. The other layout mutants are not equivalent:
-    // `EPERM = ALLOW * 1` would overwrite ALLOW's slot, `SOCKET = EPERM * 1`
-    // collides with EPERM, and `LEN = IOCTL_EPERM * 1` leaves no room for the
-    // last instruction (the build fails); `jump` also refuses, at compile
-    // time, an offset that does not fit its u8.
-    // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
-    // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
-    // [ioctl: load arg1, 4 x cmd?, ALLOW, EPERM].
-    const FIRST_DENIED: usize = 8;
-    const ALLOW: usize = FIRST_DENIED + DENIED.len();
-    const EPERM: usize = ALLOW + 1;
-    const SOCKET: usize = EPERM + 1;
-    const IOCTL: usize = SOCKET + 4;
-    const IOCTL_EPERM: usize = IOCTL + 6;
-    const LEN: usize = IOCTL_EPERM + 1;
-
-    const fn stmt(code: u32, k: u32) -> sock_filter {
-        sock_filter {
-            code: code as u16,
-            jt: 0,
-            jf: 0,
-            k,
-        }
+/// The seccomp filter for the architecture this binary was built for;
+/// `ENOSYS` (a raw errno: no allocation, safe in `pre_exec`) on any
+/// other, so no action starts without one.
+pub fn seccomp_filter() -> io::Result<&'static [libc::sock_filter]> {
+    match seccomp::Arch::native() {
+        Some(arch) => Ok(seccomp::filter(arch)),
+        None => Err(io::Error::from_raw_os_error(libc::ENOSYS)),
     }
-
-    /// A conditional jump at `at` to `to` when true, to the next when false.
-    // mutants: equivalent for every `| -> ^` (and the `| -> &` where noted)
-    // in `jump` and `program`: BPF_LD, BPF_W and BPF_K are 0, BPF_RET, BPF_JMP,
-    // BPF_JEQ/JGE and BPF_ABS are distinct single bits or disjoint, and
-    // SECCOMP_RET_ERRNO (0x5_0000) does not overlap an errno, so `^` builds the
-    // same opcode as `|`; `LD & W` is 0 like `LD | W`. The `&` that would
-    // change an opcode (`W & ABS`, `JMP & JEQ`, ...) is killed by the seccomp
-    // tests below, which would see the wrong verdict.
-    const fn jump(at: usize, code: u32, k: u32, to: usize) -> sock_filter {
-        // `jt` is a u8 and a BPF jump goes forward only: a layout whose
-        // offset does not fit would truncate silently into a jump to the
-        // wrong instruction. `program()` is evaluated at compile time, so
-        // this stops the build instead.
-        assert!(to > at && to - at - 1 <= u8::MAX as usize);
-        sock_filter {
-            code: (BPF_JMP | code | BPF_K) as u16,
-            jt: (to - at - 1) as u8,
-            jf: 0,
-            k,
-        }
-    }
-
-    const fn program() -> [sock_filter; LEN] {
-        let mut p = [stmt(0, 0); LEN];
-        p[0] = stmt(BPF_LD | BPF_W | BPF_ABS, ARCH);
-        p[1] = sock_filter {
-            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
-            jt: 1,
-            jf: 0,
-            k: AUDIT_ARCH_X86_64,
-        };
-        p[2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
-        p[3] = stmt(BPF_LD | BPF_W | BPF_ABS, NR);
-        p[4] = jump(4, BPF_JGE, X32_SYSCALL_BIT, EPERM);
-        p[5] = jump(5, BPF_JEQ, SYS_SOCKET, SOCKET);
-        p[6] = jump(6, BPF_JEQ, SYS_SOCKETPAIR, SOCKET);
-        p[7] = jump(7, BPF_JEQ, SYS_IOCTL, IOCTL);
-        let mut i = 0;
-        while i < DENIED.len() {
-            let at = FIRST_DENIED + i;
-            p[at] = jump(at, BPF_JEQ, DENIED[i], EPERM);
-            i += 1;
-        }
-        p[ALLOW] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
-        p[SOCKET] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG0_LOW);
-        p[SOCKET + 1] = sock_filter {
-            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
-            jt: 0,
-            jf: 1,
-            k: libc::AF_UNIX as u32,
-        };
-        p[SOCKET + 2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[SOCKET + 3] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EACCES as u32);
-        p[IOCTL] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG1_LOW);
-        p[IOCTL + 1] = jump(IOCTL + 1, BPF_JEQ, FS_IOC_SETFLAGS, IOCTL_EPERM);
-        p[IOCTL + 2] = jump(IOCTL + 2, BPF_JEQ, FS_IOC32_SETFLAGS, IOCTL_EPERM);
-        p[IOCTL + 3] = jump(IOCTL + 3, BPF_JEQ, FS_IOC_FSSETXATTR, IOCTL_EPERM);
-        p[IOCTL + 4] = jump(IOCTL + 4, BPF_JEQ, FS_IOC_ENABLE_VERITY, IOCTL_EPERM);
-        p[IOCTL + 5] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[IOCTL_EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
-        p
-    }
-
-    pub static FILTER: [sock_filter; LEN] = program();
-}
-
-/// The seccomp filter for this architecture; `None` where there is none yet
-/// (only x86_64 has one).
-fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
-    #[cfg(target_arch = "x86_64")]
-    return Some(&seccomp::FILTER);
-    #[cfg(not(target_arch = "x86_64"))]
-    return None;
 }
 
 /// `want` clamped to the inherited hard limit of `resource`, as a rlimit
@@ -628,7 +480,8 @@ pub fn effective_data_limit(limits: &Limits) -> u64 {
 
 /// Puts the calling process in its own session, applies `limits`, sets
 /// `no_new_privs`, enforces the ruleset if given, installs the seccomp
-/// filter (even without a ruleset) and marks every fd >= 3 close-on-exec.
+/// filter (always: without one, [`seccomp_filter`]'s error, before any
+/// change) and marks every fd >= 3 close-on-exec.
 ///
 /// # Safety
 ///
@@ -645,6 +498,7 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
             Ok(())
         }
     }
+    let filter = seccomp_filter()?;
     let fsize = clamped(libc::RLIMIT_FSIZE, limits.fsize)?;
     let data = clamped(libc::RLIMIT_DATA, limits.data)?;
     let core = libc::rlimit {
@@ -664,14 +518,12 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
         if let Some(fd) = ruleset {
             check(libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32))?;
         }
-        if let Some(filter) = seccomp_filter() {
-            let prog = libc::sock_fprog {
-                len: filter.len() as libc::c_ushort,
-                // The kernel only reads the program.
-                filter: filter.as_ptr().cast_mut(),
-            };
-            check(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog).into())?;
-        }
+        let prog = libc::sock_fprog {
+            len: filter.len() as libc::c_ushort,
+            // The kernel only reads the program.
+            filter: filter.as_ptr().cast_mut(),
+        };
+        check(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog).into())?;
         check(libc::syscall(
             libc::SYS_close_range,
             3u32,
@@ -731,7 +583,7 @@ pub(crate) mod tests {
 
     /// Whether this target has the seccomp filter; says the test is skipped if not.
     pub(crate) fn seccomp_or_skip(test: &str) -> bool {
-        let has = seccomp_filter().is_some();
+        let has = seccomp_filter().is_ok();
         if !has {
             eprintln!("SKIPPED {test}: no seccomp filter for this architecture");
         }
@@ -1264,11 +1116,6 @@ pub(crate) mod tests {
     }
 
     /// socket + connect, async-signal-safe.
-    fn connect<T: Copy>(domain: i32, ty: i32, addr: &T) -> io::Result<()> {
-        let s = socket(domain, ty, 0)?;
-        addr_call(libc::connect, s, addr)
-    }
-
     /// A socket created before the sandbox (so seccomp does not stop it),
     /// bound to 127.0.0.1:0 first when `prebind`.
     fn early_socket(domain: i32, ty: i32, prebind: bool) -> io::Result<RawFd> {
@@ -1453,15 +1300,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unix_sockets_allowed() {
-        probe(Sb::On(None), || {
-            socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)?;
-            socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0)?;
+    fn unix_sockets_denied() {
+        for ty in [libc::SOCK_STREAM, libc::SOCK_DGRAM] {
+            assert_socket_denied("unix_sockets_denied", libc::AF_UNIX, ty, 0, false);
+        }
+        let pair = || {
             let mut fds = [0; 2];
             // SAFETY: socketpair writes two ints into `fds`.
             cvt(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) })
-        })
-        .unwrap();
+        };
+        probe(Sb::Off, pair).unwrap();
+        assert_eq!(errno(probe(Sb::On(None), pair)), Some(libc::EACCES));
     }
 
     fn sockaddr_un(path: &[u8]) -> libc::sockaddr_un {
@@ -1490,23 +1339,22 @@ pub(crate) mod tests {
         path.extend_from_slice(name.as_bytes());
         let addr = sockaddr_un(&path);
         let len = 2 + path.len(); // sun_family + the name, no trailing NUL
-        let attempt = move || {
+        // Created before the sandbox (seccomp denies creating any socket):
+        // Landlock's scope still stops the connect.
+        let before = || socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let after = move |s| {
             // SAFETY: as in `connect`, with the abstract address length.
-            unsafe {
-                let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-                cvt(s)?;
-                let r = libc::connect(
+            cvt(unsafe {
+                libc::connect(
                     s,
                     (&addr as *const libc::sockaddr_un).cast(),
                     len as libc::socklen_t,
-                );
-                let err = io::Error::last_os_error();
-                libc::close(s);
-                if r == -1 { Err(err) } else { Ok(()) }
-            }
+                )
+            })
         };
-        probe(Sb::Off, attempt).unwrap();
-        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EPERM));
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EPERM));
     }
 
     #[test]
@@ -1523,9 +1371,12 @@ pub(crate) mod tests {
         let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
         bytes.push(0);
         let addr = sockaddr_un(&bytes);
-        let attempt = move || connect(libc::AF_UNIX, libc::SOCK_STREAM, &addr);
-        probe(Sb::Off, attempt).unwrap();
-        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EACCES));
+        // Created before the sandbox, as above.
+        let before = || socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let after = move |s| addr_call(libc::connect, s, &addr);
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
     }
 
     #[test]
@@ -1988,14 +1839,15 @@ pub(crate) mod tests {
             assert_eq!(errno(r), Some(libc::EPERM), "flag ioctl {which}");
         }
         assert!(!nodump_set(&input));
-        // Other ioctls stay allowed.
+        // The query ioctls stay allowed (every other one, FS_IOC_GETFLAGS
+        // too, is denied: see the hardening tests).
         probe(Sb::On(rs.as_ref()), move || {
             // SAFETY: open reads the NUL-terminated path.
             let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             cvt(fd)?;
-            let mut f: libc::c_long = 0;
-            // SAFETY: FS_IOC_GETFLAGS writes one long into `f`.
-            cvt(unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS, &mut f) })
+            let mut n: libc::c_int = 0;
+            // SAFETY: FIONREAD writes one int into `n`.
+            cvt(unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) })
         })
         .unwrap();
     }

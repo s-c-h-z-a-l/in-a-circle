@@ -732,10 +732,6 @@ fn sandbox_blocks_write_outside() {
 
 #[test]
 fn sandbox_blocks_network() {
-    if !cfg!(target_arch = "x86_64") {
-        eprintln!("sandbox_blocks_network: skipped, seccomp filter is x86_64 only");
-        return;
-    }
     let e = Env::new("network");
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.set_nonblocking(true).unwrap();
@@ -751,6 +747,51 @@ fn sandbox_blocks_network() {
         l.accept().map(|_| ()).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+/// Unix sockets, pathname and abstract, and socket pairs: the listeners
+/// take a connection from this (unsandboxed) process, the action gets
+/// EACCES from seccomp for each, with or without Landlock.
+#[test]
+fn sandbox_blocks_unix_sockets() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let e = Env::new("unix");
+    let path = e.root.join("listener.sock");
+    let named = UnixListener::bind(&path).unwrap();
+    let name = format!("inacircle-cli-test-{}", std::process::id());
+    let sa = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let abstract_ = UnixListener::bind_addr(&sa).unwrap();
+    // Control: both listeners work.
+    UnixStream::connect(&path).unwrap();
+    UnixStream::connect_addr(&sa).unwrap();
+    named.accept().unwrap();
+    abstract_.accept().unwrap();
+    named.set_nonblocking(true).unwrap();
+    abstract_.set_nonblocking(true).unwrap();
+    for (i, opt) in [
+        format!("unix_connect={}", path.display()),
+        format!("unix_connect=@{name}"),
+        "socketpair=stream".to_owned(),
+        "socketpair=dgram".to_owned(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let t = e.test_input(&format!("t{i}.test"), &[opt]);
+        let o = run_test_action(&e, &[&t]);
+        assert_eq!(o.code, Some(1), "{opt}: {}{}", o.stdout, o.stderr);
+        let f = o.pairs("fail");
+        assert_eq!(f.len(), 1, "{opt}: {}", o.stdout);
+        assert!(f[0].1.contains("os error 13"), "{opt}: {}", f[0].1);
+        assert!(o.pairs("warn").iter().all(|(_, m)| m != "connected"));
+    }
+    for l in [&named, &abstract_] {
+        assert_eq!(
+            l.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[test]

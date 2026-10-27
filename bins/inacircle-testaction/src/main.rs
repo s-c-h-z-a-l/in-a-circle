@@ -12,9 +12,9 @@
 //!
 //! A step that fails (a `fail` event from an I/O error, not `events=fail`)
 //! ends the run at once with exit 1, regardless of a later `exit=`. The one
-//! exceptions are `write_outside` and `connect`: they emit `fail` and the run
-//! continues (exit 0 or the `exit=` value), so a sandbox test can observe the
-//! denial.
+//! exceptions are `write_outside`, `connect`, `unix_connect` and
+//! `socketpair`: they emit `fail` and the run continues (exit 0 or the
+//! `exit=` value), so a sandbox test can observe the denial.
 //!
 //! - `events=<list>`: comma-separated `progress:<f>`, `done`, `skip`,
 //!   `fail`, `warn`. `done` writes the output via `output_path` first.
@@ -36,10 +36,17 @@
 //!   aborts: the expected over-cap behavior.
 //! - `connect=<ipv4>:<port>`: a TCP connect (2 s timeout); `warn … connected`
 //!   on success, `fail … <error with errno>` otherwise.
+//! - `unix_connect=<path>`: a unix stream connect to that pathname socket,
+//!   or to the abstract socket `<name>` when written `@<name>`; reported
+//!   like `connect`.
+//! - `socketpair=stream|dgram`: a unix socket pair of that type; reported
+//!   like `connect`.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::net::{SocketAddrV4, TcpStream};
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -69,6 +76,8 @@ enum Step {
     BadDone(PathBuf),
     KillSelf(libc::c_int),
     Connect(SocketAddrV4),
+    UnixConnect(String),
+    SocketPair(bool),
     Threads(usize),
     Alloc(u64),
 }
@@ -120,6 +129,12 @@ fn parse_step(key: &str, value: &str) -> Result<Step, String> {
             .parse()
             .map(Step::Connect)
             .map_err(|_| num("address (ipv4:port)")),
+        "unix_connect" => Ok(Step::UnixConnect(value.to_owned())),
+        "socketpair" => match value {
+            "stream" => Ok(Step::SocketPair(true)),
+            "dgram" => Ok(Step::SocketPair(false)),
+            _ => Err(num("socket type (stream|dgram)")),
+        },
         "threads" => match value.parse() {
             Ok(n @ 1..=256) => Ok(Step::Threads(n)),
             _ => Err(num("thread count (1-256)")),
@@ -198,6 +213,14 @@ fn input_opts(input: &Path) -> Vec<String> {
     }
 }
 
+/// `warn … connected` or `fail … <error with errno>`; the run goes on.
+fn report_connect(ev: &mut Events<io::Stdout>, input: &Path, r: io::Result<()>) {
+    match r {
+        Ok(()) => ev.warn(input, "connected"),
+        Err(e) => ev.fail(input, &e.to_string()),
+    }
+}
+
 fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
     let input = &inv.inputs[0];
     let mut ev = Events::new(io::stdout());
@@ -269,10 +292,24 @@ fn run(inv: &Invocation, steps: Vec<Step>) -> u8 {
                 threads = 1;
             }
             Step::Connect(addr) => {
-                match TcpStream::connect_timeout(&addr.into(), Duration::from_secs(2)) {
-                    Ok(_) => ev.warn(input, "connected"),
-                    Err(e) => ev.fail(input, &e.to_string()),
-                }
+                let r = TcpStream::connect_timeout(&addr.into(), Duration::from_secs(2));
+                report_connect(&mut ev, input, r.map(drop));
+            }
+            Step::UnixConnect(target) => {
+                let r = match target.strip_prefix('@') {
+                    Some(name) => SocketAddr::from_abstract_name(name.as_bytes())
+                        .and_then(|a| UnixStream::connect_addr(&a)),
+                    None => UnixStream::connect(&target),
+                };
+                report_connect(&mut ev, input, r.map(drop));
+            }
+            Step::SocketPair(stream) => {
+                let r = if stream {
+                    UnixStream::pair().map(drop)
+                } else {
+                    UnixDatagram::pair().map(drop)
+                };
+                report_connect(&mut ev, input, r);
             }
         }
     }
