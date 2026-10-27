@@ -149,14 +149,18 @@ impl StateDir {
         self.fd.as_raw_fd()
     }
 
-    /// Opens `name` in the folder (never through a symlink): a regular file
-    /// owned by this user.
+    /// Opens `name` in the folder (never through a symlink, never blocking):
+    /// a regular file owned by this user.
     pub(crate) fn open_file(
         &self,
         name: &str,
         flags: libc::c_int,
         mode: libc::mode_t,
     ) -> io::Result<File> {
+        // O_NONBLOCK: a FIFO planted at the name must not block the open
+        // (a read-only open of one waits for a writer, for ever); it has no
+        // effect on a regular file, and the type is checked right after.
+        let flags = flags | libc::O_NONBLOCK;
         let fd = open_at(self.raw(), &c_name(name.as_bytes())?, flags, mode)?;
         let st = fstat(fd.as_raw_fd())?;
         if st.st_mode & libc::S_IFMT != libc::S_IFREG {
@@ -2451,6 +2455,31 @@ mod tests {
             }
         });
         println!("ran case");
+    }
+
+    // ---- read-only opens never block ----
+
+    /// A FIFO planted at the name of a registry entry or of an archive is
+    /// not opened for reading (it would block for ever): the entry is
+    /// skipped, the archive is "not there".
+    #[test]
+    fn a_fifo_in_place_of_a_registry_entry_or_archive_does_not_block() {
+        use crate::sys::tests::{mkfifo, within};
+        let t = Tmp::new("fifo");
+        t.env(|| {
+            let job = JobId("10-3".into());
+            let running = Running::start(&job, "convert", 1);
+            mkfifo(&jobs_dir().unwrap().join("planted"));
+            let jobs = within(5, list_running);
+            assert_eq!(jobs.len(), 1, "{jobs:?}");
+            drop(running);
+
+            let rec = Recorder::open(&new_job_id(), "a");
+            rec.finish(true);
+            mkfifo(&history_dir().unwrap().join("history.v0"));
+            let e = within(5, || undo(&JobId("1-1".into())).unwrap_err());
+            assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+        });
     }
 
     // ---- private state files ----

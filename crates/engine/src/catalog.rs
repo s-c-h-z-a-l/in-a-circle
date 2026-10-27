@@ -586,15 +586,16 @@ fn read_some(fd: RawFd, out: &mut Vec<u8>) -> Result<bool, Fail> {
     Ok(true)
 }
 
-/// The cache, never read through a symlink at its name.
+/// The cache, read through its folder's descriptor: never through a
+/// symlink, never blocking on a FIFO, only a regular file of this user.
+/// Anything else is no cache.
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
+    let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
     let mut bytes = Vec::new();
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+    crate::journal::StateDir::open(dir)
+        .ok()?
+        .open_file(name, libc::O_RDONLY, 0)
         .ok()?
         .read_to_end(&mut bytes)
         .ok()?;
@@ -972,6 +973,25 @@ pub(crate) mod tests {
         assert!(m.file_type().is_file());
         assert_eq!(m.mode() & 0o777, 0o600);
         assert!(read_cache(&cache).is_some());
+    }
+
+    /// A FIFO at the cache's name must not block the wheel's read (a full
+    /// screen overlay waiting on it would lock the desktop): no cache, and
+    /// a full load still builds the catalog.
+    #[test]
+    fn a_fifo_in_place_of_the_cache_does_not_block() {
+        use crate::sys::tests::{mkfifo, within};
+        let f = Fix::new("cache-fifo");
+        let d = f.dir("actions");
+        manifest_script(&d.join("inacircle-one"), &[act("one.a", "A")]);
+        let cache = f.cache();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        mkfifo(&cache);
+        let (dirs, c2) = (vec![(d, true)], cache.clone());
+        assert!(within(5, move || Catalog::load_cached_from(&dirs, &c2)).is_none());
+        let dirs = vec![(f.root.join("actions"), true)];
+        let c = within(20, move || Catalog::load_from(&dirs, &cache));
+        assert_eq!(c.actions.len(), 1);
     }
 
     const CACHE_OK: &str = "inacircle-catalog 0\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes\n";

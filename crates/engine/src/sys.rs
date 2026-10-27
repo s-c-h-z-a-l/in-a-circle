@@ -65,3 +65,32 @@ pub(crate) fn open_at(
 pub(crate) fn ident(st: &libc::stat) -> (u64, u64) {
     (st.st_dev as u64, st.st_ino as u64)
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Makes a FIFO at `path`.
+    pub(crate) fn mkfifo(path: &Path) {
+        let c = super::c_name(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).unwrap();
+        // SAFETY: c is NUL-terminated.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    /// Runs `f` on a thread and fails the test if it does not return in
+    /// `secs`: the check for "never blocks on a FIFO". (A blocked thread is
+    /// left behind; the test process ends anyway.)
+    pub(crate) fn within<R: Send + 'static>(
+        secs: u64,
+        f: impl FnOnce() -> R + Send + 'static,
+    ) -> R {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(secs))
+            .expect("blocked: no result in time")
+    }
+}
