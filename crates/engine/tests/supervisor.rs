@@ -1076,3 +1076,131 @@ fn descendant_reaped_on_cancel() {
     assert!(took < Duration::from_secs(2), "{took:?}");
     assert!(t.work_dirs_left().is_empty());
 }
+
+/// A descendant that hops pids: each process forks the next and exits,
+/// so at any moment one or two are alive and none for long. The group is
+/// stopped before it is scanned, so the chain cannot step past the scan:
+/// the input fails, nothing is placed, no hop survives. The chain proves
+/// it ran by its first process's warning.
+#[test]
+fn descendant_fork_chain_is_caught() {
+    let t = Tmp::new("desc-hop");
+    let a = t.input("a.txt", "a");
+    let token = format!("44.{}{}", std::process::id(), line!());
+    let bin = t.script_in(
+        "/bin/bash",
+        "hop",
+        &format!(
+            "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
+             bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; hop() {{ ( hop ) & exit 0; }}; hop' {token} \"$in\" &\n\
+             sleep 0.1\n\
+             echo x > \"$work/0/a.md\"\n\
+             printf 'done\\t%s\\t0/a.md\\n' \"$in\""
+        ),
+    );
+    let act = action(&bin, "md");
+    let mut w = Watch::new(&token);
+    run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    assert!(
+        w.ran
+            .outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Warned { message, .. } if message == "hop")),
+        "the chain never ran: {:?}",
+        w.ran.outcomes
+    );
+    assert_eq!(
+        failed(&w.ran),
+        [(a.clone(), "action left processes behind".to_owned())]
+    );
+    assert!(!a.with_extension("md").exists(), "an output was placed");
+    // Give a hop that escaped the kill time to show itself.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// Cancels from inside the run, as the action reports its result and
+/// exits, so the cancel and the exit reach the supervisor in the same
+/// wake. The cancel wins: nothing is placed.
+#[test]
+fn cancel_in_the_same_wake_as_the_exit_is_kept() {
+    struct CancelAtStart(common::Ran);
+    impl Observer for CancelAtStart {
+        fn event(&mut self, o: &Outcome) {
+            self.0.event(o);
+        }
+        fn dir(&mut self, path: &std::path::Path) {
+            self.0.dir(path);
+        }
+        fn progress(&mut self, d: usize, t: usize, f: f32) {
+            self.0.progress(d, t, f);
+        }
+        fn started(&mut self, _pid: u32) {
+            // Give the action time to exit after its line, so its pidfd
+            // is ready together with the signalfd.
+            std::thread::sleep(Duration::from_millis(50));
+            // SAFETY: SIGTERM to this (the supervisor's) thread, where the
+            // cancel token blocks it: it only becomes readable on the
+            // token's signalfd.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        }
+    }
+    let t = Tmp::new("cancel-exit");
+    let a = t.input("a.txt", "a");
+    let bin = t.script(
+        "quick",
+        "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
+         printf 'progress\\t0.5\\ndone\\t%s\\t0/a.md\\n' \"$in\"",
+    );
+    let act = action(&bin, "md");
+    let mut obs = CancelAtStart(common::Ran::default());
+    run_with(&[&act], std::slice::from_ref(&a), &mut obs);
+    assert_eq!(failed(&obs.0), [(a.clone(), "cancelled".to_owned())]);
+    assert!(!a.with_extension("md").exists(), "an output was placed");
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// A contract violation gets the group our SIGTERM; a descendant that
+/// ignores it is still alive at the leader's exit. Nothing is placed,
+/// but the reason stays the violation, not "left processes behind". The
+/// descendant proves it ran by its marker file, relayed by the leader.
+#[test]
+fn violation_keeps_its_reason_over_a_surviving_descendant() {
+    let t = Tmp::new("viol-bg");
+    let a = t.input("a.txt", "a");
+    let token = format!("45.{}{}", std::process::id(), line!());
+    let bin = t.script_in(
+        "/bin/bash",
+        "viol",
+        &format!(
+            "work=$4; in=$(head -n1 \"$6\")\n\
+             (trap '' TERM; : > \"$work/up\"; exec sleep {token}) &\n\
+             while [ ! -e \"$work/up\" ]; do sleep 0.01; done\n\
+             printf 'warn\\t%s\\tbg up\\n' \"$in\"\n\
+             printf 'bogus\\n'\n\
+             sleep {token}"
+        ),
+    );
+    let act = action(&bin, "md");
+    let mut w = Watch::new(&token);
+    // Ends a broken fixture instead of hanging.
+    w.cancel_at = Some(std::time::Instant::now() + Duration::from_secs(10));
+    let took = run_with(&[&act], std::slice::from_ref(&a), &mut w);
+    assert!(
+        w.ran
+            .outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Warned { message, .. } if message == "bg up")),
+        "the descendant never ran: {:?}",
+        w.ran.outcomes
+    );
+    let f = failed(&w.ran);
+    assert!(
+        matches!(&f[..], [(_, r)] if r.starts_with("contract violation: ")),
+        "{f:?}"
+    );
+    assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(t.work_dirs_left().is_empty());
+}

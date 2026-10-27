@@ -1197,15 +1197,31 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
 
 /// Whether process group `pgid` has a live member other than its leader
 /// (`pgid` itself), read from `/proc`. Called while the leader is
-/// unreaped: it pins the id, so every process found in the group is the
-/// action's, never an unrelated one with a reused id. A member counts as
-/// live unless it has exited (zombie or dead, every thread of it): a
-/// zombie can no longer write. `Err` when `/proc` cannot be read; the
-/// caller then cannot tell and must not accept.
+/// unreaped and the group stopped (see [`freeze_and_scan`]): the leader
+/// pins the id, so every process found in the group is the action's,
+/// never an unrelated one with a reused id. A member counts as live unless
+/// it has exited (zombie or dead, every thread of it): a zombie can no
+/// longer write.
+///
+/// Fails closed: `Err` when the answer cannot be trusted, and the caller
+/// must then not accept. Only an entry that vanished meanwhile (`ENOENT`,
+/// `ESRCH`, or an empty read) is skipped; any other error is returned.
+/// The leader itself must be found, as a zombie leading `pgid`: otherwise
+/// this `/proc` shows another pid namespace (a container's or sandbox's
+/// own mount), where our pids mean other processes or nothing.
 pub(crate) fn group_has_live_member(pgid: libc::pid_t) -> io::Result<bool> {
-    let mut path = String::new();
+    group_has_live_member_in(Path::new("/proc"), pgid)
+}
+
+/// [`group_has_live_member`] over the proc tree at `proc` (a fake one in
+/// tests).
+fn group_has_live_member_in(proc: &Path, pgid: libc::pid_t) -> io::Result<bool> {
+    let vanished =
+        |e: &io::Error| matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH));
     let mut buf = Vec::new();
-    for e in fs::read_dir("/proc")? {
+    let mut live = false;
+    let mut leader_seen = false;
+    for e in fs::read_dir(proc)? {
         let e = e?;
         let Some(pid) = e
             .file_name()
@@ -1214,46 +1230,68 @@ pub(crate) fn group_has_live_member(pgid: libc::pid_t) -> io::Result<bool> {
         else {
             continue;
         };
-        if pid == pgid {
-            continue;
-        }
-        path.clear();
-        use std::fmt::Write as _;
-        let _ = write!(path, "/proc/{pid}/stat");
         buf.clear();
-        // Gone meanwhile: not a member any more.
-        let Ok(mut f) = fs::File::open(&path) else {
-            continue;
-        };
-        if f.read_to_end(&mut buf).is_err() {
-            continue;
+        let read = fs::File::open(e.path().join("stat")).and_then(|mut f| f.read_to_end(&mut buf));
+        match read {
+            Ok(0) => continue,
+            Ok(_) => {}
+            Err(e) if vanished(&e) => continue,
+            Err(e) => return Err(e),
         }
         // `pid (comm) state ppid pgrp ...`; comm may hold spaces and
         // parentheses, so the fields start after the last ')'.
-        let Some(close) = buf.iter().rposition(|&b| b == b')') else {
-            continue;
-        };
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "unexpected /proc/<pid>/stat");
+        let close = buf.iter().rposition(|&b| b == b')').ok_or_else(bad)?;
         let mut fields = buf[close + 1..]
             .split(|&b| b == b' ')
             .filter(|f| !f.is_empty());
         let (Some(state), Some(_ppid), Some(pgrp)) = (fields.next(), fields.next(), fields.next())
         else {
-            continue;
+            return Err(bad());
         };
-        if std::str::from_utf8(pgrp).ok().and_then(|g| g.parse().ok()) != Some(pgid) {
+        let pgrp: libc::pid_t = std::str::from_utf8(pgrp)
+            .ok()
+            .and_then(|g| g.parse().ok())
+            .ok_or_else(bad)?;
+        if pgrp != pgid {
             continue;
         }
-        if !matches!(state, b"Z" | b"X") {
-            return Ok(true);
+        let exited = matches!(state, b"Z" | b"X");
+        if pid == pgid {
+            // The unreaped leader, as the caller left it.
+            leader_seen = exited;
+            continue;
+        }
+        if !exited {
+            live = true;
+            continue;
         }
         // A zombie main thread whose other threads still run.
-        path.clear();
-        let _ = write!(path, "/proc/{pid}/task");
-        if fs::read_dir(&path).is_ok_and(|d| d.count() > 1) {
-            return Ok(true);
+        match fs::read_dir(e.path().join("task")) {
+            Ok(d) => live |= d.count() > 1,
+            Err(e) if vanished(&e) => {}
+            Err(e) => return Err(e),
         }
     }
-    Ok(false)
+    if !leader_seen {
+        return Err(io::Error::other(
+            "the action's leader is not in /proc: another pid namespace",
+        ));
+    }
+    Ok(live)
+}
+
+/// Stops the whole group, then scans it ([`group_has_live_member`]). A
+/// stopped process cannot fork, so no fork chain can hop past the scan's
+/// cursor; a group signal racing a fork reaches the new child too. Only
+/// while the leader `pgid` is unreaped (the id is ours); the caller kills
+/// the group next (SIGKILL ends stopped processes too). True (fail closed)
+/// if the scan cannot be trusted.
+pub(crate) fn freeze_and_scan(pgid: libc::pid_t) -> bool {
+    // SAFETY: kill has no memory preconditions; the unreaped leader keeps
+    // `pgid` the action's group.
+    unsafe { libc::kill(-pgid, libc::SIGSTOP) };
+    group_has_live_member(pgid).unwrap_or(true)
 }
 
 /// Waits, with signal 0 (which delivers nothing), until process group
@@ -1678,11 +1716,16 @@ impl<'a> Supervisor<'a> {
     /// settles every input without a result. Nothing is accepted unless all
     /// of this finishes within `GROUP_GONE`.
     fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
+        // A cancel that came in the same wake as the exit still counts.
+        if self.cancel.is_cancelled() || sink.cancelled {
+            self.cancelled = true;
+        }
         // A descendant still running after the leader's exit fails the
         // process, whatever it reported: once killed it may have been
-        // mid-write to an output. Looked at before the kill, while the
-        // unreaped leader keeps the group id ours. (Moot when cancelled.)
-        let left_behind = !self.cancelled && group_has_live_member(self.pid).unwrap_or(true);
+        // mid-write to an output. Looked at with the group stopped, before
+        // the kill, while the unreaped leader keeps the group id ours.
+        // (Moot when cancelled.)
+        let left_behind = !self.cancelled && freeze_and_scan(self.pid);
         self.signal(libc::SIGKILL);
         let until = Instant::now() + GROUP_GONE;
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
@@ -1726,6 +1769,20 @@ impl<'a> Supervisor<'a> {
             return None;
         }
         if !gone {
+            // After a contract violation the group got our SIGTERM, so a
+            // member still dying is its consequence, not a cause: the
+            // violation stays the reason. Still nothing is placed.
+            if vanished && self.violation.is_some() {
+                if let Some((j, why)) = self.offender.take() {
+                    sink.fail(origin[j], why);
+                }
+                let reason =
+                    unreported_reason(self.violation.as_deref(), end, &self.tail, self.data_limit);
+                for &o in origin {
+                    sink.fail(o, reason.clone());
+                }
+                return None;
+            }
             for &o in origin {
                 sink.fail(o, "action left processes behind".to_owned());
             }
@@ -1789,6 +1846,128 @@ mod tests {
 
     fn violation(r: Result<Event, String>) -> String {
         r.expect_err("expected a contract violation")
+    }
+
+    /// A fake `/proc` for the group scan: `(pid, state, pgrp, tasks)`;
+    /// tasks are the entries of `<pid>/task`.
+    fn fake_proc(t: &Tmp, procs: &[(i32, &str, i32, usize)]) -> PathBuf {
+        let root = t.0.join("proc");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("self")).unwrap();
+        for &(pid, state, pgrp, tasks) in procs {
+            let d = root.join(pid.to_string());
+            fs::create_dir_all(d.join("task")).unwrap();
+            // A comm with a space and a parenthesis, as real ones can have.
+            let stat = format!("{pid} (a b) c) {state} 1 {pgrp} {pgrp} 0 -1 0");
+            fs::write(d.join("stat"), stat).unwrap();
+            for k in 0..tasks {
+                fs::create_dir_all(d.join("task").join((pid + k as i32).to_string())).unwrap();
+            }
+        }
+        root
+    }
+
+    #[test]
+    fn group_scan_sees_live_members_and_not_exited_ones() {
+        let t = Tmp::new("scan-live");
+        let scan = |procs: &[(i32, &str, i32, usize)]| {
+            group_has_live_member_in(&fake_proc(&t, procs), 100).unwrap()
+        };
+        // Only the zombie leader, and a stranger in another group.
+        assert!(!scan(&[(100, "Z", 100, 1), (200, "S", 200, 1)]));
+        let _ = fs::remove_dir_all(t.0.join("proc"));
+        // A running, a stopped and a sleeping member each count.
+        for st in ["R", "T", "S", "D"] {
+            assert!(scan(&[(100, "Z", 100, 1), (101, st, 100, 1)]), "{st}");
+            let _ = fs::remove_dir_all(t.0.join("proc"));
+        }
+        // A zombie member is gone; one whose other threads run is not.
+        assert!(!scan(&[(100, "Z", 100, 1), (101, "Z", 100, 1)]));
+        let _ = fs::remove_dir_all(t.0.join("proc"));
+        assert!(scan(&[(100, "Z", 100, 1), (101, "Z", 100, 2)]));
+    }
+
+    /// An entry gone between the directory read and its `stat` (no file,
+    /// or an empty one) is skipped, not an error.
+    #[test]
+    fn group_scan_skips_vanished_entries() {
+        let t = Tmp::new("scan-vanished");
+        let root = fake_proc(&t, &[(100, "Z", 100, 1)]);
+        fs::create_dir_all(root.join("101")).unwrap();
+        fs::create_dir_all(root.join("102")).unwrap();
+        fs::write(root.join("102/stat"), "").unwrap();
+        assert!(!group_has_live_member_in(&root, 100).unwrap());
+    }
+
+    /// Fails closed: a `/proc` of another pid namespace (the leader is not
+    /// there, or not as our zombie), an unreadable or garbled `stat`.
+    #[test]
+    fn group_scan_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("scan-closed");
+        let err = |procs: &[(i32, &str, i32, usize)]| {
+            let root = fake_proc(&t, procs);
+            let r = group_has_live_member_in(&root, 100);
+            let _ = fs::remove_dir_all(&root);
+            r
+        };
+        assert!(err(&[(1, "S", 1, 1), (7, "S", 7, 1)]).is_err(), "no leader");
+        assert!(err(&[(100, "S", 100, 1)]).is_err(), "leader not a zombie");
+        assert!(
+            err(&[(100, "Z", 55, 1)]).is_err(),
+            "leader of another group"
+        );
+
+        let root = fake_proc(&t, &[(100, "Z", 100, 1)]);
+        fs::create_dir_all(root.join("101")).unwrap();
+        fs::write(root.join("101/stat"), "101 no parenthesis").unwrap();
+        assert!(group_has_live_member_in(&root, 100).is_err(), "garbled");
+        let _ = fs::remove_dir_all(&root);
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("group_scan_fails_closed: root reads a mode-0 file; EACCES case skipped");
+            return;
+        }
+        let root = fake_proc(&t, &[(100, "Z", 100, 1), (101, "S", 100, 1)]);
+        let stat = root.join("101/stat");
+        fs::set_permissions(&stat, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = group_has_live_member_in(&root, 100);
+        assert_eq!(
+            r.unwrap_err().raw_os_error(),
+            Some(libc::EACCES),
+            "unreadable"
+        );
+    }
+
+    /// On the real `/proc`, from a child that leads its own group: a live
+    /// member is seen while the leader is an unreaped zombie, and none
+    /// after the member is gone. Positive control for the fake tree.
+    #[test]
+    fn group_scan_on_the_real_proc() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 & exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id() as libc::pid_t;
+        let pidfd = pidfd_open(pid);
+        assert!(wait_exited(
+            pid,
+            pidfd.as_ref(),
+            Instant::now() + Duration::from_secs(5)
+        ));
+        assert!(group_has_live_member(pid).unwrap(), "the sleep is a member");
+        // SAFETY: the leader is unreaped: the group id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        // Its sleep, reparented, is reaped by init; until then a zombie.
+        let until = Instant::now() + Duration::from_secs(5);
+        while group_has_live_member(pid).unwrap() {
+            assert!(Instant::now() < until, "the sleep did not die");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        leader.wait().unwrap();
     }
 
     #[test]

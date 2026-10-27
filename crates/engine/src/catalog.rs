@@ -512,7 +512,7 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     // A descendant still running after the leader's exit rejects the
     // manifest: its output is not finished. Looked at before the kill,
     // while the unreaped leader keeps the group id ours.
-    let left_behind = result.is_ok() && exec::group_has_live_member(pid).unwrap_or(true);
+    let left_behind = result.is_ok() && exec::freeze_and_scan(pid);
     kill_group(child);
     let until = Instant::now() + exec::GROUP_GONE;
     if !exec::wait_exited(pid, pidfd.as_ref(), until) {
@@ -1078,21 +1078,44 @@ mod tests {
         );
     }
 
-    /// The most processes carrying `token` seen at once, sampled every
+    /// Pids whose command line is exactly `argv`. Exact, not a substring:
+    /// a `bash -c '<script>'` command line carries every token of the
+    /// script, so only the process that runs `argv` itself matches.
+    fn procs_running(argv: &[&str]) -> Vec<u32> {
+        let mut want = Vec::new();
+        for a in argv {
+            want.extend_from_slice(a.as_bytes());
+            want.push(0);
+        }
+        let mut found = Vec::new();
+        for e in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if std::fs::read(e.path().join("cmdline")).is_ok_and(|c| c == want) {
+                found.push(pid);
+            }
+        }
+        found
+    }
+
+    /// Whether a process running exactly `argv` was seen, sampled every
     /// `PERIOD` for `span` on another thread while the load runs: the
-    /// positive control that the fixture's descendants did start.
-    fn max_count(token: &str, span: Duration) -> std::thread::JoinHandle<usize> {
+    /// positive control that a fixture's descendant did start.
+    fn seen_running(argv: &[&str], span: Duration) -> std::thread::JoinHandle<bool> {
         /// Often enough to see processes that live for a second.
-        const PERIOD: Duration = Duration::from_millis(50);
-        let token = token.to_owned();
+        const PERIOD: Duration = Duration::from_millis(20);
+        let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
         std::thread::spawn(move || {
+            let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             let end = Instant::now() + span;
-            let mut most = 0;
             while Instant::now() < end {
-                most = most.max(procs_with(&token).len());
+                if !procs_running(&argv).is_empty() {
+                    return true;
+                }
                 std::thread::sleep(PERIOD);
             }
-            most
+            false
         })
     }
 
@@ -1112,26 +1135,30 @@ mod tests {
         let f = Fix::new("mf-desc");
         let d = f.dir("a");
         let token = format!("51.{}{}", std::process::id(), line!());
+        // The writer's wait: about 1 s, unique to this test, so the sleep
+        // it runs is its own visible proof.
+        let wait = format!("1.0{}{}", std::process::id(), line!());
         let line = |id: &str| act(id, "L").replace('\t', "\\t");
         let (early, lingers, late) = (line("x.early"), line("x.lingers"), line("x.late"));
         let body = format!(
             "{}\n\
              {{ printf '{lingers}\\n'; exec sleep {token} >&- 2>&-; }} &\n\
-             {{ printf '{early}\\n'; sleep 1; printf '{late}\\n'; }} &\n\
+             {{ printf '{early}\\n'; sleep {wait}; printf '{late}\\n'; }} &\n\
              sleep 0.3",
             manifest_body("", &[act("x.a", "A")])
         );
         bash_script(&d.join("one"), &body);
-        let during = max_count(&token, Duration::from_millis(250));
+        let span = Duration::from_millis(500);
+        let lingerer = seen_running(&["sleep", &token], span);
+        let writer = seen_running(&["sleep", &wait], span);
         let c = Catalog::load_from(&[(d, true)], &f.cache());
-        // The sleeper and the writer (bash execs the leader's last
-        // command, `sleep 0.3`, which carries no token).
-        let n = during.join().unwrap();
-        assert!(n >= 2, "the descendants never ran: {n}");
+        assert!(lingerer.join().unwrap(), "the lingering one never ran");
+        assert!(writer.join().unwrap(), "the writer never ran");
         for id in ["x.a", "x.early", "x.lingers", "x.late"] {
             assert!(c.get(id).is_none(), "{id} was taken");
         }
-        let left = procs_with(&token);
+        let mut left = procs_with(&token);
+        left.extend(procs_with(&wait));
         assert!(left.is_empty(), "descendants left alive: {left:?}");
     }
 
@@ -1152,17 +1179,21 @@ mod tests {
         assert!(c.get("x.early").is_some(), "the background job never ran");
     }
 
-    /// A manifest that hangs past its deadline, with a descendant that
-    /// ignores SIGTERM: the group is killed and nothing of it survives.
-    #[test]
-    fn manifest_descendant_reaped_on_timeout() {
-        let f = Fix::new("mf-desc-hang");
+    /// A manifest that hangs past its deadline (`sleep {token}`), with a
+    /// descendant that ignores SIGTERM (`sleep {token}0`, its own argv);
+    /// `with` false leaves the descendant out. Returns whether the
+    /// descendant was seen running and the catalog.
+    fn hang_with_descendant(f: &Fix, token: &str, with: bool) -> (bool, Catalog) {
         let d = f.dir("a");
-        let token = format!("52.{}{}", std::process::id(), line!());
-        // The descendant's command line carries the token too: `exec sleep`.
-        let pre = format!("(trap '' TERM; exec sleep {token}) &\nsleep {token}");
+        let dtoken = format!("{token}0");
+        let bg = if with {
+            format!("(trap '' TERM; exec sleep {dtoken}) &\n")
+        } else {
+            String::new()
+        };
+        let pre = format!("{bg}sleep {token}");
         bash_script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
-        let during = max_count(&token, DEADLINE - Duration::from_millis(500));
+        let seen = seen_running(&["sleep", &dtoken], DEADLINE - Duration::from_millis(500));
         let t = Instant::now();
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(
@@ -1170,13 +1201,32 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
-        // The leader (bash execs its last command, the sleep) and the
-        // descendant.
-        let n = during.join().unwrap();
-        assert!(n >= 2, "the descendant never ran: {n}");
         assert!(c.get("x.a").is_none());
-        let left = procs_with(&token);
-        assert!(left.is_empty(), "descendants left alive: {left:?}");
+        let left = procs_with(token);
+        assert!(left.is_empty(), "left alive: {left:?}");
+        (seen.join().unwrap(), c)
+    }
+
+    /// A manifest that hangs past its deadline, with a descendant that
+    /// ignores SIGTERM: the group is killed and nothing of it survives.
+    /// The descendant is seen by its own exact command line.
+    #[test]
+    fn manifest_descendant_reaped_on_timeout() {
+        let f = Fix::new("mf-desc-hang");
+        let token = format!("52.{}{}", std::process::id(), line!());
+        let (seen, _) = hang_with_descendant(&f, &token, true);
+        assert!(seen, "the descendant never ran");
+    }
+
+    /// The control's own control: without the descendant, the leader and
+    /// its foreground sleep (which carry the token too) are not mistaken
+    /// for it.
+    #[test]
+    fn manifest_timeout_control_needs_the_descendant() {
+        let f = Fix::new("mf-desc-hang-none");
+        let token = format!("53.{}{}", std::process::id(), line!());
+        let (seen, _) = hang_with_descendant(&f, &token, false);
+        assert!(!seen, "a descendant was seen where none runs");
     }
 
     #[test]
