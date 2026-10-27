@@ -102,15 +102,43 @@ fn lossy(p: &Path) -> String {
 }
 
 fn print_outcome(o: &Outcome) {
-    let line = match o {
+    out(&outcome_line(o));
+}
+
+/// The stdout line of an outcome.
+fn outcome_line(o: &Outcome) -> Line {
+    match o {
         Outcome::Done { input, output, .. } => {
             Line::new("done").bare(&lossy(input)).bare(&lossy(output))
         }
         Outcome::Skipped { input, reason } => Line::new("skip").bare(&lossy(input)).bare(reason),
         Outcome::Failed { input, reason } => Line::new("fail").bare(&lossy(input)).bare(reason),
         Outcome::Warned { input, message } => Line::new("warn").bare(&lossy(input)).bare(message),
-    };
-    out(&line);
+        // Published, but not where (or not as) it could be proved: no
+        // invented path, the operation and its anchor instead.
+        Outcome::PublishedUnknown {
+            input,
+            group,
+            location,
+            reason,
+            durability,
+        } => {
+            let a = &location.anchor;
+            let mut l = Line::new("unknown")
+                .bare(&lossy(input))
+                .bare(&notice::unknown_reason(*reason))
+                .pair("group", &format!("{:016x}", group.0))
+                .pair("op", &format!("{:016x}", a.op.0))
+                .pair("parent", &format!("{}:{}", a.parent_dev, a.parent_ino))
+                .pair("object", &format!("{}:{}", a.object_dev, a.object_ino))
+                .pair("leaf", &a.leaf.to_string_lossy())
+                .pair("durability", journal::durability_str(durability));
+            if let Some(p) = &location.path_at_check {
+                l = l.pair("path", &lossy(p));
+            }
+            l
+        }
+    }
 }
 
 /// Absolute against the cwd, `.` components and trailing slashes dropped.
@@ -404,11 +432,14 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     mark("exec");
     // Read now: a cancel after this point stopped nothing.
     let cancelled = cancel.is_cancelled();
-    let tally = rec.finish(sandboxed);
+    let closed = rec.finish(sandboxed);
     drop(running);
     mark("record");
 
-    let (done, skipped, failed) = tally.counts();
+    if let Some(w) = &closed.warning {
+        eprintln!("inacircle: warning: {w}");
+    }
+    let (done, skipped, failed) = closed.tally.counts();
     out(&Line::new("summary")
         .pair("done", &done.to_string())
         .pair("skipped", &skipped.to_string())
@@ -440,7 +471,14 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // Undo click can undo it. The token stays: a signal in the Undo window
     // ends the window, not the process.
     if let Some(n) = notifier {
-        n.finish(&job, sandboxed, (done, skipped, failed), cancelled, &cancel);
+        n.finish(
+            &job,
+            sandboxed,
+            (done, skipped, failed),
+            cancelled,
+            closed.undoable,
+            &cancel,
+        );
     }
     // A cancel that arrived after the run must be consumed here: dropping
     // the token with it pending would kill the process. Inputs it stopped
@@ -900,6 +938,45 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A publication of unknown place is its own line: the input, the
+    /// cause, the operation and anchor, never a `done` with a path.
+    #[test]
+    fn published_unknown_line_names_the_operation_not_a_path() {
+        use engine::exec::{
+            AnchorHint, CheckPoint, Durability, GroupId, LocationEvidence, OperationId,
+            PublicationReason,
+        };
+        let o = Outcome::PublishedUnknown {
+            input: "/in/a.txt".into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                anchor: AnchorHint {
+                    parent_dev: 8,
+                    parent_ino: 9,
+                    object_dev: 8,
+                    object_ino: 10,
+                    leaf: "a".into(),
+                    op: OperationId(2),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Synced,
+        };
+        let l = outcome_line(&o);
+        assert_eq!(l.kind, "unknown");
+        assert_eq!(l.bare_at(0), Some("/in/a.txt"));
+        assert!(l.bare_at(1).unwrap().contains("moved or replaced"));
+        assert_eq!(l.get("op"), Some("0000000000000002"));
+        assert_eq!(l.get("group"), Some("0000000000000001"));
+        assert_eq!(l.get("parent"), Some("8:9"));
+        assert_eq!(l.get("object"), Some("8:10"));
+        assert_eq!(l.get("leaf"), Some("a"));
+        assert_eq!(l.get("durability"), Some("synced"));
+        assert_eq!(l.get("path"), None);
+    }
 
     /// The wheel's choice runs as `inacircle run --notify <preset> <files…>`:
     /// through `cmd_run` itself, whose contract the CLI tests hold.

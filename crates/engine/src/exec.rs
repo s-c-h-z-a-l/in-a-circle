@@ -1,10 +1,10 @@
 //! The executor and supervisor: runs an action route (one or two actions)
 //! over a batch of input files, sandboxed, speaking contract v0
-//! (docs/architecture.md, "Invocation"), and moves the results into place
-//! with the output policy.
+//! (docs/architecture.md, "Invocation"), and publishes the results, one
+//! input at a time, with the output policy.
 //!
 //! Inputs are grouped by their final target folder; each group gets one
-//! work dir inside that folder (so placement is a same-filesystem rename)
+//! work dir inside that folder (the producers' staging)
 //! and one process per route step (`batch=no`: one group per input, run in
 //! turn). Step `k` runs with `--work <work>/step<k>` and reads its inputs
 //! from `<work>/step<k>.inputs`; step 2's inputs are step 1's outputs, so
@@ -18,7 +18,10 @@
 //! taken for a stale one) and, after a SIGTERM, the 5 s grace before
 //! SIGKILL.
 
-pub use crate::output::FileId;
+pub use crate::output::{
+    AnchorHint, CheckPoint, ChildBaseline, DirectoryId, Durability, FileId, GroupId,
+    LocationEvidence, NodeKind, OperationId, OutputGroup, Publication, PublicationReason,
+};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -92,11 +95,23 @@ pub enum Outcome {
         input: PathBuf,
         message: String,
     },
+    /// The input's outputs were published (visible, never removed again),
+    /// but where they are, or that they are still what was made, could
+    /// not be proved: no `Done` with an invented path. Engine-internal:
+    /// the action wire protocol has no such event.
+    PublishedUnknown {
+        input: PathBuf,
+        group: GroupId,
+        location: LocationEvidence,
+        reason: PublicationReason,
+        durability: Durability,
+    },
 }
 
-/// Per input, the strongest outcome so far: done (any output), else failed,
-/// else skipped; an input with only warnings is not counted. One entry per
-/// input, never per outcome.
+/// Per input, the strongest outcome so far: done (any output, or a
+/// publication whose place is unknown: the conversion happened), else
+/// failed, else skipped; an input with only warnings is not counted. One
+/// entry per input, never per outcome.
 #[derive(Debug, Default)]
 pub struct Tally {
     rank: HashMap<PathBuf, u8>,
@@ -105,7 +120,7 @@ pub struct Tally {
 impl Tally {
     pub fn add(&mut self, o: &Outcome) {
         let (input, rank) = match o {
-            Outcome::Done { input, .. } => (input, 3),
+            Outcome::Done { input, .. } | Outcome::PublishedUnknown { input, .. } => (input, 3),
             Outcome::Failed { input, .. } => (input, 2),
             Outcome::Skipped { input, .. } => (input, 1),
             Outcome::Warned { input, .. } => (input, 0),
@@ -138,9 +153,23 @@ pub struct Report {
 pub trait Observer {
     /// Every outcome, as it happens (`Done` once the output is in place).
     fn event(&mut self, o: &Outcome);
-    /// A folder created for several outputs of one input, before their
-    /// `Done` (undo may remove it if empty).
+    /// An input's wrapper folder, before its `Done`s (undo may remove it
+    /// if empty). Called by the default [`Observer::group`] only.
     fn dir(&mut self, path: &Path);
+    /// An input's outputs, complete and fixed in private at `private_path`,
+    /// right before the publishing rename. An error stops this input's
+    /// publication only: nothing of it becomes visible.
+    fn prepare_group(&mut self, _group: &OutputGroup, _private_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    /// An input's group after its commit, before its `Done`s (or its
+    /// `PublishedUnknown`). The default reports the wrapper to
+    /// [`Observer::dir`], only when its place was proved.
+    fn group(&mut self, _group: &OutputGroup, location: &LocationEvidence, _d: &Durability) {
+        if let Some(p) = &location.path_at_check {
+            self.dir(p);
+        }
+    }
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
     /// The first valid action event of a child was read, once per child
@@ -449,6 +478,25 @@ impl<'a> Sink<'a> {
         self.finish(i);
     }
 
+    /// Published, but its place or baseline could not be proved.
+    fn unknown(
+        &mut self,
+        i: usize,
+        p: Publication,
+        location: LocationEvidence,
+        reason: PublicationReason,
+    ) {
+        let input = self.input(i);
+        self.emit(Outcome::PublishedUnknown {
+            input,
+            group: p.group.group,
+            location,
+            reason,
+            durability: p.durability,
+        });
+        self.finish(i);
+    }
+
     fn begin_group(&mut self, span: usize) {
         self.span = span;
         self.step = 0;
@@ -574,7 +622,7 @@ fn run_group(
             return; // cancelled
         };
         if last {
-            place_outputs(action, &step_in, outputs, &dir, target, sink);
+            place_outputs(action, &step_in, outputs, &dir, target, cancel, sink);
             return;
         }
         // Each output was checked when its `done` arrived, but the action
@@ -637,19 +685,24 @@ fn run_group(
     }
 }
 
-/// Moves the last step's outputs to `target`: one output per input with
-/// `place_beneath`, several with `place_many_beneath`. Both resolve the
-/// output from the work dir fd without following symlinks, so even a file
-/// swapped after validation can only be one from inside the work dir.
+/// Publishes the last step's outputs to `target`, one input at a time:
+/// each input's outputs are copied into a fresh private wrapper folder and
+/// made visible by one no-replace rename ([`output::publish_beneath`]), so
+/// an input is either wholly published or not at all, and another input's
+/// failure never takes back a published one. `Done` comes only for files
+/// whose place the postcheck proved; a committed group that cannot be
+/// proved is `PublishedUnknown`, never removed. A cancel is honoured up to
+/// each input's commit.
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
     outputs: Vec<Vec<PathBuf>>,
     dir: &Path,
     target: &Path,
+    cancel: &CancelToken,
     sink: &mut Sink,
 ) {
-    // Outputs per original input, in order; the paths are moved, not copied.
+    // Outputs per original input, in order.
     let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
     for (j, outs) in outputs.into_iter().enumerate() {
         if outs.is_empty() {
@@ -666,32 +719,58 @@ fn place_outputs(
         per[at].1.extend(outs);
     }
     for (o, rels) in per {
+        if sink.is_cancelled(cancel) {
+            sink.fail(o, "cancelled".to_owned());
+            continue;
+        }
         let src = &sink.inputs[o];
         let stem = src
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "output".to_owned());
-        let placed = if rels.len() == 1 {
-            output::place_beneath(dir, &rels[0], target, &stem, &action.ext, None).map(|f| {
-                output::ManyPlaced {
-                    folder: PathBuf::new(),
-                    files: vec![f],
+        let mut cancelled = false;
+        let published = {
+            let mut before = |g: &OutputGroup, private: &Path| -> io::Result<()> {
+                sink.obs.prepare_group(g, private)?;
+                // The last point before the commit: a cancel stops here.
+                if sink.is_cancelled(cancel) {
+                    cancelled = true;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
                 }
-            })
-        } else {
-            output::place_many_beneath(dir, &rels, target, &stem)
+                Ok(())
+            };
+            output::publish_beneath(dir, &rels, target, &stem, &action.ext, &mut before)
         };
-        match placed {
-            Ok(many) => {
-                if !many.folder.as_os_str().is_empty() {
-                    sink.obs.dir(&many.folder);
+        let p = match published {
+            Ok(p) => p,
+            Err(_) if cancelled => {
+                sink.fail(o, "cancelled".to_owned());
+                continue;
+            }
+            Err(e) => {
+                sink.fail(o, format!("cannot publish output: {e}"));
+                continue;
+            }
+        };
+        #[cfg(test)]
+        tests::AFTER_PUBLISH.with_borrow_mut(|f| f.as_mut().map(|f| f(&p)));
+        let checked = output::postcheck(&p);
+        let mut location = p.location.clone();
+        if checked == Err(PublicationReason::AncestorChanged) {
+            location.path_at_check = None;
+        }
+        sink.obs.group(&p.group, &location, &p.durability);
+        match checked {
+            Ok(files) => {
+                if let Durability::Unconfirmed(why) = &p.durability {
+                    sink.warn(o, format!("saved, but not confirmed on disk: {why}"));
                 }
-                for (p, id) in many.files {
-                    sink.placed(o, p, id);
+                for (path, id) in files {
+                    sink.placed(o, path, id);
                 }
             }
-            Err(e) => sink.fail(o, format!("cannot place output: {e}")),
+            Err(reason) => sink.unknown(o, p, location, reason),
         }
     }
 }
@@ -2270,7 +2349,14 @@ pub(crate) mod tests {
         /// the rule and the next step's spawn.
         pub(super) static AFTER_CHECK: std::cell::RefCell<Hook> =
             const { std::cell::RefCell::new(None) };
+        /// Runs in `place_outputs` between an input's commit and its
+        /// postcheck: the window in which a moved ancestor must not turn
+        /// into a `Done` with a wrong path.
+        pub(super) static AFTER_PUBLISH: std::cell::RefCell<PublishHook> =
+            const { std::cell::RefCell::new(None) };
     }
+
+    type PublishHook = Option<Box<dyn FnMut(&Publication)>>;
 
     #[derive(Default)]
     struct Seen(Vec<Outcome>);
@@ -2457,7 +2543,7 @@ pub(crate) mod tests {
         let t = Tmp::new("waitid-err");
         let input = t.0.join("a.txt");
         fs::write(&input, "a\n").unwrap();
-        let out = t.0.join("a.md");
+        let out = t.0.join("a/a.md");
         let bin = t.0.join("copy");
         install_script(&bin, COPY);
         let mut action = script_action(&t, "unused", "exit 1", "md");
@@ -2480,6 +2566,83 @@ pub(crate) mod tests {
         assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
     }
 
+    /// Between an input's commit and its postcheck the folder is moved, or
+    /// a published file edited: the group stays where it is, no `Done`
+    /// with a path that was not proved, one `PublishedUnknown` that counts
+    /// as a conversion (once, however often it is seen), and the observer's
+    /// group callback gets no path for a moved folder.
+    #[test]
+    fn a_change_after_the_commit_is_published_unknown_not_done() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("a_change_after_the_commit_is_published_unknown", 0).is_none() {
+            return;
+        }
+        #[derive(Default)]
+        struct Groups(Seen, Vec<Option<PathBuf>>);
+        impl Observer for Groups {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn group(&mut self, _: &OutputGroup, l: &LocationEvidence, _: &Durability) {
+                self.1.push(l.path_at_check.clone());
+            }
+        }
+        for (change, reason) in [
+            ("move", PublicationReason::AncestorChanged),
+            ("edit", PublicationReason::BaselineChanged),
+        ] {
+            let t = Tmp::new("after-commit");
+            let docs = t.0.join("docs");
+            fs::create_dir(&docs).unwrap();
+            let input = docs.join("a.txt");
+            fs::write(&input, "a\n").unwrap();
+            let bin = t.0.join("copy");
+            install_script(&bin, COPY);
+            let mut action = script_action(&t, "unused", "exit 1", "md");
+            action.bin = bin;
+            let tok = CancelToken::install().unwrap();
+            let (from, to) = (docs.clone(), t.0.join("moved"));
+            AFTER_PUBLISH.set(Some(Box::new(move |_p: &Publication| {
+                if change == "move" {
+                    fs::rename(&from, &to).unwrap();
+                } else {
+                    fs::write(from.join("a/a.md"), "edited").unwrap();
+                }
+            })));
+            let mut seen = Groups::default();
+            run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            AFTER_PUBLISH.set(None);
+            let [
+                Outcome::PublishedUnknown {
+                    input: i,
+                    location,
+                    reason: r,
+                    durability,
+                    ..
+                },
+            ] = &seen.0.0[..]
+            else {
+                panic!("{change}: {:?}", seen.0.0)
+            };
+            assert_eq!((i, *r, durability), (&input, reason, &Durability::Synced));
+            let kept = if change == "move" {
+                assert_eq!(location.path_at_check, None);
+                assert_eq!(seen.1, [None]);
+                t.0.join("moved/a/a.md")
+            } else {
+                assert_eq!(location.path_at_check, Some(docs.join("a")));
+                docs.join("a/a.md")
+            };
+            assert!(kept.exists(), "{change}: the published output is gone");
+            let mut tally = Tally::default();
+            tally.add(&seen.0.0[0]);
+            tally.add(&seen.0.0[0]);
+            assert_eq!(tally.counts(), (1, 0, 0));
+        }
+    }
+
     /// Every action, built-in or a plugin's, runs only behind the whole
     /// sandbox gate; a failure is a refusal of every input (never a
     /// warning and an unconfined run), and the action never starts.
@@ -2493,7 +2656,7 @@ pub(crate) mod tests {
         let t = Tmp::new("gate");
         let input = t.0.join("a.txt");
         fs::write(&input, "a\n").unwrap();
-        let out = t.0.join("a.md");
+        let out = t.0.join("a/a.md");
         for builtin in [true, false] {
             let bin = t.0.join(if builtin { "builtin" } else { "plugin" });
             install_script(&bin, COPY);
@@ -2533,7 +2696,7 @@ pub(crate) mod tests {
             assert!(r.sandboxed);
             assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
             assert_eq!(fs::read_to_string(&out).unwrap(), "a\n");
-            fs::remove_file(&out).unwrap();
+            fs::remove_dir_all(t.0.join("a")).unwrap();
         }
     }
 
@@ -2578,7 +2741,7 @@ pub(crate) mod tests {
                 "{name}: {:?}",
                 seen.0
             );
-            assert!(!t.0.join("a.md").exists(), "{name}: the cached action ran");
+            assert!(!t.0.join("a").exists(), "{name}: the cached action ran");
         }
         // Control: the same cached action runs behind a passing gate.
         let cat = Catalog::load_from(&[(dir, true)], &cache);
@@ -2737,7 +2900,7 @@ pub(crate) mod tests {
                 reason: "sandbox unavailable: Landlock unavailable".to_owned()
             }]
         );
-        assert!(!t.0.join("a.md").exists(), "an action ran unconfined");
+        assert!(!t.0.join("a").exists(), "an action ran unconfined");
         // SAFETY: skips the harness' teardown, which the filter may affect.
         unsafe { libc::_exit(0) };
     }

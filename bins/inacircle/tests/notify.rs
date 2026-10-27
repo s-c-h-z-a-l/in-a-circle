@@ -467,7 +467,7 @@ fn undo_button_removes_the_output() {
     fake.join();
     let n: Vec<Got> = rx.try_iter().collect();
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
-    assert!(!e.files().join("a.md").exists());
+    assert!(!e.files().join("a").exists());
     assert!(e.files().join("a.txt").exists());
     assert_eq!(n.len(), 2);
     assert_eq!(
@@ -496,7 +496,7 @@ fn undo_button_keeps_a_changed_output() {
         Some(&bus_of(&fake)),
         &["run", "--notify", "markdown", "a.txt"],
     );
-    let md = e.files().join("a.md");
+    let md = e.files().join("a/a.md");
     let editor = std::thread::spawn(move || {
         notified_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         fs::write(&md, "edited\n").unwrap();
@@ -508,7 +508,7 @@ fn undo_button_keeps_a_changed_output() {
     let n: Vec<Got> = rx.try_iter().collect();
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
     assert_eq!(
-        fs::read_to_string(e.files().join("a.md")).unwrap(),
+        fs::read_to_string(e.files().join("a/a.md")).unwrap(),
         "edited\n"
     );
     assert_eq!(n.len(), 2);
@@ -532,7 +532,7 @@ fn undo_window_ends_by_closing_the_notice() {
     fake.join();
     let n: Vec<Got> = rx.try_iter().collect();
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
-    assert!(e.files().join("a.md").exists());
+    assert!(e.files().join("a/a.md").exists());
     assert_eq!(n.len(), 2);
     assert_eq!(n[0].actions, ["undo", "Undo"]);
     // Closed, not resent: a resend pops up again on common servers.
@@ -622,7 +622,7 @@ fn late_cancel_click_is_ignored() {
     let n: Vec<Got> = rx.try_iter().collect();
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
     assert!(r.lines("fail").is_empty(), "{}", r.stdout);
-    assert!(e.files().join("a.bin").exists());
+    assert!(e.files().join("a/a.bin").exists());
     assert!(n[0].has_button("cancel"), "no running notice");
     let last = n.last().unwrap();
     assert_eq!(last.summary, "a.bin");
@@ -659,7 +659,7 @@ fn compare(name: &str, bus: &str) -> (Run, Duration) {
     assert_eq!(r.code, p.code, "{}{}", r.stdout, r.stderr);
     assert_eq!(r.lines("summary"), p.lines("summary"));
     assert_eq!(r.lines("done").len(), 1, "{}", r.stdout);
-    assert!(e.files().join("a.md").exists());
+    assert!(e.files().join("a/a.md").exists());
     let late = r.elapsed.saturating_sub(p.elapsed);
     (r, late)
 }
@@ -983,7 +983,7 @@ fn sigterm_in_the_undo_window_keeps_the_exit_code() {
     assert_eq!(n.len(), 2);
     assert_eq!(n[0].actions, ["undo", "Undo"]);
     assert_eq!((n[1].summary.as_str(), n[1].id), (CLOSED, n[0].id));
-    assert!(e.files().join("a.md").exists());
+    assert!(e.files().join("a/a.md").exists());
 }
 
 #[test]

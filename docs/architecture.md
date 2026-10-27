@@ -121,11 +121,12 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
 - argv only, never a shell. The engine decodes `file://` URIs and passes
   local files only. stdin is `/dev/null`, the working directory is the
   temp dir. Very long input lists go through `--inputs-from <file>`.
-- **An action writes only into the temp dir.** The engine moves results to
-  their final names with an atomic `rename`. So the output policy lives in
-  one place, undo knows exactly what was created, no half-written file
-  ever appears in the user's folder, and a broken plugin cannot overwrite
-  anything.
+- **An action writes only into the temp dir.** Once its whole process
+  group is gone, the engine copies each input's results into fresh files
+  of its own and publishes them with one atomic no-replace `rename` (see
+  Output policy). So the output policy lives in one place, undo knows
+  exactly what was created, no half-written file ever appears in the
+  user's folder, and a broken plugin cannot overwrite anything.
 - stdout, one event per line:
 
   ```
@@ -304,10 +305,12 @@ Every action runs sandboxed, set up in the child between `fork` and
   a second, same id) with **Cancel**. The supervisor then waits for Undo
   for ten seconds after completion.
 - The final text is fixed English. One input, one output: the output's file
-  name (plus `Saved to Downloads (source folder is read-only)` when it went
+  name, without its folder (plus `Saved to Downloads (source folder is read-only)` when it went
   there). Several: `<n> done[, <m> skipped][, <k> failed]` and up to three
   problem lines `<input>: <reason>` (failures first), then `… and <r>
-  more`. Nothing finished: `Nothing converted`. Cancelled: `Cancelled`,
+  more`. Nothing finished: `Nothing converted`. An input converted at an
+  unknown place adds `<input>: <cause> (op <id>)` and `<n> not confirmed
+  where it was saved; Undo unavailable.`, and the Undo button is left out. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. A lossy action that produced output starts
   the body with `Formatting was lost.`; a run the sandbox gate refused ends
   it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
@@ -357,18 +360,32 @@ In the engine, in one place:
 2. Same base name, new extension. When the format stays the same, a fixed
    suffix, English and Latin-only by default (`-small`, `-compressed`),
    configurable.
-3. Never overwrite: `name (1).ext`, `name (2).ext`, without asking.
-4. Several outputs from one input go into a folder (`doc/doc-01.png`, …).
+3. Every input gets its own folder, a single output too (`a.txt` gives
+   `a/a.md`; several outputs keep their names, `doc/doc-01.png`, …).
+   Never overwrite: `name (1)/`, `name (2)/`, without asking.
+4. Per input, all or nothing: the outputs are copied into fresh files in a
+   private 0700 staging folder on the target's filesystem (`.inacircle-
+   <random>/`, files 0600), checked (regular files, unchanged while
+   copied, TXT/MD valid UTF-8 up to 32 MiB), synced, and their identity
+   recorded; then the folder is published by one `renameat2`
+   `RENAME_NOREPLACE`. A filesystem without it is refused, with no
+   fallback. Before that commit an error removes only the engine's own
+   staging; after it nothing is removed: a failed sync is reported as
+   unconfirmed, and a folder whose place cannot be proved right after the
+   commit (an ancestor renamed meanwhile) is reported as converted at an
+   unknown place, with its operation id and anchor, never with a guessed
+   path. Other inputs' published results are never taken back.
 5. Extraction: a single top-level folder is extracted as is; loose files go
    into a folder named after the archive.
-6. The temp dir is `.inacircle-<random>` inside the target folder (so the
-   final move is an atomic `rename`), always removed at the end; stale ones
-   from a crash are cleaned by the next run (our pattern only, older than a
-   day).
+6. The temp dir is `.inacircle-<random>` inside the target folder, always
+   removed at the end through the folder's fd (never by a path that may
+   name something else by then); stale ones from a crash are cleaned by
+   the next run (our pattern only, older than a day). An output folder
+   never takes that pattern.
 7. Undo deletes only files we created, and only if unchanged since
    placement (device, inode, size, mtime, ctime); otherwise it keeps them
-   and says why. A folder made for several outputs is removed only if
-   empty afterwards.
+   and says why. An output folder is removed only if empty afterwards. A
+   job with an output at an unknown place is not undoable at all.
 
 ## The wheel
 
@@ -549,9 +566,11 @@ No daemon:
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
   (header `inacircle-history 0`), manifest-style lines, each one `write`
   on an `O_APPEND` descriptor. A job's `dir`, `out` (input, path and the
-  identity taken at placement), `skip` and `fail` lines are appended as
-  they happen, its `job` line (id, time, action, status, sandbox) when it
-  ends, and `undo` once undone. A run that dies midway leaves a valid
+  identity taken at placement), `unknown` (an output published at a place
+  that could not be proved: input, group, operation, cause, durability,
+  anchor), `skip` and `fail` lines are appended as they happen, its `job`
+  line (id, time, action, status, sandbox, and `undo=no` after an
+  `unknown`) when it ends, and `undo` once undone. A run that dies midway leaves a valid
   partial record of what it placed, which undo still finds. Nothing of a
   run is kept in memory per outcome;
 - running jobs: each supervisor registers itself in

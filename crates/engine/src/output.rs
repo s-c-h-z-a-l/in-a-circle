@@ -1,12 +1,13 @@
-//! Output policy: where results go and how they are moved into place
-//! without ever overwriting anything.
+//! Output policy: where results go and how each input's results are
+//! published (fresh copies, one no-replace rename) without ever
+//! overwriting or deleting anything visible.
 
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -18,15 +19,28 @@ const MAX_CONFLICT: u32 = 999;
 const NAME_MAX: usize = 255;
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// A hidden 0700 scratch directory inside the target folder, so the final
-/// move is an atomic rename. Removed recursively on drop.
+/// A hidden 0700 scratch directory inside the target folder (the
+/// producers' staging). Removed recursively on drop, through the target
+/// folder's fd and only while its name is still the directory made here:
+/// a renamed folder still gets its own work dir removed, and a look-alike
+/// at the old path is left alone.
 pub struct WorkDir {
     pub path: PathBuf,
+    parent: Fd,
+    name: CString,
+    id: (u64, u64),
 }
 
 impl Drop for WorkDir {
     fn drop(&mut self) {
-        remove_tree(&self.path);
+        let Ok(dir) = open_dir_for_removal(Some(self.parent.0), &self.name) else {
+            return;
+        };
+        if fstat(dir.0).map(|st| ident(&st)).ok() != Some(self.id) {
+            return;
+        }
+        empty_dir(&dir);
+        unlink_own(self.parent.0, &self.name, self.id, libc::AT_REMOVEDIR);
     }
 }
 
@@ -234,19 +248,36 @@ fn mkdir_mode(path: &Path, mode: libc::mode_t) -> io::Result<()> {
 
 /// Creates `<target>/.inacircle-<16 hex>` with mode 0700.
 pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
+    let parent = open_path(libc::AT_FDCWD, &cstr(target_dir)?, 0)?;
     for _ in 0..16 {
-        let path = target_dir.join(format!("{WORK_PREFIX}{:016x}", random_u64()?));
-        match mkdir_mode(&path, 0o700) {
-            Ok(()) => {
-                // Independent of the umask. The WorkDir guard removes the
-                // directory again if this fails.
-                let dir = WorkDir { path };
-                fs::set_permissions(&dir.path, fs::Permissions::from_mode(0o700))?;
-                return Ok(dir);
+        let name = format!("{WORK_PREFIX}{:016x}", random_u64()?);
+        let path = target_dir.join(&name);
+        let name = CString::new(name).expect("no NUL in a hex name");
+        // SAFETY: name is NUL-terminated; parent is an open dir fd.
+        if unsafe { libc::mkdirat(parent.0, name.as_ptr(), 0o700) } != 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                continue;
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+            return Err(e);
         }
+        let id = ident(&stat_at(At {
+            dir: parent.0,
+            name: &name,
+        })?);
+        // Independent of the umask. The WorkDir guard removes the
+        // directory again if this fails.
+        let dir = WorkDir {
+            path,
+            parent,
+            name,
+            id,
+        };
+        // SAFETY: as above; the name is the directory just made.
+        if unsafe { libc::fchmodat(dir.parent.0, dir.name.as_ptr(), 0o700, 0) } != 0 {
+            return last_err();
+        }
+        return Ok(dir);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -323,8 +354,7 @@ pub fn writable_target(source_dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// A move source or destination: a name relative to a directory fd
-/// (`AT_FDCWD` for a plain path).
+/// A name relative to a directory fd (`AT_FDCWD` for a plain path).
 #[derive(Clone, Copy)]
 struct At<'a> {
     dir: RawFd,
@@ -357,11 +387,126 @@ impl FileId {
     }
 }
 
-/// What `place_many_beneath` made: the fresh folder and the files in it.
+/// The inode type of a published object, kept apart from its mode bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    File,
+    Directory,
+}
+
+/// The identity of an input's wrapper directory, taken while it was still
+/// private. `mode` holds only the permission and special bits; the type is
+/// `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryId {
+    pub dev: u64,
+    pub ino: u64,
+    pub kind: NodeKind,
+    pub uid: u32,
+    pub mode: u32,
+}
+
+/// The baseline of one published child, taken from the final private copy
+/// before publication; never retaken afterwards, so a later edit cannot
+/// become the baseline. `rel` is relative to the wrapper directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManyPlaced {
-    pub folder: PathBuf,
-    pub files: Vec<(PathBuf, FileId)>,
+pub struct ChildBaseline {
+    pub rel: PathBuf,
+    pub file_id: FileId,
+    pub kind: NodeKind,
+    pub uid: u32,
+    pub mode: u32,
+    pub nlink: u64,
+}
+
+/// One input's output group, unique per publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupId(pub u64);
+
+/// The publication operation of a group (the journal intent's id): the
+/// same before the commit and after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OperationId(pub u64);
+
+/// An input's outputs as fixed in private: the wrapper's identity and every
+/// child's baseline. `directory` is the planned target name, history only:
+/// on its own it is no evidence of where the group is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputGroup {
+    pub group: GroupId,
+    pub op: OperationId,
+    pub directory: PathBuf,
+    pub id: DirectoryId,
+    pub children: Vec<ChildBaseline>,
+}
+
+/// Whether the publication is known to be on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Durability {
+    /// Every file, the wrapper and both parents were synced.
+    Synced,
+    /// Visible, but a sync after the commit failed or was impossible.
+    Unconfirmed(String),
+}
+
+/// Where a published object was anchored: its parent's and its own
+/// device/inode, its leaf name and the operation. A hint, not a handle
+/// that can be reopened later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorHint {
+    pub parent_dev: u64,
+    pub parent_ino: u64,
+    pub object_dev: u64,
+    pub object_ino: u64,
+    pub leaf: OsString,
+    pub op: OperationId,
+}
+
+/// The moment a location was checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckPoint {
+    /// Right after the publishing rename and its syncs.
+    PostPublish,
+    /// When a kept object's path was resolved from its fd (undo).
+    PostResolve,
+}
+
+/// What is known about where an object is: a path proved to name it at
+/// `checked_at`, or `None` when that could not be proved. Nothing is
+/// promised about later renames by other programs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationEvidence {
+    pub path_at_check: Option<PathBuf>,
+    pub anchor: AnchorHint,
+    pub checked_at: CheckPoint,
+}
+
+/// A committed publication: visible under its name. Durability and the
+/// location are separate facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    pub group: OutputGroup,
+    pub location: LocationEvidence,
+    pub durability: Durability,
+}
+
+/// Why a committed group cannot be reported as placed files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationReason {
+    /// The checked path no longer reaches the published wrapper (an
+    /// ancestor or the wrapper itself was renamed or replaced).
+    AncestorChanged,
+    /// The wrapper's children no longer match their private baselines.
+    BaselineChanged,
+}
+
+impl PublicationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PublicationReason::AncestorChanged => "AncestorChanged",
+            PublicationReason::BaselineChanged => "BaselineChanged",
+        }
+    }
 }
 
 fn stat_at(at: At) -> io::Result<libc::stat> {
@@ -372,59 +517,28 @@ fn stat_at(at: At) -> io::Result<libc::stat> {
     if r == 0 { Ok(st) } else { last_err() }
 }
 
-/// Fallback for filesystems without `RENAME_NOREPLACE`: `linkat` fails with
-/// `EEXIST` instead of replacing, then the old name is dropped. If that
-/// unlink fails the output is already complete at `to`, so this still
-/// returns `Ok`; the work directory's removal deals with `from`.
-/// Directories cannot be hard-linked and are rejected before linking.
-fn link_then_unlink_at(from: At, to: At) -> io::Result<()> {
-    if stat_at(from)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "filesystem cannot move a directory without replacing",
-        ));
+fn fstat(fd: RawFd) -> io::Result<libc::stat> {
+    // SAFETY: zeroed stat is valid storage; fd is an open fd.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } == 0 {
+        Ok(st)
+    } else {
+        last_err()
     }
-    // SAFETY: both names are NUL-terminated, both dirs open fds or
-    // AT_FDCWD; flags 0 never follows a symlink.
-    if unsafe { libc::linkat(from.dir, from.name.as_ptr(), to.dir, to.name.as_ptr(), 0) } != 0 {
-        return last_err();
-    }
-    // SAFETY: as above.
-    unsafe { libc::unlinkat(from.dir, from.name.as_ptr(), 0) };
-    Ok(())
 }
 
-#[cfg(test)]
-fn link_then_unlink(from: &Path, to: &Path) -> io::Result<()> {
-    let (f, t) = (cstr(from)?, cstr(to)?);
-    let cwd = |name| At {
-        dir: libc::AT_FDCWD,
-        name,
-    };
-    link_then_unlink_at(cwd(&f), cwd(&t))
+/// Device and inode.
+// st_dev/st_ino widths differ between targets.
+#[allow(clippy::unnecessary_cast)]
+fn ident(st: &libc::stat) -> (u64, u64) {
+    (st.st_dev as u64, st.st_ino as u64)
 }
 
-/// No-replace move of `from` to `to`. `AlreadyExists` when `to` is taken.
-/// Neither name's last component is followed if it is a symlink.
-fn move_noreplace(from: At, to: At) -> io::Result<()> {
-    // SAFETY: both names are NUL-terminated and outlive the call; both dirs
-    // are open directory fds or AT_FDCWD.
-    let r = unsafe {
-        libc::renameat2(
-            from.dir,
-            from.name.as_ptr(),
-            to.dir,
-            to.name.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if r == 0 {
-        return Ok(());
-    }
-    let err = io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => link_then_unlink_at(from, to),
-        _ => Err(err),
+fn kind_of(st: &libc::stat) -> Option<NodeKind> {
+    match st.st_mode & libc::S_IFMT {
+        libc::S_IFREG => Some(NodeKind::File),
+        libc::S_IFDIR => Some(NodeKind::Directory),
+        _ => None,
     }
 }
 
@@ -440,10 +554,10 @@ fn check_part(part: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// `<stem><suffix> (n).<ext>` as bytes. The stem is cut (on a UTF-8
-/// boundary) so the whole name fits in `NAME_MAX`.
-fn candidate(dir: &Path, stem: &[u8], suffix: &[u8], ext: &[u8], n: u32) -> io::Result<PathBuf> {
-    let mut tail = suffix.to_vec();
+/// `<stem> (n).<ext>` as bytes. The stem is cut (on a UTF-8 boundary) so
+/// the whole name fits in `NAME_MAX`.
+fn candidate(stem: &[u8], ext: &[u8], n: u32) -> io::Result<CString> {
+    let mut tail = Vec::new();
     if n > 0 {
         tail.extend_from_slice(format!(" ({n})").as_bytes());
     }
@@ -462,171 +576,15 @@ fn candidate(dir: &Path, stem: &[u8], suffix: &[u8], ext: &[u8], n: u32) -> io::
     }
     let mut name = stem[..cut].to_vec();
     name.extend_from_slice(&tail);
-    Ok(dir.join(OsString::from_vec(name)))
-}
-
-/// Moves `from` to `dir/<stem><suffix>.<ext>` (numbered on conflict).
-/// With `dir_fd`, the destination is named relative to that fd (which must
-/// be `dir`), else by its full path.
-fn place_bytes(
-    from: At,
-    dir: &Path,
-    dir_fd: Option<RawFd>,
-    stem: &[u8],
-    ext: &[u8],
-    suffix: &[u8],
-) -> io::Result<PathBuf> {
-    if stem.is_empty() {
-        return Err(invalid("empty output stem"));
-    }
-    check_part(stem)?;
-    check_part(ext)?;
-    check_part(suffix)?;
-    for n in 0..=MAX_CONFLICT {
-        let target = candidate(dir, stem, suffix, ext, n)?;
-        let to = match dir_fd {
-            Some(_) => CString::new(target.file_name().unwrap_or_default().as_bytes())
-                .map_err(|_| invalid("invalid output name"))?,
-            None => cstr(&target)?,
-        };
-        let to_at = At {
-            dir: dir_fd.unwrap_or(libc::AT_FDCWD),
-            name: &to,
-        };
-        match move_noreplace(from, to_at) {
-            Ok(()) => return Ok(target),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no free output name",
-    ))
-}
-
-/// Moves `produced` to `dir/<stem><suffix>.<ext>`; a taken name becomes
-/// `name (1).ext` ... `name (999).ext`. Each candidate is tried with an
-/// atomic no-replace move, so nothing is ever overwritten, even under a race.
-pub fn place(
-    produced: &Path,
-    dir: &Path,
-    stem: &str,
-    ext: &str,
-    suffix: Option<&str>,
-) -> io::Result<PathBuf> {
-    let from = cstr(produced)?;
-    let from = At {
-        dir: libc::AT_FDCWD,
-        name: &from,
-    };
-    place_bytes(
-        from,
-        dir,
-        None,
-        stem.as_bytes(),
-        ext.as_bytes(),
-        suffix.unwrap_or("").as_bytes(),
-    )
+    CString::new(name).map_err(|_| invalid("invalid output name"))
 }
 
 /// Splits at the last dot (a leading dot is part of the stem).
-fn split_name(name: &OsStr) -> (&[u8], &[u8]) {
-    let b = name.as_bytes();
-    match b.iter().rposition(|&c| c == b'.') {
-        Some(i) if i > 0 => (&b[..i], &b[i + 1..]),
-        _ => (b, &[]),
+fn split_name(name: &[u8]) -> (&[u8], &[u8]) {
+    match name.iter().rposition(|&c| c == b'.') {
+        Some(i) if i > 0 => (&name[..i], &name[i + 1..]),
+        _ => (name, &[]),
     }
-}
-
-/// Several outputs from one input: moves them into a fresh `dir/<stem>/`
-/// (a taken folder name becomes `<stem> (1)/` ...), files keep their names.
-/// If one move fails, the files already moved and the folder are removed.
-pub fn place_many(produced: &[PathBuf], dir: &Path, stem: &str) -> io::Result<Vec<PathBuf>> {
-    let placed = place_many_with(produced.len(), dir, stem, false, |i, folder, _| {
-        let p = &produced[i];
-        let name = p.file_name().ok_or_else(|| invalid("output has no name"))?;
-        let (s, e) = split_name(name);
-        let from = cstr(p)?;
-        let from = At {
-            dir: libc::AT_FDCWD,
-            name: &from,
-        };
-        let path = place_bytes(from, folder, None, s, e, b"")?;
-        let name = cstr(&path)?;
-        let st = stat_at(At {
-            dir: libc::AT_FDCWD,
-            name: &name,
-        })?;
-        Ok((path, FileId::from_stat(&st)))
-    })?;
-    Ok(placed.files.into_iter().map(|(p, _)| p).collect())
-}
-
-/// Creates the fresh `dir/<stem>/` folder for `count` outputs and calls
-/// `one(i, folder, folder fd)` for each in turn (the fd is opened only with
-/// `with_fd`). If one fails, the files already moved and the folder are
-/// removed.
-fn place_many_with(
-    count: usize,
-    dir: &Path,
-    stem: &str,
-    with_fd: bool,
-    mut one: impl FnMut(usize, &Path, Option<RawFd>) -> io::Result<(PathBuf, FileId)>,
-) -> io::Result<ManyPlaced> {
-    if count == 0 {
-        return Ok(ManyPlaced {
-            folder: PathBuf::new(),
-            files: Vec::new(),
-        });
-    }
-    if stem.is_empty() {
-        return Err(invalid("empty output stem"));
-    }
-    check_part(stem.as_bytes())?;
-    let mut folder = None;
-    for n in 0..=MAX_CONFLICT {
-        let cand = candidate(dir, stem.as_bytes(), b"", b"", n)?;
-        match mkdir_mode(&cand, 0o777) {
-            Ok(()) => {
-                folder = Some(cand);
-                break;
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    let folder = folder.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::AlreadyExists, "no free output folder name")
-    })?;
-    let folder_fd = if with_fd {
-        match cstr(&folder).and_then(|c| open_path(libc::AT_FDCWD, &c, libc::O_NOFOLLOW)) {
-            Ok(fd) => Some(fd),
-            Err(e) => {
-                let _ = fs::remove_dir(&folder);
-                return Err(e);
-            }
-        }
-    } else {
-        None
-    };
-    let mut placed = Vec::with_capacity(count);
-    for i in 0..count {
-        match one(i, &folder, folder_fd.as_ref().map(|f| f.0)) {
-            Ok(t) => placed.push(t),
-            Err(e) => {
-                for (t, _) in &placed {
-                    let _ = fs::remove_file(t);
-                }
-                let _ = fs::remove_dir(&folder);
-                return Err(e);
-            }
-        }
-    }
-    Ok(ManyPlaced {
-        folder,
-        files: placed,
-    })
 }
 
 /// `openat(at, name, O_PATH | O_DIRECTORY | extra)`.
@@ -696,90 +654,681 @@ pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedF
     Ok(fd)
 }
 
-/// The placed name must still be the regular file we moved (a leaf swapped
-/// for a symlink between the check and the rename would land as a link):
-/// otherwise it is removed again.
-fn check_placed(dir_fd: RawFd, placed: &Path) -> io::Result<FileId> {
-    let name = cstr(Path::new(placed.file_name().unwrap_or_default()))?;
-    let at = At {
-        dir: dir_fd,
-        name: &name,
-    };
-    if let Ok(st) = stat_at(at)
-        && st.st_mode & libc::S_IFMT == libc::S_IFREG
-    {
-        return Ok(FileId::from_stat(&st));
-    }
-    // SAFETY: name is NUL-terminated, dir_fd open.
-    unsafe { libc::unlinkat(dir_fd, name.as_ptr(), 0) };
-    Err(invalid("output changed while being placed"))
+/// Bytes per read and write of an output's copy: few syscalls for outputs
+/// of several MB, and one small heap buffer (well inside the 5 MB PSS
+/// budget). Any value works; this one only sets the syscall count.
+const COPY_CHUNK: usize = 64 * 1024;
+/// The largest TXT/Markdown output published: `document_output_bytes`
+/// (32 MiB) of the hardening parameters, proposed and not frozen. A text
+/// output past it is refused before it is copied, so a runaway converter
+/// cannot fill the user's folder with a text nobody can open.
+const TEXT_OUTPUT_MAX: u64 = 32 << 20;
+/// The wrapper's name inside its private staging folder.
+const WRAPPER: &CStr = c"w";
+
+/// Points of a publication where the tests inject a fault or a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Point {
+    /// After an output's parent is resolved, before the output is opened.
+    Open,
+    /// Before each read of an output during its copy.
+    Copy,
+    /// Before each write of the private copy.
+    Write,
+    SyncChild,
+    SyncWrapper,
+    SyncStaging,
+    /// After `before_commit`, right before the publishing rename.
+    BeforeRename,
+    /// The publishing rename itself (an injected errno replaces it).
+    Rename,
+    /// The staging folder's sync after the commit.
+    SyncStagingAfter,
+    /// The target folder's sync after the commit.
+    SyncParentAfter,
 }
 
-/// Like [`place`], for the file `rel` beneath `root` (a work dir), found
-/// without following any symlink: every directory on the way is opened
-/// with `O_NOFOLLOW` from the one before, the leaf must be a regular file,
-/// and the move is relative to those fds.
-pub fn place_beneath(
+/// A test's fault at `p` (an errno), or its race action; nothing outside
+/// tests.
+#[cfg(test)]
+fn at(p: Point) -> io::Result<()> {
+    match tests::FAULT.with_borrow_mut(|f| f.as_mut().and_then(|f| f(p))) {
+        Some(e) => Err(io::Error::from_raw_os_error(e)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn at(_: Point) -> io::Result<()> {
+    Ok(())
+}
+
+/// `openat(dir, name, flags | O_NOFOLLOW | O_CLOEXEC, mode)`.
+fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<Fd> {
+    // mutants: equivalent — distinct flag bits, so `|` and `^` agree.
+    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    loop {
+        // SAFETY: name is NUL-terminated; dir is an open dir fd or AT_FDCWD.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, libc::c_uint::from(mode)) };
+        if fd >= 0 {
+            return Ok(Fd(fd));
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+fn sync(fd: RawFd, p: Point) -> io::Result<()> {
+    at(p)?;
+    // SAFETY: fd is an open fd.
+    if unsafe { libc::fsync(fd) } == 0 {
+        Ok(())
+    } else {
+        last_err()
+    }
+}
+
+/// `unlinkat(dir, name, flags)` only while `name` is still `id`: what we
+/// made, never a look-alike put in its place. Errors are ignored.
+fn unlink_own(dir: RawFd, name: &CStr, id: (u64, u64), flags: libc::c_int) {
+    let at = At { dir, name };
+    if stat_at(at).is_ok_and(|st| ident(&st) == id) {
+        // SAFETY: dir is an open dir fd, name is NUL-terminated.
+        unsafe { libc::unlinkat(dir, name.as_ptr(), flags) };
+    }
+}
+
+/// A made directory: `mkdirat(dir, name, 0700)`, the mode set regardless of
+/// the umask, opened for reading (the syncs need it) without following a
+/// link, and checked to be ours.
+fn make_private_dir(dir: RawFd, name: &CStr) -> io::Result<(Fd, (u64, u64))> {
+    // SAFETY: name is NUL-terminated; dir is an open dir fd.
+    if unsafe { libc::mkdirat(dir, name.as_ptr(), 0o700) } != 0 {
+        return last_err();
+    }
+    let made = stat_at(At { dir, name }).map(|st| ident(&st));
+    let opened = (|| {
+        // SAFETY: as above; the name is the directory just made.
+        if unsafe { libc::fchmodat(dir, name.as_ptr(), 0o700, 0) } != 0 {
+            return last_err();
+        }
+        let fd = open_at(dir, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let st = fstat(fd.0)?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        if made.as_ref().ok() != Some(&ident(&st)) || st.st_uid != uid {
+            return Err(io::Error::other("private folder changed while being made"));
+        }
+        Ok((fd, ident(&st)))
+    })();
+    if opened.is_err()
+        && let Ok(id) = made
+    {
+        unlink_own(dir, name, id, libc::AT_REMOVEDIR);
+    }
+    opened
+}
+
+/// The private staging of one publication: `<target>/.inacircle-<16 hex>/w`,
+/// both 0700 and ours, on the target's filesystem. Until the commit,
+/// dropping it removes exactly what it made, through its own fds and only
+/// while each name is still the object it made; a crash leaves a name the
+/// stale cleanup knows. Nothing else is ever removed.
+struct Staging<'a> {
+    parent: &'a Fd,
+    name: CString,
+    dir: Fd,
+    id: (u64, u64),
+    wrapper: Option<(Fd, (u64, u64))>,
+    children: Vec<(CString, (u64, u64))>,
+    published: bool,
+}
+
+impl<'a> Staging<'a> {
+    fn new(parent: &'a Fd) -> io::Result<Staging<'a>> {
+        for _ in 0..16 {
+            let name = CString::new(format!("{WORK_PREFIX}{:016x}", random_u64()?))
+                .expect("no NUL in a hex name");
+            match make_private_dir(parent.0, &name) {
+                Ok((dir, id)) => {
+                    let mut s = Staging {
+                        parent,
+                        name,
+                        dir,
+                        id,
+                        wrapper: None,
+                        children: Vec::new(),
+                        published: false,
+                    };
+                    s.wrapper = Some(make_private_dir(s.dir.0, WRAPPER)?);
+                    return Ok(s);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free staging name",
+        ))
+    }
+
+    fn wrapper(&self) -> &(Fd, (u64, u64)) {
+        self.wrapper.as_ref().expect("made in new")
+    }
+
+    /// Removes the (empty) staging folder after the commit.
+    fn remove_empty(&mut self) {
+        unlink_own(self.parent.0, &self.name, self.id, libc::AT_REMOVEDIR);
+    }
+}
+
+impl Drop for Staging<'_> {
+    fn drop(&mut self) {
+        if !self.published
+            && let Some((w, wid)) = &self.wrapper
+        {
+            for (name, id) in &self.children {
+                unlink_own(w.0, name, *id, 0);
+            }
+            unlink_own(self.dir.0, WRAPPER, *wid, libc::AT_REMOVEDIR);
+        }
+        self.remove_empty();
+    }
+}
+
+/// A streaming UTF-8 check: at most 3 bytes of a character cut by a chunk
+/// boundary wait for the next chunk.
+#[derive(Default)]
+struct Utf8 {
+    pending: Vec<u8>,
+}
+
+impl Utf8 {
+    fn feed(&mut self, mut data: &[u8]) -> io::Result<()> {
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "text output is not UTF-8");
+        if let Some(&lead) = self.pending.first() {
+            let width = match lead {
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                _ => 4,
+            };
+            let take = (width - self.pending.len()).min(data.len());
+            self.pending.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.pending.len() < width {
+                return Ok(());
+            }
+            std::str::from_utf8(&self.pending).map_err(|_| bad())?;
+            self.pending.clear();
+        }
+        match std::str::from_utf8(data) {
+            Ok(_) => Ok(()),
+            Err(e) if e.error_len().is_none() => {
+                self.pending.extend_from_slice(&data[e.valid_up_to()..]);
+                Ok(())
+            }
+            Err(_) => Err(bad()),
+        }
+    }
+
+    fn finish(&self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "text output is not UTF-8",
+            ))
+        }
+    }
+}
+
+fn is_text(ext: &[u8]) -> bool {
+    ext.eq_ignore_ascii_case(b"txt") || ext.eq_ignore_ascii_case(b"md")
+}
+
+fn changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "output changed while being copied",
+    )
+}
+
+/// Copies the open regular file `src` into the fresh `dst`, exactly the
+/// size it had when it was opened (a change during the copy refuses it),
+/// checking text as UTF-8. Returns the bytes copied.
+fn copy_checked(src: RawFd, dst: RawFd, text: bool, buf: &mut [u8]) -> io::Result<u64> {
+    let before = fstat(src)?;
+    let size = before.st_size as u64;
+    if text && size > TEXT_OUTPUT_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "text output larger than 32 MiB",
+        ));
+    }
+    let mut utf8 = Utf8::default();
+    let mut copied: u64 = 0;
+    loop {
+        at(Point::Copy)?;
+        // One byte past the size, to see a file that grew.
+        let want = (size - copied + 1).min(buf.len() as u64) as usize;
+        // SAFETY: buf is valid for `want` <= buf.len() bytes; src is open.
+        let n = unsafe { libc::read(src, buf.as_mut_ptr().cast(), want) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n as usize];
+        copied += chunk.len() as u64;
+        if copied > size {
+            return Err(changed());
+        }
+        if text {
+            utf8.feed(chunk)?;
+        }
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            at(Point::Write)?;
+            // SAFETY: rest is valid for its length; dst is open for writing.
+            let w = unsafe { libc::write(dst, rest.as_ptr().cast(), rest.len()) };
+            if w < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if w == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            rest = &rest[w as usize..];
+        }
+    }
+    if text {
+        utf8.finish()?;
+    }
+    let after = fstat(src)?;
+    if copied != size || FileId::from_stat(&after) != FileId::from_stat(&before) {
+        return Err(changed());
+    }
+    Ok(copied)
+}
+
+/// Copies the producer's output `rel` beneath `root` into a fresh file of
+/// the private wrapper (numbered on a clash among this input's outputs),
+/// synced, and takes its baseline from the private copy.
+fn copy_one(
+    staging: &mut Staging,
     root: &Path,
     rel: &Path,
-    dir: &Path,
-    stem: &str,
-    ext: &str,
-    suffix: Option<&str>,
-) -> io::Result<(PathBuf, FileId)> {
+    name: (&[u8], &[u8]),
+    buf: &mut [u8],
+) -> io::Result<ChildBaseline> {
     let (parent, leaf) = resolve_beneath(root, rel)?;
-    let dir_fd = open_path(libc::AT_FDCWD, &cstr(dir)?, 0)?;
-    let from = At {
-        dir: parent.0,
-        name: &leaf,
-    };
-    let placed = place_bytes(
-        from,
-        dir,
-        Some(dir_fd.0),
-        stem.as_bytes(),
-        ext.as_bytes(),
-        suffix.unwrap_or("").as_bytes(),
-    )?;
-    let id = check_placed(dir_fd.0, &placed)?;
-    Ok((placed, id))
+    at(Point::Open)?;
+    // O_NONBLOCK: a FIFO swapped in opens at once (and is refused below).
+    let src = open_at(parent.0, &leaf, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
+    if fstat(src.0)?.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(invalid("output is not a regular file"));
+    }
+    let (stem, ext) = name;
+    check_part(stem)?;
+    check_part(ext)?;
+    let w = staging.wrapper().0.0;
+    let mut made = None;
+    for n in 0..=MAX_CONFLICT {
+        let child = candidate(stem, ext, n)?;
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
+        match open_at(w, &child, flags, 0o600) {
+            Ok(fd) => {
+                made = Some((child, fd));
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let (child, dst) =
+        made.ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free output name"))?;
+    staging
+        .children
+        .push((child.clone(), ident(&fstat(dst.0)?)));
+    // Independent of the umask.
+    // SAFETY: dst is an open fd.
+    if unsafe { libc::fchmod(dst.0, 0o600) } != 0 {
+        return last_err();
+    }
+    let copied = copy_checked(src.0, dst.0, is_text(ext), buf)?;
+    sync(dst.0, Point::SyncChild)?;
+    let st = fstat(dst.0)?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    // st_nlink's width differs between targets.
+    #[allow(clippy::unnecessary_cast)]
+    let nlink = st.st_nlink as u64;
+    if kind_of(&st) != Some(NodeKind::File)
+        || st.st_uid != uid
+        || nlink != 1
+        || st.st_size as u64 != copied
+    {
+        return Err(io::Error::other("private copy changed while being made"));
+    }
+    Ok(ChildBaseline {
+        rel: PathBuf::from(OsStr::from_bytes(child.as_bytes())),
+        file_id: FileId::from_stat(&st),
+        kind: NodeKind::File,
+        uid: st.st_uid,
+        mode: st.st_mode & 0o7777,
+        nlink,
+    })
 }
 
-/// Like [`place_many`], for files beneath `root`, resolved as in
-/// [`place_beneath`]. One file at a time is resolved, checked and moved,
-/// so at most a few fds are open whatever the number of outputs.
-pub fn place_many_beneath(
+fn rename_noreplace(from: At, to: At) -> io::Result<()> {
+    at(Point::Rename)?;
+    // SAFETY: both names are NUL-terminated and outlive the call; both dirs
+    // are open directory fds.
+    let r = unsafe {
+        libc::renameat2(
+            from.dir,
+            from.name.as_ptr(),
+            to.dir,
+            to.name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r == 0 { Ok(()) } else { last_err() }
+}
+
+/// The path that names the published wrapper right now, if it can be
+/// proved: `target` still reaches the folder the commit went into, and
+/// `leaf` in it is the wrapper (never followed if it is a link).
+fn locate(target: &Path, parent: &Fd, leaf: &CStr, object: (u64, u64)) -> Option<PathBuf> {
+    let now = open_path(libc::AT_FDCWD, &cstr(target).ok()?, 0).ok()?;
+    if !same_inode(now.0, parent.0) {
+        return None;
+    }
+    let st = stat_at(At {
+        dir: now.0,
+        name: leaf,
+    })
+    .ok()?;
+    (kind_of(&st) == Some(NodeKind::Directory) && ident(&st) == object)
+        .then(|| target.join(OsStr::from_bytes(leaf.to_bytes())))
+}
+
+/// Publishes one input's outputs, `rels` beneath `root` (the producer's
+/// staging; its whole process group is dead), as one new folder in
+/// `target`: `<stem>/` (numbered on a clash, `<stem> (1)/` ...), holding
+/// `<stem>.<ext>` for a single output, else the outputs under their own
+/// names (numbered on a clash).
+///
+/// The outputs are copied into fresh files of a private 0700 staging
+/// folder on the target's filesystem (a producer's old fd cannot reach
+/// them), validated (regular, unchanged during the copy, TXT/MD as UTF-8
+/// up to 32 MiB), synced, and their baseline taken; then the wrapper, the
+/// staging folder, `before_commit(group, private path)`, and one
+/// `renameat2(RENAME_NOREPLACE)` of the wrapper: the commit. Until it,
+/// any error removes only this publication's own staging and nothing is
+/// visible; a filesystem that cannot rename without replacing is refused
+/// (`Unsupported`), never worked around. After it nothing is removed: a
+/// failed sync is `Durability::Unconfirmed`, and a path that no longer
+/// reaches the wrapper is `path_at_check: None`.
+///
+/// On a name taken between the check and the rename, the next name is
+/// tried and `before_commit` runs again for it (same group and operation).
+pub fn publish_beneath(
     root: &Path,
     rels: &[PathBuf],
-    dir: &Path,
+    target: &Path,
     stem: &str,
-) -> io::Result<ManyPlaced> {
-    place_many_with(rels.len(), dir, stem, true, |i, folder, folder_fd| {
-        let folder_fd = folder_fd.expect("opened with_fd");
-        let (parent, leaf) = resolve_beneath(root, &rels[i])?;
-        let (s, e) = split_name(OsStr::from_bytes(leaf.as_bytes()));
+    ext: &str,
+    before_commit: &mut dyn FnMut(&OutputGroup, &Path) -> io::Result<()>,
+) -> io::Result<Publication> {
+    if rels.is_empty() {
+        return Err(invalid("no outputs"));
+    }
+    if stem.is_empty() {
+        return Err(invalid("empty output stem"));
+    }
+    check_part(stem.as_bytes())?;
+    check_part(ext.as_bytes())?;
+    let group = GroupId(random_u64()?);
+    let op = OperationId(random_u64()?);
+    let parent = open_path(libc::AT_FDCWD, &cstr(target)?, 0)?;
+    // Taken now: after the commit nothing may fail any more.
+    let pst = fstat(parent.0)?;
+    let mut staging = Staging::new(&parent)?;
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let mut children = Vec::with_capacity(rels.len());
+    for rel in rels {
+        let leaf = rel
+            .file_name()
+            .ok_or_else(|| invalid("output has no name"))?;
+        let name = if rels.len() == 1 {
+            (stem.as_bytes(), ext.as_bytes())
+        } else {
+            split_name(leaf.as_bytes())
+        };
+        children.push(copy_one(&mut staging, root, rel, name, &mut buf)?);
+    }
+    drop(buf);
+    let (wrapper, wid) = staging.wrapper();
+    let (wrapper, wid) = (wrapper.0, *wid);
+    sync(wrapper, Point::SyncWrapper)?;
+    let st = fstat(wrapper)?;
+    let id = DirectoryId {
+        dev: ident(&st).0,
+        ino: ident(&st).1,
+        kind: NodeKind::Directory,
+        uid: st.st_uid,
+        mode: st.st_mode & 0o7777,
+    };
+    sync(staging.dir.0, Point::SyncStaging)?;
+    let private = target
+        .join(OsStr::from_bytes(staging.name.as_bytes()))
+        .join(OsStr::from_bytes(WRAPPER.to_bytes()));
+    let mut out = OutputGroup {
+        group,
+        op,
+        directory: PathBuf::new(),
+        id,
+        children,
+    };
+    let mut committed = None;
+    for n in 0..=MAX_CONFLICT {
+        let leaf = candidate(stem.as_bytes(), b"", n)?;
+        // Never a name the stale cleanup would take for its own.
+        if is_our_name(leaf.as_bytes()) {
+            continue;
+        }
+        match stat_at(At {
+            dir: parent.0,
+            name: &leaf,
+        }) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        out.directory = target.join(OsStr::from_bytes(leaf.as_bytes()));
+        before_commit(&out, &private)?;
+        at(Point::BeforeRename)?;
+        if !stat_at(At {
+            dir: staging.dir.0,
+            name: WRAPPER,
+        })
+        .is_ok_and(|st| ident(&st) == wid)
+        {
+            return Err(io::Error::other("private staging changed"));
+        }
         let from = At {
+            dir: staging.dir.0,
+            name: WRAPPER,
+        };
+        let to = At {
             dir: parent.0,
             name: &leaf,
         };
-        let placed = place_bytes(from, folder, Some(folder_fd), s, e, b"")?;
-        let id = check_placed(folder_fd, &placed)?;
-        Ok((placed, id))
+        match rename_noreplace(from, to) {
+            Ok(()) => {
+                committed = Some(leaf);
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EXDEV | libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("the folder's filesystem cannot publish without replacing ({e})"),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let leaf = committed
+        .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free output name"))?;
+    // Committed: visible from here on, and never removed again.
+    staging.published = true;
+    let mut unsynced = Vec::new();
+    if let Err(e) = sync(staging.dir.0, Point::SyncStagingAfter) {
+        unsynced.push(format!("staging folder sync failed: {e}"));
+    }
+    staging.remove_empty();
+    // The target fd is O_PATH (the folder may not be readable); its own
+    // inode is reopened for reading through /proc to be synced.
+    let magic = CString::new(format!("/proc/self/fd/{}", parent.0)).expect("no NUL in a number");
+    // mutants: equivalent — distinct flag bits, so `|` and `^` agree.
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    // SAFETY: magic is NUL-terminated; it names our own open fd (a magic
+    // link, so it is followed: O_NOFOLLOW would refuse it).
+    let fd = unsafe { libc::open(magic.as_ptr(), flags) };
+    let reopened = if fd < 0 { last_err() } else { Ok(Fd(fd)) };
+    match reopened {
+        Ok(fd) if same_inode(fd.0, parent.0) => {
+            if let Err(e) = sync(fd.0, Point::SyncParentAfter) {
+                unsynced.push(format!("folder sync failed: {e}"));
+            }
+        }
+        Ok(_) => unsynced.push("folder changed while being synced".to_owned()),
+        Err(e) => unsynced.push(format!("cannot open the folder to sync it: {e}")),
+    }
+    let durability = if unsynced.is_empty() {
+        Durability::Synced
+    } else {
+        Durability::Unconfirmed(unsynced.join("; "))
+    };
+    let anchor = AnchorHint {
+        parent_dev: ident(&pst).0,
+        parent_ino: ident(&pst).1,
+        object_dev: id.dev,
+        object_ino: id.ino,
+        leaf: OsStr::from_bytes(leaf.as_bytes()).to_owned(),
+        op,
+    };
+    Ok(Publication {
+        location: LocationEvidence {
+            path_at_check: locate(target, &parent, &leaf, (id.dev, id.ino)),
+            anchor,
+            checked_at: CheckPoint::PostPublish,
+        },
+        group: out,
+        durability,
     })
+}
+
+/// The check before any `Done`: the publication's proved path still
+/// reaches its wrapper (the same folder, the same wrapper inode), and the
+/// wrapper holds exactly its children, each still matching its private
+/// baseline. Returns each child's path and baseline identity.
+pub fn postcheck(p: &Publication) -> Result<Vec<(PathBuf, FileId)>, PublicationReason> {
+    use PublicationReason::{AncestorChanged, BaselineChanged};
+    let path = p.location.path_at_check.as_ref().ok_or(AncestorChanged)?;
+    let (Some(dir), Some(leaf)) = (path.parent(), path.file_name()) else {
+        return Err(AncestorChanged);
+    };
+    let a = &p.location.anchor;
+    let parent = cstr(dir)
+        .and_then(|c| open_path(libc::AT_FDCWD, &c, 0))
+        .map_err(|_| AncestorChanged)?;
+    let leaf = cstr(Path::new(leaf)).map_err(|_| AncestorChanged)?;
+    let st = stat_at(At {
+        dir: parent.0,
+        name: &leaf,
+    })
+    .map_err(|_| AncestorChanged)?;
+    let pst = fstat(parent.0).map_err(|_| AncestorChanged)?;
+    if ident(&pst) != (a.parent_dev, a.parent_ino) || ident(&st) != (a.object_dev, a.object_ino) {
+        return Err(AncestorChanged);
+    }
+    let g = &p.group;
+    let w = open_at(parent.0, &leaf, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+        .map_err(|_| BaselineChanged)?;
+    let wst = fstat(w.0).map_err(|_| BaselineChanged)?;
+    let now = DirectoryId {
+        dev: ident(&wst).0,
+        ino: ident(&wst).1,
+        kind: kind_of(&wst).ok_or(BaselineChanged)?,
+        uid: wst.st_uid,
+        mode: wst.st_mode & 0o7777,
+    };
+    if now != g.id || list_dir(&w).len() != g.children.len() {
+        return Err(BaselineChanged);
+    }
+    let mut files = Vec::with_capacity(g.children.len());
+    for c in &g.children {
+        let name = cstr(&c.rel).map_err(|_| BaselineChanged)?;
+        let st = stat_at(At {
+            dir: w.0,
+            name: &name,
+        })
+        .map_err(|_| BaselineChanged)?;
+        // st_nlink's width differs between targets.
+        #[allow(clippy::unnecessary_cast)]
+        let same = kind_of(&st) == Some(c.kind)
+            && st.st_uid == c.uid
+            && st.st_mode & 0o7777 == c.mode
+            && st.st_nlink as u64 == c.nlink
+            && FileId::from_stat(&st) == c.file_id;
+        if !same {
+            return Err(BaselineChanged);
+        }
+        files.push((path.join(&c.rel), c.file_id));
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::xdg::tests::with_env;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     type Hook = Option<Box<dyn FnMut()>>;
+
+    type Fault = Option<Box<dyn FnMut(Point) -> Option<i32>>>;
 
     thread_local! {
         /// Runs in `open_dir_for_removal` right after the `O_PATH` open:
         /// the window in which a swap of the name must not matter.
         pub(super) static AFTER_OPATH: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+        /// Called at each publication [`Point`]: an errno to inject there,
+        /// or `None` (after any race the test stages).
+        pub(super) static FAULT: std::cell::RefCell<Fault> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -806,252 +1355,6 @@ pub(crate) mod tests {
         let p = dir.join(name);
         fs::write(&p, body).unwrap();
         p
-    }
-
-    #[test]
-    fn places_next_to_source() {
-        let t = Tmp::new("next");
-        let src = file(&t.0, "tmp.bin", "x");
-        let out = place(&src, &t.0, "a", "md", None).unwrap();
-        assert_eq!(out, t.0.join("a.md"));
-        assert!(!src.exists());
-        assert_eq!(fs::read_to_string(out).unwrap(), "x");
-    }
-
-    #[test]
-    fn conflict_numbering() {
-        let t = Tmp::new("num");
-        file(&t.0, "a.md", "orig");
-        let s1 = file(&t.0, "p1", "one");
-        let s2 = file(&t.0, "p2", "two");
-        assert_eq!(
-            place(&s1, &t.0, "a", "md", None).unwrap(),
-            t.0.join("a (1).md")
-        );
-        assert_eq!(
-            place(&s2, &t.0, "a", "md", None).unwrap(),
-            t.0.join("a (2).md")
-        );
-        assert_eq!(fs::read_to_string(t.0.join("a.md")).unwrap(), "orig");
-        assert_eq!(fs::read_to_string(t.0.join("a (1).md")).unwrap(), "one");
-    }
-
-    #[test]
-    fn fails_after_999() {
-        let t = Tmp::new("max");
-        file(&t.0, "a.md", "o");
-        for n in 1..=999 {
-            file(&t.0, &format!("a ({n}).md"), "o");
-        }
-        let s = file(&t.0, "p", "new");
-        assert!(place(&s, &t.0, "a", "md", None).is_err());
-        assert!(s.exists());
-        assert_eq!(fs::read_to_string(t.0.join("a (999).md")).unwrap(), "o");
-    }
-
-    #[test]
-    fn never_overwrites_under_race() {
-        for round in 0..50 {
-            let t = Tmp::new("race");
-            let src = file(&t.0, "p", "mine");
-            let dir = t.0.clone();
-            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (s2, d2) = (stop.clone(), dir.clone());
-            // Creates the first names as fast as it can, racing the move.
-            let h = std::thread::spawn(move || {
-                let mut n = 0;
-                while !s2.load(Ordering::Relaxed) && n < 3 {
-                    let name = if n == 0 {
-                        "a.md".into()
-                    } else {
-                        format!("a ({n}).md")
-                    };
-                    let _ = fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(d2.join(name))
-                        .map(|mut f| std::io::Write::write_all(&mut f, b"theirs"));
-                    n += 1;
-                }
-            });
-            let out = place(&src, &dir, "a", "md", None).unwrap();
-            stop.store(true, Ordering::Relaxed);
-            h.join().unwrap();
-            assert_eq!(fs::read_to_string(&out).unwrap(), "mine", "round {round}");
-            for n in ["a.md", "a (1).md", "a (2).md"] {
-                let p = dir.join(n);
-                if p.exists() && p != out {
-                    assert_eq!(fs::read_to_string(p).unwrap(), "theirs");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn taken_name_in_the_middle_of_a_move_is_skipped() {
-        // Deterministic version of the race: the free-name "check" a naive
-        // implementation would do is stale; the move itself must refuse.
-        let t = Tmp::new("stale");
-        let src = file(&t.0, "p", "mine");
-        let target = t.0.join("a.md");
-        file(&t.0, "a.md", "theirs");
-        let (f, t2) = (cstr(&src).unwrap(), cstr(&target).unwrap());
-        let cwd = |name| At {
-            dir: libc::AT_FDCWD,
-            name,
-        };
-        let e = move_noreplace(cwd(&f), cwd(&t2)).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read_to_string(target).unwrap(), "theirs");
-        assert!(src.exists());
-    }
-
-    #[test]
-    fn link_then_unlink_moves_to_free_target() {
-        let t = Tmp::new("link-free");
-        let src = file(&t.0, "p", "mine");
-        let to = t.0.join("a.md");
-        link_then_unlink(&src, &to).unwrap();
-        assert!(!src.exists());
-        assert_eq!(fs::read_to_string(to).unwrap(), "mine");
-    }
-
-    #[test]
-    fn link_then_unlink_never_overwrites() {
-        let t = Tmp::new("link-taken");
-        let src = file(&t.0, "p", "mine");
-        let taken = file(&t.0, "a.md", "theirs");
-        let e = link_then_unlink(&src, &taken).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read_to_string(taken).unwrap(), "theirs");
-        assert_eq!(fs::read_to_string(src).unwrap(), "mine");
-    }
-
-    #[test]
-    fn link_then_unlink_rejects_directories() {
-        let t = Tmp::new("link-dir");
-        let d = t.0.join("d");
-        fs::create_dir(&d).unwrap();
-        assert!(link_then_unlink(&d, &t.0.join("e")).is_err());
-        assert!(d.exists() && !t.0.join("e").exists());
-    }
-
-    #[test]
-    fn invalid_names_rejected() {
-        let t = Tmp::new("names");
-        let s = file(&t.0, "p", "x");
-        for (stem, ext, suf) in [
-            ("", "md", ""),
-            ("a/b", "md", ""),
-            ("a\0b", "md", ""),
-            (".", "md", ""),
-            ("..", "md", ""),
-            ("a", "m/d", ""),
-            ("a", "..", ""),
-            ("a", "md", "/x"),
-        ] {
-            let e = place(&s, &t.0, stem, ext, Some(suf)).unwrap_err();
-            assert_eq!(
-                e.kind(),
-                io::ErrorKind::InvalidInput,
-                "{stem:?} {ext:?} {suf:?}"
-            );
-        }
-        assert!(s.exists());
-        assert!(place_many(std::slice::from_ref(&s), &t.0, "a/b").is_err());
-        assert!(place_many(std::slice::from_ref(&s), &t.0, "").is_err());
-        assert!(s.exists());
-    }
-
-    #[test]
-    fn long_stem_truncated_to_name_max() {
-        let t = Tmp::new("long");
-        file(&t.0, &format!("{}.md", "a".repeat(250)), "o");
-        let stem = "a".repeat(250);
-        let s1 = file(&t.0, "p1", "1");
-        let out = place(&s1, &t.0, &stem, "md", None).unwrap();
-        assert!(out.file_name().unwrap().len() <= 255);
-        assert_eq!(fs::read_to_string(&out).unwrap(), "1");
-        // Multi-byte stem: cut must land on a character boundary.
-        let wide = "é".repeat(130);
-        let s2 = file(&t.0, "p2", "2");
-        let out = place(&s2, &t.0, &wide, "md", None).unwrap();
-        let name = out.file_name().unwrap().to_str().unwrap();
-        assert!(name.len() <= 255 && name.ends_with(".md"));
-    }
-
-    #[test]
-    fn place_many_empty_and_rollback() {
-        let t = Tmp::new("rollback");
-        assert!(place_many(&[], &t.0, "doc").unwrap().is_empty());
-        assert!(!t.0.join("doc").exists());
-        let a = file(&t.0, "a.png", "1");
-        let missing = t.0.join("missing.png");
-        assert!(place_many(&[a.clone(), missing], &t.0, "doc").is_err());
-        assert!(!t.0.join("doc").exists(), "folder rolled back");
-        assert!(!t.0.join("doc/a.png").exists());
-        assert!(!a.exists(), "moved file was removed by the rollback");
-    }
-
-    #[test]
-    fn place_many_keeps_non_utf8_names() {
-        let t = Tmp::new("bytes");
-        let name = OsString::from_vec(b"x\xff.png".to_vec());
-        let a = t.0.join(&name);
-        fs::write(&a, "1").unwrap();
-        let out = place_many(&[a], &t.0, "doc").unwrap();
-        assert_eq!(out[0], t.0.join("doc").join(&name));
-        assert!(out[0].exists());
-    }
-
-    #[test]
-    fn numbering_goes_before_last_extension() {
-        let t = Tmp::new("ext");
-        let a = file(&t.0, "x.tar.gz", "1");
-        let b = file(&t.0, "y.tar.gz", "2");
-        let out = place_many(&[a], &t.0, "d").unwrap();
-        assert_eq!(out[0], t.0.join("d/x.tar.gz"));
-        let out2 = place_many(&[b], &t.0, "d").unwrap();
-        assert_eq!(out2[0], t.0.join("d (1)/y.tar.gz"));
-        let c = file(&t.0, "z.tar.gz", "3");
-        file(&t.0.join("d"), "z.tar.gz", "o");
-        // Direct conflict inside an existing folder numbers before ".gz".
-        let r = place(&c, &t.0.join("d"), "z.tar", "gz", None).unwrap();
-        assert_eq!(r, t.0.join("d/z.tar (1).gz"));
-    }
-
-    #[test]
-    fn suffix_used() {
-        let t = Tmp::new("suffix");
-        let s1 = file(&t.0, "p1", "1");
-        let s2 = file(&t.0, "p2", "2");
-        assert_eq!(
-            place(&s1, &t.0, "pic", "png", Some("-small")).unwrap(),
-            t.0.join("pic-small.png")
-        );
-        assert_eq!(
-            place(&s2, &t.0, "pic", "png", Some("-small")).unwrap(),
-            t.0.join("pic-small (1).png")
-        );
-    }
-
-    #[test]
-    fn many_outputs_into_folder_with_conflict() {
-        let t = Tmp::new("many");
-        fs::create_dir(t.0.join("doc")).unwrap();
-        file(&t.0.join("doc"), "keep.txt", "k");
-        let a = file(&t.0, "doc-01.png", "1");
-        let b = file(&t.0, "doc-02.png", "2");
-        let out = place_many(&[a, b], &t.0, "doc").unwrap();
-        assert_eq!(
-            out,
-            vec![
-                t.0.join("doc (1)/doc-01.png"),
-                t.0.join("doc (1)/doc-02.png")
-            ]
-        );
-        assert_eq!(fs::read_to_string(t.0.join("doc/keep.txt")).unwrap(), "k");
-        assert_eq!(fs::read_to_string(&out[1]).unwrap(), "2");
     }
 
     #[test]
@@ -1103,52 +1406,6 @@ pub(crate) mod tests {
         assert!(w2.path.exists());
     }
 
-    #[test]
-    fn place_beneath_moves_regular_files() {
-        let t = Tmp::new("beneath");
-        let w = make_work_dir(&t.0).unwrap();
-        let target = t.0.join("target");
-        fs::create_dir(&target).unwrap();
-        fs::create_dir_all(w.path.join("0/sub")).unwrap();
-        file(&w.path.join("0/sub"), "a.md", "a");
-        file(&target, "a.md", "taken");
-        let (out, id) =
-            place_beneath(&w.path, Path::new("0/sub/a.md"), &target, "a", "md", None).unwrap();
-        assert_eq!(out, target.join("a (1).md"));
-        let st = stat_at(At {
-            dir: libc::AT_FDCWD,
-            name: &cstr(&out).unwrap(),
-        })
-        .unwrap();
-        assert_eq!(id, FileId::from_stat(&st));
-        assert_eq!(id.size, 1);
-        assert_eq!(fs::read_to_string(&out).unwrap(), "a");
-        assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "taken");
-        fs::create_dir(w.path.join("1")).unwrap();
-        file(&w.path.join("1"), "p-1.png", "1");
-        file(&w.path.join("1"), "p-2.png", "2");
-        let rels = [PathBuf::from("1/p-1.png"), PathBuf::from("1/p-2.png")];
-        let outs = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
-        assert_eq!(outs.folder, target.join("doc"));
-        let names: Vec<_> = outs.files.iter().map(|(p, _)| p.clone()).collect();
-        assert_eq!(
-            names,
-            [target.join("doc/p-1.png"), target.join("doc/p-2.png")]
-        );
-        // One bad entry: what was moved is removed again, no folder is left.
-        fs::create_dir(w.path.join("2")).unwrap();
-        file(&w.path.join("2"), "ok.png", "1");
-        let rels = [PathBuf::from("2/ok.png"), PathBuf::from("2/missing.png")];
-        assert!(place_many_beneath(&w.path, &rels, &target, "two").is_err());
-        assert!(!target.join("two").exists());
-        for bad in ["", "/abs", "0/../0/sub/a.md", "./0", "0/sub"] {
-            assert!(
-                place_beneath(&w.path, Path::new(bad), &target, "x", "md", None).is_err(),
-                "{bad}"
-            );
-        }
-    }
-
     /// Runs one test of this binary in a child with RLIMIT_NOFILE `n`,
     /// with `INACIRCLE_HELPER` set to `dir`.
     fn run_helper_with_nofile(name: &str, dir: &Path, n: u64) {
@@ -1177,70 +1434,6 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-    }
-
-    #[test]
-    fn place_many_beneath_needs_few_fds() {
-        let t = Tmp::new("nofile");
-        run_helper_with_nofile("output::tests::helper_place_many_beneath_2000", &t.0, 256);
-        let n = fs::read_dir(t.0.join("target/doc")).unwrap().count();
-        assert_eq!(n, 2000);
-    }
-
-    /// Child side of `place_many_beneath_needs_few_fds`; a no-op otherwise.
-    #[test]
-    fn helper_place_many_beneath_2000() {
-        let Some(dir) = std::env::var_os("INACIRCLE_HELPER") else {
-            return;
-        };
-        let dir = PathBuf::from(dir);
-        let w = make_work_dir(&dir).unwrap();
-        fs::create_dir(w.path.join("0")).unwrap();
-        let rels: Vec<PathBuf> = (0..2000)
-            .map(|k| {
-                let rel = PathBuf::from(format!("0/p-{k:04}.png"));
-                fs::write(w.path.join(&rel), "x").unwrap();
-                rel
-            })
-            .collect();
-        let target = dir.join("target");
-        fs::create_dir(&target).unwrap();
-        let placed = place_many_beneath(&w.path, &rels, &target, "doc").unwrap();
-        assert_eq!(placed.files.len(), 2000);
-    }
-
-    #[test]
-    fn place_beneath_never_follows_a_swapped_in_symlink() {
-        let t = Tmp::new("swap");
-        let outside = t.0.join("outside");
-        fs::create_dir(&outside).unwrap();
-        file(&outside, "victim.md", "secret");
-        let target = t.0.join("target");
-        fs::create_dir(&target).unwrap();
-        let w = make_work_dir(&t.0).unwrap();
-        fs::create_dir(w.path.join("0")).unwrap();
-        file(&w.path.join("0"), "victim.md", "fake");
-        // Validated by path here; then a directory on the way is swapped.
-        assert!(
-            fs::symlink_metadata(w.path.join("0/victim.md"))
-                .unwrap()
-                .is_file()
-        );
-        fs::rename(w.path.join("0"), w.path.join("0x")).unwrap();
-        std::os::unix::fs::symlink(&outside, w.path.join("0")).unwrap();
-        let r = place_beneath(&w.path, Path::new("0/victim.md"), &target, "v", "md", None);
-        assert!(r.is_err(), "followed the symlinked directory: {r:?}");
-        let r = place_many_beneath(&w.path, &[PathBuf::from("0/victim.md")], &target, "v");
-        assert!(r.is_err(), "place_many followed the symlinked directory");
-        // The leaf itself swapped for a symlink.
-        fs::create_dir(w.path.join("1")).unwrap();
-        std::os::unix::fs::symlink(outside.join("victim.md"), w.path.join("1/l.md")).unwrap();
-        assert!(place_beneath(&w.path, Path::new("1/l.md"), &target, "l", "md", None).is_err());
-        assert_eq!(
-            fs::read_to_string(outside.join("victim.md")).unwrap(),
-            "secret"
-        );
-        assert_eq!(fs::read_dir(&target).unwrap().count(), 0, "nothing placed");
     }
 
     #[test]
@@ -1542,18 +1735,16 @@ pub(crate) mod tests {
                 remove_tree(&tree);
                 assert!(!tree.exists(), "tree left behind with fd 0 closed");
             }
-            "fd0_place_beneath" => {
+            "fd0_publish" => {
                 // SAFETY: as above.
                 unsafe { libc::close(0) };
-                let root = dir.join("root");
-                fs::create_dir_all(root.join("sub")).unwrap();
-                fs::write(root.join("sub/leaf"), "x").unwrap();
-                let target = dir.join("target");
+                let (root, target) = (dir.join("root"), dir.join("target"));
                 fs::create_dir(&target).unwrap();
-                let (p, _) =
-                    place_beneath(&root, Path::new("sub/leaf"), &target, "out", "md", None)
-                        .expect("place with fd 0 closed");
-                assert_eq!(p, target.join("out.md"));
+                produced(&root, "sub/leaf", b"x");
+                let p = publish(&root, &["sub/leaf"], &target, "out", "md")
+                    .expect("publish with fd 0 closed");
+                assert_eq!(fs::read(target.join("out/out.md")).unwrap(), b"x");
+                assert_eq!(p.durability, Durability::Synced);
             }
             "open_dir_flags_and_no_leak" => {
                 let d = dir.join("d");
@@ -1664,27 +1855,54 @@ pub(crate) mod tests {
                 assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
                 assert!(e.to_string().contains("no free work directory name"), "{e}");
             }
-            "renameat2_unsupported_einval" | "renameat2_unsupported_enosys" => {
-                let errno = if case == "renameat2_unsupported_einval" {
+            "publish_renameat2_einval" | "publish_renameat2_enosys" => {
+                let errno = if case == "publish_renameat2_einval" {
                     libc::EINVAL
                 } else {
                     libc::ENOSYS
                 };
                 deny_syscalls(&[libc::SYS_renameat2], errno as u32);
-                let src = file(&dir, "produced", "mine");
-                file(&dir, "a.md", "theirs");
-                let p = place(&src, &dir, "a", "md", None).expect("fallback place");
-                assert_eq!(p, dir.join("a (1).md"));
-                assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "theirs");
-                assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
-                assert!(!src.exists(), "source left behind");
+                let (root, target) = (dir.join("root"), dir.join("target"));
+                fs::create_dir(&target).unwrap();
+                produced(&root, "0/a.md", b"mine");
+                file(&target, "a.md", "theirs");
+                let e = publish(&root, &["0/a.md"], &target, "a", "md").unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{e:?}");
+                assert!(e.to_string().contains("without replacing"), "{e}");
+                assert_eq!(names(&target), ["a.md"]);
+                assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "theirs");
+                assert!(root.join("0/a.md").exists(), "source left alone");
             }
-            "renameat2_denied_eperm" => {
+            "crash_before_commit" | "crash_after_commit" => {
+                // The process dies at the point: a crash, not an error.
+                let point = if case == "crash_before_commit" {
+                    Point::BeforeRename
+                } else {
+                    Point::SyncStagingAfter
+                };
+                let (root, target) = (dir.join("root"), dir.join("target"));
+                fs::create_dir(&target).unwrap();
+                produced(&root, "0/a.md", b"a");
+                FAULT.set(Some(Box::new(move |p| {
+                    if p == point {
+                        // SAFETY: ends this helper process at once.
+                        unsafe { libc::_exit(7) };
+                    }
+                    None
+                })));
+                let _ = publish(&root, &["0/a.md"], &target, "a", "md");
+                panic!("did not reach {point:?}");
+            }
+            "publish_renameat2_eperm" => {
+                // Any other refusal is the commit's failure, not a reason
+                // to call the filesystem unsupported.
                 deny_syscalls(&[libc::SYS_renameat2], libc::EPERM as u32);
-                let src = file(&dir, "produced", "mine");
-                let e = place(&src, &dir, "a", "md", None).unwrap_err();
+                let (root, target) = (dir.join("root"), dir.join("target"));
+                fs::create_dir(&target).unwrap();
+                produced(&root, "0/a.md", b"mine");
+                let e = publish(&root, &["0/a.md"], &target, "a", "md").unwrap_err();
                 assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
-                assert!(src.exists() && !dir.join("a.md").exists());
+                assert_eq!(names(&target), Vec::<String>::new());
             }
             other => panic!("unknown case {other}"),
         }
@@ -1696,12 +1914,6 @@ pub(crate) mod tests {
     fn work_dir_cleanup_works_with_fd_0_closed() {
         let t = Tmp::new("fd0-remove");
         assert_case_ok("fd0_remove_tree", &t.0);
-    }
-
-    #[test]
-    fn place_beneath_works_with_fd_0_closed() {
-        let t = Tmp::new("fd0-place");
-        assert_case_ok("fd0_place_beneath", &t.0);
     }
 
     #[test]
@@ -1775,42 +1987,6 @@ pub(crate) mod tests {
         let e = make_work_dir(&t.0).err().expect("no work dir");
         fs::set_permissions(&t.0, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
-    }
-
-    #[test]
-    fn placing_into_an_unwritable_folder_reports_permission_denied() {
-        if root_or_skip("placing_into_an_unwritable_folder") {
-            return;
-        }
-        let t = Tmp::new("ro-place");
-        let src = file(&t.0, "produced", "mine");
-        let ro = t.0.join("ro");
-        fs::create_dir(&ro).unwrap();
-        fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
-        let one = place(&src, &ro, "a", "md", None).unwrap_err();
-        let many = place_many(std::slice::from_ref(&src), &ro, "out").unwrap_err();
-        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(one.kind(), io::ErrorKind::PermissionDenied, "{one:?}");
-        assert_eq!(many.kind(), io::ErrorKind::PermissionDenied, "{many:?}");
-        assert!(src.exists(), "the produced file stays where it was");
-        assert_eq!(fs::read_dir(&ro).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn filesystem_without_noreplace_still_never_overwrites() {
-        if !crate::sandbox::tests::seccomp_or_skip("filesystem_without_noreplace") {
-            return;
-        }
-        for case in [
-            "renameat2_unsupported_einval",
-            "renameat2_unsupported_enosys",
-        ] {
-            let t = Tmp::new("no-noreplace");
-            assert_case_ok(case, &t.0);
-        }
-        // Any other failure is the move's failure, not a reason to fall back.
-        let t = Tmp::new("renameat2-eperm");
-        assert_case_ok("renameat2_denied_eperm", &t.0);
     }
 
     /// Child side of `open_dir_fallback_without_chmod`; a no-op otherwise.
@@ -1903,20 +2079,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn link_fallback_names_the_directory_refusal() {
-        let t = Tmp::new("link-dir-kind");
-        let d = t.0.join("d");
-        fs::create_dir(&d).unwrap();
-        let e = link_then_unlink(&d, &t.0.join("e")).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{e:?}");
-    }
-
-    #[test]
     fn candidate_cuts_multibyte_stems_on_a_character_boundary() {
-        let dir = Path::new("/d");
         let name = |stem: &str, ext: &str, n: u32| {
-            let p = candidate(dir, stem.as_bytes(), b"", ext.as_bytes(), n).unwrap();
-            p.file_name().unwrap().to_str().unwrap().to_owned()
+            let p = candidate(stem.as_bytes(), ext.as_bytes(), n).unwrap();
+            p.into_string().unwrap()
         };
         assert_eq!(name("a", "md", 0), "a.md");
         assert_eq!(name("a", "md", 2), "a (2).md");
@@ -1943,11 +2109,11 @@ pub(crate) mod tests {
 
     #[test]
     fn candidate_refuses_when_no_stem_fits() {
-        let long_suffix = vec![b'a'; NAME_MAX];
+        let long_ext = vec![b'a'; NAME_MAX - 1];
         // Not even a byte of stem fits; a stem that starts with a
         // continuation byte (a non-UTF-8 name) must not underflow.
         for stem in [&b"abc"[..], &b"\x80abc"[..]] {
-            let e = candidate(Path::new("/d"), stem, &long_suffix, b"", 0).unwrap_err();
+            let e = candidate(stem, &long_ext, 0).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
         }
     }
@@ -1955,7 +2121,7 @@ pub(crate) mod tests {
     #[test]
     fn split_name_splits_at_the_last_dot_but_not_a_leading_one() {
         let s = |n: &str| {
-            let (a, b) = split_name(OsStr::new(n));
+            let (a, b) = split_name(n.as_bytes());
             (a.to_vec(), b.to_vec())
         };
         assert_eq!(s("a.txt"), (b"a".to_vec(), b"txt".to_vec()));
@@ -1963,97 +2129,6 @@ pub(crate) mod tests {
         assert_eq!(s(".bashrc"), (b".bashrc".to_vec(), Vec::new()));
         assert_eq!(s(".a.b"), (b".a".to_vec(), b"b".to_vec()));
         assert_eq!(s("noext"), (b"noext".to_vec(), Vec::new()));
-    }
-
-    #[test]
-    fn many_outputs_keep_dotfiles_and_number_before_the_last_extension() {
-        let t = Tmp::new("many-names");
-        let (d1, d2) = (t.0.join("1"), t.0.join("2"));
-        fs::create_dir(&d1).unwrap();
-        fs::create_dir(&d2).unwrap();
-        let produced = [
-            file(&d1, ".hidden", "h"),
-            file(&d1, "a.tar.gz", "one"),
-            file(&d2, "a.tar.gz", "two"),
-            file(&d1, "b.txt", "one"),
-            file(&d2, "b.txt", "two"),
-        ];
-        let placed = place_many(&produced, &t.0, "out").unwrap();
-        let names: Vec<_> = placed
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(
-            names,
-            [".hidden", "a.tar.gz", "a.tar (1).gz", "b.txt", "b (1).txt"]
-        );
-        assert_eq!(fs::read_to_string(&placed[2]).unwrap(), "two");
-    }
-
-    #[test]
-    fn many_outputs_beneath_number_before_the_last_extension() {
-        let t = Tmp::new("many-beneath-names");
-        let root = t.0.join("root");
-        fs::create_dir_all(root.join("0")).unwrap();
-        fs::create_dir_all(root.join("1")).unwrap();
-        fs::write(root.join("0/.hidden"), "h").unwrap();
-        fs::write(root.join("0/a.txt"), "one").unwrap();
-        fs::write(root.join("1/a.txt"), "two").unwrap();
-        let rels = [
-            PathBuf::from("0/.hidden"),
-            PathBuf::from("0/a.txt"),
-            PathBuf::from("1/a.txt"),
-        ];
-        let placed = place_many_beneath(&root, &rels, &t.0, "out").unwrap();
-        let names: Vec<_> = placed
-            .files
-            .iter()
-            .map(|(p, _)| p.file_name().unwrap().to_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(names, [".hidden", "a.txt", "a (1).txt"]);
-    }
-
-    #[test]
-    fn place_beneath_needs_no_read_permission_on_the_directories() {
-        if root_or_skip("place_beneath_needs_no_read_permission") {
-            return;
-        }
-        let t = Tmp::new("path-fds");
-        let root = t.0.join("root");
-        let sub = root.join("sub");
-        let target = t.0.join("target");
-        fs::create_dir_all(&sub).unwrap();
-        fs::create_dir(&target).unwrap();
-        fs::write(sub.join("leaf"), "x").unwrap();
-        // Searchable and writable, never listable: only an O_PATH open
-        // works on them.
-        fs::set_permissions(&sub, fs::Permissions::from_mode(0o300)).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o100)).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o300)).unwrap();
-        let r = place_beneath(&root, Path::new("sub/leaf"), &target, "out", "md", None);
-        for p in [&root, &sub, &target] {
-            fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let (p, id) = r.expect("placed through non-listable directories");
-        assert_eq!(p, target.join("out.md"));
-        assert_eq!(id.size, 1);
-        assert_eq!(fs::read_to_string(p).unwrap(), "x");
-    }
-
-    #[test]
-    fn place_beneath_into_a_missing_or_non_directory_target_fails_cleanly() {
-        let t = Tmp::new("bad-target");
-        let root = t.0.join("root");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("leaf"), "x").unwrap();
-        let missing = place_beneath(&root, Path::new("leaf"), &t.0.join("none"), "o", "md", None);
-        assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
-        let plain = file(&t.0, "plain", "p");
-        assert!(place_beneath(&root, Path::new("leaf"), &plain, "o", "md", None).is_err());
-        let through_file = place_beneath(&root, Path::new("leaf/x"), &t.0, "o", "md", None);
-        assert!(through_file.is_err());
-        assert!(root.join("leaf").exists(), "the output stays where it was");
-        assert_eq!(fs::read_to_string(&plain).unwrap(), "p");
     }
 
     #[test]
@@ -2085,5 +2160,782 @@ pub(crate) mod tests {
             .err()
             .expect("opened a file");
         assert_eq!(e.raw_os_error(), Some(libc::ENOTDIR));
+    }
+
+    // ---- Per-input publication ----
+
+    /// An output of the (dead) producer at `root/<rel>`.
+    fn produced(root: &Path, rel: &str, body: &[u8]) -> PathBuf {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn rels(r: &[&str]) -> Vec<PathBuf> {
+        r.iter().map(PathBuf::from).collect()
+    }
+
+    /// `publish_beneath` with a `before_commit` that accepts.
+    fn publish(
+        root: &Path,
+        r: &[&str],
+        target: &Path,
+        stem: &str,
+        ext: &str,
+    ) -> io::Result<Publication> {
+        publish_beneath(root, &rels(r), target, stem, ext, &mut |_, _| Ok(()))
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Runs `f` with `fault` installed at every publication point.
+    fn with_fault<R>(
+        fault: impl FnMut(Point) -> Option<i32> + 'static,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        FAULT.set(Some(Box::new(fault)));
+        let r = f();
+        FAULT.set(None);
+        r
+    }
+
+    fn uid() -> u32 {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() }
+    }
+
+    /// A target with a root (producer) dir and a target dir in it.
+    fn pub_fixture(tag: &str) -> (Tmp, PathBuf, PathBuf) {
+        let t = Tmp::new(tag);
+        let (root, target) = (t.0.join("root"), t.0.join("target"));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&target).unwrap();
+        (t, root, target)
+    }
+
+    #[test]
+    fn publication_wraps_a_single_output_in_its_own_folder() {
+        let (_t, root, target) = pub_fixture("pub-single");
+        let src = produced(&root, "0/out.md", b"# a\n");
+        let p = publish(&root, &["0/out.md"], &target, "a", "md").unwrap();
+        let wrapper = target.join("a");
+        assert_eq!(p.location.path_at_check.as_deref(), Some(wrapper.as_path()));
+        assert_eq!(p.location.checked_at, CheckPoint::PostPublish);
+        assert_eq!(p.durability, Durability::Synced);
+        assert_eq!(names(&target), ["a"]);
+        assert_eq!(names(&wrapper), ["a.md"]);
+        assert_eq!(fs::read(wrapper.join("a.md")).unwrap(), b"# a\n");
+        let wm = fs::symlink_metadata(&wrapper).unwrap();
+        assert!(wm.is_dir());
+        assert_eq!(wm.mode() & 0o7777, 0o700);
+        // The wrapper's private identity is the published one.
+        assert_eq!(
+            p.group.id,
+            DirectoryId {
+                dev: wm.dev(),
+                ino: wm.ino(),
+                kind: NodeKind::Directory,
+                uid: uid(),
+                mode: 0o700
+            }
+        );
+        assert_eq!(
+            (p.location.anchor.object_dev, p.location.anchor.object_ino),
+            (wm.dev(), wm.ino())
+        );
+        let pm = fs::metadata(&target).unwrap();
+        assert_eq!(
+            (p.location.anchor.parent_dev, p.location.anchor.parent_ino),
+            (pm.dev(), pm.ino())
+        );
+        assert_eq!(p.location.anchor.leaf, "a");
+        assert_eq!(p.location.anchor.op, p.group.op);
+        // One child, its baseline from the private copy, still matching.
+        let cm = fs::symlink_metadata(wrapper.join("a.md")).unwrap();
+        let [c] = &p.group.children[..] else {
+            panic!("{:?}", p.group.children)
+        };
+        assert_eq!(c.rel, Path::new("a.md"));
+        assert_eq!(
+            (c.kind, c.uid, c.mode, c.nlink),
+            (NodeKind::File, uid(), 0o600, 1)
+        );
+        assert_eq!(c.file_id.ino, cm.ino());
+        assert_eq!(c.file_id.size, 4);
+        // A fresh inode: the producer's file is copied, not moved.
+        assert!(src.exists());
+        assert_ne!(fs::metadata(&src).unwrap().ino(), cm.ino());
+        let files = postcheck(&p).unwrap();
+        assert_eq!(files, [(wrapper.join("a.md"), c.file_id)]);
+    }
+
+    #[test]
+    fn publication_of_several_outputs_keeps_their_names() {
+        let (_t, root, target) = pub_fixture("pub-many");
+        produced(&root, "0/p-1.png", b"1");
+        produced(&root, "0/sub/p-1.png", b"2");
+        produced(&root, "0/.hidden", b"3");
+        file(&target, "doc", "taken");
+        let p = publish(
+            &root,
+            &["0/p-1.png", "0/sub/p-1.png", "0/.hidden"],
+            &target,
+            "doc",
+            "png",
+        )
+        .unwrap();
+        let w = target.join("doc (1)");
+        assert_eq!(p.location.path_at_check.as_deref(), Some(w.as_path()));
+        assert_eq!(names(&w), [".hidden", "p-1 (1).png", "p-1.png"]);
+        let rels: Vec<_> = p.group.children.iter().map(|c| c.rel.clone()).collect();
+        assert_eq!(
+            rels,
+            [
+                PathBuf::from("p-1.png"),
+                "p-1 (1).png".into(),
+                ".hidden".into()
+            ]
+        );
+        assert_eq!(fs::read_to_string(target.join("doc")).unwrap(), "taken");
+        assert_eq!(postcheck(&p).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn publication_never_takes_an_existing_name() {
+        let (_t, root, target) = pub_fixture("pub-noreplace");
+        produced(&root, "0/x.md", b"mine");
+        file(&target, "a", "theirs");
+        fs::create_dir(target.join("a (1)")).unwrap();
+        file(&target.join("a (1)"), "a.md", "theirs too");
+        // A name taken right before the rename, by a racing program.
+        let racer = target.join("a (2)");
+        let r = racer.clone();
+        let p = with_fault(
+            move |pt| {
+                if pt == Point::BeforeRename && !r.exists() {
+                    fs::create_dir(&r).unwrap();
+                    fs::write(r.join("a.md"), "raced").unwrap();
+                }
+                None
+            },
+            || publish(&root, &["0/x.md"], &target, "a", "md"),
+        )
+        .unwrap();
+        assert_eq!(p.location.path_at_check, Some(target.join("a (3)")));
+        assert_eq!(fs::read_to_string(target.join("a")).unwrap(), "theirs");
+        assert_eq!(
+            fs::read_to_string(target.join("a (1)/a.md")).unwrap(),
+            "theirs too"
+        );
+        assert_eq!(fs::read_to_string(racer.join("a.md")).unwrap(), "raced");
+        assert_eq!(
+            fs::read_to_string(target.join("a (3)/a.md")).unwrap(),
+            "mine"
+        );
+        assert_eq!(names(&target), ["a", "a (1)", "a (2)", "a (3)"]);
+    }
+
+    #[test]
+    fn publication_is_all_or_nothing_for_one_input() {
+        let (t, root, target) = pub_fixture("pub-atomic");
+        produced(&root, "0/a.png", b"1");
+        file(&target, "keep", "k");
+        // The second output is missing: the first is never visible.
+        let e = publish(&root, &["0/a.png", "0/b.png"], &target, "doc", "png").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e:?}");
+        assert_eq!(
+            names(&target),
+            ["keep"],
+            "something of the input became visible"
+        );
+        assert!(root.join("0/a.png").exists());
+        // Every failure before the commit, injected one at a time: nothing
+        // visible, the private staging gone, the source untouched.
+        for (point, errno) in [
+            (Point::Write, libc::ENOSPC),
+            (Point::SyncChild, libc::EIO),
+            (Point::SyncWrapper, libc::EIO),
+            (Point::SyncStaging, libc::EIO),
+            (Point::Rename, libc::EIO),
+        ] {
+            produced(&root, "0/b.png", b"2");
+            let e = with_fault(
+                move |p| (p == point).then_some(errno),
+                || publish(&root, &["0/a.png", "0/b.png"], &target, "doc", "png"),
+            )
+            .unwrap_err();
+            assert_eq!(e.raw_os_error(), Some(errno), "{point:?}: {e:?}");
+            assert_eq!(names(&target), ["keep"], "{point:?}");
+            assert_eq!(fs::read(root.join("0/b.png")).unwrap(), b"2");
+        }
+        assert_eq!(names(&t.0), ["root", "target"]);
+    }
+
+    #[test]
+    fn publication_refused_by_before_commit_publishes_nothing() {
+        let (_t, root, target) = pub_fixture("pub-prepare");
+        produced(&root, "0/a.md", b"a");
+        let mut seen = None;
+        let e = publish_beneath(
+            &root,
+            &rels(&["0/a.md"]),
+            &target,
+            "a",
+            "md",
+            &mut |g, private| {
+                // The private copy is complete and fixed when this runs.
+                let m = fs::symlink_metadata(private).unwrap();
+                assert_eq!(
+                    (m.dev(), m.ino(), m.mode() & 0o7777),
+                    (g.id.dev, g.id.ino, 0o700)
+                );
+                let c = &g.children[0];
+                let cm = fs::symlink_metadata(private.join(&c.rel)).unwrap();
+                assert_eq!(
+                    FileId::from_stat(&stat_of(&private.join(&c.rel))),
+                    c.file_id
+                );
+                assert_eq!(cm.mode() & 0o7777, c.mode);
+                seen = Some(private.to_path_buf());
+                Err(io::Error::other("journal write failed"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "journal write failed");
+        assert_eq!(names(&target), Vec::<String>::new());
+        assert!(!seen.unwrap().exists(), "private staging left behind");
+    }
+
+    fn stat_of(p: &Path) -> libc::stat {
+        stat_at(At {
+            dir: libc::AT_FDCWD,
+            name: &cstr(p).unwrap(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn publication_baseline_is_the_private_one_and_ids_stay() {
+        let (_t, root, target) = pub_fixture("pub-ids");
+        produced(&root, "0/a.md", b"a");
+        let mut prepared = None;
+        let p = publish_beneath(
+            &root,
+            &rels(&["0/a.md"]),
+            &target,
+            "a",
+            "md",
+            &mut |g, _| {
+                prepared = Some(g.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        let prepared = prepared.unwrap();
+        assert_eq!((prepared.group, prepared.op), (p.group.group, p.group.op));
+        assert_eq!(prepared.id, p.group.id);
+        assert_eq!(prepared.children, p.group.children);
+        // Comparable after the publication, and a later edit is no new
+        // baseline: the postcheck sees it.
+        let child = target.join("a/a.md");
+        assert_eq!(
+            FileId::from_stat(&stat_of(&child)),
+            p.group.children[0].file_id
+        );
+        fs::write(&child, "edited").unwrap();
+        assert_eq!(postcheck(&p), Err(PublicationReason::BaselineChanged));
+        assert_eq!(prepared.children[0].file_id.size, 1);
+        // Another publication: other group and operation ids.
+        let q = publish(&root, &["0/a.md"], &target, "a", "md").unwrap();
+        assert_ne!(q.group.group, p.group.group);
+        assert_ne!(q.group.op, p.group.op);
+    }
+
+    #[test]
+    fn publication_copy_is_out_of_reach_of_the_producers_fd() {
+        use std::io::Write;
+        let (_t, root, target) = pub_fixture("pub-oldfd");
+        let src = produced(&root, "0/a.md", b"made");
+        let mut old = fs::OpenOptions::new().write(true).open(&src).unwrap();
+        let p = publish(&root, &["0/a.md"], &target, "a", "md").unwrap();
+        old.write_all(b"LATE").unwrap();
+        drop(old);
+        assert_eq!(fs::read(target.join("a/a.md")).unwrap(), b"made");
+        assert_eq!(postcheck(&p).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn publication_keeps_committed_outputs_on_sync_errors() {
+        for point in [Point::SyncStagingAfter, Point::SyncParentAfter] {
+            let (_t, root, target) = pub_fixture("pub-sync");
+            produced(&root, "0/a.md", b"a");
+            let p = with_fault(
+                move |p| (p == point).then_some(libc::EIO),
+                || publish(&root, &["0/a.md"], &target, "a", "md"),
+            )
+            .expect("a sync error after the commit is no failure");
+            let Durability::Unconfirmed(why) = &p.durability else {
+                panic!("{point:?}: {:?}", p.durability)
+            };
+            assert!(why.contains("Input/output error"), "{why}");
+            // Still visible, still at the proved place.
+            assert_eq!(p.location.path_at_check, Some(target.join("a")));
+            assert_eq!(fs::read(target.join("a/a.md")).unwrap(), b"a");
+            assert_eq!(postcheck(&p).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn publication_with_a_moved_ancestor_has_no_proved_path() {
+        let (t, root, target) = pub_fixture("pub-ancestor");
+        produced(&root, "0/a.md", b"a");
+        let moved = t.0.join("moved");
+        let (from, to) = (target.clone(), moved.clone());
+        let p = with_fault(
+            move |pt| {
+                if pt == Point::BeforeRename {
+                    fs::rename(&from, &to).unwrap();
+                }
+                None
+            },
+            || publish(&root, &["0/a.md"], &target, "a", "md"),
+        )
+        .unwrap();
+        // Committed into the folder it opened, now elsewhere: kept, no
+        // invented path, the anchor names it.
+        assert_eq!(p.location.path_at_check, None);
+        assert_eq!(fs::read(moved.join("a/a.md")).unwrap(), b"a");
+        let m = fs::metadata(moved.join("a")).unwrap();
+        assert_eq!(
+            (p.location.anchor.object_dev, p.location.anchor.object_ino),
+            (m.dev(), m.ino())
+        );
+        assert_eq!(postcheck(&p), Err(PublicationReason::AncestorChanged));
+        // A folder made at the old path is not taken for it.
+        fs::create_dir_all(target.join("a")).unwrap();
+        let mut q = p.clone();
+        q.location.path_at_check = Some(target.join("a"));
+        assert_eq!(postcheck(&q), Err(PublicationReason::AncestorChanged));
+    }
+
+    #[test]
+    fn publication_refuses_links_traversal_and_special_files() {
+        let (t, root, target) = pub_fixture("pub-refuse");
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        file(&outside, "secret.md", "secret");
+        fs::create_dir(root.join("0")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), root.join("0/leaf.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("1")).unwrap();
+        // SAFETY: the path is a valid NUL-terminated string.
+        let fifo = cstr(&root.join("0/fifo.md")).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        produced(&root, "2/ok.md", b"ok");
+        for bad in [
+            "0/leaf.md",
+            "1/secret.md",
+            "0/fifo.md",
+            "0",
+            "../outside/secret.md",
+            "/etc/passwd",
+            "",
+        ] {
+            let r = publish(&root, &["2/ok.md", bad], &target, "x", "md");
+            assert!(r.is_err(), "{bad}: {r:?}");
+        }
+        // A good output swapped for a link, a FIFO or a directory after its
+        // parent was resolved: never followed, never blocked on.
+        for swap in ["link", "fifo", "dir"] {
+            produced(&root, "3/s.md", b"s");
+            let p3 = root.join("3/s.md");
+            let o = outside.join("secret.md");
+            let r = with_fault(
+                move |pt| {
+                    if pt == Point::Open && p3.exists() {
+                        fs::remove_file(&p3).unwrap();
+                        match swap {
+                            "link" => std::os::unix::fs::symlink(&o, &p3).unwrap(),
+                            "fifo" => {
+                                let c = cstr(&p3).unwrap();
+                                // SAFETY: c is a valid path.
+                                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+                            }
+                            _ => fs::create_dir(&p3).unwrap(),
+                        }
+                    }
+                    None
+                },
+                || publish(&root, &["3/s.md"], &target, "s", "md"),
+            );
+            assert!(r.is_err(), "{swap}: {r:?}");
+            let _ = fs::remove_file(root.join("3/s.md"));
+            let _ = fs::remove_dir(root.join("3/s.md"));
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(names(&target), Vec::<String>::new());
+    }
+
+    #[test]
+    fn publication_refuses_an_output_that_changes_while_copied() {
+        let (_t, root, target) = pub_fixture("pub-grow");
+        let src = produced(&root, "0/a.md", b"start");
+        let e = with_fault(
+            move |pt| {
+                if pt == Point::Copy {
+                    let mut f = fs::OpenOptions::new().append(true).open(&src).unwrap();
+                    std::io::Write::write_all(&mut f, b"more").unwrap();
+                }
+                None
+            },
+            || publish(&root, &["0/a.md"], &target, "a", "md"),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("changed while"), "{e}");
+        assert_eq!(names(&target), Vec::<String>::new());
+    }
+
+    #[test]
+    fn publication_validates_text_outputs() {
+        let (_t, root, target) = pub_fixture("pub-utf8");
+        produced(&root, "0/a.md", b"ok \xc3\xa9");
+        produced(&root, "1/a.md", b"bad \xc3");
+        produced(&root, "2/a.txt", b"\xff");
+        produced(&root, "3/a.png", b"\xff");
+        assert!(publish(&root, &["0/a.md"], &target, "a", "md").is_ok());
+        for rel in ["1/a.md", "2/a.txt"] {
+            let e = publish(&root, &[rel], &target, "b", "md").unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{rel}: {e:?}");
+        }
+        // Only text is checked as text.
+        assert!(publish(&root, &["3/a.png"], &target, "c", "png").is_ok());
+        assert_eq!(names(&target), ["a", "c"]);
+    }
+
+    #[test]
+    fn publication_copies_across_filesystems_before_the_commit() {
+        let (_t, _root, target) = pub_fixture("pub-exdev");
+        let shm = Path::new("/dev/shm");
+        let same = fs::metadata(shm).map(|m| m.dev() == fs::metadata(&target).unwrap().dev());
+        if !matches!(same, Ok(false)) {
+            eprintln!(
+                "SKIPPED publication_copies_across_filesystems: no second filesystem at /dev/shm"
+            );
+            return;
+        }
+        let root = Tmp(shm.join(format!("inacircle-pub-exdev-{}", std::process::id())));
+        fs::create_dir_all(&root.0).unwrap();
+        produced(&root.0, "0/a.md", b"far");
+        let p = publish(&root.0, &["0/a.md"], &target, "a", "md").unwrap();
+        assert_eq!(fs::read(target.join("a/a.md")).unwrap(), b"far");
+        assert_eq!(p.group.id.dev, fs::metadata(&target).unwrap().dev());
+    }
+
+    #[test]
+    fn publication_refuses_a_rename_that_cannot_refuse_to_replace() {
+        // Injected EXDEV at the commit (a mount appearing under the
+        // target): refused, no copying fallback.
+        let (_t, root, target) = pub_fixture("pub-unsupported");
+        produced(&root, "0/a.md", b"a");
+        for errno in [libc::EXDEV, libc::EINVAL, libc::ENOSYS, libc::EOPNOTSUPP] {
+            let e = with_fault(
+                move |p| (p == Point::Rename).then_some(errno),
+                || publish(&root, &["0/a.md"], &target, "a", "md"),
+            )
+            .unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{errno}: {e:?}");
+            assert_eq!(names(&target), Vec::<String>::new());
+        }
+        // The real syscall refused by the kernel: see
+        // `filesystem_without_noreplace_is_refused`.
+    }
+
+    #[test]
+    fn publication_wrapper_never_takes_our_staging_pattern() {
+        let (_t, root, target) = pub_fixture("pub-pattern");
+        produced(&root, "0/a.md", b"a");
+        let p = publish(
+            &root,
+            &["0/a.md"],
+            &target,
+            ".inacircle-0123456789abcdef",
+            "md",
+        )
+        .unwrap();
+        let leaf = p.location.anchor.leaf.clone();
+        assert!(
+            !is_our_name(leaf.as_bytes()),
+            "{leaf:?} would be swept as stale"
+        );
+        assert_eq!(leaf, ".inacircle-0123456789abcdef (1)");
+    }
+
+    #[test]
+    fn filesystem_without_noreplace_is_refused() {
+        if !crate::sandbox::tests::seccomp_or_skip("filesystem_without_noreplace_is_refused") {
+            return;
+        }
+        for case in [
+            "publish_renameat2_einval",
+            "publish_renameat2_enosys",
+            "publish_renameat2_eperm",
+        ] {
+            let t = Tmp::new("pub-no-noreplace");
+            assert_case_ok(case, &t.0);
+        }
+    }
+
+    #[test]
+    fn publication_works_with_fd_0_closed() {
+        let t = Tmp::new("fd0-publish");
+        assert_case_ok("fd0_publish", &t.0);
+    }
+
+    #[test]
+    fn publication_numbers_names_and_gives_up_after_999() {
+        let (_t, root, target) = pub_fixture("pub-999");
+        produced(&root, "0/a.md", b"a");
+        fs::create_dir(target.join("a")).unwrap();
+        for n in 1..=MAX_CONFLICT {
+            fs::create_dir(target.join(format!("a ({n})"))).unwrap();
+        }
+        let e = publish(&root, &["0/a.md"], &target, "a", "md").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e:?}");
+        assert_eq!(e.to_string(), "no free output name");
+        assert_eq!(
+            fs::read_dir(&target).unwrap().count(),
+            1000,
+            "staging left behind"
+        );
+        fs::remove_dir(target.join("a (999)")).unwrap();
+        let p = publish(&root, &["0/a.md"], &target, "a", "md").unwrap();
+        assert_eq!(p.location.path_at_check, Some(target.join("a (999)")));
+    }
+
+    #[test]
+    fn publication_refuses_invalid_names_and_cuts_long_ones() {
+        let (_t, root, target) = pub_fixture("pub-names");
+        produced(&root, "0/a.md", b"a");
+        for (stem, ext) in [
+            ("", "md"),
+            ("a/b", "md"),
+            (".", "md"),
+            ("..", "md"),
+            ("a", "m/d"),
+            ("a", ".."),
+        ] {
+            let e = publish(&root, &["0/a.md"], &target, stem, ext).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "{stem:?}.{ext:?}: {e:?}"
+            );
+        }
+        assert!(publish_beneath(&root, &[], &target, "a", "md", &mut |_, _| Ok(())).is_err());
+        let long = "é".repeat(200);
+        let p = publish(&root, &["0/a.md"], &target, &long, "md").unwrap();
+        let w = p.location.path_at_check.unwrap();
+        assert!(w.file_name().unwrap().len() <= NAME_MAX);
+        let child = &p.group.children[0].rel;
+        assert!(child.as_os_str().len() <= NAME_MAX && child.to_str().unwrap().ends_with(".md"));
+        assert_eq!(names(&target).len(), 1);
+    }
+
+    #[test]
+    fn publication_keeps_non_utf8_names_of_several_outputs() {
+        let (_t, root, target) = pub_fixture("pub-bytes");
+        let odd = OsStr::from_bytes(b"p-\xff.png");
+        fs::create_dir(root.join("0")).unwrap();
+        fs::write(root.join("0").join(odd), "1").unwrap();
+        produced(&root, "0/q.png", b"2");
+        let rels = [Path::new("0").join(odd), PathBuf::from("0/q.png")];
+        let p = publish_beneath(&root, &rels, &target, "doc", "png", &mut |_, _| Ok(())).unwrap();
+        assert!(target.join("doc").join(odd).exists());
+        assert_eq!(p.group.children[0].rel, Path::new(odd));
+    }
+
+    /// Runs one test of this binary in a child with RLIMIT_NOFILE 256.
+    #[test]
+    fn publication_needs_few_fds() {
+        let t = Tmp::new("pub-nofile");
+        run_helper_with_nofile("output::tests::helper_publish_1100", &t.0, 256);
+        assert_eq!(fs::read_dir(t.0.join("target/doc")).unwrap().count(), 1100);
+    }
+
+    /// Child side of `publication_needs_few_fds`; a no-op otherwise.
+    #[test]
+    fn helper_publish_1100() {
+        let Some(dir) = std::env::var_os("INACIRCLE_HELPER") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let (root, target) = (dir.join("root"), dir.join("target"));
+        fs::create_dir(&target).unwrap();
+        let rels: Vec<PathBuf> = (0..1100)
+            .map(|k| {
+                let rel = format!("0/p-{k:04}.png");
+                produced(&root, &rel, b"x");
+                PathBuf::from(rel)
+            })
+            .collect();
+        let p = publish_beneath(&root, &rels, &target, "doc", "png", &mut |_, _| Ok(())).unwrap();
+        assert_eq!(p.group.children.len(), 1100);
+        assert_eq!(postcheck(&p).unwrap().len(), 1100);
+    }
+
+    #[test]
+    fn publication_into_an_unwritable_or_missing_folder_fails_cleanly() {
+        let (t, root, _target) = pub_fixture("pub-ro");
+        produced(&root, "0/a.md", b"a");
+        let missing = publish(&root, &["0/a.md"], &t.0.join("none"), "a", "md").unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        let plain = file(&t.0, "plain", "p");
+        assert!(publish(&root, &["0/a.md"], &plain, "a", "md").is_err());
+        assert_eq!(fs::read_to_string(&plain).unwrap(), "p");
+        if root_or_skip("publication_into_an_unwritable_folder") {
+            return;
+        }
+        let ro = t.0.join("ro");
+        fs::create_dir(&ro).unwrap();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
+        let e = publish(&root, &["0/a.md"], &ro, "a", "md").unwrap_err();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e:?}");
+        assert_eq!(fs::read_dir(&ro).unwrap().count(), 0);
+        assert!(
+            root.join("0/a.md").exists(),
+            "the produced file stays where it was"
+        );
+    }
+
+    #[test]
+    fn publication_needs_no_read_permission_on_the_folders() {
+        if root_or_skip("publication_needs_no_read_permission") {
+            return;
+        }
+        let (_t, root, target) = pub_fixture("pub-path-fds");
+        produced(&root, "sub/leaf", b"x");
+        // Searchable and writable, never listable: the producer's folders
+        // and the target. The target then cannot be synced: unconfirmed.
+        fs::set_permissions(root.join("sub"), fs::Permissions::from_mode(0o300)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o100)).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o300)).unwrap();
+        let r = publish(&root, &["sub/leaf"], &target, "out", "md");
+        for p in [&root, &root.join("sub"), &target] {
+            fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let p = r.expect("published through non-listable folders");
+        assert!(
+            matches!(&p.durability, Durability::Unconfirmed(w) if w.contains("Permission denied")),
+            "{:?}",
+            p.durability
+        );
+        assert_eq!(fs::read(target.join("out/out.md")).unwrap(), b"x");
+        assert_eq!(postcheck(&p).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn utf8_check_spans_chunk_boundaries() {
+        let ok = "aé€😀".as_bytes();
+        for cut in 0..=ok.len() {
+            let mut u = Utf8::default();
+            u.feed(&ok[..cut]).unwrap();
+            u.feed(&ok[cut..]).unwrap();
+            u.finish().unwrap();
+        }
+        // Byte by byte, too.
+        let mut u = Utf8::default();
+        for b in ok {
+            u.feed(std::slice::from_ref(b)).unwrap();
+        }
+        u.finish().unwrap();
+        for bad in [
+            &b"\xc3"[..],
+            b"\xc3(",
+            b"\xe2\x82",
+            b"\xed\xa0\x80",
+            b"\xf5\x80\x80\x80",
+            b"\xf0\x9f\x98",
+        ] {
+            let r = (0..=bad.len()).all(|cut| {
+                let mut u = Utf8::default();
+                u.feed(&bad[..cut])
+                    .and_then(|_| u.feed(&bad[cut..]))
+                    .and_then(|_| u.finish())
+                    .is_err()
+            });
+            assert!(r, "{bad:?} accepted");
+        }
+    }
+
+    /// A crash before the commit leaves only the private staging, under a
+    /// name the stale cleanup knows (and takes after a day); one after the
+    /// commit leaves the published folder, which the cleanup never takes,
+    /// and at most the empty staging. A foreign folder is left alone.
+    #[test]
+    fn publication_crash_leaves_only_recognizable_staging() {
+        for case in ["crash_before_commit", "crash_after_commit"] {
+            let t = Tmp::new("pub-crash");
+            let out = run_case(case, &t.0);
+            assert_eq!(out.status.code(), Some(7), "{case}: {out:?}");
+            let target = t.0.join("target");
+            fs::create_dir(target.join(".inacircle-x")).unwrap();
+            let ours: Vec<String> = names(&target)
+                .into_iter()
+                .filter(|n| is_our_name(n.as_bytes()))
+                .collect();
+            let [staging] = &ours[..] else {
+                panic!("{case}: {:?}", names(&target))
+            };
+            let staged = names(&target.join(staging));
+            if case == "crash_before_commit" {
+                assert_eq!(staged, ["w"]);
+                assert_eq!(names(&target.join(staging).join("w")), ["a.md"]);
+            } else {
+                assert!(staged.is_empty(), "{staged:?}");
+                assert_eq!(fs::read(target.join("a/a.md")).unwrap(), b"a");
+            }
+            set_age(&target.join(staging), 25 * 3600);
+            clean_stale(&target);
+            let left = names(&target);
+            assert!(!left.contains(staging), "{case}: {left:?}");
+            assert!(
+                left.contains(&".inacircle-x".to_owned()),
+                "{case}: foreign removed"
+            );
+            assert_eq!(left.contains(&"a".to_owned()), case == "crash_after_commit");
+        }
+    }
+
+    #[test]
+    fn work_dir_cleanup_follows_its_own_dir_not_its_old_path() {
+        let t = Tmp::new("work-anchor");
+        let target = t.0.join("target");
+        fs::create_dir(&target).unwrap();
+        let w = make_work_dir(&target).unwrap();
+        let name = w.path.file_name().unwrap().to_owned();
+        file(&w.path, "scratch", "s");
+        // The folder is renamed and a look-alike made at the old path.
+        fs::rename(&target, t.0.join("moved")).unwrap();
+        fs::create_dir_all(&w.path).unwrap();
+        file(&w.path, "foreign", "f");
+        drop(w);
+        assert_eq!(names(&t.0.join("target").join(&name)), ["foreign"]);
+        assert!(
+            !t.0.join("moved").join(&name).exists(),
+            "own work dir left behind"
+        );
     }
 }

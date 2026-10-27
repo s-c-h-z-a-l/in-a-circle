@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use dbus::Error;
 use dbus::notifications::{Event, Notice, Notifications};
-use engine::exec::{CancelToken, Observer, Outcome, Wake};
+use engine::exec::{CancelToken, Durability, Observer, Outcome, PublicationReason, Wake};
 use engine::journal::{self, JobId, UndoResult};
 
 /// A run that takes longer than this gets a "running" notification.
@@ -60,6 +60,11 @@ pub struct Summary {
     /// An output went to the download folder (the source folder was not
     /// writable).
     pub to_downloads: bool,
+    /// The first inputs published where it could not be confirmed:
+    /// `(file name, why, op)`.
+    pub unknown: Vec<(String, String, String)>,
+    /// Inputs published where it could not be confirmed (sticky: no Undo).
+    pub unknown_count: usize,
 }
 
 impl Summary {
@@ -94,6 +99,23 @@ impl Summary {
                 }
                 self.skipped += 1;
             }
+            Outcome::PublishedUnknown {
+                input,
+                location,
+                reason,
+                durability,
+                ..
+            } => {
+                if self.unknown.len() < KEEP_PROBLEMS {
+                    let mut why = unknown_reason(*reason);
+                    if let Durability::Unconfirmed(d) = durability {
+                        why.push_str(&format!("; not confirmed on disk: {d}"));
+                    }
+                    let op = format!("{:016x}", location.anchor.op.0);
+                    self.unknown.push((name_of(input), why, op));
+                }
+                self.unknown_count += 1;
+            }
             Outcome::Warned { .. } => {}
         }
     }
@@ -103,6 +125,18 @@ impl Summary {
         self.done_count = done;
         self.skipped = skipped;
         self.failed = failed;
+    }
+}
+
+/// The user-facing cause of a `PublishedUnknown`.
+pub fn unknown_reason(r: PublicationReason) -> String {
+    match r {
+        PublicationReason::AncestorChanged => {
+            "converted, but its folder was moved or replaced while it was saved".to_owned()
+        }
+        PublicationReason::BaselineChanged => {
+            "converted, but its files changed while they were saved".to_owned()
+        }
     }
 }
 
@@ -152,6 +186,16 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
             t
         }
     };
+    // Sticky: converted, kept, but not where (or not as) it was proved.
+    if s.unknown_count > 0 {
+        for (name, why, op) in s.unknown.iter().take(PROBLEM_LINES) {
+            body.push(format!("{name}: {why} (op {op})"));
+        }
+        body.push(format!(
+            "{} not confirmed where it was saved; Undo unavailable.",
+            s.unknown_count
+        ));
+    }
     // The sandbox gate refused the run: no action started.
     if !s.sandboxed {
         body.push("Sandbox unavailable.".to_owned());
@@ -463,6 +507,7 @@ impl Notifier {
         sandboxed: bool,
         counts: (usize, usize, usize),
         cancelled: bool,
+        undoable: bool,
         stop: &CancelToken,
     ) {
         // Own CPU of the final notice (open + Notify), for the measurement.
@@ -484,7 +529,7 @@ impl Notifier {
         s.sandboxed = sandboxed;
         s.cancelled = cancelled || self.cancelled;
         let (summary, body) = final_text(&s, markup);
-        let undo: &[(&str, &str)] = if s.done_count > 0 {
+        let undo: &[(&str, &str)] = if s.done_count > 0 && undoable && s.unknown_count == 0 {
             &[("undo", "Undo")]
         } else {
             &[]
@@ -717,6 +762,41 @@ mod tests {
         assert_eq!(running_text("Markdown", 0, 0, f32::NAN).2, 0);
         assert_eq!(running_text("Markdown", 5, 5, 1.7).2, 100);
         assert_eq!(running_text("Markdown", 0, 5, -0.2).2, 0);
+    }
+
+    #[test]
+    fn published_unknown_is_a_sticky_line_without_undo() {
+        use engine::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+        let unknown = Outcome::PublishedUnknown {
+            input: "/d/b.txt".into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 1,
+                    object_ino: 3,
+                    leaf: "b".into(),
+                    op: OperationId(0xcd),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Unconfirmed("folder sync failed".into()),
+        };
+        let mut s = summary(&[done("/d/a.txt", "/d/a/a.md"), unknown]);
+        s.set_counts((2, 0, 0));
+        let (summary, body) = final_text(&s, false);
+        assert_eq!(summary, "2 done");
+        assert_eq!(
+            lines(&body),
+            [
+                "b.txt: converted, but its folder was moved or replaced while it was saved; \
+                 not confirmed on disk: folder sync failed (op 00000000000000cd)",
+                "1 not confirmed where it was saved; Undo unavailable."
+            ]
+        );
     }
 
     #[test]

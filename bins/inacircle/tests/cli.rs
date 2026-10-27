@@ -246,7 +246,8 @@ fn txt_to_md_end_to_end() {
     // A relative path is taken against the cwd (`files/`).
     let o = e.run(&["run", "markdown", "jegyzet.txt"]);
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join("jegyzet.md");
+    // Every input gets its own folder, a single output too.
+    let out = e.files().join("jegyzet/jegyzet.md");
     assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
     assert_eq!(
         fs::read_to_string(&out).unwrap(),
@@ -295,7 +296,7 @@ fn undo_end_to_end() {
     let o = e.run(&["run", "markdown", "a.txt", "b.txt"]);
     assert_eq!(o.summary(), (2, 0, 0), "{}", o.stdout);
     let job = o.job();
-    let (am, bm) = (e.files().join("a.md"), e.files().join("b.md"));
+    let (am, bm) = (e.files().join("a/a.md"), e.files().join("b/b.md"));
     // A file changed since the run is kept.
     fs::write(&bm, "edited\n").unwrap();
 
@@ -309,6 +310,9 @@ fn undo_end_to_end() {
     assert_eq!(removed, [am.display().to_string()]);
     assert_eq!(u.pairs("kept"), [(bm.clone(), "changed since".to_owned())]);
     assert!(!am.exists());
+    // The emptied folder goes with its file, the other stays with its
+    // kept file.
+    assert!(!e.files().join("a").exists());
     assert_eq!(fs::read_to_string(&bm).unwrap(), "edited\n");
     assert!(a.exists() && b.exists());
 
@@ -329,7 +333,7 @@ fn review_focus_names() {
     let src = e.file(&format!("{name}.txt"), b"x\n");
     let o = e.run(&[OsStr::new("run"), OsStr::new("markdown"), src.as_os_str()]);
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join(format!("{name}.md"));
+    let out = e.files().join(name).join(format!("{name}.md"));
     assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "x\n");
     let job = o.job();
@@ -342,6 +346,7 @@ fn review_focus_names() {
         .collect();
     assert_eq!(removed, [out.display().to_string()]);
     assert!(!out.exists() && src.exists());
+    assert!(!e.files().join(name).exists());
 }
 
 #[test]
@@ -354,8 +359,8 @@ fn conflict_in_same_batch() {
     let mut outs: Vec<String> = o.pairs("done").into_iter().map(|(_, p)| p).collect();
     outs.sort();
     let f = |n: &str| e.files().join(n).display().to_string();
-    assert_eq!(outs, [f("a (1).md"), f("a.md")]);
-    let mut contents: Vec<String> = ["a.md", "a (1).md"]
+    assert_eq!(outs, [f("a (1)/a.md"), f("a/a.md")]);
+    let mut contents: Vec<String> = ["a/a.md", "a (1)/a.md"]
         .iter()
         .map(|n| fs::read_to_string(e.files().join(n)).unwrap())
         .collect();
@@ -373,13 +378,13 @@ fn two_source_dirs_two_groups() {
     let mut done = o.pairs("done");
     done.sort();
     let p = |n: &str| e.files().join(n).display().to_string();
-    assert_eq!(done, [(a1, p("d1/a.md")), (a2, p("d2/a.md"))]);
+    assert_eq!(done, [(a1, p("d1/a/a.md")), (a2, p("d2/a/a.md"))]);
     assert_eq!(
-        fs::read_to_string(e.files().join("d1/a.md")).unwrap(),
+        fs::read_to_string(e.files().join("d1/a/a.md")).unwrap(),
         "1\n"
     );
     assert_eq!(
-        fs::read_to_string(e.files().join("d2/a.md")).unwrap(),
+        fs::read_to_string(e.files().join("d2/a/a.md")).unwrap(),
         "2\n"
     );
 }
@@ -398,10 +403,10 @@ fn readonly_source_goes_to_downloads() {
     let o = e.run(&["run", "markdown", "ro/a.txt"]);
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.root.join("home/Downloads/a.md");
+    let out = e.root.join("home/Downloads/a/a.md");
     assert_eq!(o.pairs("done"), [(src, out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "ro\n");
-    assert!(!ro.join("a.md").exists());
+    assert!(!ro.join("a").exists());
 }
 
 #[test]
@@ -423,10 +428,10 @@ fn symlinks() {
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
     assert_eq!(
         o.pairs("done"),
-        [(l.join("la.txt"), l.join("la.md").display().to_string())]
+        [(l.join("la.txt"), l.join("la/la.md").display().to_string())]
     );
-    assert_eq!(fs::read_to_string(l.join("la.md")).unwrap(), "linked\n");
-    assert!(!e.files().join("real/a.md").exists());
+    assert_eq!(fs::read_to_string(l.join("la/la.md")).unwrap(), "linked\n");
+    assert!(!e.files().join("real/a").exists());
     assert_eq!(
         o.pairs("skip"),
         [
@@ -457,8 +462,8 @@ fn same_file_given_twice_runs_once() {
     assert_eq!(o.pairs("done")[0].0, a);
     assert_eq!(o2.pairs("done").len(), 1, "{}", o2.stdout);
     assert_eq!(o2.summary(), (1, 0, 0));
-    assert!(e.files().join("a.md").exists() && e.files().join("a (1).md").exists());
-    assert!(!e.files().join("link.md").exists());
+    assert!(e.files().join("a/a.md").exists() && e.files().join("a (1)/a.md").exists());
+    assert!(!e.files().join("link").exists());
 }
 
 #[test]
@@ -519,10 +524,10 @@ fn direct_action_runs() {
         o.pairs("done"),
         [(
             e.files().join("d.md"),
-            e.files().join("d.txt").display().to_string()
+            e.files().join("d/d.txt").display().to_string()
         )]
     );
-    assert!(e.files().join("d.txt").is_file());
+    assert!(e.files().join("d/d.txt").is_file());
 }
 
 #[test]
@@ -663,7 +668,7 @@ fn two_step_route_end_to_end() {
         return;
     }
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join("doc.md");
+    let out = e.files().join("doc/doc.md");
     assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "text\n+\n");
 }
@@ -692,7 +697,7 @@ fn two_step_intermediate_symlink_swap_is_refused() {
         o.pairs("fail"),
         [(a, "intermediate output changed".to_owned())]
     );
-    assert!(!e.files().join("doc.md").exists());
+    assert!(!e.files().join("doc").exists());
     for f in fs::read_dir(e.files()).unwrap().flatten() {
         let body = fs::read_to_string(f.path()).unwrap_or_default();
         assert!(
@@ -757,7 +762,7 @@ fn sandbox_children_get_a_clean_environment() {
         return;
     }
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join("doc.md");
+    let out = e.files().join("doc/doc.md");
     assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
     let cache = fs::read_dir(e.root.join("cache/inacircle"))
         .unwrap()
@@ -1000,7 +1005,7 @@ fn progress_and_warn_passthrough() {
     );
     assert_eq!(
         o.pairs("done"),
-        [(t, e.files().join("t.bin").display().to_string())]
+        [(t, e.files().join("t/t.bin").display().to_string())]
     );
     assert_eq!(o.summary(), (1, 0, 0));
 }
@@ -1320,7 +1325,7 @@ fn invocation_errors_exit_2() {
         assert!(o.stdout.is_empty(), "{args:?}: {}", o.stdout);
         assert!(!o.stderr.is_empty(), "{args:?}");
     }
-    assert!(!e.files().join("a.md").exists());
+    assert!(!e.files().join("a").exists());
 }
 
 #[test]
@@ -1346,7 +1351,7 @@ fn unwritable_history_warns_once_and_the_run_proceeds() {
     );
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
     assert_eq!(o.summary(), (1, 0, 0));
-    assert!(e.files().join("a.md").exists());
+    assert!(e.files().join("a/a.md").exists());
     let warns = o
         .stderr
         .lines()

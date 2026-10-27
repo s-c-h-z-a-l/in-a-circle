@@ -9,7 +9,7 @@
 //! jobs live in `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line
 //! per file.
 
-use crate::exec::{FileId, Outcome, Tally};
+use crate::exec::{Durability, FileId, Outcome, Tally};
 use crate::xdg;
 use manifest::{Line, parse_line, write_line};
 use std::ffi::CString;
@@ -167,9 +167,44 @@ fn outcome_line(job: &str, o: &Outcome) -> Option<Line> {
             .pair("job", job)
             .pair("in", &path_str(input).0)
             .pair("reason", reason),
+        Outcome::PublishedUnknown {
+            input,
+            group,
+            location,
+            reason,
+            durability,
+        } => {
+            let a = &location.anchor;
+            let mut l = Line::new("unknown")
+                .pair("job", job)
+                .pair("in", &path_str(input).0)
+                .pair("group", &format!("{:016x}", group.0))
+                .pair("op", &format!("{:016x}", a.op.0))
+                .pair("reason", reason.as_str())
+                .pair("durability", durability_str(durability))
+                .pair("parent", &format!("{}:{}", a.parent_dev, a.parent_ino))
+                .pair("object", &format!("{}:{}", a.object_dev, a.object_ino))
+                .pair("leaf", &a.leaf.to_string_lossy());
+            if let Some(p) = &location.path_at_check {
+                l = l.pair("path", &path_str(p).0);
+            }
+            l
+        }
         Outcome::Warned { .. } => return None,
     })
 }
+
+/// `synced`, or `unconfirmed` (the cause goes to the outcome's own report).
+pub fn durability_str(d: &Durability) -> &'static str {
+    match d {
+        Durability::Synced => "synced",
+        Durability::Unconfirmed(_) => "unconfirmed",
+    }
+}
+
+/// Why undo refuses a job with a publication of unknown place or baseline.
+pub const UNKNOWN_REFUSAL: &str =
+    "an output was published where it could not be confirmed; nothing undone";
 
 /// Writes a job into the history as it runs: each outcome and folder is
 /// appended when it arrives (one `write` per line, so nothing waits in a
@@ -185,6 +220,18 @@ pub struct Recorder {
     job: String,
     action: String,
     tally: Tally,
+    /// Inputs published at a place (or with a baseline) that could not be
+    /// proved: sticky, the job is then not undoable.
+    unknown: usize,
+}
+
+/// A closed job: the per-input tally, whether undo may be offered, and the
+/// warning that goes with a job that may not.
+#[derive(Debug)]
+pub struct Finished {
+    pub tally: Tally,
+    pub undoable: bool,
+    pub warning: Option<String>,
 }
 
 impl Recorder {
@@ -197,6 +244,7 @@ impl Recorder {
             job: job.0.clone(),
             action: action.to_owned(),
             tally: Tally::default(),
+            unknown: 0,
         }
     }
 
@@ -208,6 +256,9 @@ impl Recorder {
 
     pub fn outcome(&mut self, o: &Outcome) {
         self.tally.add(o);
+        if matches!(o, Outcome::PublishedUnknown { .. }) {
+            self.unknown += 1;
+        }
         if let Some(l) = outcome_line(&self.job, o) {
             self.append(&l);
         }
@@ -222,16 +273,30 @@ impl Recorder {
         }
     }
 
-    /// Appends the `job` line and returns the per-input tally.
-    pub fn finish(mut self, sandboxed: bool) -> Tally {
-        let l = Line::new("job")
+    /// Appends the `job` line (with `undo=no` after a `PublishedUnknown`)
+    /// and closes the job.
+    pub fn finish(mut self, sandboxed: bool) -> Finished {
+        let mut l = Line::new("job")
             .pair("id", &self.job)
             .pair("time", &unix_secs().to_string())
             .pair("action", &self.action)
             .pair("status", status(&self.tally))
             .pair("sandbox", if sandboxed { "yes" } else { "no" });
+        let undoable = self.unknown == 0;
+        if !undoable {
+            l = l.pair("undo", "no");
+        }
         self.append(&l);
-        self.tally
+        Finished {
+            tally: self.tally,
+            undoable,
+            warning: (!undoable).then(|| {
+                format!(
+                    "{} input(s) published where it could not be confirmed; undo unavailable",
+                    self.unknown
+                )
+            }),
+        }
     }
 }
 
@@ -494,6 +559,8 @@ fn parse_out(l: &Line) -> Option<Out> {
 struct JobRecords {
     known: bool,
     undone: bool,
+    /// A `PublishedUnknown` (or a job line with `undo=no`): undo refuses.
+    unknown: bool,
     outs: Vec<Out>,
     dirs: Vec<PathBuf>,
 }
@@ -538,7 +605,14 @@ fn job_records(mut rd: impl BufRead, job: &JobId) -> io::Result<JobRecords> {
         };
         let Ok(l) = parse_line(text) else { continue };
         match l.kind.as_str() {
-            "job" if l.get("id") == Some(&job.0) => r.known = true,
+            "job" if l.get("id") == Some(&job.0) => {
+                r.known = true;
+                r.unknown |= l.get("undo") == Some("no");
+            }
+            "unknown" if l.get("job") == Some(&job.0) => {
+                r.known = true;
+                r.unknown = true;
+            }
             "undo" if l.get("job") == Some(&job.0) => r.undone = true,
             "out" if l.get("job") == Some(&job.0) => {
                 r.known = true;
@@ -628,6 +702,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     let JobRecords {
         known,
         undone,
+        unknown,
         outs,
         dirs,
     } = job_records(BufReader::new(&file), job)?;
@@ -639,6 +714,11 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
             io::ErrorKind::AlreadyExists,
             "already undone",
         ));
+    }
+    // Before anything is removed: a group whose place or baseline was not
+    // proved could be anything by now.
+    if unknown {
+        return Err(io::Error::other(UNKNOWN_REFUSAL));
     }
     let mut res = UndoResult::default();
     for o in &outs {
@@ -774,6 +854,79 @@ mod tests {
         });
     }
 
+    fn unknown(input: &str) -> Outcome {
+        use crate::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+        Outcome::PublishedUnknown {
+            input: PathBuf::from(input),
+            group: GroupId(0xab),
+            location: LocationEvidence {
+                path_at_check: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 1,
+                    object_ino: 3,
+                    leaf: "b".into(),
+                    op: OperationId(0xcd),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: crate::exec::PublicationReason::AncestorChanged,
+            durability: Durability::Unconfirmed("folder sync failed".into()),
+        }
+    }
+
+    /// A publication of unknown place counts as a conversion once, however
+    /// often it is seen, is recorded with its operation and anchor, makes
+    /// the job not undoable (sticky, with a warning), and undo refuses the
+    /// whole job before removing anything.
+    #[test]
+    fn published_unknown_counts_once_warns_and_refuses_undo() {
+        let t = Tmp::new("unknown");
+        t.env(|| {
+            let a = t.0.join("out/a.png");
+            fs::write(&a, "a").unwrap();
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            rec.outcome(&done("/in/a", &a));
+            rec.outcome(&unknown("/in/b"));
+            rec.outcome(&unknown("/in/b"));
+            let closed = rec.finish(true);
+            assert_eq!(closed.tally.counts(), (2, 0, 0));
+            assert!(!closed.undoable);
+            assert!(closed.warning.unwrap().contains("undo unavailable"));
+            let hist = fs::read_to_string(history_path().unwrap()).unwrap();
+            let line = hist.lines().find(|l| l.starts_with("unknown\t")).unwrap();
+            for part in [
+                "\tin=/in/b\t",
+                "\tgroup=00000000000000ab\t",
+                "\top=00000000000000cd\t",
+                "\treason=AncestorChanged\t",
+                "\tdurability=unconfirmed\t",
+                "\tparent=1:2\t",
+                "\tobject=1:3\t",
+            ] {
+                assert!(line.contains(part), "{part}: {line}");
+            }
+            assert!(!line.contains("\tpath="), "{line}");
+            assert!(
+                hist.lines().last().unwrap().ends_with("\tundo=no"),
+                "{hist}"
+            );
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.to_string(), UNKNOWN_REFUSAL);
+            assert!(a.exists(), "undo removed a file of a refused job");
+            // Refused, not done: still refused, not "already undone".
+            assert_eq!(undo(&job).unwrap_err().to_string(), UNKNOWN_REFUSAL);
+            // A run that dies before its job line is refused all the same.
+            let job2 = new_job_id();
+            let mut rec = Recorder::open(&job2, "convert");
+            rec.outcome(&unknown("/in/c"));
+            drop(rec);
+            assert_eq!(undo(&job2).unwrap_err().to_string(), UNKNOWN_REFUSAL);
+        });
+    }
+
     #[test]
     fn finish_writes_status_and_returns_tally() {
         let t = Tmp::new("finish");
@@ -787,8 +940,9 @@ mod tests {
                 input: "/in/b".into(),
                 reason: "broken".into(),
             });
-            let tally = rec.finish(false);
-            assert_eq!(tally.counts(), (1, 0, 1));
+            let closed = rec.finish(false);
+            assert_eq!(closed.tally.counts(), (1, 0, 1));
+            assert!(closed.undoable && closed.warning.is_none());
             let hist = fs::read_to_string(history_path().unwrap()).unwrap();
             let last = hist.lines().last().unwrap();
             assert!(last.starts_with(&format!("job\tid={}\t", job.0)), "{last}");

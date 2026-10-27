@@ -82,7 +82,7 @@ fn background_descendant_fails_the_action_and_is_killed() {
         "{:?}",
         r.outcomes
     );
-    assert!(!a.with_extension("md").exists(), "an output was placed");
+    assert!(!a.with_extension("").exists(), "an output was placed");
     assert!(
         !process_with(&token),
         "background sleep {token} survived run()"
@@ -115,7 +115,7 @@ fn background_job_waited_for_keeps_the_result() {
         r.outcomes
     );
     assert_eq!(
-        std::fs::read_to_string(a.with_extension("md")).unwrap(),
+        std::fs::read_to_string(a.with_extension("").join("a.md")).unwrap(),
         "x\n"
     );
     assert!(t.work_dirs_left().is_empty());
@@ -391,11 +391,11 @@ fn two_step_route_places_the_last_steps_output() {
     assert_eq!(dones(&r), 2, "{:?}", r.outcomes);
     let docs = t.0.join("docs");
     assert_eq!(
-        std::fs::read_to_string(docs.join("a.md")).unwrap(),
+        std::fs::read_to_string(docs.join("a/a.md")).unwrap(),
         "a\n+\n"
     );
     assert_eq!(
-        std::fs::read_to_string(docs.join("b.md")).unwrap(),
+        std::fs::read_to_string(docs.join("b/b.md")).unwrap(),
         "b\n+\n"
     );
     assert_eq!(placed_files(&t), 2);
@@ -413,14 +413,22 @@ fn secret(t: &Tmp) -> std::path::PathBuf {
     p
 }
 
-/// Nothing of the secret reached the user's folder.
+/// Nothing of the secret reached the user's folder, nor any output folder
+/// in it.
 fn assert_no_secret_placed(t: &Tmp) {
+    let mut files = Vec::new();
     for e in std::fs::read_dir(t.0.join("docs")).unwrap().flatten() {
-        let body = std::fs::read(e.path()).unwrap_or_default();
+        match std::fs::read_dir(e.path()) {
+            Ok(sub) => files.extend(sub.flatten().map(|f| f.path())),
+            Err(_) => files.push(e.path()),
+        }
+    }
+    for f in files {
+        let body = std::fs::read(&f).unwrap_or_default();
         assert!(
             !String::from_utf8_lossy(&body).contains("SECRET"),
             "secret leaked into {}",
-            e.path().display()
+            f.display()
         );
     }
 }
@@ -451,7 +459,7 @@ fn two_step_intermediate_swapped_for_a_symlink_fails() {
     assert_eq!(dones(&r), 1);
     let docs = t.0.join("docs");
     assert_eq!(
-        std::fs::read_to_string(docs.join("b.md")).unwrap(),
+        std::fs::read_to_string(docs.join("b/b.md")).unwrap(),
         "b\n+\n"
     );
     assert_no_secret_placed(&t);
@@ -988,7 +996,7 @@ fn descendant_writer_outlives_leader() {
         [(a.clone(), "action left processes behind".to_owned())]
     );
     assert!(w.placed.is_empty(), "{:?}", w.placed);
-    assert!(!a.with_extension("md").exists(), "an output was placed");
+    assert!(!a.with_extension("").exists(), "an output was placed");
     // Only the final failure counts here: the descendant's `up` warning
     // was streamed while the leader ran, as every event is.
     let late: Vec<_> = w
@@ -1139,7 +1147,7 @@ fn descendant_fork_chain_is_caught() {
         failed(&w.ran),
         [(a.clone(), "action left processes behind".to_owned())]
     );
-    assert!(!a.with_extension("md").exists(), "an output was placed");
+    assert!(!a.with_extension("").exists(), "an output was placed");
     // Give a hop that escaped the kill time to show itself.
     std::thread::sleep(Duration::from_millis(100));
     assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
@@ -1199,7 +1207,7 @@ fn cancel_in_the_same_wake_as_the_exit_is_kept() {
     let mut obs = CancelAtStart(common::Ran::default());
     run_with(&[&act], std::slice::from_ref(&a), &mut obs);
     assert_eq!(failed(&obs.0), [(a.clone(), "cancelled".to_owned())]);
-    assert!(!a.with_extension("md").exists(), "an output was placed");
+    assert!(!a.with_extension("").exists(), "an output was placed");
     assert!(t.work_dirs_left().is_empty());
 }
 
@@ -1245,4 +1253,342 @@ fn violation_keeps_its_reason_over_a_surviving_descendant() {
     assert!(w.alive().is_empty(), "left alive: {:?}", w.alive());
     assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(t.work_dirs_left().is_empty());
+}
+
+// ---- Per-input publication ----
+
+type Prepare = Box<dyn FnMut(&engine::exec::OutputGroup, &std::path::Path) -> std::io::Result<()>>;
+
+/// Records the publication callbacks next to the outcomes; `on_prepare`
+/// runs in `prepare_group` (the last point before an input's commit).
+#[derive(Default)]
+struct Pub {
+    ran: common::Ran,
+    prepared: Vec<(engine::exec::OutputGroup, std::path::PathBuf, u32)>,
+    groups: Vec<(
+        engine::exec::OutputGroup,
+        engine::exec::LocationEvidence,
+        engine::exec::Durability,
+    )>,
+    on_prepare: Option<Prepare>,
+}
+
+impl Observer for Pub {
+    fn event(&mut self, o: &Outcome) {
+        self.ran.event(o);
+    }
+    fn dir(&mut self, path: &std::path::Path) {
+        self.ran.dir(path);
+    }
+    fn progress(&mut self, d: usize, t: usize, f: f32) {
+        self.ran.progress(d, t, f);
+    }
+    fn prepare_group(
+        &mut self,
+        g: &engine::exec::OutputGroup,
+        private: &std::path::Path,
+    ) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let mode = std::fs::symlink_metadata(private).map_or(0, |m| m.mode() & 0o7777);
+        self.prepared.push((g.clone(), private.to_owned(), mode));
+        match &mut self.on_prepare {
+            Some(f) => f(g, private),
+            None => Ok(()),
+        }
+    }
+    fn group(
+        &mut self,
+        g: &engine::exec::OutputGroup,
+        l: &engine::exec::LocationEvidence,
+        d: &engine::exec::Durability,
+    ) {
+        self.groups.push((g.clone(), l.clone(), d.clone()));
+        if let Some(p) = &l.path_at_check {
+            self.ran.dir(p);
+        }
+    }
+}
+
+/// Each input copied to `<work>/<i>/o.md`, except `c.txt`, which fails.
+const COPY_BUT_C: &str = "work=$4; i=0\n\
+     while IFS= read -r in; do case \"$in\" in\n\
+     *c.txt) printf 'fail\\t%s\\tbroken\\n' \"$in\";;\n\
+     *) mkdir -p \"$work/$i\"; cat \"$in\" > \"$work/$i/o.md\"; printf 'done\\t%s\\t%s/o.md\\n' \"$in\" $i;;\n\
+     esac; i=$((i+1)); done < \"$6\"";
+
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Four inputs, one fails: the other three are published, each in its own
+/// folder, each by its own commit; the failure takes none of them back.
+#[test]
+fn publication_is_per_input() {
+    let t = Tmp::new("pub-per-input");
+    let ins: Vec<_> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|n| t.input(&format!("{n}.txt"), n))
+        .collect();
+    let bin = t.script("copy", COPY_BUT_C);
+    let mut obs = Pub::default();
+    run_with(&[&action(&bin, "md")], &ins, &mut obs);
+    assert_eq!(failed(&obs.ran), [(ins[2].clone(), "broken".to_owned())]);
+    assert_eq!(dones(&obs.ran), 3, "{:?}", obs.ran.outcomes);
+    let docs = t.0.join("docs");
+    assert_eq!(
+        names(&docs),
+        ["a", "a.txt", "b", "b.txt", "c.txt", "d", "d.txt"]
+    );
+    for n in ["a", "b", "d"] {
+        assert_eq!(names(&docs.join(n)), [format!("{n}.md")]);
+        assert_eq!(
+            std::fs::read_to_string(docs.join(n).join(format!("{n}.md"))).unwrap(),
+            n
+        );
+    }
+    assert_eq!(obs.prepared.len(), 3);
+    assert_eq!(obs.groups.len(), 3);
+    assert_eq!(
+        obs.ran.dirs,
+        [docs.join("a"), docs.join("b"), docs.join("d")]
+    );
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// One input's second output fails its preparation (not UTF-8 text): of
+/// that input nothing becomes visible and nothing is `Done`; the input
+/// before it keeps its publication.
+#[test]
+fn publication_is_atomic_for_one_input() {
+    let t = Tmp::new("pub-atomic");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    let bin = t.script(
+        "two",
+        "work=$4; i=0\n\
+         while IFS= read -r in; do mkdir -p \"$work/$i\"; cat \"$in\" > \"$work/$i/p1.md\"\n\
+         if [ $i = 1 ]; then printf '\\377' > \"$work/$i/p2.md\"; else cat \"$in\" > \"$work/$i/p2.md\"; fi\n\
+         printf 'done\\t%s\\t%s/p1.md\\n' \"$in\" $i; printf 'done\\t%s\\t%s/p2.md\\n' \"$in\" $i\n\
+         i=$((i+1)); done < \"$6\"",
+    );
+    let mut obs = Pub::default();
+    run_with(&[&action(&bin, "md")], &[a.clone(), b.clone()], &mut obs);
+    let f = failed(&obs.ran);
+    assert_eq!(f.len(), 1, "{:?}", obs.ran.outcomes);
+    assert_eq!(f[0].0, b);
+    assert!(f[0].1.starts_with("cannot publish output: "), "{}", f[0].1);
+    let done_inputs: Vec<_> = obs
+        .ran
+        .outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Done { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(done_inputs, [a.clone(), a.clone()]);
+    let docs = t.0.join("docs");
+    assert_eq!(names(&docs), ["a", "a.txt", "b.txt"]);
+    assert_eq!(names(&docs.join("a")), ["p1.md", "p2.md"]);
+    assert!(obs.prepared.len() == 1 && obs.groups.len() == 1);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// The folder can be written but not read, so its sync after the commit is
+/// impossible: the output stays, `Done` stands, and the durability is
+/// reported as unconfirmed (to the group callback and as a warning).
+#[test]
+fn publication_keeps_committed_outputs_on_sync_error() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED publication_keeps_committed_outputs_on_sync_error: root reads anything");
+        return;
+    }
+    let t = Tmp::new("pub-sync");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("copy", COPY_BUT_C);
+    let docs = t.0.join("docs");
+    std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let mut obs = Pub::default();
+    run_with(&[&action(&bin, "md")], std::slice::from_ref(&a), &mut obs);
+    std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let [(_, location, engine::exec::Durability::Unconfirmed(why))] = &obs.groups[..] else {
+        panic!("{:?}", obs.groups)
+    };
+    assert!(why.contains("Permission denied"), "{why}");
+    assert_eq!(location.path_at_check, Some(docs.join("a")));
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Warned { message, .. }, Outcome::Done { output, .. }]
+            if message.starts_with("saved, but not confirmed on disk: ") && *output == docs.join("a/a.md")),
+        "{:?}",
+        obs.ran.outcomes
+    );
+    assert_eq!(std::fs::read_to_string(docs.join("a/a.md")).unwrap(), "a");
+}
+
+/// A failure of the observer's preparation (the journal intent) stops only
+/// that input, before its commit.
+#[test]
+fn publication_refused_by_the_observer_stops_only_that_input() {
+    let t = Tmp::new("pub-prepare");
+    let ins: Vec<_> = ["a", "b", "d"]
+        .iter()
+        .map(|n| t.input(&format!("{n}.txt"), n))
+        .collect();
+    let bin = t.script("copy", COPY_BUT_C);
+    let mut n = 0;
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(move |_, _| {
+            n += 1;
+            if n == 2 {
+                Err(std::io::Error::other("intent not written"))
+            } else {
+                Ok(())
+            }
+        })),
+        ..Pub::default()
+    };
+    run_with(&[&action(&bin, "md")], &ins, &mut obs);
+    assert_eq!(
+        failed(&obs.ran),
+        [(
+            ins[1].clone(),
+            "cannot publish output: intent not written".to_owned()
+        )]
+    );
+    assert_eq!(
+        names(&t.0.join("docs")),
+        ["a", "a.txt", "b.txt", "d", "d.txt"]
+    );
+    assert_eq!(obs.groups.len(), 2);
+    // The refused input's private copy is gone with it.
+    assert!(!obs.prepared[1].1.exists());
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// A cancel that arrives while the outputs are published stops at the
+/// next input's commit: what was published stays, the rest fails.
+#[test]
+fn publication_cancel_stops_before_the_next_commit() {
+    let t = Tmp::new("pub-cancel");
+    let a = t.input("a.txt", "a");
+    let b = t.input("b.txt", "b");
+    let bin = t.script("copy", COPY_BUT_C);
+    let tok = engine::exec::CancelToken::install().unwrap();
+    let mut n = 0;
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(move |_, _| {
+            n += 1;
+            if n == 2 {
+                // SAFETY: SIGTERM to this thread, where the token blocks it.
+                unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+            }
+            Ok(())
+        })),
+        ..Pub::default()
+    };
+    engine::exec::run(
+        &[&action(&bin, "md")],
+        &[a.clone(), b.clone()],
+        &mut obs,
+        &tok,
+    );
+    assert!(tok.is_cancelled());
+    assert_eq!(failed(&obs.ran), [(b, "cancelled".to_owned())]);
+    assert_eq!(dones(&obs.ran), 1);
+    assert_eq!(names(&t.0.join("docs")), ["a", "a.txt", "b.txt"]);
+    assert!(t.work_dirs_left().is_empty());
+}
+
+/// The folder's parent is renamed right before the commit: the group is
+/// published where the engine's fd points (now under the new name), kept,
+/// and reported as `PublishedUnknown` with no path, never as a `Done`
+/// with the old one. The work dir is still cleaned (fd-anchored).
+#[test]
+fn publication_moved_ancestor_is_published_unknown() {
+    let t = Tmp::new("pub-moved");
+    let docs = t.0.join("deep/docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    let a = docs.join("a.txt");
+    std::fs::write(&a, "a").unwrap();
+    let bin = t.script("copy", COPY_BUT_C);
+    let (from, to) = (t.0.join("deep"), t.0.join("deep2"));
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(move |_, _| std::fs::rename(&from, &to))),
+        ..Pub::default()
+    };
+    run_with(&[&action(&bin, "md")], std::slice::from_ref(&a), &mut obs);
+    let [
+        Outcome::PublishedUnknown {
+            input,
+            group,
+            location,
+            reason,
+            ..
+        },
+    ] = &obs.ran.outcomes[..]
+    else {
+        panic!("{:?}", obs.ran.outcomes)
+    };
+    assert_eq!(input, &a);
+    assert_eq!(*reason, engine::exec::PublicationReason::AncestorChanged);
+    assert_eq!(location.path_at_check, None);
+    assert_eq!(*group, obs.prepared[0].0.group);
+    assert_eq!(location.anchor.op, obs.prepared[0].0.op);
+    let moved = t.0.join("deep2/docs");
+    assert_eq!(std::fs::read_to_string(moved.join("a/a.md")).unwrap(), "a");
+    assert!(obs.ran.dirs.is_empty(), "{:?}", obs.ran.dirs);
+    assert_eq!(names(&moved), ["a", "a.txt"]);
+}
+
+/// The group's baseline is fixed in private (wrapper 0700, child 0600,
+/// one link) and is the same, with the same ids, after the commit; the
+/// private path is gone once published.
+#[test]
+fn publication_baseline_reaches_the_observer_unchanged() {
+    use std::os::unix::fs::MetadataExt;
+    let t = Tmp::new("pub-baseline");
+    let a = t.input("a.txt", "a");
+    let bin = t.script("copy", COPY_BUT_C);
+    let mut obs = Pub::default();
+    run_with(&[&action(&bin, "md")], std::slice::from_ref(&a), &mut obs);
+    let [(prepared, private, mode)] = &obs.prepared[..] else {
+        panic!("{:?}", obs.prepared)
+    };
+    let [(group, location, durability)] = &obs.groups[..] else {
+        panic!("{:?}", obs.groups)
+    };
+    assert_eq!(*mode, 0o700);
+    assert!(!private.exists());
+    assert_eq!(prepared, group);
+    assert_eq!(*durability, engine::exec::Durability::Synced);
+    let w = t.0.join("docs/a");
+    assert_eq!(location.path_at_check.as_deref(), Some(w.as_path()));
+    let wm = std::fs::symlink_metadata(&w).unwrap();
+    assert_eq!(
+        (group.id.dev, group.id.ino, group.id.mode),
+        (wm.dev(), wm.ino(), 0o700)
+    );
+    let [c] = &group.children[..] else {
+        panic!("{:?}", group.children)
+    };
+    let cm = std::fs::symlink_metadata(w.join(&c.rel)).unwrap();
+    assert_eq!(c.kind, engine::exec::NodeKind::File);
+    assert_eq!((c.uid, c.mode, c.nlink), (cm.uid(), 0o600, 1));
+    assert_eq!(
+        (c.file_id.dev, c.file_id.ino, c.file_id.size),
+        (cm.dev(), cm.ino(), 1)
+    );
+    assert!(
+        matches!(&obs.ran.outcomes[..], [Outcome::Done { output, id, .. }] if *output == w.join("a.md") && *id == c.file_id),
+        "{:?}",
+        obs.ran.outcomes
+    );
 }
