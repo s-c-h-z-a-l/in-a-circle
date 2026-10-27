@@ -96,6 +96,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --workspace --no-fail-fast
 
+      # D-10: the Trash undo's tests on the runner's own filesystem. Their
+      # fixtures live in the temp dir; the step names its filesystem, fails
+      # unless it is ext4 (GNU stat: "ext2/ext3"), and fails unless the
+      # tests ran and passed there.
+      - name: Undo tests on ext4
+        if: ${{ !cancelled() }}
+        run: |
+          dir="${TMPDIR:-/tmp}"
+          fs=$(stat -f -c %T "$dir")
+          echo "undo fixtures in $dir: $fs"
+          test "$fs" = ext2/ext3
+          cargo test -p engine --lib -- trash:: journal::tests::undo_ 2>&1 | tee undo.log
+          grep -Eq "test result: ok. [1-9][0-9]* passed" undo.log
+
       # D-27: the RSS budget guard measures the shipped (release) binary.
       # The step fails unless exactly that test ran and passed (a filter
       # that matches nothing would otherwise pass silently), and the test

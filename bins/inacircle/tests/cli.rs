@@ -306,6 +306,9 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// Undo moves each input's group whole into the Trash (the test's own
+/// `XDG_DATA_HOME`), with its `.trashinfo`; a group with a changed file is
+/// kept whole, and the CLI prints one line per group.
 #[test]
 fn undo_end_to_end() {
     let e = Env::new("undo");
@@ -315,22 +318,30 @@ fn undo_end_to_end() {
     assert_eq!(o.summary(), (2, 0, 0), "{}", o.stdout);
     let job = o.job();
     let (am, bm) = (e.files().join("a/a.md"), e.files().join("b/b.md"));
-    // A file changed since the run is kept.
+    // A file changed since the run keeps its group.
     fs::write(&bm, "edited\n").unwrap();
 
     let u = e.run(&["undo", &job]);
     assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
-    let removed: Vec<String> = u
-        .kind("removed")
+    let trash = e.root.join("home/.local/share/Trash");
+    let moved: Vec<String> = u
+        .kind("moved")
         .iter()
         .map(|l| l.bare_at(0).unwrap().to_owned())
         .collect();
-    assert_eq!(removed, [am.display().to_string()]);
-    assert_eq!(u.pairs("kept"), [(bm.clone(), "changed since".to_owned())]);
-    assert!(!am.exists());
-    // The emptied folder goes with its file, the other stays with its
-    // kept file.
-    assert!(!e.files().join("a").exists());
+    assert_eq!(moved, [trash.join("files/a").display().to_string()]);
+    assert_eq!(
+        u.pairs("kept"),
+        [(e.files().join("b"), "Changed".to_owned())]
+    );
+    assert!(!am.exists() && !e.files().join("a").exists());
+    assert_eq!(
+        fs::read_to_string(trash.join("files/a/a.md")).unwrap(),
+        "a\n"
+    );
+    let info = fs::read_to_string(trash.join("info/a.trashinfo")).unwrap();
+    assert!(info.starts_with("[Trash Info]\nPath=/"), "{info}");
+    assert!(info.contains("/files/a\nDeletionDate="), "{info}");
     assert_eq!(fs::read_to_string(&bm).unwrap(), "edited\n");
     assert!(a.exists() && b.exists());
 
@@ -342,6 +353,29 @@ fn undo_end_to_end() {
     let unknown = e.run(&["undo", "1-1"]);
     assert_eq!(unknown.code, Some(2));
     assert!(unknown.stderr.contains("unknown job"), "{}", unknown.stderr);
+}
+
+/// Without a safe Trash (a symlink in place of the home Trash) nothing
+/// moves: the group is kept and the link's target untouched.
+#[test]
+fn undo_without_a_safe_trash_keeps_the_outputs() {
+    let e = Env::new("undo-notrash");
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
+    let share = e.root.join("home/.local/share");
+    fs::create_dir_all(&share).unwrap();
+    let elsewhere = e.root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, share.join("Trash")).unwrap();
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(
+        u.pairs("kept"),
+        [(e.files().join("a"), "NoTrash".to_owned())]
+    );
+    assert!(e.files().join("a/a.md").exists());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
 #[test]
@@ -357,14 +391,25 @@ fn review_focus_names() {
     let job = o.job();
     let u = e.run(&["undo", &job]);
     assert_eq!(u.code, Some(0), "{}", u.stderr);
-    let removed: Vec<String> = u
-        .kind("removed")
+    let moved: Vec<String> = u
+        .kind("moved")
         .iter()
         .map(|l| l.bare_at(0).unwrap().to_owned())
         .collect();
-    assert_eq!(removed, [out.display().to_string()]);
+    let trash = e.root.join("home/.local/share/Trash");
+    assert_eq!(
+        moved,
+        [trash.join("files").join(name).display().to_string()]
+    );
     assert!(!out.exists() && src.exists());
     assert!(!e.files().join(name).exists());
+    // The Trash spec's `Path=`: every byte outside the unreserved set
+    // percent-encoded.
+    let info = fs::read_to_string(trash.join("info").join(format!("{name}.trashinfo"))).unwrap();
+    assert!(
+        info.contains("/files/a%20b%09c%0Ad%3De%20-%3E%20%C3%A9\nDeletionDate="),
+        "{info}"
+    );
 }
 
 #[test]
@@ -1145,7 +1190,7 @@ fn cancel_after_some_done_exits_0() {
 }
 
 #[test]
-fn undo_removes_a_multi_output_folder() {
+fn undo_moves_a_multi_output_folder_whole() {
     let e = Env::new("undo-many");
     let t = e.test_input("t.test", &["outputs=3"]);
     let o = run_test_action(&e, &[&t]);
@@ -1155,8 +1200,10 @@ fn undo_removes_a_multi_output_folder() {
     assert!(e.history().contains("\tchildren=3\n"), "{}", e.history());
     let u = e.run(&["undo", &o.job()]);
     assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
-    assert_eq!(u.kind("removed").len(), 3, "{}", u.stdout);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
     assert!(!folder.exists());
+    let moved = e.root.join("home/.local/share/Trash/files/t");
+    assert_eq!(fs::read_dir(moved).unwrap().count(), 3);
 }
 
 /// The budget is the shipped `inacircle`'s peak PSS <= 5 MB, however many

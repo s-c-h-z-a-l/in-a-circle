@@ -452,7 +452,7 @@ fn measure_reports_the_notification_cpu_before_the_undo_window() {
 }
 
 #[test]
-fn undo_button_removes_the_output() {
+fn undo_button_moves_the_output_to_the_trash() {
     let e = Env::new("undo");
     e.file("a.txt", "hello\n");
     let (fake, rx) = server(|p, g| {
@@ -469,10 +469,13 @@ fn undo_button_removes_the_output() {
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
     assert!(!e.files().join("a").exists());
     assert!(e.files().join("a.txt").exists());
+    let trash = e.root.join("home/.local/share/Trash");
+    assert!(trash.join("files/a/a.md").is_file());
+    assert!(trash.join("info/a.trashinfo").exists());
     assert_eq!(n.len(), 2);
     assert_eq!(
         (n[1].summary.as_str(), n[1].body.as_str()),
-        ("Undone", "1 removed")
+        ("Undone", "Moved to Trash")
     );
     assert!(n[1].actions.is_empty());
     // It replaces the result, whose Undo button is spent.
@@ -514,7 +517,7 @@ fn undo_button_keeps_a_changed_output() {
     assert_eq!(n.len(), 2);
     assert_eq!(
         (n[1].summary.as_str(), n[1].body.as_str()),
-        ("Undone", "0 removed, 1 kept (changed since)")
+        ("Nothing undone", "1 kept because it changed")
     );
 }
 

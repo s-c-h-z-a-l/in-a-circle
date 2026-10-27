@@ -462,18 +462,55 @@ pub struct AnchorHint {
 /// The moment a location was checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckPoint {
+    /// Undo: before anything moved.
+    Precheck,
     /// Right after the publishing rename and its syncs.
     PostPublish,
-    /// When a kept object's path was resolved from its fd (undo).
+    /// Undo: after the move into the Trash (or its failed way back).
+    PostMove,
+    /// Undo: after the move back.
+    PostRestore,
+    /// When an object's path was resolved from its fd (undo).
     PostResolve,
+    /// Undo: when the move into the Trash was committed.
+    Commit,
+}
+
+impl CheckPoint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckPoint::Precheck => "Precheck",
+            CheckPoint::PostPublish => "PostPublish",
+            CheckPoint::PostMove => "PostMove",
+            CheckPoint::PostRestore => "PostRestore",
+            CheckPoint::PostResolve => "PostResolve",
+            CheckPoint::Commit => "Commit",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CheckPoint> {
+        [
+            CheckPoint::Precheck,
+            CheckPoint::PostPublish,
+            CheckPoint::PostMove,
+            CheckPoint::PostRestore,
+            CheckPoint::PostResolve,
+            CheckPoint::Commit,
+        ]
+        .into_iter()
+        .find(|c| c.as_str() == s)
+    }
 }
 
 /// What is known about where an object is: a path proved to name it at
 /// `checked_at`, or `None` when that could not be proved. Nothing is
-/// promised about later renames by other programs.
+/// promised about later renames by other programs. `last_unverified_path`
+/// is a diagnostic only (the last path seen, not proved), never evidence
+/// of a place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocationEvidence {
     pub path_at_check: Option<PathBuf>,
+    pub last_unverified_path: Option<PathBuf>,
     pub anchor: AnchorHint,
     pub checked_at: CheckPoint,
 }
@@ -744,6 +781,17 @@ fn sync(fd: RawFd, p: Point) -> io::Result<()> {
 
 /// `unlinkat(dir, name, flags)` only while `name` is still `id`: what we
 /// made, never a look-alike put in its place. Errors are ignored.
+///
+/// Limit (D-28): the identity is `(dev, ino)`, checked by name. Where the
+/// object's own fd is held until this call (the staging folder, the private
+/// wrapper, the work dir, which `WorkDir::drop` also reopens and checks),
+/// its inode cannot be freed and its number reused, so only a same-user
+/// swap between the check and the unlink remains. A staging child's fd is
+/// closed after its copy (holding one per output would cost up to 1024 fds
+/// per group): if a same-user process removed it from the private 0700
+/// staging folder and a new file got the freed inode number under the same
+/// name, that file would match and be removed. This is never published
+/// content: staging is unlinked only when the group was not published.
 fn unlink_own(dir: RawFd, name: &CStr, id: (u64, u64), flags: libc::c_int) {
     let at = At { dir, name };
     if stat_at(at).is_ok_and(|st| ident(&st) == id) {
@@ -1276,6 +1324,7 @@ pub fn publish_beneath(
     Ok(Publication {
         location: LocationEvidence {
             path_at_check: locate(target, &parent, &leaf, (id.dev, id.ino)),
+            last_unverified_path: None,
             anchor,
             checked_at: CheckPoint::PostPublish,
         },

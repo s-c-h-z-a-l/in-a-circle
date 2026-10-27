@@ -22,6 +22,13 @@
 //! The same file (by canonical path) given more than once counts once; the
 //! first spelling wins.
 //!
+//! `undo` moves each of the job's output groups whole into the Trash and
+//! prints one line per group: `moved <trash path>`, `kept <path|-> <reason>`,
+//! `restored <path|-> <reason>`, `recovery-kept <path|-> <reason> <errno|->`
+//! or `uncertain <op> <reason> <last path seen|->` (never a made-up place),
+//! then `warning <text>` lines. It exits 0 when every group went to the
+//! Trash or was provably kept in place, else 1.
+//!
 //! `--notify` adds desktop notifications: "running" with Cancel after a
 //! second, the result with Undo at the end. The stdout lines are written
 //! before the Undo window starts; the exit code does not depend on them.
@@ -49,7 +56,7 @@ use engine::classify::{Classified, Kind, classify};
 use engine::exec::{
     self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
 };
-use engine::journal::{self, JobId, Recorder, Running};
+use engine::journal::{self, GroupOutcome, JobId, Recorder, Running};
 use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
 use notice::Notifier;
@@ -645,13 +652,62 @@ fn cmd_undo(args: &[OsString]) -> u8 {
     };
     match journal::undo(&job) {
         Ok(r) => {
-            for p in &r.removed {
-                out(&Line::new("removed").bare(&lossy(p)));
+            let place = |p: &Option<PathBuf>| p.as_deref().map_or_else(|| "-".to_owned(), lossy);
+            let mut attention = false;
+            for o in &r.groups {
+                let l = match o {
+                    GroupOutcome::MovedToTrash { location, .. } => {
+                        Line::new("moved").bare(&place(&location.path_at_check))
+                    }
+                    GroupOutcome::Kept {
+                        location, reason, ..
+                    } => Line::new("kept")
+                        .bare(&place(&location.path_at_check))
+                        .bare(reason.name()),
+                    GroupOutcome::Restored {
+                        location, reason, ..
+                    } => {
+                        attention = true;
+                        Line::new("restored")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                    }
+                    GroupOutcome::RecoveryKept {
+                        location,
+                        reason,
+                        errno,
+                        ..
+                    } => {
+                        attention = true;
+                        Line::new("recovery-kept")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                            .bare(&errno.map_or_else(|| "-".to_owned(), |e| e.to_string()))
+                    }
+                    GroupOutcome::Uncertain {
+                        op,
+                        locations,
+                        reason,
+                        ..
+                    } => {
+                        attention = true;
+                        let seen = locations.iter().find_map(|l| {
+                            l.path_at_check
+                                .clone()
+                                .or_else(|| l.last_unverified_path.clone())
+                        });
+                        Line::new("uncertain")
+                            .bare(&format!("{:016x}", op.0))
+                            .bare(reason.name())
+                            .bare(&place(&seen))
+                    }
+                };
+                out(&l);
             }
-            for (p, why) in &r.kept {
-                out(&Line::new("kept").bare(&lossy(p)).bare(why));
+            for w in &r.warnings {
+                out(&Line::new("warning").bare(w));
             }
-            EXIT_DONE
+            if attention { EXIT_FAILED } else { EXIT_DONE }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             eprintln!("inacircle: unknown job {}", job.0);
@@ -966,6 +1022,7 @@ mod tests {
             group: GroupId(1),
             location: LocationEvidence {
                 path_at_check: None,
+                last_unverified_path: None,
                 anchor: AnchorHint {
                     parent_dev: 8,
                     parent_ino: 9,

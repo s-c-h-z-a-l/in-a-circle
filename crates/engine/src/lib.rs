@@ -9,4 +9,5 @@ pub mod menu;
 pub mod output;
 pub mod sandbox;
 mod sys;
+pub mod trash;
 pub mod xdg;

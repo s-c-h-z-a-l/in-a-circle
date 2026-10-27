@@ -350,8 +350,15 @@ Every action runs sandboxed, set up in the child between `fork` and
   SIGINT received during the window (a cancel during the run is part of the
   run; the signals stay blocked and are read through the signalfd): the
   result is closed and `run` exits with its own code. An Undo click
-  undoes the job and replaces the result with `Undone` and
-  `<n> removed[, <k> kept (<reason>)]`, or `Undo failed` with the cause.
+  undoes the job and replaces the result with what happened, per input
+  group: `Undone` / `Moved to Trash` when every group went to the Trash;
+  `Partially undone` with the counts (`2 moved to Trash, 1 kept because it
+  changed`); `Nothing undone` only when every group was provably kept in
+  place; `Undo uncertain` when a group's place or metadata could not be
+  proved (never shown as a success); `Undo incomplete` otherwise (a group
+  moved and came back, or stays in the Trash). Places that need attention
+  and warnings follow, each line escaped and bounded; `Undo failed` with
+  the cause when the job was refused before anything moved.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 
@@ -393,14 +400,35 @@ In the engine, in one place:
    name something else by then); stale ones from a crash are cleaned by
    the next run (our pattern only, older than a day). An output folder
    never takes that pattern.
-7. Undo deletes only files we created, and only if unchanged since their
-   private baseline (device, inode, size, mtime, ctime, type, owner, mode,
-   link count), inside the wrapper folder the commit recorded (same device
-   and inode); otherwise it keeps them and says why. An output folder is
-   removed only if empty afterwards. A job with an output at an unknown
-   place, not confirmed on disk, or with an incomplete or damaged record
-   is not undoable at all, and neither is a job of the previous history
-   format.
+7. Undo never deletes. It moves each input's output group (the wrapper
+   folder, whole) into the freedesktop.org Trash with one
+   `renameat2(RENAME_NOREPLACE)`: the home Trash
+   (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
+   the volume's (`$topdir/.Trash/$uid` under a sticky `.Trash`, else
+   `$topdir/.Trash-$uid`); every Trash folder is opened without following
+   a symlink and must be this user's with mode 0700 (refused otherwise,
+   never `chmod`ed); a remote filesystem or no safe Trash keeps the group.
+   Nothing is copied across filesystems (`EXDEV` keeps it). Before the
+   move the wrapper and every child must match their private baseline
+   (device, inode, size, mtime, ctime, type, owner, mode, link count; the
+   exact child count): one changed, missing or extra child keeps the whole
+   group; other groups are not affected. The `.trashinfo` (`Path=`
+   percent-encoded, `DeletionDate=` local time) is created with `O_EXCL`,
+   read back and synced before the move, after a synced recovery intent.
+   After the move the group and its info are checked again; on any
+   difference the group is moved back (no-replace); if its way back is
+   taken it stays in the Trash and its place is reported. Our info is
+   authentic only while it names our moved group: otherwise it is
+   neutralised through its fd and renamed off its `.trashinfo` name (even
+   when the neutralisation failed). A place is reported only when proved
+   at that moment: the known path, or the path resolved from the held fd
+   (at most 4 tries, no symlink); otherwise it is unknown, with an anchor,
+   and nothing is deleted. Later renames by other programs are not
+   followed. A job with an output at an unknown place, not confirmed on
+   disk, or with an incomplete or damaged record is refused before
+   anything moves, and so is a job of the previous history format. We
+   never empty or scan the Trash: the user manages it in the file
+   manager.
 
 ## The wheel
 
@@ -592,7 +620,15 @@ No daemon:
   is then not undoable. A publication that fails after its intent gets
   `publish-abort`. `skip`, `fail` and `unknown` lines come as they
   happen, the `job` line (id, time, action, status, sandbox, `undo=no`
-  when not undoable) at the end, `undo` once undone. Paths are
+  when not undoable) at the end. Undo writes, per group, a synced
+  `recovery-intent` (source, Trash target, identities, mount, deletion
+  date) before anything is made in the Trash, and one synced ending:
+  `recovery-commit` (in the Trash), `recovery-restored`,
+  `recovery-kept`, `recovery-uncertain` or `recovery-abort` (nothing
+  moved), each with the proved place or `-`, the anchor and the reason;
+  then `undo`. An undo cut by a crash is resumed by the next one from
+  these records: an intent without its ending is recovered by looking only
+  at its target and our two info names (no Trash scan). Paths are
   byte-exact (`%XX` for bytes that are not printable ASCII, `%` and
   `\`). There is no digest: undo acts only on a job whose every group is
   complete (version, unique group and operation, begin and end, matching
@@ -645,7 +681,12 @@ inacircle cancel <job-id>
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
 - `undo` of a job that is still running is refused (exit 1): cancel it
-  first.
+  first. It prints one line per output group: `moved <Trash path>`,
+  `kept <path|-> <reason>`, `restored <path|-> <reason>`,
+  `recovery-kept <path|-> <reason> <errno|->` or
+  `uncertain <op> <reason> <last path seen|->` (a hint, not a proved
+  place), then `warning <text>` lines; exit 0 when every group went to the
+  Trash or was kept in place, else 1.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
 - `--notify` adds the desktop notifications of [Feedback](#feedback). All

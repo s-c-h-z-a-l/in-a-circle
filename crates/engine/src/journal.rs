@@ -11,10 +11,13 @@
 //! synced). A name taken at the rename adds another `publish-intent` for
 //! the same group and operation; a publication that failed after its
 //! intent gets `publish-abort`. `skip`, `fail` and `unknown` lines come as
-//! they happen, the `job` line when the run ends, `undo` once undone.
-//! Undo acts only on a job whose every group is complete (strict framing,
-//! counts, a synced commit); anything else refuses the whole job before
-//! anything is removed. Paths are byte-exact (`%XX` for a byte that is not
+//! they happen, the `job` line when the run ends. Undo (into the Trash,
+//! see [`crate::trash`]) adds per group a synced `recovery-intent` before
+//! anything is made in the Trash and one synced ending
+//! (`recovery-commit`, `-restored`, `-kept`, `-uncertain`, `-abort`), then
+//! `undo`. Undo acts only on a job whose every group is complete (strict
+//! framing, counts, a synced commit); anything else refuses the whole job
+//! before anything is moved. Paths are byte-exact (`%XX` for a byte that is not
 //! printable ASCII, and for `%` and `\\`).
 //!
 //! A version 0 history is archived (`history.v0`, never overwritten) under
@@ -26,15 +29,20 @@
 //! in `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line per file.
 
 use crate::exec::{Durability, FileId, Outcome, Tally};
-use crate::output::{ChildBaseline, DirectoryId, LocationEvidence, NodeKind, OutputGroup};
-use crate::sys::{c_name, fstat, ident, last_err, open_at, stat_at};
+use crate::output::{
+    AnchorHint, CheckPoint, ChildBaseline, DirectoryId, GroupId, LocationEvidence, NodeKind,
+    OperationId, OutputGroup,
+};
+use crate::sys::{c_name, fstat, ident, last_err, open_at, read_dir, stat_at};
+use crate::trash::{self, RECOVERY_INTENT_MAX_BYTES};
+pub use crate::trash::{GroupOutcome, UndoReason, UndoResult};
 use crate::xdg;
 use manifest::{Line, parse_line, write_line};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileExt};
 use std::path::{Path, PathBuf};
@@ -61,6 +69,10 @@ const TEMP_ATTEMPTS: u32 = 4;
 /// A registry entry is one `job` line of about 200 bytes; a bigger file is
 /// not ours and is skipped unread.
 const REGISTRY_ENTRY_MAX: u64 = 4096;
+/// Registry entries read at most: one per running supervisor, each a
+/// process the user started; 65536 is far past any desktop's concurrent
+/// runs. A folder with more is not ours to read (nothing is listed).
+const REGISTRY_ENTRIES_MAX: usize = 65536;
 /// Running-job files are rewritten at most this often.
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
 
@@ -229,8 +241,15 @@ impl StateDir {
 
     /// Replaces `name` with a file holding `bytes` (a temp file renamed
     /// over it; a symlink at `name` is replaced, not followed). Returns the
-    /// new file's `(dev, ino)`.
-    pub(crate) fn replace(&self, name: &str, bytes: &[u8], sync: bool) -> io::Result<(u64, u64)> {
+    /// new file's `(dev, ino)` and the open file: whoever keeps it open
+    /// keeps the inode from being freed and reused, so a later identity
+    /// check against `(dev, ino)` cannot match an unrelated new file.
+    pub(crate) fn replace(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        sync: bool,
+    ) -> io::Result<((u64, u64), File)> {
         let (tmp, f) = self.temp(name, bytes, sync)?;
         let id = ident(&fstat(f.as_raw_fd())?);
         let (from, to) = (c_name(tmp.as_bytes())?, c_name(name.as_bytes())?);
@@ -243,7 +262,7 @@ impl StateDir {
         if sync {
             self.sync()?;
         }
-        Ok(id)
+        Ok((id, f))
     }
 
     /// `renameat2(RENAME_NOREPLACE)` within the folder.
@@ -991,10 +1010,14 @@ impl Recorder {
 
 /// A registered running job. Its file is written by rename in the
 /// registry folder opened at the start, and removed on drop if it is
-/// still the file written last.
+/// still the file written last. That file is held open until then, so its
+/// inode cannot be freed and reused by another file at the name (on ext4
+/// a removed file's inode number comes back at once): the check before
+/// the unlink compares against a live inode. What remains is the
+/// check-to-unlink window of `unlink_if` against a same-user swap.
 pub struct Running {
     dir: Option<StateDir>,
-    written: Option<(u64, u64)>,
+    written: Option<((u64, u64), File)>,
     job: String,
     action: String,
     inputs: usize,
@@ -1041,16 +1064,16 @@ impl Running {
             .pair("done", &done.to_string())
             .pair("progress", &format!("{progress:.3}"))
             .pair("started", &self.started.to_string());
-        if let Ok(id) = dir.replace(&self.job, write_line(&line).as_bytes(), false) {
-            self.written = Some(id);
+        if let Ok(w) = dir.replace(&self.job, write_line(&line).as_bytes(), false) {
+            self.written = Some(w);
         }
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        if let (Some(dir), Some(id)) = (&self.dir, self.written) {
-            let _ = dir.unlink_if(&self.job, id);
+        if let (Some(dir), Some((id, _))) = (&self.dir, &self.written) {
+            let _ = dir.unlink_if(&self.job, *id);
         }
     }
 }
@@ -1101,13 +1124,16 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
     let Some(path) = jobs_dir() else {
         return Vec::new();
     };
-    let (Ok(dir), Ok(rd)) = (StateDir::open(&path), fs::read_dir(&path)) else {
+    // Listed through the folder's own descriptor (D-28), never by path.
+    let Ok(dir) = StateDir::open(&path) else {
+        return Vec::new();
+    };
+    let Ok(names) = read_dir(dir.raw(), REGISTRY_ENTRIES_MAX) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for e in rd.flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str().filter(|n| !n.starts_with('.')) else {
+    for name in &names {
+        let Some(name) = name.to_str().ok().filter(|n| !n.starts_with('.')) else {
             continue;
         };
         let Ok(f) = dir.open_file(name, libc::O_RDONLY, 0) else {
@@ -1154,12 +1180,6 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
 
 // ---- reading a job back ----
 
-#[derive(Debug, Default)]
-pub struct UndoResult {
-    pub removed: Vec<PathBuf>,
-    pub kept: Vec<(PathBuf, String)>,
-}
-
 /// One group as its records say.
 #[derive(Debug)]
 struct GroupRec {
@@ -1180,6 +1200,27 @@ struct GroupRec {
     uncertain: bool,
     /// Its publication failed after the intent: nothing was published.
     aborted: bool,
+    /// Its undo into the Trash, as recorded.
+    recovery: Recovery,
+}
+
+/// A group's undo records: none, an intent without its ending (a crash),
+/// or the ending. A `Kept` ending (nothing moved) lets a later intent in.
+#[derive(Debug)]
+enum Recovery {
+    None,
+    Open(OpenRec),
+    Closed(GroupOutcome),
+}
+
+#[derive(Debug)]
+struct OpenRec {
+    op: u64,
+    source: Vec<u8>,
+    target: Vec<u8>,
+    info_rel: usize,
+    target_parent: (u64, u64),
+    date: String,
 }
 
 impl GroupRec {
@@ -1312,6 +1353,223 @@ const UNCERTAIN: &[&str] = &[
     "durability",
 ];
 const ABORT: &[&str] = &["op", "job", "group"];
+const RINTENT: &[&str] = &[
+    "op",
+    "job",
+    "group",
+    "source",
+    "target",
+    "info_rel",
+    "source_parent_dev",
+    "source_parent_ino",
+    "target_parent_dev",
+    "target_parent_ino",
+    "wrapper_dev",
+    "wrapper_ino",
+    "mount",
+    "deletion_date",
+];
+const RCLOSE: &[&str] = &[
+    "op",
+    "job",
+    "group",
+    "actual",
+    "parent",
+    "object",
+    "leaf",
+    "checked",
+    "reason",
+    "errno",
+    "info",
+    "durability",
+];
+/// The closing record of each undo outcome.
+const R_KEPT: &str = "recovery-abort";
+const R_MOVED: &str = "recovery-commit";
+const R_RESTORED: &str = "recovery-restored";
+const R_RECOVERY_KEPT: &str = "recovery-kept";
+const R_UNCERTAIN: &str = "recovery-uncertain";
+
+/// `dev:ino`.
+fn pair_id(s: &str) -> Result<(u64, u64), Fault> {
+    let (d, i) = s.split_once(':').ok_or("a bad identity")?;
+    Ok((num(d)?, num(i)?))
+}
+
+/// `-` or a value.
+fn opt(s: &str) -> Option<&str> {
+    (s != "-").then_some(s)
+}
+
+/// An undo outcome back from its closing record.
+fn closed_outcome(kind: &str, group: u64, op: u64, v: &[&str]) -> Result<GroupOutcome, Fault> {
+    let (parent, object) = (pair_id(v[4])?, pair_id(v[5])?);
+    let location = LocationEvidence {
+        path_at_check: opt(v[3])
+            .map(path_dec)
+            .transpose()?
+            .map(|p| PathBuf::from(OsStr::from_bytes(&p))),
+        last_unverified_path: None,
+        anchor: AnchorHint {
+            parent_dev: parent.0,
+            parent_ino: parent.1,
+            object_dev: object.0,
+            object_ino: object.1,
+            leaf: OsStr::from_bytes(&path_dec(v[6])?).to_owned(),
+            op: OperationId(op),
+        },
+        checked_at: CheckPoint::parse(v[7]).ok_or("a bad check point")?,
+    };
+    let errno = opt(v[9])
+        .map(|e| e.parse::<i32>().map_err(|_| "a bad errno"))
+        .transpose()?;
+    // The errno belongs to the reason when its kind carries one, else it
+    // is the outcome's own (a failed way back).
+    let reason = opt(v[8])
+        .map(|r| {
+            UndoReason::parse(r, None)
+                .or_else(|| UndoReason::parse(r, errno))
+                .ok_or("a bad reason")
+        })
+        .transpose()?;
+    let durability = match v[11] {
+        "synced" => Durability::Synced,
+        // `-`: an ending without one (kept, uncertain).
+        "unconfirmed" | "-" => Durability::Unconfirmed("recorded unconfirmed".to_owned()),
+        _ => return Err("a bad durability"),
+    };
+    let group = GroupId(group);
+    let reason = || reason.ok_or("a missing reason");
+    Ok(match kind {
+        R_KEPT => GroupOutcome::Kept {
+            group,
+            location,
+            reason: reason()?,
+        },
+        R_MOVED => GroupOutcome::MovedToTrash {
+            group,
+            location,
+            info_leaf: OsStr::from_bytes(&path_dec(opt(v[10]).ok_or("a missing info")?)?)
+                .to_owned(),
+            durability,
+        },
+        R_RESTORED => GroupOutcome::Restored {
+            group,
+            location,
+            reason: reason()?,
+            durability,
+        },
+        R_RECOVERY_KEPT => GroupOutcome::RecoveryKept {
+            group,
+            location,
+            reason: reason()?,
+            errno,
+            durability,
+        },
+        _ => GroupOutcome::Uncertain {
+            group,
+            op: OperationId(op),
+            locations: vec![location],
+            reason: reason()?,
+        },
+    })
+}
+
+/// The closing record of `op`, ending as `o`.
+fn close_line(job: &str, op: OperationId, o: &GroupOutcome) -> String {
+    let (kind, group, loc, reason, errno, info, durability) = match o {
+        GroupOutcome::Kept {
+            group,
+            location,
+            reason,
+        } => (
+            R_KEPT,
+            group,
+            location,
+            Some(*reason),
+            reason.errno(),
+            None,
+            None,
+        ),
+        GroupOutcome::MovedToTrash {
+            group,
+            location,
+            info_leaf,
+            durability,
+        } => (
+            R_MOVED,
+            group,
+            location,
+            None,
+            None,
+            Some(info_leaf),
+            Some(durability),
+        ),
+        GroupOutcome::Restored {
+            group,
+            location,
+            reason,
+            durability,
+        } => (
+            R_RESTORED,
+            group,
+            location,
+            Some(*reason),
+            reason.errno(),
+            None,
+            Some(durability),
+        ),
+        GroupOutcome::RecoveryKept {
+            group,
+            location,
+            reason,
+            errno,
+            durability,
+        } => (
+            R_RECOVERY_KEPT,
+            group,
+            location,
+            Some(*reason),
+            *errno,
+            None,
+            Some(durability),
+        ),
+        GroupOutcome::Uncertain {
+            group,
+            locations,
+            reason,
+            ..
+        } => (
+            R_UNCERTAIN,
+            group,
+            &locations[0],
+            Some(*reason),
+            reason.errno(),
+            None,
+            None,
+        ),
+    };
+    let a = &loc.anchor;
+    let dash = || "-".to_owned();
+    write_line(
+        &Line::new(kind)
+            .pair("op", &hex(op.0))
+            .pair("job", job)
+            .pair("group", &hex(group.0))
+            .pair(
+                "actual",
+                &loc.path_at_check.as_deref().map_or_else(dash, path_enc),
+            )
+            .pair("parent", &format!("{}:{}", a.parent_dev, a.parent_ino))
+            .pair("object", &format!("{}:{}", a.object_dev, a.object_ino))
+            .pair("leaf", &enc(a.leaf.as_bytes()))
+            .pair("checked", loc.checked_at.as_str())
+            .pair("reason", reason.map_or("-", UndoReason::name))
+            .pair("errno", &errno.map_or_else(dash, |e| e.to_string()))
+            .pair("info", &info.map_or_else(dash, |i| enc(i.as_bytes())))
+            .pair("durability", durability.map_or("-", durability_str)),
+    )
+}
 
 impl JobRecords {
     /// The begun group `id` (with operation `op`, when given).
@@ -1424,6 +1682,57 @@ impl JobRecords {
                 }
                 g.aborted = true;
             }
+            "recovery-intent" => {
+                let v = fields(l, RINTENT)?;
+                let (source, target) = (path_dec(v[3])?, path_dec(v[4])?);
+                let info_rel = count(v[5])?;
+                if info_rel > source.len() {
+                    return Err("a Trash path outside its source");
+                }
+                for n in &v[6..13] {
+                    num(n)?;
+                }
+                let date = v[13];
+                if date.len() != 19
+                    || !date
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b"-T:".contains(&b))
+                {
+                    return Err("a bad deletion date");
+                }
+                let op = hex_id(v[0])?;
+                let target_parent = (num(v[8])?, num(v[9])?);
+                let g = self.group(v[2], None)?;
+                if g.commit.is_none() || !g.synced {
+                    return Err("an undo of a group not committed");
+                }
+                if !matches!(
+                    g.recovery,
+                    Recovery::None | Recovery::Closed(GroupOutcome::Kept { .. })
+                ) {
+                    return Err("an undo intent out of order");
+                }
+                g.recovery = Recovery::Open(OpenRec {
+                    op,
+                    source,
+                    target,
+                    info_rel,
+                    target_parent,
+                    date: date.to_owned(),
+                });
+            }
+            kind @ (R_KEPT | R_MOVED | R_RESTORED | R_RECOVERY_KEPT | R_UNCERTAIN) => {
+                let v = fields(l, RCLOSE)?;
+                let op = hex_id(v[0])?;
+                let g = self.group(v[2], None)?;
+                let Recovery::Open(o) = &g.recovery else {
+                    return Err("an undo ending without its intent");
+                };
+                if o.op != op {
+                    return Err("an undo ending of another operation");
+                }
+                g.recovery = Recovery::Closed(closed_outcome(kind, g.group, op, &v)?);
+            }
             _ => return Err("an unknown record"),
         }
         Ok(())
@@ -1460,6 +1769,7 @@ impl JobRecords {
             synced: false,
             uncertain: false,
             aborted: false,
+            recovery: Recovery::None,
         });
         Ok(())
     }
@@ -1693,111 +2003,62 @@ fn refusal(r: &JobRecords) -> Option<io::Error> {
     None
 }
 
-/// Removes a committed group's files that still match their baselines,
-/// then its wrapper if that is left empty. All through the wrapper opened
-/// without following a symlink and checked against its recorded identity:
-/// a folder that took its place (a lookalike, a symlink) is left alone.
-fn undo_group(place: &Path, g: &GroupRec, res: &mut UndoResult) {
-    let keep_all = |res: &mut UndoResult, why: &str| {
-        for c in &g.children {
-            res.kept.push((place.join(&c.rel), why.to_owned()));
+/// The history as the Trash undo writes it: each record appended under
+/// the append lock and synced.
+struct HistLog<'a> {
+    file: &'a mut File,
+    lock: &'a File,
+    job: String,
+}
+
+impl trash::Log for HistLog<'_> {
+    fn intent(&mut self, i: &trash::Intent) -> io::Result<()> {
+        let line = format!(
+            "recovery-intent\top={}\tjob={}\tgroup={}\tsource={}\ttarget={}\tinfo_rel={}\tsource_parent_dev={}\tsource_parent_ino={}\ttarget_parent_dev={}\ttarget_parent_ino={}\twrapper_dev={}\twrapper_ino={}\tmount={}\tdeletion_date={}\n",
+            hex(i.op.0),
+            self.job,
+            hex(i.group.0),
+            enc(i.source),
+            enc(i.target),
+            i.info_rel,
+            i.source_parent.0,
+            i.source_parent.1,
+            i.target_parent.0,
+            i.target_parent.1,
+            i.wrapper.0,
+            i.wrapper.1,
+            i.mount,
+            i.date,
+        );
+        if line.len() > RECOVERY_INTENT_MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recovery intent exceeds the safety limit",
+            ));
         }
-    };
-    let (Some(parent), Some(leaf)) = (place.parent(), place.file_name()) else {
-        return keep_all(res, "no parent");
-    };
-    let (Ok(cparent), Ok(cleaf)) = (
-        c_name(parent.as_os_str().as_bytes()),
-        c_name(leaf.as_bytes()),
-    ) else {
-        return keep_all(res, "invalid path");
-    };
-    // The parent path is followed (a symlink the user made along it is
-    // fine): the wrapper is checked against its recorded identity below.
-    // SAFETY: cparent is NUL-terminated.
-    let fd = unsafe {
-        libc::open(
-            cparent.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return keep_all(res, "missing");
+        append(self.file, self.lock, true, |b| b.text(&line))
     }
-    // SAFETY: fd was just opened and nothing else owns it.
-    let pfd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let wrapper = (g.wrapper.dev, g.wrapper.ino);
-    let wfd = match open_at(
-        pfd.as_raw_fd(),
-        &cleaf,
-        libc::O_RDONLY | libc::O_DIRECTORY,
-        0,
-    ) {
-        Ok(fd) => fd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return keep_all(res, "missing"),
-        Err(_) => return keep_all(res, "changed since"),
-    };
-    if fstat(wfd.as_raw_fd()).map(|st| ident(&st)).ok() != Some(wrapper) {
-        return keep_all(res, "changed since");
-    }
-    for c in &g.children {
-        let path = place.join(&c.rel);
-        let Ok(name) = c_name(c.rel.as_os_str().as_bytes()) else {
-            res.kept.push((path, "invalid path".to_owned()));
-            continue;
-        };
-        let st = match stat_at(wfd.as_raw_fd(), &name) {
-            Ok(st) => st,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                res.kept.push((path, "missing".to_owned()));
-                continue;
-            }
-            Err(e) => {
-                res.kept.push((path, format!("cannot stat: {e}")));
-                continue;
-            }
-        };
-        let (want, flag) = match c.kind {
-            NodeKind::File => (libc::S_IFREG, 0),
-            NodeKind::Directory => (libc::S_IFDIR, libc::AT_REMOVEDIR),
-        };
-        // st_nlink's width differs between targets.
-        #[allow(clippy::unnecessary_cast)]
-        let same = st.st_mode & libc::S_IFMT == want
-            && st.st_uid == c.uid
-            && st.st_mode & 0o7777 == c.mode
-            && st.st_nlink as u64 == c.nlink
-            && FileId::from_stat(&st) == c.file_id;
-        if !same {
-            res.kept.push((path, "changed since".to_owned()));
-            continue;
-        }
-        // SAFETY: the fd is an open directory and name NUL-terminated.
-        if unsafe { libc::unlinkat(wfd.as_raw_fd(), name.as_ptr(), flag) } != 0 {
-            let e = io::Error::last_os_error();
-            res.kept.push((path, format!("cannot remove: {e}")));
-            continue;
-        }
-        res.removed.push(path);
-    }
-    // Only the wrapper itself, and only if empty (rmdir fails otherwise).
-    if stat_at(pfd.as_raw_fd(), &cleaf).is_ok_and(|st| ident(&st) == wrapper) {
-        // SAFETY: the fd is an open directory and cleaf NUL-terminated.
-        unsafe { libc::unlinkat(pfd.as_raw_fd(), cleaf.as_ptr(), libc::AT_REMOVEDIR) };
+
+    fn close(&mut self, op: OperationId, o: &GroupOutcome) -> io::Result<()> {
+        let line = close_line(&self.job, op, o);
+        append(self.file, self.lock, true, |b| b.text(&line))
     }
 }
 
-/// Undoes a job: deletes the files its groups published, but only those
-/// still matching their private baselines (device, inode, size, mtime,
-/// ctime, type, owner, mode, link count) in the wrapper the commit recorded
-/// (same device and inode); the rest are kept with the reason. Each emptied
-/// wrapper goes too. The whole job is refused, before anything is touched,
+/// Undoes a job by moving each committed group, whole, into the Trash
+/// (see [`trash`]): never deleting, never overwriting. A group that
+/// changed since publication (any child, the wrapper, an extra or missing
+/// child) is kept whole; one that differs after the move goes back; each
+/// group gets its own typed outcome, and other groups are not undone
+/// because of it. The whole job is refused (`Err`), before anything moves,
 /// when any record is incomplete, damaged or unknown, when a group's place
 /// or durability was not confirmed, and for a job of the previous history
-/// format. The history is held under an exclusive `flock` for the whole
-/// undo (waiting at most 2 s for it), so two undos of one job cannot both
-/// run. A job that is still running is refused (`ResourceBusy`): it could
-/// place more files.
+/// format; after the first move, problems are outcomes and warnings, never
+/// an `Err`. The history is held under an exclusive `flock` for the whole
+/// undo (waiting at most 2 s), so two undos of one job cannot both run. A
+/// job that is still running is refused (`ResourceBusy`). An undo a crash
+/// interrupted is resumed from its records: endings are reported as
+/// recorded, an open intent is recovered (see [`trash::recover`]).
 ///
 /// The history is streamed: only lines that mention the job are parsed.
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
@@ -1821,7 +2082,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     };
     lock_with_deadline(&file, LOCK_WAIT)?;
     let r = job_records(&mut BufReader::new(&file), job)?;
-    // Taken before anything is removed: the undo line needs it.
+    // Taken before anything moves: the records need it.
     let lock = dir.open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)?;
     if !r.known && !r.old && !r.undone {
         return Err(old_or_unknown(&dir, job));
@@ -1832,18 +2093,57 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     if !r.known {
         return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
     }
+    // A line another run left cut off would swallow our first record.
+    end_line(&mut file, &lock)?;
     let mut res = UndoResult::default();
+    let mut log = HistLog {
+        file: &mut file,
+        lock: &lock,
+        job: manifest::escape(&job.0),
+    };
     for g in &r.groups {
-        if let Some(place) = &g.commit {
-            undo_group(Path::new(OsStr::from_bytes(place)), g, &mut res);
-        }
+        let Some(place) = &g.commit else { continue };
+        let grp = trash::Group {
+            group: GroupId(g.group),
+            place,
+            wrapper: g.wrapper,
+            children: &g.children,
+        };
+        let warn = &mut res.warnings;
+        let o = match &g.recovery {
+            Recovery::Closed(o) if !matches!(o, GroupOutcome::Kept { .. }) => o.clone(),
+            Recovery::Open(o) => {
+                let open = trash::Open {
+                    op: OperationId(o.op),
+                    source: &o.source,
+                    target: &o.target,
+                    info_rel: o.info_rel,
+                    target_parent: o.target_parent,
+                    date: &o.date,
+                };
+                match trash::recover(&grp, &open, &mut log, warn) {
+                    Some(o) => o,
+                    None => trash::undo_group(&grp, &mut log, warn),
+                }
+            }
+            _ => trash::undo_group(&grp, &mut log, warn),
+        };
+        res.groups.push(o);
     }
+    let moved = res
+        .groups
+        .iter()
+        .filter(|o| matches!(o, GroupOutcome::MovedToTrash { .. }))
+        .count();
     let l = Line::new("undo")
         .pair("job", &job.0)
         .pair("time", &unix_secs().to_string())
-        .pair("removed", &res.removed.len().to_string())
-        .pair("kept", &res.kept.len().to_string());
-    append(&mut file, &lock, true, |b| b.line(&l))?;
+        .pair("moved", &moved.to_string())
+        .pair("other", &(res.groups.len() - moved).to_string());
+    if let Err(e) = append(log.file, &lock, true, |b| b.line(&l)) {
+        res.warnings
+            .push(format!("history: the undo was not recorded: {e}"));
+    }
     Ok(res)
 }
 
@@ -1872,7 +2172,7 @@ mod tests {
                 N.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = fs::remove_dir_all(&p);
-            for d in ["state", "run", "out"] {
+            for d in ["state", "run", "out", "data"] {
                 fs::create_dir_all(p.join(d)).unwrap();
             }
             Tmp(p)
@@ -1880,16 +2180,22 @@ mod tests {
         fn env<R>(&self, f: impl FnOnce() -> R) -> R {
             let s = self.0.join("state");
             let r = self.0.join("run");
+            let d = self.0.join("data");
             with_env(
                 &[
                     ("XDG_STATE_HOME", Some(s.to_str().unwrap())),
                     ("XDG_RUNTIME_DIR", Some(r.to_str().unwrap())),
+                    // Each test's own Trash, never the user's.
+                    ("XDG_DATA_HOME", Some(d.to_str().unwrap())),
                 ],
                 f,
             )
         }
         fn out(&self) -> PathBuf {
             self.0.join("out")
+        }
+        fn trash(&self) -> PathBuf {
+            self.0.join("data/Trash")
         }
     }
     impl Drop for Tmp {
@@ -1981,12 +2287,33 @@ mod tests {
         files
     }
 
+    /// Whether every group went to the Trash and none of `files` is left.
+    fn all_moved(r: &UndoResult, files: &[PathBuf]) -> bool {
+        !r.groups.is_empty()
+            && r.groups
+                .iter()
+                .all(|o| matches!(o, GroupOutcome::MovedToTrash { .. }))
+            && files.iter().all(|f| fs::symlink_metadata(f).is_err())
+    }
+
+    /// The reasons of the `Kept` groups.
+    fn kept(r: &UndoResult) -> Vec<UndoReason> {
+        r.groups
+            .iter()
+            .filter_map(|o| match o {
+                GroupOutcome::Kept { reason, .. } => Some(*reason),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn unknown(input: &str) -> Outcome {
         Outcome::PublishedUnknown {
             input: PathBuf::from(input),
             group: GroupId(0xab),
             location: LocationEvidence {
                 path_at_check: None,
+                last_unverified_path: None,
                 anchor: AnchorHint {
                     parent_dev: 1,
                     parent_ino: 2,
@@ -2123,7 +2450,7 @@ mod tests {
             let count = |k: &str| h.lines().filter(|l| l.starts_with(k)).count();
             assert_eq!((count("group-begin\t"), count("publish-intent\t")), (1, 2));
             let u = undo(&job).unwrap();
-            assert_eq!(u.removed, files);
+            assert!(all_moved(&u, &files), "{u:?}");
             assert!(!t.out().join("a (1)").exists());
             assert_eq!(fs::read_to_string(theirs.join("a.md")).unwrap(), "theirs");
         });
@@ -2147,7 +2474,7 @@ mod tests {
             let r = rec.finish(true);
             assert!(r.undoable, "{:?}", r.warning);
             assert!(history().contains("publish-abort\t"), "{}", history());
-            assert_eq!(undo(&job).unwrap().removed, a);
+            assert!(all_moved(&undo(&job).unwrap(), &a));
         });
     }
 
@@ -2737,7 +3064,7 @@ mod tests {
             drop(h);
             let next = new_job_id();
             let files = job_of(&t, &next, &[("b", "b")]);
-            assert_eq!(undo(&next).unwrap().removed, files);
+            assert!(all_moved(&undo(&next).unwrap(), &files));
         });
     }
 
@@ -3051,6 +3378,976 @@ mod tests {
 
     // ---- undo ----
 
+    // ---- undo into the Trash (T8) ----
+
+    /// A normal group goes to the test's own Trash whole: its bytes are
+    /// readable there, and `info/<name>.trashinfo` names where it was.
+    #[test]
+    fn undo_moves_whole_groups_to_the_trash_with_their_info() {
+        let t = Tmp::new("t8-move");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let a = publish(&t, &mut rec, "a", &[("x.md", "aaa")]);
+            let doc = publish(&t, &mut rec, "doc", &[("1.md", "1"), ("2.md", "22")]);
+            rec.finish(true);
+            let _ = undo(&job);
+            assert!(!t.out().join("a").exists() && !t.out().join("doc").exists());
+            let files = t.trash().join("files");
+            let in_trash = |f: &Path| {
+                let w = f.parent().unwrap().file_name().unwrap();
+                files.join(w).join(f.file_name().unwrap())
+            };
+            assert_eq!(fs::read_to_string(in_trash(&a[0])).unwrap(), "aaa");
+            assert_eq!(fs::read_to_string(in_trash(&doc[1])).unwrap(), "22");
+            let info = fs::read_to_string(t.trash().join("info/a.trashinfo")).unwrap();
+            let src = t.out().join("a");
+            assert!(
+                info.starts_with(&format!("[Trash Info]\nPath={}\nDeletionDate=", url(&src))),
+                "{info}"
+            );
+        });
+    }
+
+    /// One changed child keeps its whole group, the unchanged sibling
+    /// included; another input's group still goes.
+    #[test]
+    fn undo_keeps_a_whole_group_when_one_child_changed() {
+        let t = Tmp::new("t8-keep");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let doc = publish(&t, &mut rec, "doc", &[("1.md", "one"), ("2.md", "two")]);
+            publish(&t, &mut rec, "b", &[("x.md", "b")]);
+            rec.finish(true);
+            fs::write(&doc[1], "edited").unwrap();
+            let _ = undo(&job);
+            assert_eq!(fs::read_to_string(&doc[0]).unwrap(), "one");
+            assert_eq!(fs::read_to_string(&doc[1]).unwrap(), "edited");
+            assert!(t.trash().join("files/b").is_dir());
+            assert!(!t.out().join("b").exists());
+        });
+    }
+
+    /// A writer that keeps its descriptor across the undo writes into the
+    /// Trash copy: nothing it writes is lost to an unlink.
+    #[test]
+    fn undo_keeps_a_retained_writers_bytes() {
+        let t = Tmp::new("t8-writer");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "data")]);
+            let mut w = OpenOptions::new().append(true).open(&f[0]).unwrap();
+            let _ = undo(&job);
+            w.write_all(b"+late").unwrap();
+            drop(w);
+            let moved = t.trash().join("files/a").join(f[0].file_name().unwrap());
+            assert_eq!(fs::read_to_string(moved).unwrap(), "data+late");
+        });
+    }
+
+    use crate::trash::Point;
+    use crate::trash::tests::fault;
+
+    /// The Trash as its spec pairs it (§6): each `info/X.trashinfo` that
+    /// is a real trashinfo (its `[Trash Info]` header) with its `files/X`.
+    /// Asserts every such info has its data; returns `(X, Path=)`.
+    fn pairs(t: &Tmp) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(t.trash().join("info")) else {
+            return out;
+        };
+        for e in rd {
+            let name = e.unwrap().file_name().into_string().unwrap();
+            let Some(x) = name.strip_suffix(".trashinfo") else {
+                continue;
+            };
+            let text = fs::read_to_string(t.trash().join("info").join(&name)).unwrap();
+            let Some(rest) = text.strip_prefix("[Trash Info]\nPath=") else {
+                continue;
+            };
+            let path = rest.split('\n').next().unwrap().to_owned();
+            assert!(
+                fs::symlink_metadata(t.trash().join("files").join(x)).is_ok(),
+                "an authentic info without its data: {name}"
+            );
+            out.push((x.to_owned(), path));
+        }
+        out.sort();
+        out
+    }
+
+    /// The names in `files/` of the test's Trash.
+    fn trashed(t: &Tmp) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(t.trash().join("files"))
+            .map(|rd| {
+                rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Our detached infos (`.<op>.inacircle-detached`) and their bytes.
+    fn detached(t: &Tmp) -> Vec<Vec<u8>> {
+        fs::read_dir(t.trash().join("info"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_str().unwrap().ends_with(".inacircle-detached"))
+            .map(|p| fs::read(p).unwrap())
+            .collect()
+    }
+
+    fn one(r: &UndoResult) -> &GroupOutcome {
+        assert_eq!(r.groups.len(), 1, "{r:?}");
+        &r.groups[0]
+    }
+
+    /// A group of one file `<stem>.md` published at `out/<stem>`: the job,
+    /// the wrapper and the file.
+    fn single(t: &Tmp, stem: &str) -> (JobId, PathBuf, PathBuf) {
+        let job = new_job_id();
+        let f = job_of(t, &job, &[(stem, "data")]);
+        let w = f[0].parent().unwrap().to_owned();
+        (job, w, f[0].clone())
+    }
+
+    /// Runs `undo` with a crash (an unwind: no cleanup step runs) at `at`.
+    fn crash_at(job: &JobId, at: Point) {
+        let _f = fault(move |p| {
+            if p == at {
+                panic!("simulated crash at {p:?}");
+            }
+            None
+        });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| undo(job)));
+        assert!(r.is_err(), "no crash at {at:?}");
+    }
+
+    /// A wrapper swapped for a lookalike between the check and the move
+    /// (barrier at `BeforeMove`): the lookalike is what moved, the
+    /// postcheck catches it, and it goes back. The user's original folder
+    /// is untouched, our info is closed, the Trash is left empty.
+    #[test]
+    fn undo_restores_a_wrapper_swapped_before_the_move() {
+        let t = Tmp::new("t8-swap");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (w2, kept) = (w.clone(), t.0.join("user-a"));
+            let k2 = kept.clone();
+            let name = f.file_name().unwrap().to_owned();
+            let _f = fault(move |p| {
+                if p == Point::BeforeMove {
+                    fs::rename(&w2, &k2).unwrap();
+                    fs::create_dir(&w2).unwrap();
+                    fs::write(w2.join(&name), "data").unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Restored {
+                location, reason, ..
+            } = one(&r)
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::PostMoveMismatch);
+            assert_eq!(location.path_at_check.as_deref(), Some(w.as_path()));
+            assert_eq!(location.checked_at, CheckPoint::PostRestore);
+            assert_eq!(fs::read_to_string(&f).unwrap(), "data");
+            assert_eq!(
+                fs::read_to_string(kept.join(f.file_name().unwrap())).unwrap(),
+                "data"
+            );
+            assert!(trashed(&t).is_empty() && pairs(&t).is_empty());
+            assert_eq!(detached(&t).len(), 1);
+        });
+    }
+
+    /// A child swapped between the check and the move: back it goes.
+    #[test]
+    fn undo_restores_a_child_swapped_before_the_move() {
+        let t = Tmp::new("t8-childswap");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let f2 = f.clone();
+            let _f = fault(move |p| {
+                if p == Point::BeforeMove {
+                    let o = f2.with_extension("other");
+                    fs::write(&o, "data").unwrap();
+                    fs::rename(&o, &f2).unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            assert!(matches!(one(&r), GroupOutcome::Restored { .. }), "{r:?}");
+            assert_eq!(fs::read_to_string(&f).unwrap(), "data");
+            assert!(trashed(&t).is_empty() && pairs(&t).is_empty());
+        });
+    }
+
+    /// A folder fd kept open across the move adds a file inside the moved
+    /// group (barrier at `AfterMove`): the group no longer matches and goes
+    /// back whole, the new file with it.
+    #[test]
+    fn undo_restores_after_a_change_through_a_retained_dirfd() {
+        let t = Tmp::new("t8-dirfd");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let dir = File::open(&w).unwrap();
+            let raw = dir.as_raw_fd();
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    // SAFETY: raw is the open folder; the name is NUL-terminated.
+                    let fd = unsafe {
+                        libc::openat(
+                            raw,
+                            c"extra".as_ptr(),
+                            libc::O_CREAT | libc::O_WRONLY,
+                            0o600,
+                        )
+                    };
+                    assert!(fd >= 0);
+                    // SAFETY: fd was just opened.
+                    unsafe { libc::close(fd) };
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            assert!(matches!(one(&r), GroupOutcome::Restored { .. }), "{r:?}");
+            assert!(w.join("extra").exists() && f.exists());
+            drop(dir);
+        });
+    }
+
+    /// A writer through a shared mapping kept across the undo: its bytes
+    /// land in the Trash copy, nothing is lost.
+    #[test]
+    fn undo_keeps_a_retained_mapping_writable() {
+        let t = Tmp::new("t8-mmap");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let file = OpenOptions::new().read(true).write(true).open(&f).unwrap();
+            // SAFETY: a shared 4-byte mapping of an open 4-byte file.
+            let m = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            assert_ne!(m, libc::MAP_FAILED);
+            let r = undo(&job).unwrap();
+            assert!(matches!(one(&r), GroupOutcome::MovedToTrash { .. }));
+            // SAFETY: m maps 4 writable bytes; msync/munmap take the same range.
+            unsafe {
+                std::ptr::copy_nonoverlapping(b"DATA".as_ptr(), m.cast::<u8>(), 4);
+                libc::msync(m, 4, libc::MS_SYNC);
+                libc::munmap(m, 4);
+            }
+            let moved = t.trash().join("files/a").join(f.file_name().unwrap());
+            assert_eq!(fs::read_to_string(moved).unwrap(), "DATA");
+        });
+    }
+
+    /// Missing, extra and changed children and a wrapper mode change each
+    /// keep their group whole before anything moves; nothing is written to
+    /// the Trash.
+    #[test]
+    fn undo_keeps_missing_extra_and_changed_groups() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("t8-precheck");
+        t.env(|| {
+            type Change = fn(&Path, &Path);
+            let changes: [(&str, Change); 4] = [
+                ("missing", |_, f| fs::remove_file(f).unwrap()),
+                ("extra", |w, _| fs::write(w.join("extra"), "x").unwrap()),
+                ("changed", |_, f| fs::write(f, "edited").unwrap()),
+                ("wrapper mode", |w, _| {
+                    let m = fs::metadata(w).unwrap().permissions().mode() & 0o777;
+                    let new = if m == 0o700 { 0o750 } else { 0o700 };
+                    fs::set_permissions(w, fs::Permissions::from_mode(new)).unwrap()
+                }),
+            ];
+            for (what, change) in changes {
+                let (job, w, f) = single(&t, what.split(' ').next().unwrap());
+                change(&w, &f);
+                let r = undo(&job).unwrap();
+                assert_eq!(kept(&r), [UndoReason::Changed], "{what}");
+                assert!(w.is_dir(), "{what}");
+            }
+            assert!(trashed(&t).is_empty());
+            assert!(!t.trash().exists(), "nothing made before the check passed");
+        });
+    }
+
+    /// The way back taken by a new folder (barrier at `AfterMove`): the
+    /// moved group stays in the Trash, its info still pairs with it, the
+    /// user's new folder is untouched, and the place is given.
+    #[test]
+    fn undo_keeps_in_the_trash_when_the_way_back_is_taken() {
+        let t = Tmp::new("t8-collide");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (w2, moved) = (
+                w.clone(),
+                t.trash().join("files/a").join(f.file_name().unwrap()),
+            );
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    fs::write(&moved, "changed in Trash").unwrap();
+                    fs::create_dir(&w2).unwrap();
+                    fs::write(w2.join("new"), "user").unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::RecoveryKept {
+                location,
+                reason,
+                errno,
+                ..
+            } = one(&r)
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(
+                (*reason, *errno),
+                (UndoReason::RestoreCollision, Some(libc::EEXIST))
+            );
+            assert_eq!(location.path_at_check, Some(t.trash().join("files/a")));
+            assert_eq!(fs::read_to_string(w.join("new")).unwrap(), "user");
+            assert_eq!(pairs(&t), [("a".to_owned(), url(&w))]);
+        });
+    }
+
+    /// I1: the Trash renamed before the place is proved: the place is the
+    /// path resolved from the held fd (`PostResolve`).
+    #[test]
+    fn undo_proves_the_place_after_the_trash_was_renamed() {
+        let t = Tmp::new("t8-resolve");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (w2, moved) = (
+                w.clone(),
+                t.trash().join("files/a").join(f.file_name().unwrap()),
+            );
+            let (trash, renamed) = (t.trash(), t.0.join("data/Trash-moved"));
+            let r2 = renamed.clone();
+            let _f = fault(move |p| {
+                match p {
+                    Point::AfterMove => {
+                        fs::write(&moved, "changed").unwrap();
+                        fs::create_dir(&w2).unwrap();
+                    }
+                    Point::AfterRestoreFail => fs::rename(&trash, &r2).unwrap(),
+                    _ => {}
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::RecoveryKept { location, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(location.checked_at, CheckPoint::PostResolve);
+            let want = fs::canonicalize(renamed.join("files/a")).unwrap();
+            assert_eq!(location.path_at_check.as_deref(), Some(want.as_path()));
+        });
+    }
+
+    /// I1: a renamer that wins every resolution attempt: the place is
+    /// `None` (never made up), the last path seen is only a hint, the
+    /// anchor names the moved wrapper, and its bytes are all there.
+    #[test]
+    fn undo_is_uncertain_when_the_trash_keeps_moving() {
+        let t = Tmp::new("t8-uncertain");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (w2, moved) = (
+                w.clone(),
+                t.trash().join("files/a").join(f.file_name().unwrap()),
+            );
+            let data = t.0.join("data");
+            let n = std::rc::Rc::new(std::cell::Cell::new(0u32));
+            let k = n.clone();
+            let _f = fault(move |p| {
+                let name = |i: u32| {
+                    data.join(if i == 0 {
+                        "Trash".to_owned()
+                    } else {
+                        format!("T{i}")
+                    })
+                };
+                match p {
+                    Point::AfterMove => {
+                        fs::write(&moved, "changed").unwrap();
+                        fs::create_dir(&w2).unwrap();
+                    }
+                    // From the failed way back on (a resolve before the
+                    // move, of the source, is left alone).
+                    Point::AfterRestoreFail => {
+                        fs::rename(name(0), name(1)).unwrap();
+                        k.set(1);
+                    }
+                    Point::Resolve if k.get() > 0 => {
+                        fs::rename(name(k.get()), name(k.get() + 1)).unwrap();
+                        k.set(k.get() + 1);
+                    }
+                    _ => {}
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Uncertain {
+                locations, reason, ..
+            } = one(&r)
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::AncestorChanged);
+            let l = &locations[0];
+            assert_eq!(l.path_at_check, None);
+            assert!(l.last_unverified_path.is_some());
+            let wid = fs::metadata(t.0.join(format!("data/T{}/files/a", n.get()))).unwrap();
+            assert_eq!(
+                (l.anchor.object_dev, l.anchor.object_ino),
+                (wid.dev(), wid.ino())
+            );
+            let at = t.0.join(format!("data/T{}/files/a", n.get()));
+            assert_eq!(
+                fs::read_to_string(at.join(f.file_name().unwrap())).unwrap(),
+                "changed"
+            );
+        });
+    }
+
+    /// The parent folder renamed away (and a lookalike made) after the
+    /// check: the move goes through the held parent fd, so the published
+    /// group itself is trashed; the lookalike is untouched.
+    #[test]
+    fn undo_moves_from_a_parent_renamed_after_the_check() {
+        let t = Tmp::new("t8-parent");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (out, away) = (t.out(), t.0.join("out-away"));
+            let name = f.file_name().unwrap().to_owned();
+            let _f = fault(move |p| {
+                if p == Point::BeforeMove {
+                    fs::rename(&out, &away).unwrap();
+                    fs::create_dir_all(out.join("a")).unwrap();
+                    fs::write(out.join("a").join(&name), "look").unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(fs::read_to_string(&f).unwrap(), "look");
+            assert_eq!(trashed(&t), ["a"]);
+            assert_eq!(pairs(&t), [("a".to_owned(), url(&w))]);
+        });
+    }
+
+    /// EXDEV at the move (labelled injection): kept in place, nothing
+    /// copied, our info closed: no authentic info is left in the Trash.
+    #[test]
+    fn undo_refuses_exdev_and_closes_its_info() {
+        let t = Tmp::new("t8-exdev");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let _f = fault(|p| (p == Point::Rename).then_some(libc::EXDEV));
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Kept {
+                location, reason, ..
+            } = one(&r)
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::MoveRefused(libc::EXDEV));
+            assert_eq!(location.path_at_check.as_deref(), Some(w.as_path()));
+            assert!(f.exists());
+            assert!(trashed(&t).is_empty() && pairs(&t).is_empty());
+            let d = detached(&t);
+            assert_eq!(d.len(), 1);
+            assert!(d[0].starts_with(b"inacircle-detached-trashinfo op="));
+        });
+    }
+
+    /// The data name taken in the Trash between the choice and the move:
+    /// EEXIST, kept, and the foreign data never gets our info. N1: with
+    /// the neutralisation failing (at the write, at the sync) the info is
+    /// still detached, and the group is `Uncertain` with where it is.
+    #[test]
+    fn undo_closes_its_info_when_the_data_name_is_taken() {
+        for inject in [
+            None,
+            Some((Point::NeutralWrite, libc::ENOSPC)),
+            Some((Point::NeutralSync, libc::EIO)),
+        ] {
+            let t = Tmp::new("t8-taken");
+            t.env(|| {
+                let (job, _, f) = single(&t, "a");
+                let foreign = t.trash().join("files/a");
+                let _f = fault(move |p| {
+                    if p == Point::BeforeMove {
+                        fs::create_dir(&foreign).unwrap();
+                        fs::write(foreign.join("theirs"), "x").unwrap();
+                    }
+                    inject.and_then(|(at, e)| (p == at).then_some(e))
+                });
+                let r = undo(&job).unwrap();
+                assert!(f.exists());
+                assert!(pairs(&t).is_empty(), "foreign data paired with our info");
+                assert!(!t.trash().join("info/a.trashinfo").exists());
+                match (inject, one(&r)) {
+                    (None, GroupOutcome::Kept { reason, .. }) => {
+                        assert_eq!(*reason, UndoReason::MoveRefused(libc::EEXIST));
+                    }
+                    (
+                        Some((_, e)),
+                        GroupOutcome::Uncertain {
+                            reason, locations, ..
+                        },
+                    ) => {
+                        assert_eq!(*reason, UndoReason::ContentNotNeutralized(e));
+                        let info = locations[1].path_at_check.as_ref().unwrap();
+                        assert!(info.to_str().unwrap().ends_with(".inacircle-detached"));
+                    }
+                    other => panic!("{inject:?}: {other:?}"),
+                }
+            });
+        }
+    }
+
+    /// ENOSPC and EDQUOT at the info write (labelled injection: a short
+    /// write) and EIO at its sync: kept, no move, no authentic info left.
+    #[test]
+    fn undo_info_write_faults_keep_the_group() {
+        for (at, e) in [
+            (Point::InfoWrite, libc::ENOSPC),
+            (Point::InfoWrite, libc::EDQUOT),
+            (Point::InfoSync, libc::EIO),
+        ] {
+            let t = Tmp::new("t8-info");
+            t.env(|| {
+                let (job, _, f) = single(&t, "a");
+                let _f = fault(move |p| (p == at).then_some(e));
+                let r = undo(&job).unwrap();
+                assert_eq!(kept(&r), [UndoReason::InfoNotWritten(e)], "{at:?}");
+                assert!(f.exists());
+                assert!(trashed(&t).is_empty() && pairs(&t).is_empty(), "{at:?}");
+            });
+        }
+    }
+
+    /// The intent not written (labelled injection): nothing moves, no info
+    /// is made.
+    #[test]
+    fn undo_history_fault_before_the_move_keeps_the_group() {
+        let t = Tmp::new("t8-intent");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let _f = fault(|p| (p == Point::Intent).then_some(libc::ENOSPC));
+            let r = undo(&job).unwrap();
+            assert_eq!(kept(&r), [UndoReason::HistoryNotWritten(libc::ENOSPC)]);
+            assert!(f.exists());
+            assert!(
+                fs::read_dir(t.trash().join("info"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        });
+    }
+
+    /// The commit not recorded after the move: never "nothing changed"; the
+    /// group is in the Trash with its info, reported with its place.
+    #[test]
+    fn undo_commit_fault_reports_the_trash_place() {
+        let t = Tmp::new("t8-commit");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            let _f = fault(|p| (p == Point::Commit).then_some(libc::EIO));
+            let r = undo(&job).unwrap();
+            let GroupOutcome::RecoveryKept {
+                location, reason, ..
+            } = one(&r)
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::CommitNotRecorded);
+            assert_eq!(location.path_at_check, Some(t.trash().join("files/a")));
+            assert_eq!(pairs(&t), [("a".to_owned(), url(&w))]);
+            assert!(!r.warnings.is_empty());
+        });
+    }
+
+    /// Our info swapped for a foreign one after the move: the group goes
+    /// back, the foreign info is left byte-identical.
+    #[test]
+    fn undo_restores_when_its_info_was_swapped() {
+        let t = Tmp::new("t8-infoswap");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            let info = t.trash().join("info");
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    fs::rename(info.join("a.trashinfo"), info.join("mine-moved")).unwrap();
+                    fs::write(info.join("a.trashinfo"), "foreign").unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Restored { reason, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::InfoChanged);
+            assert!(w.is_dir());
+            let info = t.trash().join("info");
+            assert_eq!(
+                fs::read_to_string(info.join("a.trashinfo")).unwrap(),
+                "foreign"
+            );
+            assert!(
+                fs::read(info.join("mine-moved"))
+                    .unwrap()
+                    .starts_with(b"inacircle-detached")
+            );
+        });
+    }
+
+    /// A real EACCES at the move (the parent made read-only): kept.
+    #[test]
+    fn undo_permission_denied_keeps_the_group() {
+        use std::os::unix::fs::PermissionsExt;
+        if euid() == 0 {
+            return; // root ignores the folder's mode
+        }
+        let t = Tmp::new("t8-eacces");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            fs::set_permissions(t.out(), fs::Permissions::from_mode(0o555)).unwrap();
+            let r = undo(&job).unwrap();
+            fs::set_permissions(t.out(), fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(kept(&r), [UndoReason::MoveRefused(libc::EACCES)]);
+            assert!(f.exists() && pairs(&t).is_empty());
+        });
+    }
+
+    /// No safe Trash: a symlinked `Trash`, or a `files` folder open to
+    /// others; refused before anything is written, nothing chmod-ed.
+    #[test]
+    fn undo_refuses_an_unsafe_trash() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("t8-unsafe");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let real = t.0.join("real-trash");
+            fs::create_dir(&real).unwrap();
+            symlink(&real, t.trash()).unwrap();
+            assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::NoTrash]);
+            assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+            fs::remove_file(t.trash()).unwrap();
+            let (job, _, g) = single(&t, "b");
+            fs::create_dir_all(t.trash().join("files")).unwrap();
+            fs::set_permissions(t.trash(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(t.trash().join("files"), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::NoTrash]);
+            let m = fs::metadata(t.trash().join("files"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(m & 0o777, 0o755);
+            assert!(f.exists() && g.exists());
+        });
+    }
+
+    /// A crash at each step of the move: the next undo of the job finds
+    /// the operation from its intent (only the target and our two info
+    /// names are looked at), closes what is stale, and ends with the group
+    /// in the Trash under exactly one authentic info.
+    #[test]
+    fn undo_recovers_from_a_crash_at_each_step() {
+        for at in [
+            Point::InfoWrite,
+            Point::InfoSync,
+            Point::BeforeMove,
+            Point::AfterMove,
+            Point::Commit,
+        ] {
+            let t = Tmp::new("t8-crash");
+            t.env(|| {
+                let (job, w, f) = single(&t, "a");
+                crash_at(&job, at);
+                let r = undo(&job).unwrap();
+                assert!(
+                    matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                    "{at:?}: {r:?}"
+                );
+                assert!(!f.exists());
+                let p = pairs(&t);
+                assert_eq!(p.len(), 1, "{at:?}: {p:?}");
+                assert_eq!(p[0].1, url(&w), "{at:?}");
+                let moved = t.trash().join("files").join(&p[0].0);
+                assert_eq!(
+                    fs::read_to_string(moved.join(f.file_name().unwrap())).unwrap(),
+                    "data"
+                );
+            });
+        }
+    }
+
+    /// A crash while our info was being closed (after the neutralisation,
+    /// before the detach): the next undo detaches it and moves the group.
+    #[test]
+    fn undo_recovers_from_a_crash_while_closing_its_info() {
+        let t = Tmp::new("t8-crash-close");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            {
+                let _f = fault(|p| match p {
+                    Point::Rename => Some(libc::EXDEV),
+                    Point::Detach => panic!("simulated crash at Detach"),
+                    _ => None,
+                });
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| undo(&job)));
+                assert!(r.is_err());
+            }
+            let info = t.trash().join("info/a.trashinfo");
+            assert!(fs::read(&info).unwrap().starts_with(b"inacircle-detached"));
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(pairs(&t), [("a".to_owned(), url(&w))]);
+        });
+    }
+
+    /// N1 in the crash recovery: our authentic info left by a crash cannot
+    /// be neutralised; it is still detached (no `.trashinfo` name), and the
+    /// group is reported `Uncertain`, not moved.
+    #[test]
+    fn undo_recovery_detaches_even_when_neutralising_fails() {
+        let t = Tmp::new("t8-crash-n1");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let _f = fault(|p| (p == Point::NeutralWrite).then_some(libc::ENOSPC));
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Uncertain { reason, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::ContentNotNeutralized(libc::ENOSPC));
+            assert!(f.exists());
+            assert!(pairs(&t).is_empty());
+            assert!(!t.trash().join("info/a.trashinfo").exists());
+            assert!(
+                detached(&t)[0].starts_with(b"[Trash Info]"),
+                "authentic, but unpaired"
+            );
+        });
+    }
+
+    /// An undo that a crash cut after one group's commit: the next undo
+    /// reports that group from its records (no second move) and finishes
+    /// the other.
+    #[test]
+    fn undo_resumes_an_interrupted_job_from_its_records() {
+        let t = Tmp::new("t8-resume");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "a"), ("b", "b")]);
+            let n = std::rc::Rc::new(std::cell::Cell::new(0));
+            let k = n.clone();
+            {
+                let _f = fault(move |p| {
+                    if p == Point::Intent {
+                        k.set(k.get() + 1);
+                        if k.get() == 2 {
+                            panic!("simulated crash at the second group");
+                        }
+                    }
+                    None
+                });
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| undo(&job)));
+                assert!(r.is_err());
+            }
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &f), "{r:?}");
+            let GroupOutcome::MovedToTrash { location, .. } = &r.groups[0] else {
+                unreachable!()
+            };
+            assert_eq!(location.checked_at, CheckPoint::Commit);
+            assert_eq!(trashed(&t), ["a", "b"]);
+            assert_eq!(pairs(&t).len(), 2);
+            assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        });
+    }
+
+    /// The engine never unlinks: across every scenario above, each inode
+    /// published is still reachable. Here: the whole undo of a job holds
+    /// every published byte somewhere (source or Trash), counted by inode.
+    #[test]
+    fn undo_never_unlinks_a_published_inode() {
+        let t = Tmp::new("t8-nounlink");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let a = publish(&t, &mut rec, "a", &[("1.md", "1"), ("2.md", "2")]);
+            let b = publish(&t, &mut rec, "b", &[("x.md", "x")]);
+            rec.finish(true);
+            fs::write(&b[0], "edited").unwrap();
+            let inos: Vec<u64> = a
+                .iter()
+                .chain(&b)
+                .map(|p| fs::metadata(p).unwrap().ino())
+                .collect();
+            undo(&job).unwrap();
+            let mut found = Vec::new();
+            for root in [t.out(), t.trash().join("files")] {
+                for w in fs::read_dir(root).unwrap() {
+                    let w = w.unwrap().path();
+                    if w.is_dir() {
+                        for c in fs::read_dir(w).unwrap() {
+                            found.push(c.unwrap().metadata().unwrap().ino());
+                        }
+                    }
+                }
+            }
+            for i in inos {
+                assert!(found.contains(&i), "inode {i} gone");
+            }
+        });
+    }
+
+    /// The recovery-intent record is bounded: 32768 bytes are written,
+    /// 32769 refused before anything is written.
+    #[test]
+    fn undo_intent_record_is_bounded() {
+        let t = Tmp::new("t8-bound");
+        t.env(|| {
+            let job = new_job_id();
+            job_of(&t, &job, &[("a", "a")]);
+            let dir = StateDir::open(&history_dir().unwrap()).unwrap();
+            let mut file = dir
+                .open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0)
+                .unwrap();
+            let lock = dir
+                .open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)
+                .unwrap();
+            let mut log = HistLog {
+                file: &mut file,
+                lock: &lock,
+                job: job.0.clone(),
+            };
+            let mut intent = |source: &[u8]| -> io::Result<()> {
+                let i = trash::Intent {
+                    op: OperationId(1),
+                    group: GroupId(2),
+                    source,
+                    target: b"/t",
+                    info_rel: 0,
+                    source_parent: (1, 2),
+                    target_parent: (3, 4),
+                    wrapper: (5, 6),
+                    mount: 7,
+                    date: "2026-10-27T10:00:00",
+                };
+                trash::Log::intent(&mut log, &i)
+            };
+            let before = fs::metadata(history_path()).unwrap().len();
+            intent(b"/").unwrap();
+            let frame = fs::metadata(history_path()).unwrap().len() - before - 1;
+            let fill = vec![b'a'; RECOVERY_INTENT_MAX_BYTES - frame as usize];
+            intent(&fill).unwrap();
+            let len = fs::metadata(history_path()).unwrap().len();
+            let mut over = fill.clone();
+            over.push(b'a');
+            let e = intent(&over).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(fs::metadata(history_path()).unwrap().len(), len);
+        });
+    }
+
+    /// Every undo ending survives its record: what the next undo reports
+    /// is what this one did (the unproved hint excepted: not recorded).
+    #[test]
+    fn undo_endings_roundtrip_through_their_records() {
+        let loc = |p: Option<&str>| LocationEvidence {
+            path_at_check: p.map(PathBuf::from),
+            last_unverified_path: None,
+            anchor: AnchorHint {
+                parent_dev: 1,
+                parent_ino: 2,
+                object_dev: 3,
+                object_ino: 4,
+                leaf: OsStr::from_bytes(b"a\tb\xff").to_owned(),
+                op: OperationId(9),
+            },
+            checked_at: CheckPoint::PostMove,
+        };
+        let g = GroupId(5);
+        for o in [
+            GroupOutcome::Kept {
+                group: g,
+                location: loc(Some("/o/a")),
+                reason: UndoReason::MoveRefused(18),
+            },
+            GroupOutcome::MovedToTrash {
+                group: g,
+                location: loc(Some("/t/files/a b")),
+                info_leaf: "a b.trashinfo".into(),
+                durability: Durability::Synced,
+            },
+            GroupOutcome::Restored {
+                group: g,
+                location: loc(Some("/o/a")),
+                reason: UndoReason::InfoChanged,
+                durability: Durability::Synced,
+            },
+            GroupOutcome::RecoveryKept {
+                group: g,
+                location: loc(Some("/t/files/a")),
+                reason: UndoReason::RestoreCollision,
+                errno: Some(17),
+                durability: Durability::Synced,
+            },
+            GroupOutcome::Uncertain {
+                group: g,
+                op: OperationId(9),
+                locations: vec![loc(None)],
+                reason: UndoReason::AncestorChanged,
+            },
+        ] {
+            let line = close_line("1-2", OperationId(9), &o);
+            let l = parse_line(&line).unwrap();
+            let v = fields(&l, RCLOSE).unwrap();
+            assert_eq!(closed_outcome(&l.kind, 5, 9, &v).unwrap(), o, "{line}");
+        }
+    }
+
+    /// The Trash spec's `Path=` form of `p`: bytes outside the unreserved
+    /// set (and `/`) as `%XX`.
+    fn url(p: &Path) -> String {
+        let mut s = String::new();
+        for &b in p.as_os_str().as_bytes() {
+            if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+                s.push(char::from(b));
+            } else {
+                s.push_str(&format!("%{b:02X}"));
+            }
+        }
+        s
+    }
+
     #[test]
     fn undo_removes_unchanged_outputs_and_their_folders() {
         let t = Tmp::new("undo");
@@ -3063,10 +4360,10 @@ mod tests {
             let r = undo(&job).unwrap();
             let mut want = a.clone();
             want.extend(many.clone());
-            assert_eq!(r.removed, want);
-            assert!(r.kept.is_empty());
+            assert!(all_moved(&r, &want), "{r:?}");
+            assert_eq!(r.groups.len(), 2);
             assert!(!t.out().join("a").exists() && !t.out().join("doc").exists());
-            assert!(t.out().exists(), "a user folder is never removed");
+            assert!(t.out().exists(), "a user folder is never moved");
         });
     }
 
@@ -3086,7 +4383,7 @@ mod tests {
             drop(f);
             let b = new_job_id();
             let b_files = job_of(&t, &b, &[("b", "b")]);
-            assert_eq!(undo(&b).unwrap().removed, b_files);
+            assert!(all_moved(&undo(&b).unwrap(), &b_files));
             let e = undo(&a).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
             assert!(a_files[0].exists());
@@ -3102,7 +4399,7 @@ mod tests {
             let mut rec = Recorder::open(&job, "convert");
             let a = publish(&t, &mut rec, "a", &[("x.md", "a")]);
             drop(rec);
-            assert_eq!(undo(&job).unwrap().removed, a);
+            assert!(all_moved(&undo(&job).unwrap(), &a));
         });
     }
 
@@ -3116,10 +4413,13 @@ mod tests {
             rec.finish(true);
             fs::write(&f[1], "longer content").unwrap();
             let r = undo(&job).unwrap();
-            assert_eq!(r.removed, [f[0].clone()]);
-            assert_eq!(r.kept, vec![(f[1].clone(), "changed since".to_owned())]);
+            assert_eq!(kept(&r), [UndoReason::Changed]);
             assert_eq!(fs::read_to_string(&f[1]).unwrap(), "longer content");
-            assert!(t.out().join("doc").exists(), "a kept file keeps its folder");
+            assert_eq!(
+                fs::read_to_string(&f[0]).unwrap(),
+                "one",
+                "its sibling stays too"
+            );
         });
     }
 
@@ -3164,12 +4464,7 @@ mod tests {
                 let f = job_of(&t, &job, &[(&stem, "one")]);
                 change(&f[0], &t.0);
                 let r = undo(&job).unwrap();
-                assert!(r.removed.is_empty(), "{what}");
-                assert_eq!(
-                    r.kept,
-                    vec![(f[0].clone(), "changed since".to_owned())],
-                    "{what}"
-                );
+                assert_eq!(kept(&r), [UndoReason::Changed], "{what}");
                 assert!(fs::symlink_metadata(&f[0]).is_ok(), "{what}");
             }
             assert_eq!(fs::read_to_string(t.0.join("victim")).unwrap(), "one");
@@ -3177,7 +4472,7 @@ mod tests {
     }
 
     /// The wrapper moved away and a lookalike folder (same names, same
-    /// bytes) put in its place, or a symlink to one: nothing is removed.
+    /// bytes) put in its place, or a symlink to one: nothing is moved.
     #[test]
     fn a_swapped_wrapper_keeps_the_lookalike() {
         let t = Tmp::new("wrapswap");
@@ -3198,8 +4493,7 @@ mod tests {
                     fs::rename(&look, &wrapper).unwrap();
                 }
                 let r = undo(&job).unwrap();
-                assert!(r.removed.is_empty(), "link={link}");
-                assert_eq!(r.kept[0].1, "changed since");
+                assert_eq!(kept(&r), [UndoReason::Changed], "link={link}");
                 assert!(f[0].exists() && moved.join(f[0].file_name().unwrap()).exists());
             }
         });
@@ -3211,9 +4505,20 @@ mod tests {
         t.env(|| {
             let job = new_job_id();
             let f = job_of(&t, &job, &[("a", "d")]);
+            // A missing child keeps the group; a missing folder is missing.
             fs::remove_file(&f[0]).unwrap();
+            assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::Changed]);
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("b", "d")]);
+            let moved = t.0.join("b-moved");
+            fs::rename(f[0].parent().unwrap(), &moved).unwrap();
             let r = undo(&job).unwrap();
-            assert_eq!(r.kept, vec![(f[0].clone(), "missing".to_owned())]);
+            assert_eq!(kept(&r), [UndoReason::Missing]);
+            let GroupOutcome::Kept { location, .. } = &r.groups[0] else {
+                unreachable!()
+            };
+            assert_eq!(location.path_at_check, None, "no place is made up");
+            assert!(moved.join(f[0].file_name().unwrap()).exists());
         });
     }
 
@@ -3266,7 +4571,7 @@ mod tests {
             assert_eq!(files[1].file_name(), Some(name));
             assert!(rec.finish(true).undoable);
             let r = undo(&job).unwrap();
-            assert_eq!(r.removed, files);
+            assert!(all_moved(&r, &files), "{r:?}");
         });
     }
 
@@ -3300,12 +4605,12 @@ mod tests {
             for r in recs {
                 assert!(r.finish(true).undoable);
             }
-            assert_eq!(undo(&jobs[1]).unwrap().removed, files[1]);
+            assert!(all_moved(&undo(&jobs[1]).unwrap(), &files[1]));
             for k in [0, 2] {
                 assert!(files[k].iter().all(|f| f.exists()), "{} untouched", ids[k]);
             }
-            assert_eq!(undo(&jobs[0]).unwrap().removed, files[0]);
-            assert_eq!(undo(&jobs[2]).unwrap().removed, files[2]);
+            assert!(all_moved(&undo(&jobs[0]).unwrap(), &files[0]));
+            assert!(all_moved(&undo(&jobs[2]).unwrap(), &files[2]));
             for j in &jobs {
                 assert_eq!(undo(j).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
             }
@@ -3404,7 +4709,7 @@ mod tests {
             assert!(f[0].exists());
             drop(running);
             drop(rec.finish(true));
-            assert_eq!(undo(&job).unwrap().removed, f);
+            assert!(all_moved(&undo(&job).unwrap(), &f));
         });
     }
 
@@ -3426,7 +4731,7 @@ mod tests {
             assert!(took <= Duration::from_millis(2100), "took {took:?}");
             assert!(f[0].exists(), "nothing is deleted without the lock");
             drop(holder);
-            assert_eq!(undo(&job).unwrap().removed, f);
+            assert!(all_moved(&undo(&job).unwrap(), &f));
         });
     }
 
@@ -3646,10 +4951,16 @@ mod tests {
         let t = std::mem::ManuallyDrop::new(Tmp(dir));
         let state = t.0.join("state");
         let state_s = state.to_str().unwrap().to_owned();
+        // Its own Trash: the env inherited from the parent names whatever
+        // test held it when this child was spawned.
+        let data = t.0.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let data_s = data.to_str().unwrap().to_owned();
         // No registry: the env inherited from the parent may name another
         // test's runtime dir, whose "running" job 10-1 would block the undo.
         let v = [
             ("XDG_STATE_HOME", Some(&*state_s)),
+            ("XDG_DATA_HOME", Some(&*data_s)),
             ("XDG_RUNTIME_DIR", None),
         ];
         with_env(&v, || {
@@ -3673,7 +4984,7 @@ mod tests {
             let before = vm_hwm_kb();
             let r = undo(&job).unwrap();
             let after = vm_hwm_kb();
-            assert_eq!(r.removed, f);
+            assert!(all_moved(&r, &f));
             assert!(
                 after.saturating_sub(before) < 8 * 1024,
                 "peak RSS grew by {} kB",

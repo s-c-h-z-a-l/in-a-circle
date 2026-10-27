@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use dbus::Error;
 use dbus::notifications::{Event, Notice, Notifications};
 use engine::exec::{CancelToken, Durability, Observer, Outcome, PublicationReason, Wake};
-use engine::journal::{self, JobId, UndoResult};
+use engine::journal::{self, GroupOutcome, JobId, UndoReason, UndoResult};
 
 /// A run that takes longer than this gets a "running" notification.
 pub const RUNNING_AFTER: Duration = Duration::from_secs(1);
@@ -221,21 +221,125 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
     (fit(&summary, false), body_of(&body, markup))
 }
 
-/// The notification after an Undo click.
-pub fn undo_text(r: &UndoResult) -> (String, String) {
-    let mut body = format!("{} removed", r.removed.len());
-    // Kept files by reason, in the order the reasons first appear.
-    let mut reasons: Vec<(&str, usize)> = Vec::new();
-    for (_, why) in &r.kept {
-        match reasons.iter_mut().find(|(w, _)| w == why) {
+/// Why a group was kept, as the user reads it after a count.
+fn kept_why(r: UndoReason) -> &'static str {
+    match r {
+        UndoReason::Changed => "kept because it changed",
+        UndoReason::Missing => "not found where it was saved",
+        UndoReason::AncestorChanged => "kept: its folder moved",
+        UndoReason::NoTrash => "kept: no Trash on the same disk",
+        UndoReason::NameTaken => "kept: no free name in Trash",
+        UndoReason::TooLong => "kept: path too long for Trash",
+        UndoReason::HistoryNotWritten(_) => "kept: history not writable",
+        UndoReason::InfoNotWritten(_) => "kept: Trash info not written",
+        UndoReason::MoveRefused(_) => "kept: could not move to Trash",
+        _ => "kept",
+    }
+}
+
+/// Why a moved group came back.
+fn restored_why(r: UndoReason) -> &'static str {
+    match r {
+        UndoReason::InfoChanged => "moved back: Trash info changed",
+        _ => "moved back because it changed",
+    }
+}
+
+/// `n what` for each distinct `what`, in the order they first appear.
+fn counted(items: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for w in items {
+        match seen.iter_mut().find(|(s, _)| *s == w) {
             Some((_, n)) => *n += 1,
-            None => reasons.push((why, 1)),
+            None => seen.push((w, 1)),
         }
     }
-    for (why, n) in reasons {
-        body.push_str(&format!(", {n} kept ({why})"));
+    seen.into_iter().map(|(w, n)| format!("{n} {w}")).collect()
+}
+
+/// The notification after an Undo click: the summary says what happened as
+/// a whole, never more than happened. `Undone` (body `Moved to Trash`) only
+/// when every group went to the Trash; `Nothing undone` only when every
+/// group was provably kept in place; `Partially undone` when some moved and
+/// the rest is known; `Undo uncertain` whenever a group's place or metadata
+/// could not be proved; `Undo incomplete` otherwise (a group moved and came
+/// back, or stays in Trash after a failed way back). The body counts the
+/// groups by what happened, then gives the places of what needs attention
+/// and the warnings, each line fitted.
+pub fn undo_text(r: &UndoResult, markup: bool) -> (String, String) {
+    let is = |f: fn(&GroupOutcome) -> bool| r.groups.iter().filter(|o| f(o)).count();
+    let moved = is(|o| matches!(o, GroupOutcome::MovedToTrash { .. }));
+    let kept = is(|o| matches!(o, GroupOutcome::Kept { .. }));
+    let uncertain = is(|o| matches!(o, GroupOutcome::Uncertain { .. }));
+    let all = r.groups.len();
+    let summary = if uncertain > 0 {
+        "Undo uncertain"
+    } else if moved == all && all > 0 {
+        "Undone"
+    } else if kept == all {
+        "Nothing undone"
+    } else if moved > 0 {
+        "Partially undone"
+    } else {
+        "Undo incomplete"
+    };
+    let mut lines = Vec::new();
+    if moved == all && all > 0 {
+        lines.push("Moved to Trash".to_owned());
+    } else {
+        let what = r.groups.iter().map(|o| match o {
+            GroupOutcome::MovedToTrash { .. } => "moved to Trash".to_owned(),
+            GroupOutcome::Kept { reason, .. } => kept_why(*reason).to_owned(),
+            GroupOutcome::Restored { reason, .. } => restored_why(*reason).to_owned(),
+            GroupOutcome::RecoveryKept { .. } => "left in Trash".to_owned(),
+            GroupOutcome::Uncertain { .. } => "uncertain".to_owned(),
+        });
+        lines.push(counted(what).join(", "));
     }
-    ("Undone".to_owned(), fit(&body, false))
+    // Where what needs attention is.
+    let mut details = Vec::new();
+    for o in &r.groups {
+        match o {
+            GroupOutcome::RecoveryKept {
+                location, reason, ..
+            } => details.push(match &location.path_at_check {
+                Some(p) => format!("in Trash at {} ({})", p.display(), reason.name()),
+                None => format!("in Trash ({})", reason.name()),
+            }),
+            GroupOutcome::Uncertain {
+                op,
+                locations,
+                reason,
+                ..
+            } => {
+                let place = locations
+                    .iter()
+                    .find_map(|l| l.path_at_check.as_ref())
+                    .map(|p| format!("at {}", p.display()))
+                    .or_else(|| {
+                        locations
+                            .iter()
+                            .find_map(|l| l.last_unverified_path.as_ref())
+                            .map(|p| format!("last seen at {} (not confirmed)", p.display()))
+                    })
+                    .unwrap_or_else(|| "place unknown".to_owned());
+                details.push(format!(
+                    "uncertain {place}: {}, nothing deleted (op {:016x})",
+                    reason.name(),
+                    op.0
+                ));
+            }
+            _ => {}
+        }
+    }
+    let more = details.len().saturating_sub(PROBLEM_LINES);
+    details.truncate(PROBLEM_LINES);
+    lines.extend(details);
+    if more > 0 {
+        lines.push(format!("… and {more} more"));
+    }
+    lines.extend(r.warnings.iter().take(PROBLEM_LINES).cloned());
+    (fit(summary, false), body_of(&lines, markup))
 }
 
 /// `lines` as a body: each fitted, joined by newlines.
@@ -600,10 +704,9 @@ impl Notifier {
             }
         }
         let (summary, body) = match journal::undo(job) {
-            Ok(r) => undo_text(&r),
-            Err(e) => ("Undo failed".to_owned(), e.to_string()),
+            Ok(r) => undo_text(&r, markup),
+            Err(e) => ("Undo failed".to_owned(), body_of(&[e.to_string()], markup)),
         };
-        let body = body_of(&[body], markup);
         // In place of the result: its Undo button is spent.
         self.show(
             &Notice {
@@ -727,7 +830,7 @@ fn name_of(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::exec::FileId;
+    use engine::exec::{AnchorHint, CheckPoint, FileId, GroupId, LocationEvidence, OperationId};
 
     fn done(input: &str, output: &str) -> Outcome {
         Outcome::Done {
@@ -817,6 +920,7 @@ mod tests {
             group: GroupId(1),
             location: LocationEvidence {
                 path_at_check: None,
+                last_unverified_path: None,
                 anchor: AnchorHint {
                     parent_dev: 1,
                     parent_ino: 2,
@@ -853,6 +957,7 @@ mod tests {
             group: GroupId(1),
             location: LocationEvidence {
                 path_at_check: None,
+                last_unverified_path: None,
                 anchor: AnchorHint {
                     parent_dev: 1,
                     parent_ino: 2,
@@ -1062,27 +1167,143 @@ mod tests {
         );
     }
 
+    fn place(p: Option<&str>, last: Option<&str>) -> LocationEvidence {
+        LocationEvidence {
+            path_at_check: p.map(PathBuf::from),
+            last_unverified_path: last.map(PathBuf::from),
+            anchor: AnchorHint {
+                parent_dev: 1,
+                parent_ino: 2,
+                object_dev: 1,
+                object_ino: 3,
+                leaf: "a".into(),
+                op: OperationId(0xcd),
+            },
+            checked_at: CheckPoint::Precheck,
+        }
+    }
+
+    fn moved() -> GroupOutcome {
+        GroupOutcome::MovedToTrash {
+            group: GroupId(1),
+            location: place(Some("/t/files/a"), None),
+            info_leaf: "a.trashinfo".into(),
+            durability: Durability::Synced,
+        }
+    }
+
+    fn kept(reason: UndoReason) -> GroupOutcome {
+        GroupOutcome::Kept {
+            group: GroupId(2),
+            location: place(Some("/d/a"), None),
+            reason,
+        }
+    }
+
+    fn undo_of(groups: Vec<GroupOutcome>) -> (String, String) {
+        undo_text(
+            &UndoResult {
+                groups,
+                warnings: vec![],
+            },
+            false,
+        )
+    }
+
     #[test]
-    fn undo_text_counts_removed_and_kept() {
-        let r = UndoResult {
-            removed: vec!["/d/a.md".into(), "/d/b.md".into()],
-            kept: vec![],
-        };
-        assert_eq!(undo_text(&r), ("Undone".into(), "2 removed".into()));
-        let r = UndoResult {
-            removed: vec!["/d/a.md".into()],
-            kept: vec![
-                ("/d/b.md".into(), "changed since".into()),
-                ("/d/c.md".into(), "missing".into()),
-                ("/d/e.md".into(), "changed since".into()),
-            ],
-        };
+    fn undo_text_counts_groups_by_what_happened() {
         assert_eq!(
-            undo_text(&r),
+            undo_of(vec![moved(), moved()]),
+            ("Undone".into(), "Moved to Trash".into())
+        );
+        assert_eq!(
+            undo_of(vec![moved(), moved(), kept(UndoReason::Changed)]),
             (
-                "Undone".into(),
-                "1 removed, 2 kept (changed since), 1 kept (missing)".into()
+                "Partially undone".into(),
+                "2 moved to Trash, 1 kept because it changed".into()
             )
         );
+        // Every group provably kept in place: nothing moved.
+        assert_eq!(
+            undo_of(vec![
+                kept(UndoReason::Changed),
+                kept(UndoReason::NoTrash),
+                kept(UndoReason::Changed)
+            ]),
+            (
+                "Nothing undone".into(),
+                "2 kept because it changed, 1 kept: no Trash on the same disk".into()
+            )
+        );
+    }
+
+    /// A move that came back is no "Nothing undone"; one left in the Trash
+    /// gives its place; an uncertain one is never a success nor "Nothing
+    /// undone", and its unproved path is said to be unconfirmed.
+    #[test]
+    fn undo_text_names_moves_back_recovery_places_and_uncertainty() {
+        let restored = GroupOutcome::Restored {
+            group: GroupId(3),
+            location: place(Some("/d/a"), None),
+            reason: UndoReason::PostMoveMismatch,
+            durability: Durability::Synced,
+        };
+        assert_eq!(
+            undo_of(vec![restored.clone()]),
+            (
+                "Undo incomplete".into(),
+                "1 moved back because it changed".into()
+            )
+        );
+        let left = GroupOutcome::RecoveryKept {
+            group: GroupId(4),
+            location: place(Some("/t/files/a"), None),
+            reason: UndoReason::RestoreCollision,
+            errno: Some(17),
+            durability: Durability::Synced,
+        };
+        assert_eq!(
+            undo_of(vec![moved(), left]),
+            (
+                "Partially undone".into(),
+                "1 moved to Trash, 1 left in Trash\nin Trash at /t/files/a (RestoreCollision)"
+                    .into()
+            )
+        );
+        let unsure = GroupOutcome::Uncertain {
+            group: GroupId(5),
+            op: OperationId(0xab),
+            locations: vec![place(None, Some("/t2/files/a"))],
+            reason: UndoReason::AncestorChanged,
+        };
+        for groups in [vec![unsure.clone()], vec![moved(), unsure.clone()]] {
+            let (summary, body) = undo_of(groups);
+            assert_eq!(summary, "Undo uncertain");
+            assert!(
+                body.ends_with(
+                    "uncertain last seen at /t2/files/a (not confirmed): AncestorChanged, nothing deleted (op 00000000000000ab)"
+                ),
+                "{body}"
+            );
+        }
+        // Escaped and bounded: a control character in a path is not shown
+        // raw, and the warnings follow.
+        let (_, body) = undo_text(
+            &UndoResult {
+                groups: vec![GroupOutcome::RecoveryKept {
+                    group: GroupId(6),
+                    location: place(Some("/t/a\nb"), None),
+                    reason: UndoReason::RestoreFailed,
+                    errno: Some(13),
+                    durability: Durability::Synced,
+                }],
+                warnings: vec!["history: the undo was not recorded".into()],
+            },
+            false,
+        );
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3, "{body}");
+        assert!(!lines[1].contains("a\nb") && lines[1].starts_with("in Trash at /t/a"));
+        assert_eq!(lines[2], "history: the undo was not recorded");
     }
 }
