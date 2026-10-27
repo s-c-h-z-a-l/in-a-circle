@@ -1327,6 +1327,12 @@ fn seccomp_denied_syscalls_reach_the_kernel_only_without_the_filter() {
                 How::KernelMayDeny(why) => {
                     notes.push(format!("{}: kernel denies first ({why})", row.0));
                 }
+                // The namespace exists but grants no capability: Ubuntu's
+                // AppArmor (kernel.apparmor_restrict_unprivileged_userns).
+                How::Userns => notes.push(format!(
+                    "{}: user namespace without capabilities, control unprovable here",
+                    row.0
+                )),
                 _ => wrong.push(format!("{}: control already gives {deny}", row.0)),
             }
         }

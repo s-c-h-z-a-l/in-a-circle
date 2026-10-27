@@ -1424,6 +1424,8 @@ pub(crate) mod tests {
         assert_eq!(errno(probe(Sb::On(None), attempt)), Some(libc::EPERM));
     }
 
+    /// x32 is an x86_64 ABI; on aarch64 the number is just unknown.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn x32_syscall_denied() {
         if !seccomp_or_skip("x32_syscall_denied") {
