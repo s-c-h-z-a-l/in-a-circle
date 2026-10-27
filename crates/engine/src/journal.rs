@@ -3918,6 +3918,7 @@ mod tests {
                         assert_eq!(*reason, UndoReason::ContentNotNeutralized(e));
                         let info = locations[1].path_at_check.as_ref().unwrap();
                         assert!(info.to_str().unwrap().ends_with(".inacircle-detached"));
+                        assert_eq!(locations[1].checked_at, CheckPoint::PostMove);
                     }
                     other => panic!("{inject:?}: {other:?}"),
                 }
@@ -4225,6 +4226,181 @@ mod tests {
             for i in inos {
                 assert!(found.contains(&i), "inode {i} gone");
             }
+        });
+    }
+
+    /// The home Trash on another filesystem (labelled: `EXDEV` injected
+    /// at the home lookup): the volume Trash is used, `.Trash-$uid` under
+    /// the topdir (the fixture, standing in for the mount point), with
+    /// `Path=` relative to the topdir; a crash before the move recovers
+    /// there too.
+    #[test]
+    fn undo_uses_the_volume_trash_when_home_is_elsewhere() {
+        for crash in [false, true] {
+            let t = Tmp::new("t8-volume");
+            t.env(|| {
+                crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = Some(t.0.clone()));
+                let (job, _, f) = single(&t, "a");
+                if crash {
+                    let _f = fault(|p| match p {
+                        Point::Home => Some(libc::EXDEV),
+                        Point::BeforeMove => panic!("simulated crash at BeforeMove"),
+                        _ => None,
+                    });
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| undo(&job)));
+                    assert!(r.is_err());
+                }
+                let r = {
+                    let _f = fault(|p| (p == Point::Home).then_some(libc::EXDEV));
+                    undo(&job).unwrap()
+                };
+                crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = None);
+                let vol = t.0.join(format!(".Trash-{}", euid()));
+                let GroupOutcome::MovedToTrash { location, .. } = one(&r) else {
+                    panic!("{r:?}")
+                };
+                assert_eq!(location.path_at_check, Some(vol.join("files/a")));
+                assert!(vol.join("files/a").join(f.file_name().unwrap()).exists());
+                let infos: Vec<_> = fs::read_dir(vol.join("info"))
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "trashinfo"))
+                    .collect();
+                assert_eq!(infos.len(), 1, "crash={crash}: {infos:?}");
+                let text = fs::read_to_string(&infos[0]).unwrap();
+                assert!(text.starts_with("[Trash Info]\nPath=out/a\n"), "{text}");
+                assert!(!t.trash().exists(), "the home Trash is not used");
+            });
+        }
+    }
+
+    /// The info swapped and the way back taken: the group stays in the
+    /// Trash, and our info (renamed away by someone) is closed: it must not
+    /// stay authentic anywhere; the foreign info is left alone.
+    #[test]
+    fn undo_closes_a_swapped_info_when_the_way_back_is_taken() {
+        let t = Tmp::new("t8-swap-collide");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            let (info, w2) = (t.trash().join("info"), w.clone());
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    fs::rename(info.join("a.trashinfo"), info.join("mine-moved")).unwrap();
+                    fs::write(info.join("a.trashinfo"), "foreign").unwrap();
+                    fs::create_dir(&w2).unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::RecoveryKept { reason, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::RestoreCollision);
+            let info = t.trash().join("info");
+            assert_eq!(
+                fs::read_to_string(info.join("a.trashinfo")).unwrap(),
+                "foreign"
+            );
+            assert!(
+                fs::read(info.join("mine-moved"))
+                    .unwrap()
+                    .starts_with(b"inacircle-detached")
+            );
+        });
+    }
+
+    /// The detaching rename fails (labelled EACCES after an EXDEV move):
+    /// the neutral inode stays under its name and a warning says where.
+    #[test]
+    fn undo_warns_when_its_info_cannot_be_detached() {
+        let t = Tmp::new("t8-nodetach");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            let _f = fault(|p| match p {
+                Point::Rename => Some(libc::EXDEV),
+                Point::Detach => Some(libc::EACCES),
+                _ => None,
+            });
+            let r = undo(&job).unwrap();
+            assert_eq!(kept(&r), [UndoReason::MoveRefused(libc::EXDEV)]);
+            let info = t.trash().join("info/a.trashinfo");
+            assert!(fs::read(&info).unwrap().starts_with(b"inacircle-detached"));
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("left neutralised") && w.contains(info.to_str().unwrap())),
+                "{:?}",
+                r.warnings
+            );
+        });
+    }
+
+    /// Crash recovery at the detached name: our authentic bytes there (a
+    /// detach that ran after a failed neutralisation) are neutralised; a
+    /// foreign file there (a lost race) is put back under its name. Then
+    /// the undo goes on.
+    #[test]
+    fn undo_recovery_settles_the_detached_name() {
+        for foreign in [false, true] {
+            let t = Tmp::new("t8-detached");
+            t.env(|| {
+                let (job, _, _) = single(&t, "a");
+                crash_at(&job, Point::BeforeMove);
+                let info = t.trash().join("info");
+                let det = fs::read_dir(&info)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|p| p.to_str().unwrap().ends_with(".trashinfo"))
+                    .unwrap();
+                let op = history()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("recovery-intent\top="))
+                    .map(|r| r[..16].to_owned())
+                    .unwrap();
+                let detached_at = info.join(format!(".{op}.inacircle-detached"));
+                fs::rename(&det, &detached_at).unwrap();
+                if foreign {
+                    fs::write(&detached_at, "foreign").unwrap();
+                }
+                let r = undo(&job).unwrap();
+                assert!(
+                    matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                    "{r:?}"
+                );
+                if foreign {
+                    // Put back under the name; the move took the next name.
+                    assert_eq!(
+                        fs::read_to_string(info.join("a.trashinfo")).unwrap(),
+                        "foreign"
+                    );
+                    assert_eq!(pairs(&t).len(), 1);
+                } else {
+                    assert!(
+                        fs::read(&detached_at)
+                            .unwrap()
+                            .starts_with(b"inacircle-detached")
+                    );
+                }
+            });
+        }
+    }
+
+    /// A FIFO planted at our info name during a crash: never opened for
+    /// reading in a blocking way, never taken for ours; the undo goes on
+    /// under the next name.
+    #[test]
+    fn undo_recovery_leaves_a_fifo_at_its_info_name() {
+        let t = Tmp::new("t8-fifo");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info/a.trashinfo");
+            fs::rename(&info, t.0.join("ours")).unwrap();
+            crate::sys::tests::mkfifo(&info);
+            let r = crate::sys::tests::within(10, move || undo(&job).map(|r| r.groups.len()));
+            assert_eq!(r.unwrap(), 1);
+            let ft = fs::symlink_metadata(&info).unwrap().file_type();
+            assert!(std::os::unix::fs::FileTypeExt::is_fifo(&ft));
         });
     }
 

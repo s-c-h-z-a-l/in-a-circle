@@ -299,6 +299,9 @@ pub(crate) enum Point {
     Detach,
     /// The parents' syncs after the move.
     Sync,
+    /// Before the home Trash is looked at (an `EXDEV` makes the home Trash
+    /// another filesystem's, so the volume Trash is used).
+    Home,
     /// Before the closing record of a moved group.
     Commit,
 }
@@ -833,6 +836,7 @@ fn trash_in(root: RawFd, path: &Path, uid: u32, top: Option<&Path>) -> io::Resul
 /// missing (as file managers do) and followed if a symlink (the user's
 /// own setting); `Trash`, `files` and `info` never are.
 fn home_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
+    at(Point::Home)?;
     let data = xdg::data_home()?;
     // Its nearest existing ancestor tells the domain before anything is
     // made: a home on another filesystem gets no new folders.
@@ -943,6 +947,12 @@ pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Resu
 
 /// The volume Trash of mount `dom.0`.
 fn volume_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
+    #[cfg(test)]
+    let point = match tests::TOPDIR.with_borrow(Clone::clone) {
+        Some(p) => p,
+        None => mount_point(dom.0)?,
+    };
+    #[cfg(not(test))]
     let point = mount_point(dom.0)?;
     let top = open_no_symlinks(
         &c_name(point.as_os_str().as_bytes())?,
@@ -1672,6 +1682,10 @@ pub(crate) mod tests {
         /// (after any race the test stages).
         pub(crate) static FAULT: std::cell::RefCell<Fault> =
             const { std::cell::RefCell::new(None) };
+        /// The volume Trash's topdir in place of the real mount point (a
+        /// test never makes a Trash at a real mount's root).
+        pub(crate) static TOPDIR: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     /// Installs `f` at every [`Point`] until the guard drops.
@@ -2096,6 +2110,144 @@ pub(crate) mod tests {
             "{point:?}"
         );
         assert!(local_fs(fd.as_raw_fd()));
+    }
+
+    #[test]
+    fn unescape_takes_only_whole_octal_escapes() {
+        assert_eq!(unescape(b"/a\\040b"), b"/a b");
+        assert_eq!(unescape(b"/a\\040"), b"/a ");
+        assert_eq!(unescape(b"/a\\04"), b"/a\\04", "cut off at the end");
+        assert_eq!(unescape(b"/a\\x41"), b"/a\\x41", "not octal");
+        assert_eq!(unescape(b"\\134"), b"\\");
+    }
+
+    #[test]
+    fn candidate_of_a_leaf_of_continuation_bytes() {
+        let odd = [0x80u8; 300];
+        assert_eq!(candidate(&odd, 0), None);
+        assert_eq!(candidate(&[0x80u8; 3], 0).unwrap().as_bytes(), [0x80u8; 3]);
+    }
+
+    #[test]
+    fn mount_point_is_the_mount_of_the_fixture() {
+        let d = Dir::new("mountpoint");
+        let (mnt, _) = domain(d.fd("").as_raw_fd()).unwrap();
+        let point = mount_point(mnt).unwrap();
+        let top = open_dir_follow(point.as_os_str().as_bytes()).unwrap();
+        assert_eq!(domain(top.as_raw_fd()).unwrap().0, mnt, "{point:?}");
+    }
+
+    /// Only a regular file of at most TRASHINFO_MAX_BYTES is read; a FIFO
+    /// at the name is never read (nor blocks).
+    #[test]
+    fn read_info_is_bounded_and_regular_only() {
+        let d = Dir::new("readinfo");
+        let dir = d.fd("");
+        fs::write(d.0.join("max"), vec![b'a'; TRASHINFO_MAX_BYTES]).unwrap();
+        fs::write(d.0.join("over"), vec![b'a'; TRASHINFO_MAX_BYTES + 1]).unwrap();
+        crate::sys::tests::mkfifo(&d.0.join("fifo"));
+        assert_eq!(
+            read_info(dir.as_raw_fd(), c"max").unwrap().1.len(),
+            TRASHINFO_MAX_BYTES
+        );
+        assert!(read_info(dir.as_raw_fd(), c"over").is_none());
+        assert!(read_info(dir.as_raw_fd(), c"fifo").is_none());
+    }
+
+    /// The known folder still reaches the folder fd, but the leaf names
+    /// another object: the place comes from the object's own fd.
+    #[test]
+    fn locate_never_takes_a_name_that_is_another_object() {
+        let d = Dir::new("locate");
+        fs::create_dir_all(d.0.join("p/x")).unwrap();
+        let (p, x) = (d.fd("p"), d.fd("p/x"));
+        fs::rename(d.0.join("p/x"), d.0.join("p/moved")).unwrap();
+        fs::create_dir(d.0.join("p/x")).unwrap();
+        let l = locate(
+            Some(&d.0.join("p")),
+            p.as_raw_fd(),
+            c"x",
+            x.as_raw_fd(),
+            OP,
+            CheckPoint::PostMove,
+        );
+        assert_eq!(l.checked_at, CheckPoint::PostResolve);
+        assert_eq!(
+            l.path_at_check,
+            Some(fs::canonicalize(d.0.join("p/moved")).unwrap())
+        );
+        let l = locate(
+            Some(&d.0.join("p")),
+            p.as_raw_fd(),
+            c"moved",
+            x.as_raw_fd(),
+            OP,
+            CheckPoint::PostMove,
+        );
+        assert_eq!(l.checked_at, CheckPoint::PostMove);
+        assert_eq!(l.path_at_check, Some(d.0.join("p/moved")));
+    }
+
+    /// A removed folder or a path longer than PATH_MAX is unverified at
+    /// once: no reopen is tried.
+    #[test]
+    fn resolve_gives_up_at_once_on_a_removed_or_too_long_path() {
+        let d = Dir::new("noreopen");
+        let tries = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let t2 = tries.clone();
+        let _f = fault(move |p| {
+            if p == Point::Resolve {
+                t2.set(t2.get() + 1);
+            }
+            None
+        });
+        fs::create_dir(d.0.join("x")).unwrap();
+        let x = d.fd("x");
+        fs::remove_dir(d.0.join("x")).unwrap();
+        assert!(matches!(
+            resolve(x.as_raw_fd()),
+            Resolved::Unverified { .. }
+        ));
+        // Deeper than PATH_MAX, built relative to fds.
+        let mut cur = d.fd("");
+        let part = CString::new("d".repeat(200)).unwrap();
+        for _ in 0..25 {
+            // SAFETY: cur is an open folder; part is NUL-terminated.
+            assert_eq!(
+                unsafe { libc::mkdirat(cur.as_raw_fd(), part.as_ptr(), 0o700) },
+                0
+            );
+            cur = open_at(
+                cur.as_raw_fd(),
+                &part,
+                libc::O_RDONLY | libc::O_DIRECTORY,
+                0,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            resolve(cur.as_raw_fd()),
+            Resolved::Unverified { last: None }
+        ));
+        assert_eq!(tries.get(), 0);
+    }
+
+    /// Our name gone between the identity check and the detaching rename:
+    /// nothing else is touched.
+    #[test]
+    fn close_info_when_its_name_vanishes_before_the_detach() {
+        let d = Dir::new("vanish");
+        let (info, i) = reserved(&d);
+        let root = d.0.clone();
+        let _f = fault(move |p| {
+            if p == Point::Detach {
+                fs::rename(root.join("x.trashinfo"), root.join("elsewhere")).unwrap();
+            }
+            None
+        });
+        let cl = close_info(info.as_raw_fd(), &i);
+        assert_eq!(cl.state, InfoState::ForeignUntouched);
+        assert_eq!(fs::read(d.0.join("elsewhere")).unwrap(), neutral(OP));
     }
 
     #[test]
