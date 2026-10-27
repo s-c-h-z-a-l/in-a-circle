@@ -1950,13 +1950,14 @@ pub(crate) mod tests {
                     "umask_222" => (0o222, 0o644, 0o755),
                     _ => (0o100, 0o666, 0o777),
                 };
-                // SAFETY: umask only sets this process's mask; the child
-                // is single-threaded here.
-                unsafe { libc::umask(mask) };
                 let (root, target) = (dir.join("root"), dir.join("target"));
                 fs::create_dir(&target).unwrap();
                 produced(&root, "0/a.png", b"1");
                 produced(&root, "0/b.png", b"2");
+                // After the fixture (a mask like 0o222 would make the
+                // fixture itself unwritable). SAFETY: umask only sets this
+                // process's mask; the child is single-threaded here.
+                unsafe { libc::umask(mask) };
                 let mut private = None;
                 let p = publish_beneath(
                     &root,
