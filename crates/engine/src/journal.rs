@@ -1533,6 +1533,7 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
             "bad or unsupported history header",
         ));
     }
+    let mut seen_ours = false;
     loop {
         buf.clear();
         if rd.read_until(b'\n', &mut buf)? == 0 {
@@ -1541,9 +1542,13 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
         if !mentions(&buf) {
             // A `job` line cut inside its id names no job in full, but if
             // what is there could be the start of ours, it may be our
-            // withdrawal (`undo=no`) that never landed: refuse. (A cut
-            // before the id's first byte stays invisible.)
-            if version == VERSION && is_job_id_prefix(&buf, &job.0) {
+            // withdrawal (`undo=no`) that never landed: refuse. Only after
+            // a record of ours: the withdrawal follows the job's own
+            // records, and a cut line before them (ids start with the
+            // clock, so it is a prefix of nearly every id) must not
+            // refuse other, intact jobs. (A cut before the id's first
+            // byte stays invisible.)
+            if version == VERSION && seen_ours && is_job_id_prefix(&buf, &job.0) {
                 r.broken.get_or_insert("a record cut off");
             }
             continue;
@@ -1552,6 +1557,7 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
             r.old = true;
             return Ok(r);
         }
+        seen_ours = true;
         let fault = if buf.pop() != Some(b'\n') {
             Err("a record cut off")
         } else {
@@ -2994,6 +3000,11 @@ mod tests {
             let mut l = good();
             l.push(format!("{cut}\n"));
             assert_eq!(read(&l).unwrap().broken.is_some(), broken, "{cut:?}");
+            // Before the job's own records the same line is nobody's
+            // business: it does not refuse an intact job.
+            let mut l = good();
+            l.insert(0, format!("{cut}\n"));
+            assert!(read(&l).unwrap().broken.is_none(), "{cut:?} before");
         }
         // A cut that left only the start of the line.
         let mut l = good();
@@ -3056,6 +3067,29 @@ mod tests {
             assert!(r.kept.is_empty());
             assert!(!t.out().join("a").exists() && !t.out().join("doc").exists());
             assert!(t.out().exists(), "a user folder is never removed");
+        });
+    }
+
+    /// Regression: one `job` line cut inside its id (a crash, a full disk)
+    /// refuses only its own job; a later, intact job is still undoable.
+    #[test]
+    fn a_cut_job_line_does_not_refuse_later_jobs() {
+        let t = Tmp::new("cutlater");
+        t.env(|| {
+            let a = new_job_id();
+            let a_files = job_of(&t, &a, &[("a", "a")]);
+            // Cut the last line (A's `job` line) just after "job\tid=1".
+            let text = history();
+            let last = text.trim_end().rfind('\n').unwrap() + 1;
+            let f = OpenOptions::new().write(true).open(history_path()).unwrap();
+            f.set_len((last + "job\tid=1".len()) as u64).unwrap();
+            drop(f);
+            let b = new_job_id();
+            let b_files = job_of(&t, &b, &[("b", "b")]);
+            assert_eq!(undo(&b).unwrap().removed, b_files);
+            let e = undo(&a).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            assert!(a_files[0].exists());
         });
     }
 
