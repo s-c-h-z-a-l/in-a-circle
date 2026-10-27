@@ -5,12 +5,13 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::sys::{self, fstat, ident, last_err};
 use crate::xdg;
 
 const WORK_PREFIX: &str = ".inacircle-";
@@ -42,10 +43,6 @@ impl Drop for WorkDir {
         empty_dir(&dir);
         unlink_own(self.parent.0, &self.name, self.id, libc::AT_REMOVEDIR);
     }
-}
-
-fn last_err<T>() -> io::Result<T> {
-    Err(io::Error::last_os_error())
 }
 
 /// Closes the fd on drop.
@@ -509,31 +506,6 @@ impl PublicationReason {
     }
 }
 
-fn stat_at(at: At) -> io::Result<libc::stat> {
-    // SAFETY: zeroed stat is valid storage; at.name is NUL-terminated and
-    // at.dir an open directory fd or AT_FDCWD.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let r = unsafe { libc::fstatat(at.dir, at.name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-    if r == 0 { Ok(st) } else { last_err() }
-}
-
-fn fstat(fd: RawFd) -> io::Result<libc::stat> {
-    // SAFETY: zeroed stat is valid storage; fd is an open fd.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut st) } == 0 {
-        Ok(st)
-    } else {
-        last_err()
-    }
-}
-
-/// Device and inode.
-// st_dev/st_ino widths differ between targets.
-#[allow(clippy::unnecessary_cast)]
-fn ident(st: &libc::stat) -> (u64, u64) {
-    (st.st_dev as u64, st.st_ino as u64)
-}
-
 fn kind_of(st: &libc::stat) -> Option<NodeKind> {
     match st.st_mode & libc::S_IFMT {
         libc::S_IFREG => Some(NodeKind::File),
@@ -751,21 +723,13 @@ fn at(_: Point) -> io::Result<()> {
     Ok(())
 }
 
-/// `openat(dir, name, flags | O_NOFOLLOW | O_CLOEXEC, mode)`.
+/// `sys::open_at` with the descriptor under this module's guard.
 fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<Fd> {
-    // mutants: equivalent — distinct flag bits, so `|` and `^` agree.
-    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    loop {
-        // SAFETY: name is NUL-terminated; dir is an open dir fd or AT_FDCWD.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, libc::c_uint::from(mode)) };
-        if fd >= 0 {
-            return Ok(Fd(fd));
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
+    sys::open_at(dir, name, flags, mode).map(|fd| Fd(fd.into_raw_fd()))
+}
+
+fn stat_at(at: At) -> io::Result<libc::stat> {
+    sys::stat_at(at.dir, at.name)
 }
 
 fn sync(fd: RawFd, p: Point) -> io::Result<()> {

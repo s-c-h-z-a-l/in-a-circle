@@ -27,9 +27,10 @@
 
 use crate::exec::{Durability, FileId, Outcome, Tally};
 use crate::output::{ChildBaseline, DirectoryId, LocationEvidence, NodeKind, OutputGroup};
+use crate::sys::{c_name, fstat, ident, last_err, open_at, stat_at};
 use crate::xdg;
 use manifest::{Line, parse_line, write_line};
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -97,55 +98,6 @@ fn jobs_dir() -> Option<PathBuf> {
 }
 
 // ---- private state folders ----
-
-fn last_err<T>() -> io::Result<T> {
-    Err(io::Error::last_os_error())
-}
-
-fn c_name(name: &[u8]) -> io::Result<CString> {
-    CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a name"))
-}
-
-fn fstat(fd: RawFd) -> io::Result<libc::stat> {
-    // SAFETY: zeroed stat is valid storage; fd is an open descriptor.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut st) } == 0 {
-        Ok(st)
-    } else {
-        last_err()
-    }
-}
-
-/// `fstatat` without following a symlink at `name`.
-fn stat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
-    // SAFETY: zeroed stat is valid storage; name is NUL-terminated and dir
-    // an open directory fd.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
-        Ok(st)
-    } else {
-        last_err()
-    }
-}
-
-/// `openat` with `O_NOFOLLOW | O_CLOEXEC` added.
-fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
-    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    // SAFETY: name is NUL-terminated, dir an open directory fd (or
-    // AT_FDCWD); the returned fd is owned here.
-    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, libc::c_uint::from(mode)) };
-    if fd < 0 {
-        return last_err();
-    }
-    // SAFETY: fd was just opened and nothing else owns it.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// `(st_dev, st_ino)`; their widths differ between targets.
-#[allow(clippy::unnecessary_cast)]
-fn ident(st: &libc::stat) -> (u64, u64) {
-    (st.st_dev as u64, st.st_ino as u64)
-}
 
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
