@@ -310,7 +310,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   problem lines `<input>: <reason>` (failures first), then `… and <r>
   more`. Nothing finished: `Nothing converted`. An input converted at an
   unknown place adds `<input>: <cause> (op <id>)` and `<n> not confirmed
-  where it was saved; Undo unavailable.`, and the Undo button is left out. Cancelled: `Cancelled`,
+  where it was saved; Undo unavailable.`, and the Undo button is left out.
+  Undo is offered only when the history holds every group of the run
+  complete, durable and synced; otherwise the recording warning (`history
+  not written: …; undo unavailable`, `… not confirmed on disk; undo
+  unavailable`) is a body line instead. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. A lossy action that produced output starts
   the body with `Formatting was lost.`; a run the sandbox gate refused ends
   it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
@@ -389,10 +393,14 @@ In the engine, in one place:
    name something else by then); stale ones from a crash are cleaned by
    the next run (our pattern only, older than a day). An output folder
    never takes that pattern.
-7. Undo deletes only files we created, and only if unchanged since
-   placement (device, inode, size, mtime, ctime); otherwise it keeps them
-   and says why. An output folder is removed only if empty afterwards. A
-   job with an output at an unknown place is not undoable at all.
+7. Undo deletes only files we created, and only if unchanged since their
+   private baseline (device, inode, size, mtime, ctime, type, owner, mode,
+   link count), inside the wrapper folder the commit recorded (same device
+   and inode); otherwise it keeps them and says why. An output folder is
+   removed only if empty afterwards. A job with an output at an unknown
+   place, not confirmed on disk, or with an incomplete or damaged record
+   is not undoable at all, and neither is a job of the previous history
+   format.
 
 ## The wheel
 
@@ -571,15 +579,36 @@ running jobs and history.
 No daemon:
 
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
-  (header `inacircle-history 0`), manifest-style lines, each one `write`
-  on an `O_APPEND` descriptor. A job's `dir`, `out` (input, path and the
-  identity taken at placement), `unknown` (an output published at a place
-  that could not be proved: input, group, operation, cause, durability,
-  anchor), `skip` and `fail` lines are appended as they happen, its `job`
-  line (id, time, action, status, sandbox, and `undo=no` after an
-  `unknown`) when it ends, and `undo` once undone. A run that dies midway leaves a valid
-  partial record of what it placed, which undo still finds. Nothing of a
-  run is kept in memory per outcome;
+  (header `inacircle-history 1`), manifest-style lines. Before an
+  output group's publishing rename, its whole manifest (`group-begin`
+  with the wrapper's identity and the child count, one `child` per output
+  with its private baseline, `group-end` with the count and the names'
+  bytes) and a `publish-intent` (planned place) are appended as one block
+  and synced; if that fails, the group is not published. A name taken at
+  the rename adds another intent for the same group and operation. After
+  the rename comes `publish-commit` (the proved place, durability) or
+  `publish-uncertain` (the anchor, when the place could not be proved),
+  synced; a failure there keeps the output and its success, and the job
+  is then not undoable. A publication that fails after its intent gets
+  `publish-abort`. `skip`, `fail` and `unknown` lines come as they
+  happen, the `job` line (id, time, action, status, sandbox, `undo=no`
+  when not undoable) at the end, `undo` once undone. Paths are
+  byte-exact (`%XX` for bytes that are not printable ASCII, `%` and
+  `\`). There is no digest: undo acts only on a job whose every group is
+  complete (version, unique group and operation, begin and end, matching
+  counts and bytes, a commit at a recorded intent's place, synced); a
+  duplicate, missing, cut-off or unknown record refuses the whole job
+  before anything is touched. A version 0 history is archived
+  (`history.v0`, `history.v0.1`, …, never overwritten) under the
+  history's lock by the first run that writes; its jobs are refused with
+  the reason, their outputs kept. A run that dies midway leaves its
+  complete groups, which undo still finds. Nothing of a run is kept in
+  memory per outcome;
+- state files (history, registry entries, the catalog cache) are created
+  exclusively under random names, never through a symlink, in a folder
+  opened once and checked (a directory of this user, not writable by
+  others: tightened if it is), and renamed or linked into place relative
+  to that folder;
 - running jobs: each supervisor registers itself in
   `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
   action, inputs, done, progress, start time) rewritten by rename at most
