@@ -2003,6 +2003,13 @@ mod tests {
                     ),
                     other => panic!("builtin={builtin}, {name}: {other:?}"),
                 }
+                // The ambient case is refused on its own branch, not on
+                // permitted or effective.
+                if let ("ambient capability", [Outcome::Failed { reason, .. }]) =
+                    (name, &seen.0[..])
+                {
+                    assert!(reason.contains("ambient capabilities"), "{reason}");
+                }
                 assert!(!out.exists(), "builtin={builtin}, {name}: the action ran");
             }
             let mut seen = Seen::default();

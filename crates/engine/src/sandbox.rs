@@ -2615,8 +2615,9 @@ pub(crate) mod tests {
                 uid: [1000, 1000, 0, 1000],
                 ..normal_user()
             })),
+            // Only the ambient set: with permitted or effective set too,
+            // the gate would refuse on that branch first.
             "ambient capability" => inject::PRIVILEGE.set(Some(PrivilegeSnapshot {
-                cap_permitted: 1 << CAP_DAC_OVERRIDE,
                 cap_inheritable: 1 << CAP_DAC_OVERRIDE,
                 cap_ambient: 1 << CAP_DAC_OVERRIDE,
                 ..normal_user()
@@ -2674,6 +2675,10 @@ pub(crate) mod tests {
             let _g = inject_failure(name);
             if name != "setup error" {
                 assert!(ready().is_err(), "{name}: ready passed");
+            }
+            if name == "ambient capability" {
+                let e = ready().unwrap_err().to_string();
+                assert!(e.contains("ambient capabilities"), "{name}: {e}");
             }
             assert!(create().is_err(), "{name}: create passed");
             assert!(build(&any_policy()).is_err(), "{name}: build passed");
