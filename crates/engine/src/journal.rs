@@ -929,9 +929,18 @@ impl Recorder {
         if !undoable {
             l = l.pair("undo", "no");
         }
+        let mut marker_unproven = false;
         if self.failed.is_some() {
+            // The record of an earlier error may be in the page cache only
+            // (a failed sync, a short write). The `undo=no` that withdraws
+            // it is synced too, and a cut-off earlier line gets its newline
+            // first so this one stands alone. If even that fails, the
+            // history cannot prove the withdrawal: say so. The reader still
+            // fails closed on a cut line (`a record cut off`).
             if let Some((f, lock)) = &mut self.file {
-                let _ = append(f, lock, false, |b| b.line(&l));
+                let written =
+                    end_line(f, lock).and_then(|()| append(f, lock, true, |b| b.line(&l)));
+                marker_unproven = written.is_err();
             }
         } else if self.write(false, |b| b.line(&l)).is_err() {
             undoable = false;
@@ -944,6 +953,9 @@ impl Recorder {
         }
         if let Some(why) = &self.failed {
             warning.push(format!("history not written: {why}; outputs kept"));
+        }
+        if marker_unproven {
+            warning.push("the history could not be made durable".to_owned());
         }
         if self.unconfirmed > 0 {
             warning.push(format!(
@@ -1277,6 +1289,8 @@ const BEGIN: &[&str] = &[
 const CHILD: &[&str] = &[
     "job", "group", "rel", "type", "dev", "ino", "uid", "mode", "nlink", "size", "mtime", "ctime",
 ];
+const JOB: &[&str] = &["id", "time", "action", "status", "sandbox"];
+const JOB_WITHDRAWN: &[&str] = &["id", "time", "action", "status", "sandbox", "undo"];
 const END: &[&str] = &["job", "group", "children", "bytes"];
 const INTENT: &[&str] = &["op", "job", "group", "private", "target"];
 const COMMIT: &[&str] = &["op", "job", "group", "actual", "durability"];
@@ -1317,8 +1331,16 @@ impl JobRecords {
         let mine = |k: &str| l.get(k) == Some(job);
         match l.kind.as_str() {
             "job" if mine("id") => {
+                // Exactly the fields `finish` writes; `undo` only as `no`.
+                // A cut or altered line is a framing fault, not an
+                // accepted job line that lost its `undo=no`.
+                let withdrawn = l.items.len() == JOB.len() + 1;
+                let v = fields(l, if withdrawn { JOB_WITHDRAWN } else { JOB })?;
+                if withdrawn && v[5] != "no" {
+                    return Err("a job record with an unknown undo value");
+                }
                 self.known = true;
-                self.withdrawn |= l.get("undo") == Some("no");
+                self.withdrawn |= withdrawn;
             }
             "job" => {}
             _ if !mine("job") => {}
@@ -1473,6 +1495,14 @@ impl JobRecords {
     }
 }
 
+/// Whether `line` (with or without its newline) is `job\tid=` and then a
+/// proper start of `job`: a `job` line cut inside the id.
+fn is_job_id_prefix(line: &[u8], job: &str) -> bool {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_prefix(b"job\tid=")
+        .is_some_and(|rest| rest.len() < job.len() && job.as_bytes().starts_with(rest))
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -1505,6 +1535,13 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
             break;
         }
         if !mentions(&buf) {
+            // A `job` line cut inside its id names no job in full, but if
+            // what is there could be the start of ours, it may be our
+            // withdrawal (`undo=no`) that never landed: refuse. (A cut
+            // before the id's first byte stays invisible.)
+            if version == VERSION && is_job_id_prefix(&buf, &job.0) {
+                r.broken.get_or_insert("a record cut off");
+            }
             continue;
         }
         if version == OLD_VERSION {
@@ -2312,6 +2349,11 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_job_line_after_a_failed_sync_refuses_undo() {
+        assert_case_ok("commit_fsync_fails_job_line_cut");
+    }
+
+    #[test]
     fn a_short_history_write_after_the_commit_keeps_the_output() {
         assert_case_ok("commit_write_short");
     }
@@ -2358,10 +2400,40 @@ mod tests {
                     let w = r.warning.unwrap();
                     assert!(w.contains("history not written"), "{w}");
                     assert!(w.contains("undo unavailable"), "{w}");
+                    if case == "commit_fsync_fails" {
+                        // The withdrawal was tried synced, and failed too.
+                        assert!(w.contains("could not be made durable"), "{w}");
+                    }
                     assert_eq!(fs::read_to_string(&files[0]).unwrap(), "mine");
                     let e = undo(&job).unwrap_err();
                     assert_ne!(e.kind(), io::ErrorKind::NotFound, "{e}");
                     assert!(files[0].exists(), "undo removed after a refusal");
+                }
+                "commit_fsync_fails_job_line_cut" => {
+                    let p = try_publish(&t, &mut rec, "a", &[("x.md", "mine")], &mut |_, _| Ok(()))
+                        .unwrap();
+                    crate::output::tests::deny_syscalls(
+                        &[libc::SYS_fsync, libc::SYS_fdatasync],
+                        libc::EIO as u32,
+                    );
+                    let files = commit(&mut rec, "/in/a", &p);
+                    // The commit line is in (its sync failed); the `job`
+                    // line is cut inside, past its id so the reader sees it.
+                    limit_history_growth(30);
+                    let r = rec.finish(true);
+                    assert!(!r.undoable);
+                    // What a later `undo` would read (its own newline write
+                    // cannot run here, fsync stays denied): the job is
+                    // refused by the reader, not left looking complete.
+                    let bytes = fs::read(history_path()).unwrap();
+                    let rec = job_records(&mut &bytes[..], &job).unwrap();
+                    assert_eq!(
+                        rec.broken,
+                        Some("a record cut off"),
+                        "{:?}",
+                        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(120)..])
+                    );
+                    assert!(files[0].exists());
                 }
                 "prepare_write_short" => {
                     limit_history_growth(10);
@@ -2794,6 +2866,110 @@ mod tests {
         let text = format!("inacircle-history 2\n{}", good().concat());
         let e = job_records(&mut text.as_bytes(), &JobId(J.into())).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The framing branches the table above does not name, each with the
+    /// fault it must give (a wrong reason would mean another branch fired).
+    #[test]
+    fn more_framing_faults_give_their_own_reason() {
+        type Edit = fn(&mut Vec<String>);
+        let cases: &[(&str, &str, Edit)] = &[
+            (
+                "a duplicate operation",
+                "op repeated across two groups",
+                |l| {
+                    let b = l[0].replace("group=00000000000000aa", "group=00000000000000ab");
+                    l.push(b)
+                },
+            ),
+            ("an intent out of order", "intent before group-end", |l| {
+                l.swap(3, 4)
+            }),
+            (
+                "a commit at a place no intent named",
+                "commit without intent",
+                |l| {
+                    l.remove(4);
+                },
+            ),
+            ("an abort after the outcome", "abort after commit", |l| {
+                l.push(format!(
+                    "publish-abort\top=00000000000000bb\tjob={J}\tgroup=00000000000000aa\n"
+                ))
+            }),
+            ("an uncertain place said known", "location_known=yes", |l| {
+                l[5] = format!(
+                    "publish-uncertain\top=00000000000000bb\tjob={J}\tgroup=00000000000000aa\tlocation_known=yes\tparent_dev=1\tparent_ino=2\tleaf=a\tobject_dev=1\tobject_ino=2\treason=AncestorChanged\tdurability=synced\n"
+                )
+            }),
+            ("a bad durability", "durability=maybe", |l| {
+                l[5] = l[5].replace("durability=synced", "durability=maybe")
+            }),
+            (
+                "a wrapper that is not a directory",
+                "wrapper_type=file",
+                |l| l[0] = l[0].replace("wrapper_type=dir", "wrapper_type=file"),
+            ),
+            (
+                "a child after its group's end",
+                "child after group-end",
+                |l| {
+                    let c = l[1].replace("rel=a.md", "rel=c.md");
+                    l.insert(4, c)
+                },
+            ),
+        ];
+        for (why, what, edit) in cases {
+            let mut l = good();
+            edit(&mut l);
+            let r = read(&l).unwrap();
+            assert_eq!(r.broken, Some(*why), "{what}: {l:?}");
+        }
+    }
+
+    /// The `job` line is read as strictly as the others: a cut `undo=n`, a
+    /// value other than `no`, a missing field and a field twice are all a
+    /// refusal; the two exact forms are not.
+    #[test]
+    fn the_job_line_is_read_strictly() {
+        let line = |tail: &str| {
+            format!("job\tid={J}\ttime=1\taction=convert\tstatus=ok\tsandbox=no{tail}\n")
+        };
+        for tail in ["", "\tundo=no"] {
+            let mut l = good();
+            l.push(line(tail));
+            assert!(read(&l).unwrap().broken.is_none(), "{tail:?}");
+        }
+        for tail in [
+            "\tundo=n",
+            "\tundo=",
+            "\tundo=yes",
+            "\tundo=no\tundo=no",
+            "\tx=1",
+        ] {
+            let mut l = good();
+            l.push(line(tail));
+            let r = read(&l).unwrap();
+            assert!(r.broken.is_some() && !r.withdrawn, "{tail:?} accepted");
+        }
+        let mut l = good();
+        l.push(line("").replace("\tsandbox=no", ""));
+        assert!(read(&l).unwrap().broken.is_some(), "missing field accepted");
+        // A cut inside the id: it could be ours, so the job is refused; a
+        // line that cannot be ours is not.
+        for (cut, broken) in [
+            ("job\tid=1", true),
+            ("job\tid=", true),
+            ("job\tid=10-2", false),
+        ] {
+            let mut l = good();
+            l.push(format!("{cut}\n"));
+            assert_eq!(read(&l).unwrap().broken.is_some(), broken, "{cut:?}");
+        }
+        // A cut that left only the start of the line.
+        let mut l = good();
+        l.push(format!("job\tid={J}\ttime=1\tact\n"));
+        assert!(read(&l).unwrap().broken.is_some());
     }
 
     /// The reader on a whole history file: a broken record is a refusal by
