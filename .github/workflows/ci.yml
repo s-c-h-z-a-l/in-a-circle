@@ -123,7 +123,8 @@ jobs:
         env:
           INACIRCLE_RSS_GATE: "1"
         run: |
-          cargo test --release -p inacircle --test cli -- --exact many_groups_many_outputs_stay_within_rss_budget 2>&1 | tee rss.log
+          echo "page size: $(getconf PAGESIZE)"
+          cargo test --release -p inacircle --test cli -- --exact many_groups_many_outputs_stay_within_rss_budget --nocapture 2>&1 | tee rss.log
           grep -q "test result: ok. 1 passed" rss.log
 
       # The hardening tests again as a static musl binary: musl's own thread

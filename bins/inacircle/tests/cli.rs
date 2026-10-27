@@ -1250,6 +1250,7 @@ fn many_groups_many_outputs_stay_within_rss_budget() {
         eprintln!("diagnostic only (debug build, not gated): VmHWM {kb} kB");
         return;
     }
+    eprintln!("release VmHWM {kb} kB");
     assert!(
         kb * 1024 <= 5_000_000,
         "VmHWM {kb} kB > 5 000 000 B (release)"
