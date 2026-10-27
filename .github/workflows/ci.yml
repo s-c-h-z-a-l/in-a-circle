@@ -33,6 +33,58 @@ jobs:
           path: sandbox-qualification.json
           if-no-files-found: error
 
+  # The sandbox's seccomp policy, Landlock and CLI sandbox tests on both
+  # native architectures (`check` runs on x86_64 only). These runners pass
+  # the Landlock ABI 6 qualification above, so a skipped test fails here.
+  hardening:
+    name: Hardening (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    # A cold debug build of the workspace's test targets plus the tests
+    # themselves (well under a minute); 30 minutes still stops a hang early.
+    timeout-minutes: 30
+    env:
+      INACIRCLE_REQUIRE_LANDLOCK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-hardening-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-hardening-
+
+      # Ubuntu's AppArmor takes capabilities away inside unprivileged user
+      # namespaces; the kernel controls for capability-checked syscalls
+      # (pivot_root, fsopen, ...) need one to reach the argument checks.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Every hardening and CLI sandbox test must run, not skip.
+      - name: Hardening and CLI sandbox tests
+        shell: bash
+        run: |
+          {
+            cargo test -p engine --test hardening -- --nocapture
+            cargo test -p inacircle --test cli sandbox_ -- --nocapture
+          } 2>&1 | tee hardening.log
+          if grep -E "SKIPPED|: skipped" hardening.log; then
+            echo "a hardening test was skipped"; exit 1
+          fi
+
+      # The sandbox unit tests; some skip by design where the runner's file
+      # system or kernel lacks a feature (fs-verity, SCTP, MPTCP).
+      - name: Sandbox unit tests
+        run: cargo test -p engine --lib "sandbox::" -- --nocapture
+
   check:
     runs-on: ubuntu-latest
     steps:
