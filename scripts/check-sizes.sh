@@ -4,6 +4,12 @@
 #   scripts/check-sizes.sh                  check against the limits + baseline
 #   scripts/check-sizes.sh --write-baseline record the current sizes
 #
+# One baseline per architecture (`uname -m`): the code differs, so one
+# machine's sizes say nothing about the other's growth. x86_64 keeps
+# scripts/sizes.baseline; any other uses scripts/sizes.baseline.<arch>.
+# Lines starting with `#` are provenance (where and from what the numbers
+# were measured), kept by hand and skipped here.
+#
 # Exit 0: within limits (warnings go to stderr). Exit 1: a limit is exceeded.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,7 +27,12 @@ FAMILY_TEXT_LIMIT=$((1024 * 1024)) # 1 048 576 B
 # failure: the plan must justify it and refresh the baseline.
 GROWTH_WARN=$((100 * 1024)) # 102 400 B
 
-BASELINE=scripts/sizes.baseline
+ARCH=$(uname -m)
+if [ "$ARCH" = x86_64 ]; then
+    BASELINE=scripts/sizes.baseline
+else
+    BASELINE=scripts/sizes.baseline.$ARCH
+fi
 BINS=$(cat scripts/shipped-bins)
 
 # shellcheck disable=SC2086
@@ -36,15 +47,20 @@ measure() { # <bin>: prints "<file_bytes> <text_bytes>"
 }
 
 if [ "${1:-}" = "--write-baseline" ]; then
-    for b in $BINS; do echo "$b $(measure "$b")"; done >"$BASELINE"
-    echo "wrote $BASELINE"
+    {
+        # The provenance lines of the old baseline stay at the top.
+        grep -E '^#' "$BASELINE" 2>/dev/null || true
+        for b in $BINS; do echo "$b $(measure "$b")"; done
+    } >"$BASELINE.tmp"
+    mv "$BASELINE.tmp" "$BASELINE"
+    echo "wrote $BASELINE ($ARCH)"
     exit 0
 fi
 
 bad=0
 for b in $BINS; do
     read -r file text < <(measure "$b")
-    echo "$b: file $file B, .text $text B"
+    echo "$b ($ARCH): file $file B, .text $text B"
     if [ "$b" = "$ENGINE_BIN" ]; then
         if [ "$file" -gt "$ENGINE_FILE_LIMIT" ]; then
             echo "error: $b file is $file B, limit $ENGINE_FILE_LIMIT B" >&2
@@ -67,8 +83,13 @@ for b in $BINS; do
     fi
 done
 # Baseline entries for binaries that are no longer shipped.
-while read -r name _; do
-    grep -qxF "$name" scripts/shipped-bins ||
-        echo "warning: $BASELINE lists unknown binary $name" >&2
-done <"$BASELINE"
+if [ -e "$BASELINE" ]; then
+    while read -r name _; do
+        case $name in '#'* | '') continue ;; esac
+        grep -qxF "$name" scripts/shipped-bins ||
+            echo "warning: $BASELINE lists unknown binary $name" >&2
+    done <"$BASELINE"
+else
+    echo "warning: no baseline for $ARCH ($BASELINE)" >&2
+fi
 exit $bad
