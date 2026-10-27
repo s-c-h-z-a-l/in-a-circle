@@ -68,7 +68,9 @@ jobs:
       - name: Allow unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      # Every hardening and CLI sandbox test must run, not skip.
+      # Every hardening and CLI sandbox test must run, not skip, and every
+      # kernel control must be provable (no `note:` from the hardening
+      # tests, which the general `check` job tolerates).
       - name: Hardening and CLI sandbox tests
         shell: bash
         run: |
@@ -76,8 +78,8 @@ jobs:
             cargo test -p engine --test hardening -- --nocapture
             cargo test -p inacircle --test cli sandbox_ -- --nocapture
           } 2>&1 | tee hardening.log
-          if grep -E "SKIPPED|: skipped" hardening.log; then
-            echo "a hardening test was skipped"; exit 1
+          if grep -E "SKIPPED|: skipped|^note: " hardening.log; then
+            echo "a hardening test was skipped or a control unprovable"; exit 1
           fi
 
       # The sandbox unit tests; some skip by design where the runner's file
