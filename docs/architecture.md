@@ -104,7 +104,10 @@ are in `CLAUDE.md`.
   cross one (each manifest valid alone) is refused whole with a message,
   never trimmed silently. A manifest itself is limited to 256 records, 32
   fields per record, 4096 fields and 32 KiB per line, checked before it is
-  parsed; past that its binary is refused.
+  parsed; past that its binary is refused. The scan of the action
+  folders (on the wheel's path too) is bounded while it runs: at most 512
+  entries per folder (more refuses that folder whole, loudly) and at most
+  129 binaries held, the smallest paths in folder order.
 - Per action: id and family; input and output as **MIME types** plus the
   output extension (`ext=`); one or many inputs (`batch=no` for one at a
   time); label and group; cost and whether it loses information

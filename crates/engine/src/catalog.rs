@@ -264,8 +264,7 @@ impl Catalog {
         let mut bins = scan(dirs);
         if bins.len() > CACHE_BINS {
             eprintln!(
-                "inacircle: {} action binaries found; only the first {CACHE_BINS} are used (the action catalog's limit)",
-                bins.len()
+                "inacircle: more than {CACHE_BINS} action binaries found; only the first {CACHE_BINS} are used (the action catalog's limit)"
             );
             bins.truncate(CACHE_BINS);
         }
@@ -425,33 +424,79 @@ fn dirs_from(over: Option<std::ffi::OsString>, data_home: Option<PathBuf>) -> Ve
     dirs
 }
 
-/// Executable regular files (links resolved) in each dir, sorted by name.
+/// Entries examined per action folder, on the wheel's path too (no G0-P
+/// row; derived): 4x `CACHE_BINS`, room for the binaries plus unrelated
+/// files beside them. Each entry costs one `stat`, ~0.3 us (a name lookup
+/// measured at 17.7 us for 64, T9 preflight `names-cost.txt`), so a full
+/// folder is ~0.15 ms. A folder with more is no action folder we know
+/// (a wrong `INACIRCLE_ACTIONS_DIR`, a broken install): the scan stops at
+/// entry 513 and the folder is refused whole, loudly, rather than used in
+/// part (readdir order would decide which part).
+const SCAN_DIR_ENTRIES: usize = 512;
+
+/// The executable regular files (links resolved) of `dir` with the `room`
+/// smallest paths, sorted. Holds at most `room` binaries while it runs and
+/// examines at most `SCAN_DIR_ENTRIES` + 1 entries (`examined`); past that,
+/// `Err`. An unreadable folder has none.
+fn scan_dir(dir: &Path, builtin: &bool, room: usize, examined: &mut usize) -> Result<Vec<Bin>, ()> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Ok(Vec::new());
+    };
+    let mut found: Vec<Bin> = Vec::new();
+    for e in rd {
+        *examined += 1;
+        if *examined > SCAN_DIR_ENTRIES {
+            return Err(());
+        }
+        let Ok(e) = e else {
+            continue;
+        };
+        if e.file_name().as_encoded_bytes().first() == Some(&b'.') {
+            continue;
+        }
+        let path = e.path();
+        if found.len() == room && found.last().is_none_or(|b| b.path <= path) {
+            continue;
+        }
+        let Ok(m) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !m.is_file() || m.mode() & 0o111 == 0 {
+            continue;
+        }
+        let at = found.partition_point(|b| b.path < path);
+        found.insert(
+            at,
+            Bin {
+                path,
+                mtime: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
+                size: m.len(),
+                builtin: *builtin,
+            },
+        );
+        found.truncate(room);
+    }
+    Ok(found)
+}
+
+/// Executable regular files (links resolved) in each dir, sorted by name,
+/// in folder order: at most `CACHE_BINS` + 1 in all (one over says the
+/// catalog's limit was crossed). A folder past `SCAN_DIR_ENTRIES` is
+/// refused with a message.
 fn scan(dirs: &[(PathBuf, bool)]) -> Vec<Bin> {
     let mut out = Vec::new();
     for (dir, builtin) in dirs {
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut found: Vec<Bin> = rd
-            .flatten()
-            .filter_map(|e| {
-                if e.file_name().as_encoded_bytes().first() == Some(&b'.') {
-                    return None;
-                }
-                let m = std::fs::metadata(e.path()).ok()?;
-                if !m.is_file() || m.mode() & 0o111 == 0 {
-                    return None;
-                }
-                Some(Bin {
-                    path: e.path(),
-                    mtime: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
-                    size: m.len(),
-                    builtin: *builtin,
-                })
-            })
-            .collect();
-        found.sort_by(|a, b| a.path.cmp(&b.path));
-        out.extend(found);
+        let room = (CACHE_BINS + 1).saturating_sub(out.len());
+        if room == 0 {
+            break;
+        }
+        match scan_dir(dir, builtin, room, &mut 0) {
+            Ok(found) => out.extend(found),
+            Err(()) => eprintln!(
+                "inacircle: {}: more than {SCAN_DIR_ENTRIES} entries; its actions are not used (the action catalog's limit)",
+                dir.display()
+            ),
+        }
     }
     out
 }
@@ -2141,6 +2186,57 @@ pub(crate) mod tests {
     }
 
     /// 129 binaries: the first 128 are used, the extra is reported.
+    /// The scan itself is bounded: it stops at `SCAN_DIR_ENTRIES` + 1
+    /// entries of a folder (refusing that folder whole) and holds at most
+    /// `room` binaries, the smallest paths, however many there are.
+    #[test]
+    fn scan_stops_at_its_limits_while_it_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fix::new("scan-bound");
+        let fill = |d: &Path, n: usize, exec: usize| {
+            for i in 0..n {
+                let p = d.join(format!("e{i:05}"));
+                std::fs::write(&p, "").unwrap();
+                if i < exec {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+        };
+        // 300 binaries, room for CACHE_BINS + 1: the 129 smallest paths.
+        let many = f.dir("many");
+        fill(&many, 300, 300);
+        let mut n = 0;
+        let got = scan_dir(&many, &true, CACHE_BINS + 1, &mut n).unwrap();
+        assert_eq!(n, 300);
+        let want: Vec<PathBuf> = (0..=CACHE_BINS)
+            .map(|i| many.join(format!("e{i:05}")))
+            .collect();
+        assert_eq!(got.iter().map(|b| b.path.clone()).collect::<Vec<_>>(), want);
+        // Exactly SCAN_DIR_ENTRIES entries: scanned whole.
+        let at = f.dir("at");
+        fill(&at, SCAN_DIR_ENTRIES, 1);
+        let mut n = 0;
+        assert_eq!(
+            scan_dir(&at, &true, CACHE_BINS + 1, &mut n).unwrap().len(),
+            1
+        );
+        assert_eq!(n, SCAN_DIR_ENTRIES);
+        // Far more entries: refused after examining one past the limit.
+        let huge = f.dir("huge");
+        fill(&huge, 8 * SCAN_DIR_ENTRIES, 1);
+        let mut n = 0;
+        assert!(scan_dir(&huge, &true, CACHE_BINS + 1, &mut n).is_err());
+        assert_eq!(
+            n,
+            SCAN_DIR_ENTRIES + 1,
+            "the scan did not stop at its limit"
+        );
+        // The refused folder gives nothing; the others are used.
+        let bins = scan(&[(huge, true), (at.clone(), false)]);
+        assert_eq!(bins.len(), 1);
+        assert_eq!(bins[0].path, at.join("e00000"));
+    }
+
     #[test]
     fn live_rebuild_obeys_the_bin_limit() {
         let f = Fix::new("agg-bins");
