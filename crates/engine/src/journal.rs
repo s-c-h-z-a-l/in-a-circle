@@ -4023,6 +4023,39 @@ mod tests {
         });
     }
 
+    /// The group taken out of the Trash right after the move (another
+    /// program, or a file manager's Restore): the outcome is uncertain and
+    /// our info is closed, so data that later appears at `files/a` never
+    /// pairs with an authentic `a.trashinfo`.
+    #[test]
+    fn undo_closes_its_info_when_the_group_leaves_the_trash() {
+        let t = Tmp::new("t8-gone");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let (files, away) = (t.trash().join("files"), t.0.join("away"));
+            let a2 = away.clone();
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    fs::rename(files.join("a"), &a2).unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Uncertain { reason, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::AncestorChanged);
+            assert_eq!(
+                fs::read_to_string(away.join(f.file_name().unwrap())).unwrap(),
+                "data"
+            );
+            fs::create_dir(t.trash().join("files/a")).unwrap();
+            assert_eq!(pairs(&t), Vec::<(String, String)>::new());
+            assert_eq!(detached(&t).len(), 1);
+            assert!(detached(&t)[0].starts_with(b"inacircle-detached"));
+        });
+    }
+
     /// A real EACCES at the move (the parent made read-only): kept.
     #[test]
     fn undo_permission_denied_keeps_the_group() {

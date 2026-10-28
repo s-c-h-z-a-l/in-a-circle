@@ -1131,7 +1131,9 @@ fn after_move(mut m: Moved, log: &mut dyn Log, warn: &mut Vec<String>) -> GroupO
     let (g, op) = (m.g, m.op);
     let Ok(obj) = open_at(m.files, &m.base, libc::O_PATH, 0) else {
         // Gone from the Trash before we could look: nothing of ours to
-        // anchor, nothing deleted by us.
+        // anchor, nothing deleted by us. Our info no longer describes
+        // `files/<base>`, so it is closed: whatever appears there later
+        // never pairs with it.
         let o = GroupOutcome::Uncertain {
             group: g.group,
             op,
@@ -1141,6 +1143,10 @@ fn after_move(mut m: Moved, log: &mut dyn Log, warn: &mut Vec<String>) -> GroupO
                 CheckPoint::PostMove,
             )],
             reason: UndoReason::AncestorChanged,
+        };
+        let o = match m.info.take() {
+            Some(i) => closed(&m, &i, o, warn),
+            None => o,
         };
         return end(log, op, o, warn);
     };
