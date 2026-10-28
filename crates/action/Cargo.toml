@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 manifest = { path = "../manifest" }
+libc = "0.2"

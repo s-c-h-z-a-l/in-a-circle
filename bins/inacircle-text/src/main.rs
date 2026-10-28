@@ -10,6 +10,13 @@ use std::process::ExitCode;
 use action::{Command, Events, Invocation, parse_args};
 use doc::{Loss, ReadError};
 
+/// `document_input_bytes` (G0-P): one TXT/Markdown input is read at most
+/// this far. 8 MiB is 12.9x the largest real text measured (pcre2.txt,
+/// 652 KB) and fits a book-sized file; the conversion peaks near twice the
+/// input, and the sandbox's RLIMIT_DATA (>= 1 GiB) is the second net. Past
+/// it the input fails (`fail`, nothing staged) and the batch goes on.
+const DOCUMENT_INPUT_BYTES: usize = 8 * 1024 * 1024;
+
 fn manifest_text() -> String {
     let action = |id: &str, input: &str, out: &str, ext: &str, label: &str, lossy: &str| {
         manifest::write_line(
@@ -108,8 +115,12 @@ fn process(
         ev.skip(input, "non-UTF-8 path");
         return Outcome::Unsupported;
     }
-    let bytes = match fs::read(input) {
+    let bytes = match action::read_file_bounded(input, DOCUMENT_INPUT_BYTES) {
         Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            ev.fail(input, "This text file is larger than 8 MiB.");
+            return Outcome::Failed;
+        }
         Err(e) => {
             ev.fail(input, &e.to_string());
             return Outcome::Failed;

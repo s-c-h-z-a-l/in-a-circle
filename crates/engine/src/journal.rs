@@ -33,7 +33,7 @@ use crate::output::{
     AnchorHint, CheckPoint, ChildBaseline, DirectoryId, GroupId, LocationEvidence, NodeKind,
     OperationId, OutputGroup,
 };
-use crate::sys::{c_name, fstat, ident, last_err, open_at, read_dir, stat_at};
+use crate::sys::{c_name, fstat, ident, last_err, open_at, read_dir_upto, stat_at};
 use crate::trash::{self, RECOVERY_INTENT_MAX_BYTES};
 pub use crate::trash::{GroupOutcome, UndoReason, UndoResult};
 use crate::xdg;
@@ -66,13 +66,56 @@ const ARCHIVE_ATTEMPTS: u32 = 8;
 /// Fresh random temp names tried: a 64-bit random name only clashes with a
 /// planted or leftover file; past a few the folder is not ours to use.
 const TEMP_ATTEMPTS: u32 = 4;
-/// A registry entry is one `job` line of about 200 bytes; a bigger file is
-/// not ours and is skipped unread.
-const REGISTRY_ENTRY_MAX: u64 = 4096;
-/// Registry entries read at most: one per running supervisor, each a
-/// process the user started; 65536 is far past any desktop's concurrent
-/// runs. A folder with more is not ours to read (nothing is listed).
-const REGISTRY_ENTRIES_MAX: usize = 65536;
+/// `registry_jobfile_bytes` (G0-P): a registry entry is one `job` line of
+/// about 200 bytes; 4096 is 20x. A bigger file is not skipped: whether a
+/// job runs is then unknown, so the listing is an error (and the writer
+/// keeps its own line under this, see [`REGISTRY_ACTION_MAX`]).
+const REGISTRY_ENTRY_MAX: usize = 4096;
+/// `registry_listing_jobs` (G0-P): at most this many directory entries are
+/// examined per listing (hidden temp names and bad ones count). Real use
+/// is one to a few concurrent supervisors; 128 is far past that. More is
+/// an error, never a shorter list; the dead entries among the first 128
+/// are removed before the error, so a pile left by crashes heals itself.
+const REGISTRY_ENTRIES_MAX: usize = 128;
+/// `registry_fields` (G0-P): a `job` line has 7 pairs; 16 is 2x.
+const REGISTRY_FIELDS_MAX: usize = 16;
+/// The action name in a registry line is cut to this many bytes: the line
+/// has to stay under [`REGISTRY_ENTRY_MAX`] or the job would be unlistable.
+/// The fixed fields take about 200 B and the escape at most doubles a
+/// name, so 512 B gives under 1.3 KB; it is a display name only.
+const REGISTRY_ACTION_MAX: usize = 512;
+/// `history_line_bytes` (G0-P): the longest record is the recovery intent
+/// ([`RECOVERY_INTENT_MAX_BYTES`], 32 KiB); the real longest line is 219 B.
+/// A longer line is never ours; one that names the job refuses its undo.
+const HISTORY_LINE_BYTES: usize = 32_768;
+/// `history_fields_per_record` (G0-P): the widest real record has about 20
+/// fields (columns after the kind); counted on the bytes before parsing.
+const HISTORY_FIELDS: usize = 32;
+/// `history_outputs_per_job` (G0-P): the engine accepts at most 1024
+/// outputs from one action run (`exec::MAX_OUTPUTS`).
+const HISTORY_OUTPUTS: usize = 1024;
+/// `history_dirs_per_job` (G0-P): at most one wrapper directory per output.
+const HISTORY_DIRS: usize = 1024;
+/// `history_path_bytes` (G0-P): Linux `PATH_MAX`, the bound the Trash code
+/// already works with. Decoded bytes of one path.
+const HISTORY_PATH_BYTES: usize = 4096;
+/// `history_path_bytes_per_job` (G0-P): the decoded path bytes one job's
+/// records keep. 1 MiB measured (T9 preflight) at 4.56 MB PSS for `undo`
+/// of a job at the limit; twice that is 6.4 MB, over the 5,000,000 B
+/// budget, so the limit is load-bearing.
+const HISTORY_PATH_BYTES_PER_JOB: usize = 1_048_576;
+/// `history_tail_window_bytes` (G0-P): `undo` looks at the last 8 MiB of
+/// the history only (an I/O window, read in [`HISTORY_READ_CHUNK`] pieces,
+/// never held). A job not provably inside it is refused before a move.
+const HISTORY_TAIL_WINDOW: u64 = 8 * 1024 * 1024;
+/// `history_read_chunk_bytes` (G0-P): the history reader's buffer.
+const HISTORY_READ_CHUNK: usize = 1024;
+/// How much older than a job's start a line must have been written to
+/// prove, from the `time` of a finished job's line, that none of the job's
+/// own records can precede it in the file: the job id's clock second is
+/// whole seconds (1 s), a line can wait for the append lock ([`LOCK_WAIT`],
+/// 2 s) after its `time` was taken, and 2 s of slack.
+const ANCHOR_MARGIN_SECS: u64 = 5;
 /// Running-job files are rewritten at most this often.
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
 
@@ -304,6 +347,12 @@ impl StateDir {
 /// The header's version; `None` for an empty file (one being created).
 /// Anything that is not a header is `InvalidData`.
 fn read_header(f: &File) -> io::Result<Option<u32>> {
+    Ok(read_header_len(f)?.map(|(v, _)| v))
+}
+
+/// The header's version and its length (newline included): at most
+/// [`HEADER_MAX`] bytes are read, whatever the file holds.
+fn read_header_len(f: &File) -> io::Result<Option<(u32, usize)>> {
     let mut buf = [0u8; HEADER_MAX];
     let mut n = 0;
     while n < buf.len() {
@@ -317,7 +366,12 @@ fn read_header(f: &File) -> io::Result<Option<u32>> {
     if n == 0 {
         return Ok(None);
     }
-    parse_header(&buf[..n]).map(Some)
+    let v = parse_header(&buf[..n])?;
+    let len = buf[..n]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(n, |i| i + 1);
+    Ok(Some((v, len)))
 }
 
 /// The version of a header line at the start of `bytes` (its newline
@@ -1059,7 +1113,7 @@ impl Running {
         let line = Line::new("job")
             .pair("id", &self.job)
             .pair("pid", &std::process::id().to_string())
-            .pair("action", &self.action)
+            .pair("action", cut_at_boundary(&self.action, REGISTRY_ACTION_MAX))
             .pair("inputs", &self.inputs.to_string())
             .pair("done", &done.to_string())
             .pair("progress", &format!("{progress:.3}"))
@@ -1076,6 +1130,15 @@ impl Drop for Running {
             let _ = dir.unlink_if(&self.job, *id);
         }
     }
+}
+
+/// `s` cut to at most `max` bytes at a character boundary.
+fn cut_at_boundary(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Start time of `pid` in unix seconds, from `/proc/<pid>/stat` (field 22,
@@ -1117,20 +1180,36 @@ fn job_alive(pid: u32, started: Option<u64>) -> bool {
     }
 }
 
+/// Why a registry listing is refused (rejection copy of the registry rows).
+const REGISTRY_REFUSAL: &str = "The running-jobs registry exceeds its safety limits.";
+
+fn registry_refusal(what: String) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{REGISTRY_REFUSAL} ({what})"),
+    )
+}
+
 /// Running jobs: `(id, action, pid, progress)`. An entry whose process is
 /// gone is deleted and left out. Entries are read through the folder's
-/// descriptor, never through a symlink.
-pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
+/// descriptor, never through a symlink. Not knowing is an error, never an
+/// empty list: a folder that cannot be opened (other than missing: then no
+/// job was ever registered), more than [`REGISTRY_ENTRIES_MAX`] entries, an
+/// entry over [`REGISTRY_ENTRY_MAX`] bytes or [`REGISTRY_FIELDS_MAX`]
+/// fields, or a read that fails. An entry that is not a regular file of
+/// ours, or does not parse as a `job` line, cannot be a job of ours and is
+/// skipped.
+pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
     let Some(path) = jobs_dir() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     // Listed through the folder's own descriptor (D-28), never by path.
-    let Ok(dir) = StateDir::open(&path) else {
-        return Vec::new();
+    let dir = match StateDir::open(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let Ok(names) = read_dir(dir.raw(), REGISTRY_ENTRIES_MAX) else {
-        return Vec::new();
-    };
+    let (names, more) = read_dir_upto(dir.raw(), REGISTRY_ENTRIES_MAX)?;
     let mut out = Vec::new();
     for name in &names {
         let Some(name) = name.to_str().ok().filter(|n| !n.starts_with('.')) else {
@@ -1139,19 +1218,28 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
         let Ok(f) = dir.open_file(name, libc::O_RDONLY, 0) else {
             continue;
         };
-        let mut text = String::new();
-        if f.take(REGISTRY_ENTRY_MAX + 1)
-            .read_to_string(&mut text)
-            .is_err()
-            || text.len() as u64 > REGISTRY_ENTRY_MAX
-        {
+        let bytes = match action::read_bounded(f, REGISTRY_ENTRY_MAX) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                return Err(registry_refusal(format!(
+                    "entry {name} is over {REGISTRY_ENTRY_MAX} bytes"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
             continue;
-        }
+        };
         let Ok(line) = parse_line(&text) else {
             continue;
         };
         if line.kind != "job" {
             continue;
+        }
+        if line.items.len() > REGISTRY_FIELDS_MAX {
+            return Err(registry_refusal(format!(
+                "entry {name} has more than {REGISTRY_FIELDS_MAX} fields"
+            )));
         }
         let (Some(id), Some(Ok(pid))) = (line.get("id"), line.get("pid").map(str::parse::<u32>))
         else {
@@ -1175,7 +1263,12 @@ pub fn list_running() -> Vec<(JobId, String, u32, f32)> {
             progress,
         ));
     }
-    out
+    if more {
+        return Err(registry_refusal(format!(
+            "more than {REGISTRY_ENTRIES_MAX} entries"
+        )));
+    }
+    Ok(out)
 }
 
 // ---- reading a job back ----
@@ -1244,6 +1337,13 @@ struct JobRecords {
     groups: Vec<GroupRec>,
     /// The first framing fault: undo refuses the whole job.
     broken: Option<&'static str>,
+    /// Outputs (children) of all groups so far.
+    outputs: usize,
+    /// Decoded path bytes kept so far.
+    path_bytes: usize,
+    /// In a window that does not start at the history's start, a record of
+    /// the job was seen before any line that proves it started later.
+    incomplete: bool,
 }
 
 type Fault = &'static str;
@@ -1308,8 +1408,13 @@ fn hex_id(s: &str) -> Result<u64, Fault> {
         .ok_or("a bad id")
 }
 
+/// A path's bytes; one over [`HISTORY_PATH_BYTES`] decoded is a limit fault.
 fn path_dec(s: &str) -> Result<Vec<u8>, Fault> {
-    dec(s).ok_or("a bad path encoding")
+    let d = dec(s).ok_or("a bad path encoding")?;
+    if d.len() > HISTORY_PATH_BYTES {
+        return Err("over the limit: a path longer than the history's path limit");
+    }
+    Ok(d)
 }
 
 fn node_kind(s: &str) -> Result<NodeKind, Fault> {
@@ -1572,6 +1677,16 @@ fn close_line(job: &str, op: OperationId, o: &GroupOutcome) -> String {
 }
 
 impl JobRecords {
+    /// Counts `n` decoded path bytes kept for the job (checked).
+    fn keep(&mut self, n: usize) -> Result<(), Fault> {
+        self.path_bytes = self
+            .path_bytes
+            .checked_add(n)
+            .filter(|&t| t <= HISTORY_PATH_BYTES_PER_JOB)
+            .ok_or("over the limit: more path bytes in the job than the history allows")?;
+        Ok(())
+    }
+
     /// The begun group `id` (with operation `op`, when given).
     fn group(&mut self, id: &str, op: Option<&str>) -> Result<&mut GroupRec, Fault> {
         let id = hex_id(id)?;
@@ -1633,6 +1748,7 @@ impl JobRecords {
                 let v = fields(l, INTENT)?;
                 path_dec(v[3])?;
                 let target = path_dec(v[4])?;
+                self.keep(target.len())?;
                 let g = self.group(v[2], Some(v[0]))?;
                 if !g.ended || g.closed() {
                     return Err("an intent out of order");
@@ -1642,6 +1758,7 @@ impl JobRecords {
             "publish-commit" => {
                 let v = fields(l, COMMIT)?;
                 let actual = path_dec(v[3])?;
+                self.keep(actual.len())?;
                 let synced = match v[4] {
                     "synced" => true,
                     "unconfirmed" => false,
@@ -1685,6 +1802,8 @@ impl JobRecords {
             "recovery-intent" => {
                 let v = fields(l, RINTENT)?;
                 let (source, target) = (path_dec(v[3])?, path_dec(v[4])?);
+                self.keep(source.len())?;
+                self.keep(target.len())?;
                 let info_rel = count(v[5])?;
                 if info_rel > source.len() {
                     return Err("a Trash path outside its source");
@@ -1723,6 +1842,10 @@ impl JobRecords {
             }
             kind @ (R_KEPT | R_MOVED | R_RESTORED | R_RECOVERY_KEPT | R_UNCERTAIN) => {
                 let v = fields(l, RCLOSE)?;
+                if let Some(p) = opt(v[3]) {
+                    self.keep(path_dec(p)?.len())?;
+                }
+                self.keep(path_dec(v[6])?.len())?;
                 let op = hex_id(v[0])?;
                 let g = self.group(v[2], None)?;
                 let Recovery::Open(o) = &g.recovery else {
@@ -1741,6 +1864,9 @@ impl JobRecords {
     fn begin(&mut self, v: &[&str]) -> Result<(), Fault> {
         self.known = true;
         let (group, op) = (hex_id(v[1])?, hex_id(v[2])?);
+        if self.groups.len() >= HISTORY_DIRS {
+            return Err("over the limit: more groups in the job than the history allows");
+        }
         if self.groups.iter().any(|g| g.group == group) {
             return Err("a duplicate group");
         }
@@ -1776,6 +1902,11 @@ impl JobRecords {
 
     fn child(&mut self, v: &[&str]) -> Result<(), Fault> {
         let rel = path_dec(v[2])?;
+        self.keep(rel.len())?;
+        if self.outputs >= HISTORY_OUTPUTS {
+            return Err("over the limit: more outputs in the job than the history allows");
+        }
+        self.outputs += 1;
         if rel.is_empty() || rel == b"." || rel == b".." || rel.contains(&b'/') {
             return Err("a child name that is not one plain component");
         }
@@ -1821,19 +1952,96 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Reads a history stream (header, then lines) and collects the records of
-/// one job. Pure: no file, no lock. It streams (only lines that mention the
-/// job are parsed), so `undo` hands it the locked file and the fuzz target
-/// a byte slice. A bad or unsupported header is `InvalidData`; a version 0
-/// history only says whether it names the job (`old`). In version 1 a line
-/// that may be the job's (it holds `job=<id>` or `id=<id>`) but is cut off,
-/// not UTF-8 or does not parse, and any framing fault of the job's records,
-/// is `broken`: undo then refuses. Other jobs' lines are skipped.
+/// One line as [`read_line_bounded`] found it.
+enum Got {
+    Eof,
+    /// `content` bytes before the newline (all of them, kept or not);
+    /// `ended`: the line had its newline (false: cut off by the end).
+    Line {
+        content: usize,
+        ended: bool,
+    },
+}
+
+/// The next line into `buf`, never more than [`HISTORY_LINE_BYTES`] + 1
+/// bytes of it kept (a line over the limit keeps its first bytes, so a
+/// mention of a job in it can still be seen, and the rest is dropped
+/// without being stored). `buf` ends with the newline exactly when the
+/// line has one and is within the limit. Interrupted reads are retried;
+/// a failed reservation is `OutOfMemory`.
+fn read_line_bounded(rd: &mut dyn BufRead, buf: &mut Vec<u8>) -> io::Result<Got> {
+    buf.clear();
+    let (mut content, mut any, mut ended) = (0usize, false, false);
+    loop {
+        let chunk = match rd.fill_buf() {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if chunk.is_empty() {
+            break;
+        }
+        any = true;
+        let (used, nl) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        content = content.saturating_add(if nl { used - 1 } else { used });
+        let keep = (HISTORY_LINE_BYTES + 1).saturating_sub(buf.len()).min(used);
+        buf.try_reserve(keep)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        buf.extend_from_slice(&chunk[..keep]);
+        rd.consume(used);
+        if nl {
+            ended = true;
+            break;
+        }
+    }
+    Ok(if any {
+        Got::Line { content, ended }
+    } else {
+        Got::Eof
+    })
+}
+
+/// What a window that starts inside the history needs to prove the job's
+/// records are all in it (see [`scan_file`]).
+struct Tail {
+    /// The job's start (unix seconds, from its id); `None`: not provable.
+    started: Option<u64>,
+    /// A finished job's line written long enough before the job started
+    /// was seen: everything of the job is after it.
+    anchored: bool,
+}
+
+/// Reads a whole history stream (header, then lines) and collects the
+/// records of one job. Pure: no file, no lock. See [`scan_records`].
+#[cfg(any(test, fuzzing))]
 fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
-    let mut r = JobRecords::default();
     let mut buf = Vec::new();
     rd.take(HEADER_MAX as u64).read_until(b'\n', &mut buf)?;
     let version = parse_header(&buf)?;
+    scan_records(rd, version, job, None)
+}
+
+/// The lines after the header, for one job. It streams (only lines that
+/// mention the job are parsed), so `undo` hands it the locked file and the
+/// fuzz target a byte slice. A version 0 history only says whether it names
+/// the job (`old`). In version 1 a line that may be the job's (it holds
+/// `job=<id>` or `id=<id>`) but is cut off, longer than
+/// [`HISTORY_LINE_BYTES`], has more than [`HISTORY_FIELDS`] fields, is not
+/// UTF-8 or does not parse, and any framing fault or limit of the job's
+/// records, is `broken`: undo then refuses. Other jobs' lines are skipped,
+/// however damaged. With a `tail` (a window not from the start) a record of
+/// the job before the proof that it all follows is `incomplete`.
+fn scan_records(
+    rd: &mut dyn BufRead,
+    version: u32,
+    job: &JobId,
+    mut tail: Option<Tail>,
+) -> io::Result<JobRecords> {
+    let mut r = JobRecords::default();
+    let mut buf = Vec::new();
     let needle = format!("job={}", job.0);
     let id_needle = format!("id={}", job.0);
     let mentions = |b: &[u8]| contains(b, needle.as_bytes()) || contains(b, id_needle.as_bytes());
@@ -1845,10 +2053,11 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
     }
     let mut seen_ours = false;
     loop {
-        buf.clear();
-        if rd.read_until(b'\n', &mut buf)? == 0 {
-            break;
-        }
+        let (content, ended) = match read_line_bounded(rd, &mut buf)? {
+            Got::Eof => break,
+            Got::Line { content, ended } => (content, ended),
+        };
+        let over = content > HISTORY_LINE_BYTES;
         if !mentions(&buf) {
             // A `job` line cut inside its id names no job in full, but if
             // what is there could be the start of ours, it may be our
@@ -1858,8 +2067,16 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
             // clock, so it is a prefix of nearly every id) must not
             // refuse other, intact jobs. (A cut before the id's first
             // byte stays invisible.)
-            if version == VERSION && seen_ours && is_job_id_prefix(&buf, &job.0) {
+            if version == VERSION && seen_ours && !over && is_job_id_prefix(&buf, &job.0) {
                 r.broken.get_or_insert("a record cut off");
+            }
+            if let Some(t) = tail.as_mut()
+                && !t.anchored
+                && ended
+                && !over
+                && buf.starts_with(b"job\tid=")
+            {
+                t.anchored = finished_before(&buf, t.started);
             }
             continue;
         }
@@ -1868,9 +2085,17 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
             return Ok(r);
         }
         seen_ours = true;
-        let fault = if buf.pop() != Some(b'\n') {
+        if tail.as_ref().is_some_and(|t| !t.anchored) {
+            r.incomplete = true;
+        }
+        let fault = if over {
+            Err("over the limit: a record longer than the history's line limit")
+        } else if !ended {
             Err("a record cut off")
+        } else if buf.iter().filter(|&&b| b == b'\t').count() > HISTORY_FIELDS {
+            Err("over the limit: a record with more fields than the history allows")
         } else {
+            buf.pop();
             std::str::from_utf8(&buf)
                 .map_err(|_| "a record that is not UTF-8")
                 .and_then(|t| parse_line(t).map_err(|_| "a garbled record"))
@@ -1882,6 +2107,107 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
     }
     if r.groups.iter().any(|g| !g.ended) {
         r.broken.get_or_insert("a group without its end");
+    }
+    Ok(r)
+}
+
+/// Whether `line` is a finished job's `job` line written at least
+/// [`ANCHOR_MARGIN_SECS`] before `started`.
+fn finished_before(line: &[u8], started: Option<u64>) -> bool {
+    let Some(started) = started else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let Ok(l) = parse_line(text) else {
+        return false;
+    };
+    l.kind == "job"
+        && l.get("time")
+            .and_then(|t| t.parse::<u64>().ok())
+            .and_then(|t| t.checked_add(ANCHOR_MARGIN_SECS))
+            .is_some_and(|t| t <= started)
+}
+
+/// A read of `f` at its own offsets, up to `end`: no shared file offset,
+/// nothing past the size the scan began with.
+struct At<'a> {
+    f: &'a File,
+    pos: u64,
+    end: u64,
+}
+
+impl Read for At<'_> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let left = self.end.saturating_sub(self.pos);
+        let want = usize::try_from(left).unwrap_or(usize::MAX).min(b.len());
+        if want == 0 {
+            return Ok(0);
+        }
+        let n = self.f.read_at(&mut b[..want], self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+/// Why a job that is not provably in the window is refused (rejection copy
+/// of `history_tail_window_bytes`).
+pub const WINDOW_REFUSAL: &str = "This action's record is older than the history window. Its outputs were kept; nothing was moved.";
+
+/// The records of `job` in the history file `f` (the caller holds the
+/// history lock). The header is read by itself, bounded ([`HEADER_MAX`]);
+/// then at most [`HISTORY_TAIL_WINDOW`] bytes before the size the file has
+/// now, from the first whole line, through a [`HISTORY_READ_CHUNK`] buffer
+/// (nothing of the window is held). Lines appended meanwhile are not read.
+/// If the window does not start at the history's start, the job must be
+/// provably all inside it: a line of a job that finished at least
+/// [`ANCHOR_MARGIN_SECS`] before this one started has to come before the
+/// job's first record there. Otherwise (or if the window holds no record of
+/// it) the job is refused as older than the window: a job with records
+/// before the window must not be undone as if it were whole.
+fn scan_file(f: &File, job: &JobId) -> io::Result<JobRecords> {
+    let size = f.metadata()?.len();
+    let Some((version, header_len)) = read_header_len(f)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad or unsupported history header",
+        ));
+    };
+    let header_len = header_len as u64;
+    let truncated = size.saturating_sub(header_len) > HISTORY_TAIL_WINDOW;
+    let start = if truncated {
+        size - HISTORY_TAIL_WINDOW
+    } else {
+        header_len
+    };
+    let mut rd = BufReader::with_capacity(
+        HISTORY_READ_CHUNK,
+        At {
+            f,
+            pos: start,
+            end: size,
+        },
+    );
+    if truncated {
+        // Start at a line: when the byte before is not a newline, the
+        // first line is partly outside the window and is dropped.
+        let mut before = [0u8; 1];
+        let n = f.read_at(&mut before, start - 1)?;
+        if n == 1 && before[0] != b'\n' {
+            read_line_bounded(&mut rd, &mut Vec::new())?;
+        }
+    }
+    let tail = (truncated && version == VERSION).then(|| Tail {
+        started: job.0.split('-').next().and_then(|s| s.parse().ok()),
+        anchored: false,
+    });
+    let r = scan_records(&mut rd, version, job, tail)?;
+    if truncated
+        && version == VERSION
+        && (r.incomplete || !(r.known || r.undone || r.old || r.broken.is_some()))
+    {
+        return Err(io::Error::other(WINDOW_REFUSAL));
     }
     Ok(r)
 }
@@ -1945,7 +2271,7 @@ fn old_or_unknown(dir: &StateDir, job: &JobId) -> io::Error {
         let Ok(f) = dir.open_file(&archive_name(n), libc::O_RDONLY, 0) else {
             continue;
         };
-        if job_records(&mut BufReader::new(f), job).is_ok_and(|r| r.old) {
+        if scan_file(&f, job).is_ok_and(|r| r.old) {
             return io::Error::other(OLD_REFUSAL);
         }
     }
@@ -1980,6 +2306,12 @@ fn refusal(r: &JobRecords) -> Option<io::Error> {
         return Some(io::Error::other(UNKNOWN_REFUSAL));
     }
     if let Some(why) = &r.broken {
+        if why.starts_with("over the limit") {
+            return Some(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("History exceeds the safety limit ({why}). No recovery changes were made."),
+            ));
+        }
         return Some(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("this job's history record is damaged ({why}); nothing undone"),
@@ -2062,7 +2394,8 @@ impl trash::Log for HistLog<'_> {
 ///
 /// The history is streamed: only lines that mention the job are parsed.
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
-    if list_running().iter().any(|(id, ..)| id == job) {
+    // Not knowing which jobs run is an error: nothing is moved on a guess.
+    if list_running()?.iter().any(|(id, ..)| id == job) {
         return Err(io::Error::new(
             io::ErrorKind::ResourceBusy,
             "job is running; cancel it first",
@@ -2081,7 +2414,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         Err(e) => return Err(e),
     };
     lock_with_deadline(&file, LOCK_WAIT)?;
-    let r = job_records(&mut BufReader::new(&file), job)?;
+    let r = scan_file(&file, job)?;
     // Taken before anything moves: the records need it.
     let lock = dir.open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)?;
     if !r.known && !r.old && !r.undone {
@@ -2803,7 +3136,7 @@ mod tests {
             let job = JobId("10-3".into());
             let running = Running::start(&job, "convert", 1);
             mkfifo(&jobs_dir().unwrap().join("planted"));
-            let jobs = within(5, list_running);
+            let jobs = within(5, || list_running().unwrap());
             assert_eq!(jobs.len(), 1, "{jobs:?}");
             drop(running);
 
@@ -2839,7 +3172,7 @@ mod tests {
             let rec = Recorder::open(&job, "convert");
             assert!(rec.finish(true).undoable);
             assert!(history().starts_with("inacircle-history 1\n"));
-            assert_eq!(list_running().len(), 1);
+            assert_eq!(list_running().unwrap().len(), 1);
             drop(running);
             assert_eq!(fs::read_to_string(&sentinel).unwrap(), "SENTINEL");
         });
@@ -4995,19 +5328,19 @@ mod tests {
                 let mut r = Running::start(&job, "convert", 3);
                 assert!(path.exists());
                 assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-                let l = list_running();
+                let l = list_running().unwrap();
                 assert_eq!(l.len(), 1);
                 assert_eq!(l[0].0, job);
                 assert_eq!(l[0].1, "convert");
                 assert_eq!(l[0].2, std::process::id());
                 r.update(1, 0.5); // throttled: too soon after start
-                assert_eq!(list_running()[0].3, 0.0);
+                assert_eq!(list_running().unwrap()[0].3, 0.0);
                 std::thread::sleep(UPDATE_EVERY + Duration::from_millis(20));
                 r.update(1, 0.5);
-                assert_eq!(list_running()[0].3, 0.5);
+                assert_eq!(list_running().unwrap()[0].3, 0.5);
             }
             assert!(!path.exists());
-            assert!(list_running().is_empty());
+            assert!(list_running().unwrap().is_empty());
             let names: Vec<_> = fs::read_dir(jobs_dir().unwrap()).unwrap().collect();
             assert!(names.is_empty(), "temp files left: {names:?}");
         });
@@ -5075,12 +5408,12 @@ mod tests {
             let mut r = Running::start(&job, "convert", 4);
             r.update(1, 0.25); // dropped: too soon after start
             r.update(2, 0.5); // dropped
-            assert_eq!(list_running()[0].3, 0.0);
+            assert_eq!(list_running().unwrap()[0].3, 0.0);
             std::thread::sleep(UPDATE_EVERY + Duration::from_millis(20));
             r.update(3, 0.75);
             let f = fs::read_to_string(jobs_dir().unwrap().join("10-2")).unwrap();
             assert!(f.contains("\tdone=3\t"), "{f}");
-            assert_eq!(list_running()[0].3, 0.75);
+            assert_eq!(list_running().unwrap()[0].3, 0.75);
         });
     }
 
@@ -5096,7 +5429,7 @@ mod tests {
             || {
                 let job = JobId("10-1".into());
                 drop(Running::start(&job, "a", 1));
-                assert!(list_running().is_empty());
+                assert!(list_running().unwrap().is_empty());
                 Recorder::open(&job, "a").finish(true);
                 assert!(history_path().exists());
             },
@@ -5119,7 +5452,7 @@ mod tests {
                 .pair("progress", "0.1");
             let p = dir.join("5-5");
             fs::write(&p, write_line(&line)).unwrap();
-            assert!(list_running().is_empty());
+            assert!(list_running().unwrap().is_empty());
             assert!(!p.exists());
         });
     }
@@ -5137,7 +5470,7 @@ mod tests {
                 .pair("action", "x")
                 .pair("started", &(unix_secs() - 100_000).to_string());
             fs::write(dir.join("5-5"), write_line(&old)).unwrap();
-            assert!(list_running().is_empty());
+            assert!(list_running().unwrap().is_empty());
             assert!(!dir.join("5-5").exists());
         });
     }
@@ -5297,8 +5630,11 @@ mod tests {
         ];
         with_env(&v, || {
             let job = JobId("10-1".into());
-            let f = job_of(&t, &job, &[("a", "d")]);
-            // ~50 MB of other jobs' lines in front of ours.
+            // The history exists (header) before the filler.
+            drop(Recorder::open(&JobId("9-9".into()), "a").finish(true));
+            // ~50 MB of other jobs' lines in front of ours, ending with a
+            // finished job's line written long before ours started (the
+            // proof that all of our records are inside the I/O window).
             let p = history_path();
             let mut w = io::BufWriter::new(OpenOptions::new().append(true).open(&p).unwrap());
             let filler = Line::new("child")
@@ -5310,8 +5646,11 @@ mod tests {
             for _ in 0..n {
                 w.write_all(text.as_bytes()).unwrap();
             }
+            w.write_all(b"job\tid=99-9\ttime=1\taction=a\tstatus=done\tsandbox=yes\n")
+                .unwrap();
             w.flush().unwrap();
             drop(w);
+            let f = job_of(&t, &job, &[("a", "d")]);
             assert!(fs::metadata(&p).unwrap().len() >= 50_000_000);
             let before = vm_hwm_kb();
             let r = undo(&job).unwrap();
@@ -5324,5 +5663,506 @@ mod tests {
             );
         });
         println!("ran helper");
+    }
+
+    // ---- bounded reads (T9) ----
+
+    const SJ: &str = "1790000000-1-deadbeef";
+
+    /// A hand-made version 1 history of job `SJ`: `groups` groups, each
+    /// with `children` children named by `rel(group, child)` and a committed
+    /// place of `place_len` decoded bytes (also its one intent).
+    fn synth(
+        groups: usize,
+        children: usize,
+        rel: impl Fn(usize, usize) -> String,
+        place_len: usize,
+    ) -> String {
+        let mut t = String::from("inacircle-history 1\n");
+        let uid = unsafe { libc::geteuid() };
+        for g in 0..groups {
+            let gid = format!("{:016x}", g + 1);
+            let op = format!("{:016x}", g + 0x1000);
+            let mut place = format!("/t/{g}/");
+            while place.len() < place_len {
+                place.push('a');
+            }
+            place.truncate(place_len);
+            t.push_str(&format!(
+                "group-begin\tjob={SJ}\tgroup={gid}\top={op}\twrapper_dev=1\twrapper_ino={}\twrapper_type=dir\twrapper_uid={uid}\twrapper_mode=700\tchildren={children}\n",
+                g + 10
+            ));
+            let mut bytes = 0;
+            for c in 0..children {
+                let r = rel(g, c);
+                bytes += r.len();
+                t.push_str(&format!(
+                    "child\tjob={SJ}\tgroup={gid}\trel={r}\ttype=file\tdev=1\tino={}\tuid={uid}\tmode=600\tnlink=1\tsize=1\tmtime=1\tctime=1\n",
+                    g * 100_000 + c + 5000
+                ));
+            }
+            t.push_str(&format!(
+                "group-end\tjob={SJ}\tgroup={gid}\tchildren={children}\tbytes={bytes}\n"
+            ));
+            t.push_str(&format!(
+                "publish-intent\top={op}\tjob={SJ}\tgroup={gid}\tprivate=/p\ttarget={place}\n"
+            ));
+            t.push_str(&format!(
+                "publish-commit\top={op}\tjob={SJ}\tgroup={gid}\tactual={place}\tdurability=synced\n"
+            ));
+        }
+        t.push_str(&format!(
+            "job\tid={SJ}\ttime=1790000001\taction=x\tstatus=done\tsandbox=yes\n"
+        ));
+        t
+    }
+
+    fn scan_text(t: &str) -> io::Result<JobRecords> {
+        job_records(&mut t.as_bytes(), &JobId(SJ.into()))
+    }
+
+    fn broken_of(t: &str) -> Option<&'static str> {
+        scan_text(t).unwrap().broken
+    }
+
+    fn is_limit(b: Option<&'static str>) -> bool {
+        b.is_some_and(|w| w.starts_with("over the limit"))
+    }
+
+    fn rel_n(_: usize, c: usize) -> String {
+        format!("c{c}")
+    }
+
+    #[test]
+    fn history_outputs_per_job_1024_and_1025() {
+        assert_eq!(broken_of(&synth(1, 1024, rel_n, 20)), None);
+        assert!(is_limit(broken_of(&synth(1, 1025, rel_n, 20))));
+        // Across groups the count is the job's.
+        assert_eq!(broken_of(&synth(2, 512, rel_n, 20)), None);
+        assert!(is_limit(broken_of(&synth(2, 513, rel_n, 20))));
+    }
+
+    #[test]
+    fn history_dirs_per_job_1024_and_1025() {
+        assert_eq!(broken_of(&synth(1024, 1, |_, _| "c".into(), 20)), None);
+        assert!(is_limit(broken_of(&synth(1025, 1, |_, _| "c".into(), 20))));
+    }
+
+    #[test]
+    fn history_path_4096_and_4097() {
+        assert_eq!(broken_of(&synth(1, 1, rel_n, 4096)), None);
+        assert!(is_limit(broken_of(&synth(1, 1, rel_n, 4097))));
+    }
+
+    /// 512 groups x (2 B name + 1023 B intent + 1023 B commit) is exactly
+    /// 1 MiB of kept path bytes; one more byte is over the job's limit
+    /// although no single limit is hit.
+    #[test]
+    fn history_path_bytes_per_job_max_and_max_plus_one() {
+        let at = synth(512, 1, |_, _| "cc".into(), 1023);
+        assert_eq!(broken_of(&at), None);
+        assert!(is_limit(broken_of(&synth(
+            512,
+            1,
+            |g, _| if g == 0 { "ccc".into() } else { "cc".into() },
+            1023
+        ))));
+    }
+
+    /// Fields per record: a `skip` of the job with 32 fields is read, 33
+    /// is a limit fault (counted before the line is parsed).
+    #[test]
+    fn history_fields_32_and_33() {
+        let mk = |n: usize| {
+            let mut t = synth(1, 1, rel_n, 20);
+            let mut l = format!("skip\tjob={SJ}");
+            for k in 1..n {
+                l.push_str(&format!("\tk{k}=v"));
+            }
+            t.push_str(&l);
+            t.push('\n');
+            t
+        };
+        assert_eq!(broken_of(&mk(32)), None);
+        assert!(is_limit(broken_of(&mk(33))));
+    }
+
+    /// Lines of exactly 32768 B are read, 32769 B are a limit fault when
+    /// they name the job; one that does not name it is skipped (a damaged
+    /// line invalidates only its own job).
+    #[test]
+    fn history_line_32768_and_32769() {
+        let line = |len: usize, job: &str| {
+            let mut l = format!("skip\tjob={job}\treason=");
+            while l.len() < len {
+                l.push('p');
+            }
+            l.push('\n');
+            l
+        };
+        let mut t = synth(1, 1, rel_n, 20);
+        t.push_str(&line(32768, SJ));
+        assert_eq!(broken_of(&t), None);
+        let mut t = synth(1, 1, rel_n, 20);
+        t.push_str(&line(32769, SJ));
+        assert!(is_limit(broken_of(&t)));
+        let mut t = synth(1, 1, rel_n, 20);
+        t.push_str(&line(5_000_000, "99-9"));
+        assert_eq!(broken_of(&t), None, "another job's long line");
+        // After the long line the reader is on the next line.
+        t.push_str(&format!("skip\tjob={SJ}\treason=after\n"));
+        assert_eq!(broken_of(&t), None);
+    }
+
+    /// The reader's lines across a small buffer's chunk edges.
+    #[test]
+    fn bounded_lines_across_chunk_edges() {
+        for cap in [1usize, 7, HISTORY_READ_CHUNK] {
+            for len in [
+                0,
+                1,
+                cap.saturating_sub(1),
+                cap,
+                cap + 1,
+                3 * cap,
+                32768,
+                32769,
+                70_000,
+            ] {
+                let text = format!("{}\nnext\n", "a".repeat(len));
+                let mut rd = BufReader::with_capacity(cap, text.as_bytes());
+                let mut buf = Vec::new();
+                let Got::Line { content, ended } = read_line_bounded(&mut rd, &mut buf).unwrap()
+                else {
+                    panic!("eof");
+                };
+                assert_eq!((content, ended), (len, true), "cap {cap} len {len}");
+                assert!(buf.len() <= HISTORY_LINE_BYTES + 1);
+                if len <= HISTORY_LINE_BYTES {
+                    assert_eq!(buf.len(), len + 1, "kept whole with its newline");
+                }
+                let Got::Line { content, .. } = read_line_bounded(&mut rd, &mut buf).unwrap()
+                else {
+                    panic!("eof");
+                };
+                assert_eq!((content, &buf[..]), (4, &b"next\n"[..]));
+            }
+        }
+        // A line cut by the end is not `ended`.
+        let mut rd = BufReader::with_capacity(4, &b"abc"[..]);
+        let mut buf = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut rd, &mut buf).unwrap(),
+            Got::Line {
+                content: 3,
+                ended: false
+            }
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut rd, &mut buf).unwrap(),
+            Got::Eof
+        ));
+    }
+
+    /// The header is read by itself with its own bound: a first line of
+    /// megabytes without a newline is a bad header after at most 256 B.
+    #[test]
+    fn history_header_is_read_bounded() {
+        struct Endless(usize);
+        impl Read for Endless {
+            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                assert!(self.0 < 1 << 20, "read far past the header bound");
+                b.fill(b'h');
+                self.0 += b.len();
+                Ok(b.len())
+            }
+        }
+        let mut e = Endless(0);
+        let err = job_records(
+            &mut BufReader::with_capacity(64, &mut e),
+            &JobId("1-1".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(e.0 <= HEADER_MAX + 64, "read {}", e.0);
+        // The file side: 256 B and 257 B first lines, and a huge one.
+        let t = Tmp::new("hdr");
+        for (len, nl) in [(255, true), (256, true), (257, true), (3_000_000, false)] {
+            let p = t.0.join("h");
+            let mut body = "x".repeat(len);
+            if nl {
+                body.push('\n');
+            }
+            fs::write(&p, &body).unwrap();
+            let f = File::open(&p).unwrap();
+            let e = read_header_len(&f).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "len {len}");
+        }
+        // Positive control: the real header.
+        let p = t.0.join("h");
+        fs::write(&p, "inacircle-history 1\nrest").unwrap();
+        assert_eq!(
+            read_header_len(&File::open(&p).unwrap()).unwrap(),
+            Some((1, 20))
+        );
+    }
+
+    /// The window's reader never goes past the size the scan began with,
+    /// whatever the file grows to meanwhile.
+    #[test]
+    fn the_scan_stops_at_the_size_it_began_with() {
+        let t = Tmp::new("grow");
+        let p = t.0.join("g");
+        fs::write(&p, "0123456789").unwrap();
+        let f = File::open(&p).unwrap();
+        let mut at = At {
+            f: &f,
+            pos: 2,
+            end: 10,
+        };
+        let mut w = OpenOptions::new().append(true).open(&p).unwrap();
+        w.write_all(&[b'z'; 100_000]).unwrap();
+        let mut out = Vec::new();
+        at.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"23456789");
+    }
+
+    /// A fresh job in the 8 MiB window behind a long old prefix is handled
+    /// (the prefix is never read); the same job with a prefix before it
+    /// that is not provably older, or fully outside, is refused before
+    /// anything moves.
+    #[test]
+    fn a_fresh_job_behind_a_big_prefix_is_handled_and_one_outside_is_not() {
+        let filler = |w: &mut dyn Write, bytes: usize, last_time: u64| {
+            let l = write_line(
+                &Line::new("child")
+                    .pair("job", "99-9")
+                    .pair("group", "00000000000000aa")
+                    .pair("rel", &"p".repeat(200)),
+            );
+            for _ in 0..bytes / l.len() + 1 {
+                w.write_all(l.as_bytes()).unwrap();
+            }
+            // An odd tail so the window start lands inside a line.
+            w.write_all(b"child\tjob=99-9\tpartial").unwrap();
+            writeln!(
+                w,
+                "\njob\tid=99-9\ttime={last_time}\taction=a\tstatus=done\tsandbox=yes"
+            )
+            .unwrap();
+        };
+        let append = |w: &mut dyn FnMut(&mut dyn Write)| {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(history_path())
+                .unwrap();
+            w(&mut f);
+        };
+        // (1) A big old prefix, then the whole fresh job: undone.
+        let t = Tmp::new("window-ok");
+        t.env(|| {
+            let job = JobId("1790000000-1-aaaaaaaa".into());
+            drop(Recorder::open(&JobId("9-9".into()), "a").finish(true));
+            append(&mut |w| filler(w, 9 << 20, 1));
+            let f = job_of(&t, &job, &[("a", "d"), ("b", "e")]);
+            assert!(fs::metadata(history_path()).unwrap().len() > 9 << 20);
+            assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+        // (2) The job entirely before a big suffix: outside the window.
+        let t = Tmp::new("window-out");
+        t.env(|| {
+            let job = JobId("10-1".into());
+            let f = job_of(&t, &job, &[("a", "d")]);
+            append(&mut |w| filler(w, 9 << 20, 1));
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.to_string(), WINDOW_REFUSAL);
+            assert!(f[0].exists(), "nothing moved");
+        });
+        // (3) A job whose first group lies before the window and the second
+        // inside: without the proof (the only finished-job line in the
+        // window is not older than the job) it is refused, nothing moved.
+        let t = Tmp::new("window-part");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let mut f = publish(&t, &mut rec, "a", &[("x.md", "1")]);
+            append(&mut |w| filler(w, 9 << 20, unix_secs()));
+            f.extend(publish(&t, &mut rec, "b", &[("x.md", "2")]));
+            assert!(rec.finish(true).undoable);
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.to_string(), WINDOW_REFUSAL);
+            assert!(f.iter().all(|p| p.exists()), "nothing moved");
+        });
+    }
+
+    /// A job file over the limit, or a listing past it, is an error: undo
+    /// then moves nothing (it cannot tell whether the job runs).
+    #[test]
+    fn undo_refuses_unknown_running_state() {
+        let t = Tmp::new("unkrun");
+        t.env(|| {
+            let job = JobId("10-1".into());
+            let f = job_of(&t, &job, &[("a", "d")]);
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            // The job's own file is the one that is too big.
+            let mut line = write_line(
+                &Line::new("job")
+                    .pair("id", "10-1")
+                    .pair("pid", &std::process::id().to_string())
+                    .pair("action", &"a".repeat(REGISTRY_ENTRY_MAX)),
+            );
+            line.truncate(REGISTRY_ENTRY_MAX + 1);
+            fs::write(dir.join("10-1"), &line).unwrap();
+            let e = undo(&job).unwrap_err();
+            assert!(e.to_string().contains("safety limits"), "{e}");
+            assert!(f[0].exists(), "nothing moved on a guess");
+            // Control: with the file gone the same undo works.
+            fs::remove_file(dir.join("10-1")).unwrap();
+            assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+        // More entries than the listing takes: also an error.
+        let t = Tmp::new("unkrun2");
+        t.env(|| {
+            let job = JobId("10-2".into());
+            let f = job_of(&t, &job, &[("a", "d")]);
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            for i in 0..=REGISTRY_ENTRIES_MAX {
+                fs::write(dir.join(format!("live{i}")), "junk").unwrap();
+            }
+            let e = undo(&job).unwrap_err();
+            assert!(e.to_string().contains("safety limits"), "{e}");
+            assert!(f[0].exists());
+        });
+    }
+
+    fn put_job(dir: &Path, id: &str, pid: u32, extra: &[(String, String)], action: &str) {
+        let mut l = Line::new("job")
+            .pair("id", id)
+            .pair("pid", &pid.to_string())
+            .pair("action", action);
+        for (k, v) in extra {
+            l = l.pair(k, v);
+        }
+        fs::write(dir.join(id), write_line(&l)).unwrap();
+    }
+
+    #[test]
+    fn registry_file_4096_and_4097() {
+        let t = Tmp::new("regbytes");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let mut l = write_line(
+                &Line::new("job")
+                    .pair("id", "5-1")
+                    .pair("pid", &std::process::id().to_string())
+                    .pair("action", ""),
+            );
+            let pad = REGISTRY_ENTRY_MAX - l.len() + 1; // newline replaced
+            l = write_line(
+                &Line::new("job")
+                    .pair("id", "5-1")
+                    .pair("pid", &std::process::id().to_string())
+                    .pair("action", &"a".repeat(pad - 1)),
+            );
+            assert_eq!(l.len(), REGISTRY_ENTRY_MAX);
+            fs::write(dir.join("5-1"), &l).unwrap();
+            assert_eq!(list_running().unwrap().len(), 1);
+            l.insert(l.len() - 1, 'a');
+            fs::write(dir.join("5-1"), &l).unwrap();
+            assert!(
+                list_running()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("safety limits")
+            );
+        });
+    }
+
+    #[test]
+    fn registry_fields_16_and_17() {
+        let t = Tmp::new("regfields");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let me = std::process::id();
+            let extra = |n: usize| -> Vec<(String, String)> {
+                (0..n).map(|i| (format!("k{i}"), "v".to_owned())).collect()
+            };
+            // id, pid, action are 3 fields.
+            put_job(&dir, "5-1", me, &extra(13), "x");
+            assert_eq!(list_running().unwrap().len(), 1);
+            put_job(&dir, "5-1", me, &extra(14), "x");
+            assert!(list_running().is_err());
+        });
+    }
+
+    #[test]
+    fn registry_entries_128_and_129_and_dead_ones_heal() {
+        let t = Tmp::new("regcount");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let dead = child.id();
+            child.wait().unwrap();
+            // 128 dead entries: listed (examined) and removed.
+            for i in 0..REGISTRY_ENTRIES_MAX {
+                put_job(&dir, &format!("5-{i}"), dead, &[], "x");
+            }
+            assert!(list_running().unwrap().is_empty());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+            // 129 live entries: an error (never a shorter list).
+            for i in 0..=REGISTRY_ENTRIES_MAX {
+                put_job(&dir, &format!("6-{i}"), std::process::id(), &[], "x");
+            }
+            assert!(
+                list_running()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("safety limits")
+            );
+            for i in 0..=REGISTRY_ENTRIES_MAX {
+                fs::remove_file(dir.join(format!("6-{i}"))).unwrap();
+            }
+            // 129 dead entries: the first call errs after removing the
+            // 128 it examined, the second works.
+            for i in 0..=REGISTRY_ENTRIES_MAX {
+                put_job(&dir, &format!("7-{i}"), dead, &[], "x");
+            }
+            assert!(list_running().is_err());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+            assert!(list_running().unwrap().is_empty());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        });
+    }
+
+    /// A registry folder that cannot be opened is an error, not "no job
+    /// runs"; a missing one is no job.
+    #[test]
+    fn registry_folder_unopenable_is_an_error_missing_is_empty() {
+        let t = Tmp::new("regdir");
+        t.env(|| {
+            assert!(list_running().unwrap().is_empty(), "missing: no job");
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            fs::write(&dir, "a file where the folder should be").unwrap();
+            assert!(list_running().is_err());
+        });
+    }
+
+    /// The writer keeps its line listable: a huge action name is cut.
+    #[test]
+    fn a_huge_action_name_keeps_the_registry_entry_listable() {
+        let t = Tmp::new("regaction");
+        t.env(|| {
+            let job = JobId("10-9".into());
+            let _r = Running::start(&job, &"é".repeat(100_000), 1);
+            let l = list_running().unwrap();
+            assert_eq!(l.len(), 1);
+            assert!(l[0].1.len() <= REGISTRY_ACTION_MAX && !l[0].1.is_empty());
+        });
     }
 }

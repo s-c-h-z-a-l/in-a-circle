@@ -114,6 +114,16 @@ pub(crate) fn fsync(fd: RawFd) -> io::Result<()> {
 /// names is an error (`max` is the caller's bound, so a planted folder of
 /// millions of entries costs at most `max + 1` reads).
 pub(crate) fn read_dir(dir: RawFd, max: usize) -> io::Result<Vec<CString>> {
+    match read_dir_upto(dir, max)? {
+        (names, false) => Ok(names),
+        (_, true) => Err(io::Error::other("more entries than expected")),
+    }
+}
+
+/// Like [`read_dir`], but keeps the first `max` names and says whether
+/// there were more (stopped at the `max + 1`-th), so a caller can act on
+/// what it did see before it refuses the rest.
+pub(crate) fn read_dir_upto(dir: RawFd, max: usize) -> io::Result<(Vec<CString>, bool)> {
     // SAFETY: dir is an open fd; the duplicate is fdopendir's to own.
     let dup = unsafe { libc::fcntl(dir, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
@@ -131,6 +141,7 @@ pub(crate) fn read_dir(dir: RawFd, max: usize) -> io::Result<Vec<CString>> {
     // SAFETY: d is a valid DIR.
     unsafe { libc::rewinddir(d) };
     let mut names = Vec::new();
+    let mut more = false;
     let r = loop {
         // SAFETY: errno is thread-local; cleared to tell the end from an
         // error after readdir.
@@ -152,13 +163,14 @@ pub(crate) fn read_dir(dir: RawFd, max: usize) -> io::Result<Vec<CString>> {
             continue;
         }
         if names.len() == max {
-            break Err(io::Error::other("more entries than expected"));
+            more = true;
+            break Ok(());
         }
         names.push(name.to_owned());
     };
     // SAFETY: d is a valid DIR, closed exactly once (this closes dup).
     unsafe { libc::closedir(d) };
-    r.map(|()| names)
+    r.map(|()| (names, more))
 }
 
 /// `(st_dev, st_ino)`; their widths differ between targets.

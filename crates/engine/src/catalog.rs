@@ -34,6 +34,162 @@ const DEADLINE: Duration = Duration::from_secs(2);
 const REFRESH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: usize = 64 * 1024;
 
+// Cache limits (G0-P rows `cache_*`). The cache is ours and rebuildable,
+// so a cache past any of them is no cache: it is rejected loudly and
+// rebuilt, never half-used. The real cache is about 0.4 KB for three
+// records; the limits leave 1.6x to 100x room over the largest shape the
+// other limits allow.
+/// `cache_bytes`: 1024 actions x ~133 B + 128 bins x ~200 B is ~160 KB;
+/// 256 KiB is 1.6x. Checked on the bytes actually read (max + 1).
+const CACHE_BYTES: usize = 262_144;
+/// `cache_bins`: ~100x the handful of shipped binaries; each bin is one
+/// spawn on a rebuild, so this bounds the rebuild cost too.
+const CACHE_BINS: usize = 128;
+/// `cache_actions`: ~100x the dozen families x presets planned.
+const CACHE_ACTIONS: usize = 1024;
+/// `cache_records`: `CACHE_BINS + CACHE_ACTIONS`, no own basis.
+const CACHE_RECORDS: usize = CACHE_BINS + CACHE_ACTIONS;
+/// `cache_fields_per_record`: the widest real record has 10 fields
+/// (columns after the kind); 32 is 3.2x. Counted before any allocation.
+const CACHE_FIELDS_PER_RECORD: usize = 32;
+/// `cache_total_fields`: 1024 x 10 + 128 x 4 = 10 752 real-shaped fields;
+/// 12 288 is 1.14x (the earlier 8192 refused a valid full cache).
+const CACHE_TOTAL_FIELDS: usize = 12_288;
+/// `cache_line_bytes`: a 4096 B path escaped twice is 8 KiB plus ~200 B
+/// of other fields; 32 KiB is 3.9x.
+const CACHE_LINE_BYTES: usize = 32_768;
+// Manifest limits (G0-P rows `manifest_*`), applied to the captured text
+// (already <= `MAX_OUTPUT`) before `manifest::parse` allocates per record.
+/// `manifest_records`: a real manifest has 8 action lines; 256 is 32x.
+const MANIFEST_RECORDS: usize = 256;
+/// `manifest_fields_per_record`: the widest real action has 10; 32 is 3.2x.
+const MANIFEST_FIELDS_PER_RECORD: usize = 32;
+/// `manifest_total_fields`: 256 x 10 = 2560 real-shaped; 4096 is 1.6x.
+const MANIFEST_TOTAL_FIELDS: usize = 4096;
+/// `manifest_line_bytes`: ~130 B real, 8 KiB with an escaped 4096 B path.
+const MANIFEST_LINE_BYTES: usize = 32_768;
+
+/// A text format's per-line, record and field limits.
+struct Shape {
+    line: usize,
+    records: usize,
+    fields_per_record: usize,
+    total_fields: usize,
+}
+
+const CACHE_SHAPE: Shape = Shape {
+    line: CACHE_LINE_BYTES,
+    records: CACHE_RECORDS,
+    fields_per_record: CACHE_FIELDS_PER_RECORD,
+    total_fields: CACHE_TOTAL_FIELDS,
+};
+const MANIFEST_SHAPE: Shape = Shape {
+    line: MANIFEST_LINE_BYTES,
+    records: MANIFEST_RECORDS,
+    fields_per_record: MANIFEST_FIELDS_PER_RECORD,
+    total_fields: MANIFEST_TOTAL_FIELDS,
+};
+
+/// Checks `text` against `shape` before `manifest::parse` allocates: the
+/// header and every line stay within `shape.line` bytes; every record
+/// (a line that is not blank or a `#` comment, after the header) has at
+/// most `fields_per_record` fields (tab-separated columns after the kind)
+/// and all together at most `total_fields`, in at most `records` records.
+/// Counts only; allocates nothing.
+fn preflight(text: &str, shape: &Shape) -> Result<(), &'static str> {
+    let (mut records, mut total) = (0usize, 0usize);
+    for (i, l) in text.lines().enumerate() {
+        if l.len() > shape.line {
+            return Err("a line is too long");
+        }
+        if i == 0 || l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        records += 1;
+        if records > shape.records {
+            return Err("too many records");
+        }
+        let fields = l.bytes().filter(|&b| b == b'\t').count();
+        if fields > shape.fields_per_record {
+            return Err("a record has too many fields");
+        }
+        total = total.saturating_add(fields);
+        if total > shape.total_fields {
+            return Err("too many fields in all");
+        }
+    }
+    Ok(())
+}
+
+/// What the cache would hold, counted as entries are accepted, so the
+/// state a rebuild collects obeys the same limits as the file the parser
+/// accepts (each manifest can be valid alone and the sum still too big).
+struct CacheBudget {
+    bins: usize,
+    actions: usize,
+    fields: usize,
+    bytes: usize,
+}
+
+impl CacheBudget {
+    fn new() -> CacheBudget {
+        CacheBudget {
+            bins: 0,
+            actions: 0,
+            fields: 0,
+            bytes: manifest::header(CACHE_MAGIC, 0).len(),
+        }
+    }
+
+    /// Takes `e` in, or says which limit it would cross (and takes nothing).
+    fn take(&mut self, e: &Entry) -> Result<(), &'static str> {
+        let bin = manifest::write_line(&bin_line(&e.bin));
+        let mut next = CacheBudget {
+            bins: self.bins + 1,
+            actions: self.actions,
+            fields: self.fields + 4,
+            bytes: self.bytes.saturating_add(bin.len()),
+        };
+        if bin.len() - 1 > CACHE_LINE_BYTES {
+            return Err("a binary's path is too long");
+        }
+        for l in &e.lines {
+            let w = manifest::write_line(l);
+            if w.len() - 1 > CACHE_LINE_BYTES || l.items.len() > CACHE_FIELDS_PER_RECORD {
+                return Err("an action line is too big");
+            }
+            next.actions += 1;
+            next.fields = next.fields.saturating_add(l.items.len());
+            next.bytes = next.bytes.saturating_add(w.len());
+        }
+        if next.bins > CACHE_BINS {
+            return Err("more binaries than the cache holds");
+        }
+        if next.actions > CACHE_ACTIONS {
+            return Err("more actions than the cache holds");
+        }
+        if next.bins + next.actions > CACHE_RECORDS {
+            return Err("more records than the cache holds");
+        }
+        if next.fields > CACHE_TOTAL_FIELDS {
+            return Err("more fields than the cache holds");
+        }
+        if next.bytes > CACHE_BYTES {
+            return Err("more bytes than the cache holds");
+        }
+        *self = next;
+        Ok(())
+    }
+}
+
+fn bin_line(b: &Bin) -> Line {
+    Line::new("bin")
+        .pair("path", &b.path.to_string_lossy())
+        .pair("mtime", &b.mtime.to_string())
+        .pair("size", &b.size.to_string())
+        .pair("builtin", if b.builtin { "yes" } else { "no" })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
     pub id: String,
@@ -105,7 +261,14 @@ impl Catalog {
 
     fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>) -> Catalog {
         let refresh_end = Instant::now() + REFRESH_BUDGET;
-        let bins = scan(dirs);
+        let mut bins = scan(dirs);
+        if bins.len() > CACHE_BINS {
+            eprintln!(
+                "inacircle: {} action binaries found; only the first {CACHE_BINS} are used (the action catalog's limit)",
+                bins.len()
+            );
+            bins.truncate(CACHE_BINS);
+        }
         let cached = cache.and_then(read_cache).unwrap_or_default();
         let hit = cached.iter().map(|e| &e.bin).eq(bins.iter());
         let entries: Vec<Entry> = if hit {
@@ -118,21 +281,46 @@ impl Catalog {
             // mtime/size differ from the file on disk, so the next start
             // reruns it. A binary with no old entry stays out.
             let mut cached = cached;
-            let entries: Vec<Entry> = bins
-                .into_iter()
-                .filter_map(|bin| {
-                    if let Some(i) = cached.iter().position(|e| e.bin == bin) {
-                        return Some(cached.swap_remove(i));
-                    }
+            let mut budget = CacheBudget::new();
+            let mut entries: Vec<Entry> = Vec::new();
+            for bin in bins {
+                let lines = if let Some(i) = cached.iter().position(|e| e.bin == bin) {
+                    cached.swap_remove(i).lines
+                } else {
                     match run_manifest(&bin.path, refresh_end) {
-                        Some(lines) => Some(Entry { bin, lines }),
-                        None => cached
-                            .iter()
-                            .position(|e| e.bin.path == bin.path)
-                            .map(|i| cached.swap_remove(i)),
+                        Some(lines) => lines,
+                        None => match cached.iter().position(|e| e.bin.path == bin.path) {
+                            Some(i) => {
+                                // The old entry stays as it was (old bin).
+                                let old = cached.swap_remove(i);
+                                if budget.take(&old).is_ok() {
+                                    entries.push(old);
+                                }
+                                continue;
+                            }
+                            None => continue,
+                        },
                     }
-                })
-                .collect();
+                };
+                let mut entry = Entry { bin, lines };
+                // Valid alone is not enough: the sum of all manifests must
+                // fit what the cache can hold. A binary that would cross a
+                // limit is refused whole and loudly (no action of it is
+                // dropped alone), and cached without actions so it is not
+                // rerun until it changes.
+                if let Err(why) = budget.take(&entry) {
+                    eprintln!(
+                        "inacircle: {}: {why}; its actions are refused (the action catalog's limits)",
+                        entry.bin.path.display()
+                    );
+                    entry.lines = Vec::new();
+                    // A bare bin line always fits when bins < CACHE_BINS.
+                    if budget.take(&entry).is_err() {
+                        continue;
+                    }
+                }
+                entries.push(entry);
+            }
             if let Some(cache) = cache {
                 write_cache(cache, &entries);
             }
@@ -341,6 +529,11 @@ fn manifest_lines(bin: &Path, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
     let out = capture(bin, deadline)?;
     let bad = |why: String| Fail::Deterministic(why);
     let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
+    preflight(&text, &MANIFEST_SHAPE).map_err(|why| {
+        bad(format!(
+            "The action manifest exceeds its safety limits ({why}). This action binary was refused."
+        ))
+    })?;
     match manifest::parse(&text, MANIFEST_MAGIC) {
         Ok((0, lines)) => Ok(lines
             .into_iter()
@@ -590,23 +783,73 @@ fn read_some(fd: RawFd, out: &mut Vec<u8>) -> Result<bool, Fail> {
 /// symlink, never blocking on a FIFO, only a regular file of this user.
 /// Anything else is no cache.
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
-    use std::io::Read;
     let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
-    let mut bytes = Vec::new();
-    crate::journal::StateDir::open(dir)
+    let file = crate::journal::StateDir::open(dir)
         .ok()?
         .open_file(name, libc::O_RDONLY, 0)
-        .ok()?
-        .read_to_end(&mut bytes)
         .ok()?;
-    parse_cache(&bytes)
+    // The size `fstat` shows is a pre-filter; the bytes read are the
+    // authority (a file may grow while it is read): at most max + 1.
+    let rejected = |why: &str| {
+        eprintln!(
+            "inacircle: The action catalog was rejected and will be rebuilt ({why}). Its actions were not silently discarded."
+        );
+    };
+    if file.metadata().ok()?.len() > CACHE_BYTES as u64 {
+        rejected("the cache file is too big");
+        return None;
+    }
+    let bytes = match action::read_bounded(file, CACHE_BYTES) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            rejected("the cache file is too big");
+            return None;
+        }
+        Err(_) => return None,
+    };
+    match check_cache(&bytes) {
+        Ok(()) => parse_cache(&bytes),
+        Err(why) => {
+            rejected(why);
+            None
+        }
+    }
+}
+
+/// The cache's limits on the whole file (bytes, lines, records, fields,
+/// bins, actions), counted without allocating. `Err` names the limit.
+/// Non-UTF-8 or a bad header is not a limit: [`parse_cache`] says `None`.
+fn check_cache(bytes: &[u8]) -> Result<(), &'static str> {
+    if bytes.len() > CACHE_BYTES {
+        return Err("the cache file is too big");
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(());
+    };
+    preflight(text, &CACHE_SHAPE)?;
+    let (mut bins, mut actions) = (0usize, 0usize);
+    for l in text.lines().skip(1) {
+        match l.split('\t').next() {
+            Some("bin") => bins += 1,
+            Some("action") => actions += 1,
+            _ => {}
+        }
+    }
+    if bins > CACHE_BINS {
+        return Err("too many binaries");
+    }
+    if actions > CACHE_ACTIONS {
+        return Err("too many actions");
+    }
+    Ok(())
 }
 
 /// The cache file's content as entries; `None` for anything that is not
-/// exactly what `write_cache` writes (not UTF-8, wrong header or version,
-/// a line of an unknown kind or with a field missing or malformed, an
-/// action before any bin). Pure: no file.
+/// exactly what `write_cache` writes (over a limit, not UTF-8, wrong
+/// header or version, a line of an unknown kind or with a field missing or
+/// malformed, an action before any bin). Pure: no file.
 fn parse_cache(bytes: &[u8]) -> Option<Vec<Entry>> {
+    check_cache(bytes).ok()?;
     let text = std::str::from_utf8(bytes).ok()?;
     let (0, lines) = manifest::parse(text, CACHE_MAGIC).ok()? else {
         return None;
@@ -644,13 +887,7 @@ pub fn fuzz_read_cache(bytes: &[u8]) {
 fn write_cache(path: &Path, entries: &[Entry]) {
     let mut s = manifest::header(CACHE_MAGIC, 0);
     for e in entries {
-        let b = &e.bin;
-        let line = Line::new("bin")
-            .pair("path", &b.path.to_string_lossy())
-            .pair("mtime", &b.mtime.to_string())
-            .pair("size", &b.size.to_string())
-            .pair("builtin", if b.builtin { "yes" } else { "no" });
-        s.push_str(&manifest::write_line(&line));
+        s.push_str(&manifest::write_line(&bin_line(&e.bin)));
         for l in &e.lines {
             s.push_str(&manifest::write_line(l));
         }
@@ -1609,5 +1846,317 @@ pub(crate) mod tests {
             builtin: true,
         };
         assert_eq!(missing_tools(&act), ["no-such-tool-inacircle"]);
+    }
+
+    // ---- bounded cache and manifest (T9) ----
+
+    const HDR: &str = "inacircle-catalog 0\n";
+
+    fn bin_rec(i: usize) -> String {
+        format!("bin\tpath=/b/{i}\tmtime=5\tsize=7\tbuiltin=yes\n")
+    }
+
+    /// An action line with exactly `fields` fields after the kind (an id
+    /// and `fields - 1` pairs).
+    fn wide(id: &str, fields: usize) -> String {
+        let mut l = format!("action\t{id}");
+        for k in 1..fields {
+            l.push_str(&format!("\tk{k}=v"));
+        }
+        l.push('\n');
+        l
+    }
+
+    fn cache_of(bins: usize, actions: usize) -> String {
+        let mut t = String::from(HDR);
+        for i in 0..bins.max(1) {
+            if i < bins {
+                t.push_str(&bin_rec(i));
+            }
+            if i == 0 {
+                for a in 0..actions {
+                    t.push_str(&wide(&format!("x.{a}"), 1));
+                }
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn cache_bins_128_and_129() {
+        assert_eq!(parse_cache(cache_of(128, 0).as_bytes()).unwrap().len(), 128);
+        assert!(parse_cache(cache_of(129, 0).as_bytes()).is_none());
+    }
+
+    #[test]
+    fn cache_actions_1024_and_1025() {
+        assert_eq!(
+            parse_cache(cache_of(1, 1024).as_bytes()).unwrap()[0]
+                .lines
+                .len(),
+            1024
+        );
+        assert!(parse_cache(cache_of(1, 1025).as_bytes()).is_none());
+    }
+
+    /// 128 bins + 1024 actions are the 1152 records the cache holds; one
+    /// more record is refused by the record count (not by a kind count:
+    /// the extra one is of an unknown kind, which `parse_cache` refuses
+    /// anyway, so this checks `check_cache` itself).
+    #[test]
+    fn cache_records_1152_and_1153() {
+        let mut t = String::from(HDR);
+        for i in 0..128 {
+            t.push_str(&bin_rec(i));
+        }
+        for a in 0..1024 {
+            t.push_str(&wide(&format!("x.{a}"), 1));
+        }
+        assert!(check_cache(t.as_bytes()).is_ok());
+        assert!(parse_cache(t.as_bytes()).is_some());
+        t.push_str("zzz\n");
+        assert_eq!(check_cache(t.as_bytes()), Err("too many records"));
+    }
+
+    #[test]
+    fn cache_fields_32_and_33() {
+        let mk = |n| format!("{HDR}{}{}", bin_rec(0), wide("x.a", n));
+        assert!(parse_cache(mk(32).as_bytes()).is_some());
+        assert!(parse_cache(mk(33).as_bytes()).is_none());
+    }
+
+    #[test]
+    fn cache_total_fields_12288_and_12289() {
+        // A bin has 4 fields; 383 actions of 32 and one of 28 make 12288.
+        let mk = |last| {
+            let mut t = format!("{HDR}{}", bin_rec(0));
+            for a in 0..383 {
+                t.push_str(&wide(&format!("x.{a}"), 32));
+            }
+            t.push_str(&wide("x.last", last));
+            t
+        };
+        assert!(parse_cache(mk(28).as_bytes()).is_some());
+        assert_eq!(
+            check_cache(mk(29).as_bytes()),
+            Err("too many fields in all")
+        );
+    }
+
+    #[test]
+    fn cache_line_32768_and_32769() {
+        let mk = |len: usize| {
+            let mut l = String::from("action\tx.a\tpad=");
+            while l.len() < len {
+                l.push('p');
+            }
+            format!("{HDR}{}{l}\n", bin_rec(0))
+        };
+        assert!(parse_cache(mk(32768).as_bytes()).is_some());
+        assert_eq!(check_cache(mk(32769).as_bytes()), Err("a line is too long"));
+    }
+
+    #[test]
+    fn cache_bytes_262144_and_262145() {
+        // Eight lines of 32768 B + header + one bin = just under; the
+        // final pad line brings the file to exactly the limit.
+        let mk = |total: usize| {
+            let mut t = format!("{HDR}{}", bin_rec(0));
+            let mut n = 0;
+            while t.len() + 32769 < total {
+                let mut l = format!("action\tx.{n}\tpad=");
+                while l.len() < 32768 {
+                    l.push('p');
+                }
+                t.push_str(&l);
+                t.push('\n');
+                n += 1;
+            }
+            let mut l = String::from("action\tx.last\tpad=");
+            while t.len() + l.len() + 1 < total {
+                l.push('p');
+            }
+            t.push_str(&l);
+            t.push('\n');
+            assert_eq!(t.len(), total);
+            t
+        };
+        assert!(parse_cache(mk(CACHE_BYTES).as_bytes()).is_some());
+        assert_eq!(
+            check_cache(mk(CACHE_BYTES + 1).as_bytes()),
+            Err("the cache file is too big")
+        );
+    }
+
+    /// The file is read through the bounded reader: a cache file past the
+    /// limit is no cache (rebuilt), one at the limit is read.
+    #[test]
+    fn read_cache_refuses_a_big_file_and_reads_one_at_the_limit() {
+        let f = Fix::new("bigcache");
+        let path = f.cache();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut t = format!("{HDR}{}", bin_rec(0));
+        while t.len() + 20_000 < CACHE_BYTES {
+            t.push_str(&format!(
+                "action\tx.{}\tpad={}\n",
+                t.len(),
+                "p".repeat(10_000)
+            ));
+        }
+        let mut l = String::from("action\tx.last\tpad=");
+        while t.len() + l.len() + 1 < CACHE_BYTES {
+            l.push('p');
+        }
+        t.push_str(&l);
+        t.push('\n');
+        assert_eq!(t.len(), CACHE_BYTES);
+        std::fs::write(&path, &t).unwrap();
+        assert!(read_cache(&path).is_some());
+        std::fs::write(&path, format!("{t}p")).unwrap();
+        assert!(read_cache(&path).is_none());
+        // Far past the limit: refused without reading it all.
+        std::fs::write(&path, vec![b'x'; 8 << 20]).unwrap();
+        assert!(read_cache(&path).is_none());
+    }
+
+    /// A cache that grows while it is read: the read stops at the limit
+    /// plus one byte (the reader is bounded by what it reads, not by what
+    /// the file showed at the start).
+    #[test]
+    fn a_cache_that_grows_while_read_is_cut_at_the_limit() {
+        struct Growing(usize);
+        impl std::io::Read for Growing {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                assert!(self.0 < 1 << 20, "read far past the bound");
+                b.fill(b'a');
+                self.0 += b.len();
+                Ok(b.len())
+            }
+        }
+        let mut g = Growing(0);
+        let e = action::read_bounded(&mut g, CACHE_BYTES).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(g.0, CACHE_BYTES + 1);
+    }
+
+    #[test]
+    fn manifest_shape_boundaries() {
+        let m = |recs: &[String]| format!("inacircle-manifest 0\n{}", recs.concat());
+        let one = |n: usize| wide("x.a", n);
+        // Records 256 / 257.
+        let r = |n: usize| {
+            (0..n)
+                .map(|i| wide(&format!("x.{i}"), 1))
+                .collect::<Vec<_>>()
+        };
+        assert!(preflight(&m(&r(256)), &MANIFEST_SHAPE).is_ok());
+        assert_eq!(
+            preflight(&m(&r(257)), &MANIFEST_SHAPE),
+            Err("too many records")
+        );
+        // Fields per record 32 / 33.
+        assert!(preflight(&m(&[one(32)]), &MANIFEST_SHAPE).is_ok());
+        assert_eq!(
+            preflight(&m(&[one(33)]), &MANIFEST_SHAPE),
+            Err("a record has too many fields")
+        );
+        // Total fields 4096 / 4097: 128 records of 32.
+        let t = |extra: usize| {
+            let mut v: Vec<String> = (0..128).map(|i| wide(&format!("x.{i}"), 32)).collect();
+            if extra > 0 {
+                v.push(wide("x.e", extra));
+            }
+            v
+        };
+        assert!(preflight(&m(&t(0)), &MANIFEST_SHAPE).is_ok());
+        assert_eq!(
+            preflight(&m(&t(1)), &MANIFEST_SHAPE),
+            Err("too many fields in all")
+        );
+        // Line 32768 / 32769.
+        let line = |len: usize| {
+            let mut l = String::from("action\tx.a\tpad=");
+            while l.len() < len {
+                l.push('p');
+            }
+            l.push('\n');
+            l
+        };
+        assert!(preflight(&m(&[line(32768)]), &MANIFEST_SHAPE).is_ok());
+        assert_eq!(
+            preflight(&m(&[line(32769)]), &MANIFEST_SHAPE),
+            Err("a line is too long")
+        );
+        // Unknown and escaped kinds still count and still pass.
+        assert!(
+            preflight(
+                "inacircle-manifest 0\nfuture\\tkind\tx=1\n",
+                &MANIFEST_SHAPE
+            )
+            .is_ok()
+        );
+    }
+
+    /// A manifest past its limits refuses the binary (deterministic,
+    /// cached: it is not rerun until it changes).
+    #[test]
+    fn a_manifest_over_its_limits_refuses_the_binary() {
+        let f = Fix::new("mf-limit");
+        let d = f.dir("a");
+        let acts = |n: usize| {
+            (0..n)
+                .map(|i| act(&format!("x.{i}"), "A"))
+                .collect::<Vec<_>>()
+        };
+        manifest_script(&d.join("ok"), &acts(256));
+        manifest_script(&d.join("over"), &acts(257));
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert_eq!(c.actions.len(), 256, "only the binary within the limits");
+        assert!(c.actions.iter().all(|a| a.bin.ends_with("ok")));
+    }
+
+    /// Each manifest is valid alone; together they cross the cache's
+    /// action limit. The binary that crosses it is refused whole (none of
+    /// its actions kept), the rest stay, and the cache written is one the
+    /// parser accepts.
+    #[test]
+    fn live_rebuild_obeys_the_aggregate_action_limit() {
+        let f = Fix::new("agg-actions");
+        let d = f.dir("a");
+        for (n, name) in ["a", "b", "c", "d"].iter().enumerate() {
+            let acts: Vec<String> = (0..256).map(|i| act(&format!("x{n}.{i}"), "A")).collect();
+            manifest_script(&d.join(name), &acts);
+        }
+        manifest_script(&d.join("e"), &[act("y.only", "A")]);
+        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+        assert_eq!(c.actions.len(), 1024, "1024 fit");
+        assert!(c.get("y.only").is_none(), "the 1025th is refused loudly");
+        let cached = read_cache(&f.cache()).expect("the written cache parses");
+        assert_eq!(cached.len(), 5);
+        assert!(cached[4].lines.is_empty());
+        // 1024 exactly, without the fifth binary: all loaded.
+        std::fs::remove_file(d.join("e")).unwrap();
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert_eq!(c.actions.len(), 1024);
+    }
+
+    /// 129 binaries: the first 128 are used, the extra is reported.
+    #[test]
+    fn live_rebuild_obeys_the_bin_limit() {
+        let f = Fix::new("agg-bins");
+        let d = f.dir("a");
+        for i in 0..129 {
+            manifest_script(
+                &d.join(format!("b{i:03}")),
+                &[act(&format!("x.{i:03}"), "A")],
+            );
+        }
+        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+        assert_eq!(c.actions.len(), 128);
+        assert!(c.get("x.128").is_none() && c.get("x.127").is_some());
+        assert_eq!(read_cache(&f.cache()).unwrap().len(), 128);
+        std::fs::remove_file(d.join("b128")).unwrap();
+        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        assert_eq!(c.actions.len(), 128);
     }
 }

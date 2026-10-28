@@ -744,7 +744,15 @@ fn cmd_jobs(args: &[OsString]) -> u8 {
     if !args.is_empty() {
         return usage("jobs takes no arguments");
     }
-    for (id, action, pid, progress) in journal::list_running() {
+    // Not knowing which jobs run is a failure, not an empty list.
+    let jobs = match journal::list_running() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("inacircle: jobs: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    for (id, action, pid, progress) in jobs {
         out(&Line::new("job")
             .pair("id", &id.0)
             .pair("action", &action)
@@ -759,10 +767,14 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
         Ok(j) => j,
         Err(c) => return c,
     };
-    let Some((_, _, pid, _)) = journal::list_running()
-        .into_iter()
-        .find(|(id, ..)| *id == job)
-    else {
+    let jobs = match journal::list_running() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("inacircle: cancel {}: {e}", job.0);
+            return EXIT_FAILED;
+        }
+    };
+    let Some((_, _, pid, _)) = jobs.into_iter().find(|(id, ..)| *id == job) else {
         eprintln!("inacircle: no running job {}", job.0);
         return EXIT_USAGE;
     };

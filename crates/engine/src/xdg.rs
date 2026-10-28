@@ -83,6 +83,29 @@ pub fn runtime_dir() -> Option<PathBuf> {
     abs_env("XDG_RUNTIME_DIR")
 }
 
+/// The longest `user-dirs.dirs` read (no G0-P row; derived): xdg-user-dirs
+/// writes about eight short lines (under 0.5 KiB); eight keys with a 4096 B
+/// path each plus quotes stay under 34 KiB, so 64 KiB is about twice the
+/// worst real shape. A longer file is no user-dirs file we know: the
+/// fallback (`~/Downloads`) is used, as for an unreadable one.
+const USER_DIRS_MAX_BYTES: usize = 64 * 1024;
+
+/// The file's text, opened without blocking and never through a symlink at
+/// its own name, only a regular file, read at most `USER_DIRS_MAX_BYTES`.
+/// `None` for anything else (the caller falls back).
+fn read_user_dirs(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    String::from_utf8(action::read_bounded(f, USER_DIRS_MAX_BYTES).ok()?).ok()
+}
+
 /// `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, else `~/Downloads` (or the
 /// no-home fallback).
 pub fn download_dir() -> io::Result<PathBuf> {
@@ -91,7 +114,7 @@ pub fn download_dir() -> io::Result<PathBuf> {
         None => Ok(fallback_root()?.join("downloads")),
     };
     let config = base("XDG_CONFIG_HOME", ".config", "config")?;
-    let Ok(text) = std::fs::read_to_string(config.join("user-dirs.dirs")) else {
+    let Some(text) = read_user_dirs(&config.join("user-dirs.dirs")) else {
         return fallback();
     };
     for line in text.lines() {
@@ -239,6 +262,58 @@ pub(crate) mod tests {
             tmp.join("Downloads")
         );
         assert_eq!(run(None), tmp.join("Downloads"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `user-dirs.dirs` is read bounded and never through a symlink at its
+    /// own name or from a FIFO: each of those falls back to `~/Downloads`.
+    #[test]
+    fn user_dirs_read_is_bounded_typed_and_not_followed() {
+        use crate::sys::tests::{mkfifo, within};
+        let tmp = std::env::temp_dir().join(format!("engine-xdg-ud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cfg = tmp.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let f = cfg.join("user-dirs.dirs");
+        let want = "XDG_DOWNLOAD_DIR=\"/data/dl\"\n";
+        let pad = |n: usize| {
+            let mut c = String::from(want);
+            c.push('#');
+            while c.len() < n {
+                c.push('x');
+            }
+            c
+        };
+        let (home, cfgs) = (
+            tmp.to_str().unwrap().to_owned(),
+            cfg.to_str().unwrap().to_owned(),
+        );
+        let get = || {
+            let (h, c) = (home.clone(), cfgs.clone());
+            with_env(
+                &[
+                    ("HOME", Some(h.as_str())),
+                    ("XDG_CONFIG_HOME", Some(c.as_str())),
+                ],
+                || within(5, download_dir).unwrap(),
+            )
+        };
+        // Max is read, max + 1 falls back.
+        std::fs::write(&f, pad(USER_DIRS_MAX_BYTES)).unwrap();
+        assert_eq!(get(), PathBuf::from("/data/dl"));
+        std::fs::write(&f, pad(USER_DIRS_MAX_BYTES + 1)).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        // A symlink at the name is not followed (positive control above:
+        // the same content as a regular file is read).
+        let real = tmp.join("real");
+        std::fs::write(&real, want).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&real, &f).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        // A FIFO neither blocks nor is read.
+        std::fs::remove_file(&f).unwrap();
+        mkfifo(&f);
+        assert_eq!(get(), tmp.join("Downloads"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

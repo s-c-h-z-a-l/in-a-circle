@@ -361,3 +361,56 @@ fn inputs_from_file_with_tab_and_newline_in_paths() {
         assert!(work.join(rel).is_file());
     }
 }
+
+/// `document_input_bytes`: 8 MiB is read, 8 MiB + 1 is a `fail` with
+/// nothing staged, and the next input of the batch still converts.
+#[test]
+fn text_input_is_bounded() {
+    let root = tmp("bounded");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let at = root.join("at.txt");
+    let over = root.join("over.txt");
+    let small = root.join("small.txt");
+    fs::write(&at, vec![b'a'; 8 * 1024 * 1024]).unwrap();
+    fs::write(&over, vec![b'a'; 8 * 1024 * 1024 + 1]).unwrap();
+    fs::write(&small, "x\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&at]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(lines(&stdout(&o), "done").len(), 1);
+    let o = run_raw("text.txt-to-md", &work, &[&over, &small]);
+    assert_eq!(o.status.code(), Some(0), "the small one is done");
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert!(fails[0][2].contains("larger than 8 MiB"), "{out}");
+    // Nothing staged for the refused input (index 0 of that run).
+    assert!(!work.join("0/over.md").exists());
+    assert!(work.join("1/small.md").is_file());
+}
+
+/// A FIFO as an input fails at once (never blocks); a symlink to a text
+/// file still converts (positive control).
+#[test]
+fn text_input_fifo_fails_and_symlink_still_works() {
+    let root = tmp("fifo");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let q = root.join("q.txt");
+    let c = std::ffi::CString::new(q.as_os_str().as_bytes()).unwrap();
+    // SAFETY: c is NUL-terminated.
+    assert_eq!(unsafe { libc_mkfifo(c.as_ptr(), 0o600) }, 0);
+    let real = root.join("real.txt");
+    fs::write(&real, "hello\n").unwrap();
+    let link = root.join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&q, &link]);
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "fail").len(), 1, "{out}");
+    assert_eq!(lines(&out, "done").len(), 1, "{out}");
+}
+
+unsafe extern "C" {
+    #[link_name = "mkfifo"]
+    fn libc_mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+}

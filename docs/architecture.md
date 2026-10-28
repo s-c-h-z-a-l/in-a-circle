@@ -96,6 +96,15 @@ are in `CLAUDE.md`.
   while the set of binaries and their mtime and size match it exactly.
   The wheel never runs a manifest while its overlay is up: it reads the
   cache as it is and refreshes it after it closes (see the B path).
+  The cache is read bounded (256 KiB, measured on the bytes read, not on
+  the size `stat` shows): at most 128 binaries, 1024 actions, 1152
+  records, 32 fields per record, 12288 fields and 32 KiB per line. A cache
+  over a limit is rejected loudly and rebuilt. A rebuild obeys the same
+  limits on what it has collected so far: a binary whose manifest would
+  cross one (each manifest valid alone) is refused whole with a message,
+  never trimmed silently. A manifest itself is limited to 256 records, 32
+  fields per record, 4096 fields and 32 KiB per line, checked before it is
+  parsed; past that its binary is refused.
 - Per action: id and family; input and output as **MIME types** plus the
   output extension (`ext=`); one or many inputs (`batch=no` for one at a
   time); label and group; cost and whether it loses information
@@ -120,7 +129,9 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
 
 - argv only, never a shell. The engine decodes `file://` URIs and passes
   local files only. stdin is `/dev/null`, the working directory is the
-  temp dir. Very long input lists go through `--inputs-from <file>`.
+  temp dir. Very long input lists go through `--inputs-from <file>`; the
+  list (read bounded: 1 MiB, 8 KiB per encoded line) and argv together
+  hold at most 1024 paths of at most 4096 bytes each and 1 MiB in all.
 - **An action writes only into the temp dir.** Once its whole process
   group is gone, the engine copies each input's results into fresh files
   of its own and publishes them with one atomic no-replace `rename` (see
@@ -650,7 +661,18 @@ No daemon:
   action, inputs, done, progress, start time) rewritten by rename at most
   four times a second and removed at the end; a job id is
   `<unix-seconds>-<pid>-<8 random hex digits>`, and an entry whose
-  process is gone is ignored;
+  process is gone is ignored. A listing examines at most 128 entries and
+  reads each entry bounded (4096 bytes, 16 fields); past a limit, or when
+  the folder cannot be read, it is an error, never a shorter or empty list,
+  and `undo`, `jobs` and `cancel` fail on it (undo moves nothing). The
+  dead entries among those examined are removed first, so a pile left by
+  crashes heals;
+- the history is read in a window: the header by itself (256 bytes), then
+  at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
+  with at most 32 fields, a job with at most 1024 outputs and groups, paths
+  of at most 4096 bytes and 1 MiB in all. A job that is not provably inside
+  the window (a finished-job line written well before it started has to
+  come first), or over a limit, is refused before anything moves;
 - cancelling: `SIGTERM` to the supervisor.
 
 A jobs view (name, paths, what into what, progress, estimated time,

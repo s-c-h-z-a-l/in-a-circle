@@ -1503,6 +1503,26 @@ fn jobs_empty_when_idle() {
     assert!(o.stdout.is_empty());
 }
 
+/// A registry that cannot be read in full is a failure of `jobs`,
+/// `cancel` and `undo`, never "no job runs"; idle stays quiet and exit 0
+/// (the control above).
+#[test]
+fn jobs_cancel_undo_fail_on_an_unreadable_registry() {
+    let e = Env::new("jobs-over");
+    let dir = e.root.join("runtime/inacircle/jobs");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("9-9"), vec![b'j'; 4097]).unwrap();
+    for args in [&["jobs"][..], &["cancel", "9-9"][..], &["undo", "9-9"][..]] {
+        let o = e.run(args);
+        assert_eq!(o.code, Some(1), "{args:?}: {} {}", o.stdout, o.stderr);
+        assert!(o.stderr.contains("safety limits"), "{args:?}: {}", o.stderr);
+        assert!(o.stdout.is_empty(), "{args:?}");
+    }
+    fs::remove_file(dir.join("9-9")).unwrap();
+    assert_eq!(e.run(&["jobs"]).code, Some(0));
+}
+
 /// Without a history nothing can be recorded before the publishing rename,
 /// so nothing is published: the input fails with the reason, the source
 /// stays, and the warning comes once.
