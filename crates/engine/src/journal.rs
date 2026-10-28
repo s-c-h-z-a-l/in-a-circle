@@ -107,6 +107,14 @@ const HISTORY_PATH_BYTES: usize = 4096;
 /// of a job at the limit; twice that is 6.4 MB, over the 5,000,000 B
 /// budget, so the limit is load-bearing.
 const HISTORY_PATH_BYTES_PER_JOB: usize = 1_048_576;
+/// Intents one job's records keep (no G0-P row; derived): one per group
+/// ([`HISTORY_DIRS`]) plus three lost name races per group on average
+/// (a race is rare: the name was free when stat'ed). A kept intent costs
+/// ~40 B beside its path bytes (a `Vec` and its allocation), so 3072 more
+/// than the measured maximal job (1024) add ~120 KB to its 4.56 MB PSS,
+/// under the 5 MB budget. An empty target costs no path bytes, so without
+/// this count ~80 k of them fit in the window. Past it: refused.
+const HISTORY_INTENTS: usize = 4 * HISTORY_DIRS;
 /// `history_tail_window_bytes` (G0-P): `undo` looks at the last 8 MiB of
 /// the history only (an I/O window, read in [`HISTORY_READ_CHUNK`] pieces,
 /// never held). A job not provably inside it is refused before a move.
@@ -1407,6 +1415,8 @@ struct JobRecords {
     outputs: usize,
     /// Decoded path bytes kept so far.
     path_bytes: usize,
+    /// Intents (of all groups) kept so far.
+    intents: usize,
     /// In a window that does not start at the history's start, a line of
     /// the job came before its `job-start`.
     incomplete: bool,
@@ -1843,6 +1853,10 @@ impl JobRecords {
                 path_dec(v[3])?;
                 let target = path_dec(v[4])?;
                 self.keep(target.len())?;
+                if self.intents >= HISTORY_INTENTS {
+                    return Err("over the limit: more intents in the job than the history allows");
+                }
+                self.intents += 1;
                 let g = self.group(v[2], Some(v[0]))?;
                 if !g.ended || g.closed() {
                     return Err("an intent out of order");
@@ -2128,6 +2142,10 @@ fn scan_records(
     let mut buf = Vec::new();
     let needle = format!("job={}", job.0);
     let id_needle = format!("id={}", job.0);
+    // Only the kept prefix of a long line (`read_line_bounded`: 32 KiB + 1)
+    // is searched. Every record names its job in its first three fields,
+    // well inside it; a record that ever names the job later must keep it
+    // inside the prefix, or its over-long line would be skipped.
     let mentions = |b: &[u8]| contains(b, needle.as_bytes()) || contains(b, id_needle.as_bytes());
     if version != VERSION && version != OLD_VERSION {
         return Err(io::Error::new(
@@ -5820,6 +5838,26 @@ mod tests {
     fn history_dirs_per_job_1024_and_1025() {
         assert_eq!(broken_of(&synth(1024, 1, |_, _| "c".into(), 20)), None);
         assert!(is_limit(broken_of(&synth(1025, 1, |_, _| "c".into(), 20))));
+    }
+
+    /// Intents per job: 4096 are read, 4097 are a limit fault, even when
+    /// each costs no path bytes (an empty target), so the count alone is
+    /// bounded.
+    #[test]
+    fn history_intents_per_job_4096_and_4097() {
+        let with = |n: usize| {
+            let mut l = good();
+            let intent = l[4].clone();
+            for _ in 1..n {
+                l.insert(4, intent.replace("target=/o/a", "target="));
+            }
+            let r = read(&l).unwrap();
+            assert!(r.known, "the job's records were read");
+            r.broken
+        };
+        assert_eq!(with(HISTORY_INTENTS), None);
+        let b = with(HISTORY_INTENTS + 1);
+        assert!(is_limit(b), "{b:?}");
     }
 
     #[test]

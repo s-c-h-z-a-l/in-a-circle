@@ -676,8 +676,8 @@ No daemon:
   so a pile left by crashes heals;
 - the history is read in a window: the header by itself (256 bytes), then
   at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
-  with at most 32 fields, a job with at most 1024 outputs and groups, paths
-  of at most 4096 bytes and 1 MiB in all. A job that is not provably inside
+  with at most 32 fields, a job with at most 1024 outputs and groups and
+  4096 publish intents, paths of at most 4096 bytes and 1 MiB in all. A job that is not provably inside
   the window (its `job-start` has to be there, before any other line of
   it; the append lock orders the records, no clock is trusted), or over a
   limit, is refused before anything moves;
