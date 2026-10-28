@@ -29,9 +29,10 @@ number is a result only where its row says so.
   PSS 0 into `invalid`, and a functional failure into `invalid` rows with
   its reason.
 - **Builds.** A = `169163b` (instrumentation only, before the hardening hot
-  path changes), sha256 `692a0e5d...27c7`. B = the hardening release at
-  `b696450` (sha256 `530de180...1019`; later commits changed tests and
-  scripts only). Same profile (fat LTO, `panic=abort`, stripped) and the
+  path changes), sha256 `692a0e5d...27c7`. B = the hardening release, source
+  `b696450`; the binary (sha256 `530de180...1019`, series label
+  `B-c901291`) was built from `c901291`, whose only difference from
+  `b696450` is tests and scripts. Same profile (fat LTO, `panic=abort`, stripped) and the
   same `INACIRCLE_MEASURE` instrumentation, which is a runtime switch.
 
 ## Memory (release, fake compositor, this machine)
@@ -91,9 +92,10 @@ failures; N = 50 valid of 50 attempts per row):
   the other series do not, and the drift is far below the A/B effect.
 - `wheel_cpu_us` p95: B -8.9% / -10.3% against A. Process PSS p95 at plain
   startup: A 2.74 MB, B 1.82 MB (both under 5,000,000 B).
-- The improvement is the commit-first change (no obsolete full paint before
-  the first commit); the second buffer is painted after the first flush.
-  Total wheel CPU moves less than the commit interval.
+- Hypothesis, not measured: the improvement comes from the commit-first
+  change (no obsolete full paint before the first commit; the second buffer
+  is painted after the first flush). There is no phase breakdown that
+  isolates it. Total wheel CPU moves less than the commit interval.
 - ThinkCentre absolute CPU (about 2-3.6 ms) is outside the reference gate
   by policy ([acceptance.md](acceptance.md), Plan-7 interpretation); only
   the environment-matched regression applies, and there is none.
@@ -106,7 +108,9 @@ failures; N = 50 valid of 50 attempts per row):
 | X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
 | ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
+| U-01: choice-to-action entry with real clicks | OPEN: needs a real pointer session (T13b) |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
+| Native ARM CI / own ARM VM | CI run 40654582001 green on `b696450`; `c901291`/`87153e4` CI not checked. Own ARM VM suite 31/31 (emulated, functional only) |
 | Engine/supervisor and Undo-window memory phases | OPEN (evidence gap) |
 
 Reproduce: copy two release directories and the two scripts to the target,
