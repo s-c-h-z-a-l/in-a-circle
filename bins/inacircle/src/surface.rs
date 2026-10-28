@@ -6,9 +6,11 @@
 //! Layout (the spike's, proven on niri): a full-screen overlay layer surface
 //! with a 1x1 transparent buffer stretched by `wp_viewporter` takes every
 //! pointer and drag event; the wheel sits in a subsurface whose input region
-//! is empty. Buffer 0 is painted while the compositor configures us, buffer
-//! 1 after the map while the pointer position is on its way; only the
-//! subsurface position waits for it.
+//! is empty. Buffer 0 is painted while the compositor configures us; only
+//! the subsurface position waits for the pointer. Buffer 1 is painted only
+//! for a wheel that is on the screen (`prepaint`, after the first commit
+//! left): the pointer or the drag decides the first wheel, and a second
+//! buffer painted before that would be for a wheel nobody sees.
 //!
 //! Globals are bound at the version our requests need, or treated as
 //! absent: a `wl_data_device_manager` older than v3 (no `set_actions`)
@@ -70,6 +72,13 @@ pub const STARTUP: Duration = Duration::from_millis(2000);
 /// compositor that has stopped answering, and past it the connection is
 /// dropped anyway, which removes the surfaces.
 pub const TEARDOWN: Duration = Duration::from_millis(1000);
+/// The `alarm` that backs the startup (and the lock before it) up, until
+/// the wheel's first commit; then `STAGE`'s takes over (`begin_user_stage`).
+/// The soft path ends a startup in at most `STARTUP` + `TEARDOWN` = 3 s;
+/// 5 s leaves 2 s of scheduling slack (whole seconds only), so the alarm
+/// fires only where no deadline reaches, and a stuck startup cannot hold
+/// the full-screen grab for the user's 30 s.
+pub const STARTUP_BACKSTOP: Duration = Duration::from_secs(5);
 
 const DND_COPY: u32 = 1;
 const LAYER_OVERLAY: u32 = 3;
@@ -145,17 +154,25 @@ pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> Result<Chosen, Startup
     let mut s = Surface::connect()?;
     s.meter = meter.take();
     let r = s.setup(m).and_then(|()| s.event_loop(m));
-    // A failure once the wheel was on the screen is not a failure to open.
-    let r = match r {
-        Err(StartupError::Protocol(e)) if s.user_stage => Err(StartupError::AfterOpen(e)),
-        r => r,
-    };
+    // A failure once the wheel was on the screen is not a failure to open:
+    // the first commit decides, not the loop pass that starts the user's
+    // stage.
+    let r = classify(r, s.shown.is_some());
     *meter = s.meter.take();
     // Release the grabs and the surfaces, then drop the connection; the
     // caller frees the lock after this returns.
     let ack = !matches!(&r, Err(e) if e.compositor_silent());
     s.teardown(m, ack);
     r
+}
+
+/// A protocol failure after the wheel's first commit (`opened`) is
+/// [`StartupError::AfterOpen`]; anything else is left as it is.
+fn classify(r: Result<Chosen, StartupError>, opened: bool) -> Result<Chosen, StartupError> {
+    match r {
+        Err(StartupError::Protocol(e)) if opened => Err(StartupError::AfterOpen(e)),
+        r => r,
+    }
 }
 
 fn other(msg: impl Into<String>) -> io::Error {
@@ -409,7 +426,7 @@ impl Surface {
     /// An error from the connection while starting: a timeout is the
     /// startup clock's, anything else is the connection's.
     fn start_error(&self, e: io::Error) -> StartupError {
-        if e.kind() == io::ErrorKind::TimedOut && !self.user_stage {
+        if e.kind() == io::ErrorKind::TimedOut && self.shown.is_none() {
             self.startup_timeout()
         } else {
             StartupError::Protocol(e)
@@ -623,17 +640,14 @@ impl Surface {
         let shm = self.shm.as_mut().expect("built above");
         m.wheel().paint_full(shm.canvas(0), None);
         self.painted[0] = Some((generation, None));
+        if let Some(meter) = &mut self.meter {
+            meter.paint('S', 0, generation, self.busy[0]);
+        }
 
         // The configure is acked and the overlay mapped in `handle`; its
         // inputs wait in the queue for the event loop.
         self.wait(m, |s| s.size.is_some())?;
         self.flush_start()?;
-        // While the pointer position is on its way: buffer 1.
-        if self.painted[1].is_none() && !self.busy[1] {
-            let shm = self.shm.as_mut().expect("built above");
-            m.wheel().paint_full(shm.canvas(1), m.hover());
-            self.painted[1] = Some((m.generation(), m.hover()));
-        }
         Ok(())
     }
 
@@ -1161,11 +1175,14 @@ impl Surface {
         self.pending = false;
         let hover_repaint = !first && self.shown.is_some_and(|(g, _)| g == m.generation());
         let started = (hover_repaint && self.meter.is_some()).then(Instant::now);
+        let was_busy = self.busy[i];
         let shm = self.shm.as_mut().expect("built in setup");
         let canvas = shm.canvas(i);
-        let painted = match self.painted[i] {
-            Some((g, old)) if g == m.generation() => m.wheel().paint_hover(canvas, old, m.hover()),
-            _ => m.wheel().paint_full(canvas, m.hover()),
+        let (phase, painted) = match self.painted[i] {
+            Some((g, old)) if g == m.generation() => {
+                ('H', m.wheel().paint_hover(canvas, old, m.hover()))
+            }
+            _ => ('F', m.wheel().paint_full(canvas, m.hover())),
         };
         let painted = painted.union(std::mem::replace(&mut self.prepainted[i], Rect::EMPTY));
         self.painted[i] = want;
@@ -1218,6 +1235,8 @@ impl Surface {
                 meter.swapped(crate::cpu_us(libc::RUSAGE_SELF));
             }
             // After the timings are taken: reading smaps costs tens of µs.
+            // After the timings, like the PSS read: the trace costs a push.
+            meter.paint(phase, i, m.generation(), was_busy);
             if started.is_none() {
                 let c0 = crate::cpu_us(libc::RUSAGE_SELF);
                 meter.pss(crate::measure::pss_kb());
@@ -1230,8 +1249,13 @@ impl Surface {
     /// Before waiting: a free buffer that still holds an older wheel (the
     /// stage-2 swap) is painted in full now, so the next hover on it is a
     /// cheap `paint_hover` and not a full paint inside the event.
+    ///
+    /// Not while a list is being read (the early read, or the drop's): the
+    /// machine replaces the wheel when it arrives, and a buffer made ready
+    /// for the wheel about to go would be painted again at once. A list
+    /// that fails changes nothing for the wheel, and the next pass paints.
     fn prepaint(&mut self, m: &Machine) {
-        if self.shown.is_none() {
+        if self.shown.is_none() || self.early.is_some() || self.reading.is_some() {
             return;
         }
         for i in to_prepaint(&self.painted, &self.busy, m.generation()) {
@@ -1240,6 +1264,9 @@ impl Surface {
                 let r = m.wheel().paint_full(shm.canvas(i), m.hover());
                 self.painted[i] = Some((m.generation(), m.hover()));
                 self.prepainted[i] = self.prepainted[i].union(r);
+                if let Some(meter) = &mut self.meter {
+                    meter.paint('P', i, m.generation(), self.busy[i]);
+                }
             }
         }
     }
@@ -1576,6 +1603,157 @@ mod tests {
         let (s, _server) = fake_compositor();
         assert!(!s.user_stage);
         assert!(s.deadline <= Instant::now() + STARTUP);
+    }
+
+    /// The wheel is on the screen from its first commit, not from the next
+    /// pass of the loop that starts the user's stage: an error between the
+    /// two (the flush right after the commit) is an error after the open,
+    /// and a timeout there is the connection's, not the startup clock's.
+    #[test]
+    fn after_open_is_keyed_on_the_first_commit() {
+        let (mut s, _server) = fake_compositor();
+        let timed_out = || io::Error::new(io::ErrorKind::TimedOut, "slow");
+        assert!(matches!(
+            s.start_error(timed_out()),
+            StartupError::ConfigureTimeout
+        ));
+        // Committed, the loop has not yet begun the user's stage.
+        s.shown = Some((0, None));
+        assert!(!s.user_stage);
+        assert!(matches!(
+            s.start_error(timed_out()),
+            StartupError::Protocol(_)
+        ));
+        let broke = |opened| classify(Err(StartupError::Protocol(timed_out())), opened);
+        assert!(matches!(broke(true), Err(StartupError::AfterOpen(_))));
+        assert!(matches!(broke(false), Err(StartupError::Protocol(_))));
+        // Neither a choice nor another kind of failure is rewritten.
+        assert!(matches!(classify(Ok(None), true), Ok(None)));
+        let init = Err(StartupError::Initialization(timed_out()));
+        assert!(matches!(
+            classify(init, true),
+            Err(StartupError::Initialization(_))
+        ));
+    }
+
+    /// The startup's hard backstop leaves the soft path (the startup clock
+    /// and the close) room to finish in order, and is far below the user's
+    /// stage.
+    #[test]
+    fn startup_backstop_covers_the_soft_path_and_not_the_stage() {
+        assert!(STARTUP + TEARDOWN < STARTUP_BACKSTOP);
+        assert!(STARTUP_BACKSTOP < STAGE);
+        assert_eq!(STARTUP_BACKSTOP.subsec_nanos(), 0, "alarm counts seconds");
+    }
+
+    /// A wheel with one lit slice; the machine states below swap it.
+    fn render_surface() -> (Surface, OwnedFd) {
+        let (mut s, server) = fake_compositor();
+        s.shm = Some(Shm::new().unwrap());
+        s.id.surface = s.conn.new_id(Iface::Surface);
+        s.id.wheel = s.conn.new_id(Iface::Surface);
+        s.id.sub = s.conn.new_id(Iface::Subsurface);
+        for i in 0..2 {
+            s.id.bufs[i] = s.conn.new_id(Iface::Buffer);
+        }
+        (s, server)
+    }
+
+    /// Every buffer that claims the current wheel holds exactly a full paint of it:
+    /// the damage-only paths (hover, prepaint, buffer reuse) leave the same
+    /// pixels a repaint from scratch would.
+    fn assert_buffers_are_full_paints(s: &mut Surface, m: &Machine, what: &str) {
+        for i in 0..2 {
+            let Some((g, hover)) = s.painted[i] else {
+                continue;
+            };
+            // A buffer of an older wheel is not shown again before its
+            // next full paint (`render`, `prepaint`): nothing to compare.
+            if g != m.generation() {
+                continue;
+            }
+            let mut want = vec![0xAAu8; s.shm.as_mut().unwrap().canvas(i).len()];
+            m.wheel().paint_full(&mut want, hover);
+            assert!(
+                s.shm.as_mut().unwrap().canvas(i) == &want[..],
+                "{what}: buffer {i} differs from a full paint of {hover:?}"
+            );
+        }
+    }
+
+    /// Two lit categories (north and south).
+    fn two_lit(_: &[u8]) -> GroupMenu {
+        let mut gm = empty_groups(b"");
+        for (k, name) in [(0, "North"), (4, "South")] {
+            gm.slices[k] = Some(crate::wheel::GroupChoice {
+                label: name.into(),
+                group: name.into(),
+                lit: true,
+            });
+        }
+        gm.hub = "src".into();
+        gm
+    }
+
+    /// Startup with the second buffer unpainted (the first commit alone),
+    /// the prepaint that makes it ready, a stage swap, the prepaint of the
+    /// released buffer, and hover on both buffers in turn: after each step
+    /// every claimed state is pixel-equal to a full repaint.
+    #[test]
+    fn render_pixels_equal_a_full_repaint_through_swaps_and_hover() {
+        let (mut s, server) = render_surface();
+        let mut m = Machine::with_menus(two_lit, empty_targets);
+        // What `setup` paints for the first frame: buffer 0 only.
+        let first = m.generation();
+        m.wheel()
+            .paint_full(s.shm.as_mut().unwrap().canvas(0), None);
+        s.painted[0] = Some((first, None));
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        s.render(&m).unwrap();
+        assert!(
+            s.painted[1].is_none(),
+            "the second buffer is not painted yet"
+        );
+        assert_buffers_are_full_paints(&mut s, &m, "first commit");
+        // Not shown yet until released: buffer 1 is free but unpainted.
+        s.prepaint(&m);
+        assert_eq!(s.painted[1], Some((m.generation(), m.hover())));
+        assert_buffers_are_full_paints(&mut s, &m, "prepaint");
+        // The list arrives: another wheel, both buffers stale.
+        m.on(Input::DragList(1, Ok(b"a".to_vec())));
+        s.render(&m).unwrap();
+        assert_buffers_are_full_paints(&mut s, &m, "swap");
+        // The old frame is released and repainted ahead of time.
+        let release = msg(s.id.bufs[0], op::wl_buffer::RELEASE, &[]);
+        deliver_to(&mut s, &server, &release, &m);
+        s.prepaint(&m);
+        assert_buffers_are_full_paints(&mut s, &m, "prepaint after swap");
+        // Hover north, south, off, north again: both buffers take turns.
+        for (k, (x, y)) in [
+            (960.0, 390.0),
+            (960.0, 690.0),
+            (960.0, 540.0),
+            (960.0, 390.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.on(Input::DragMotion(x, y));
+            s.render(&m).unwrap();
+            assert_buffers_are_full_paints(&mut s, &m, &format!("hover {k}"));
+            for i in 0..2 {
+                let release = msg(s.id.bufs[i], op::wl_buffer::RELEASE, &[]);
+                deliver_to(&mut s, &server, &release, &m);
+            }
+            s.prepaint(&m);
+            assert_buffers_are_full_paints(&mut s, &m, &format!("released {k}"));
+        }
+        assert_eq!(s.shown, Some((m.generation(), m.hover())));
     }
 
     #[test]

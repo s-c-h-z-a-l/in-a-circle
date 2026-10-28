@@ -825,8 +825,9 @@ fn cmd_wheel() -> u8 {
         )));
     }
     // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
-    // kills the process: the backstop if anything below hangs.
-    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
+    // kills the process: the backstop if anything below hangs. Only the
+    // startup's: the first commit re-arms it with the user's stage.
+    unsafe { libc::alarm(surface::STARTUP_BACKSTOP.as_secs() as u32) };
     // The lock comes before Wayland: a second instance must not draw.
     let lock = match lock_wheel() {
         Ok(Some(l)) => l,

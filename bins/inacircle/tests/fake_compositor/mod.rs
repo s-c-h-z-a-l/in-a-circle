@@ -411,6 +411,12 @@ impl Compositor {
         self.send(p, op::wl_pointer::ENTER, &words(&[7, overlay, cx, cy]));
     }
 
+    /// The pointer moves to `(x, y)` (output coordinates).
+    pub fn pointer_motion(&mut self, x: u32, y: u32) {
+        let p = self.pointer;
+        self.send(p, op::wl_pointer::MOTION, &words(&[0, x * 256, y * 256]));
+    }
+
     /// A key press (`key` is the evdev code; Esc is 1).
     pub fn key(&mut self, key: u32) {
         self.serial += 1;

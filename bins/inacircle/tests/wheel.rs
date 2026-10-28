@@ -226,7 +226,10 @@ impl Root {
     }
 
     fn cmd(&self) -> Command {
-        let mut c = Command::new(BIN);
+        // `INACIRCLE_TEST_BIN` runs another build against the same fake
+        // compositor (the A/B hover measurement); never set in the suite.
+        let bin = std::env::var("INACIRCLE_TEST_BIN").unwrap_or_else(|_| BIN.to_owned());
+        let mut c = Command::new(bin);
         c.env("XDG_RUNTIME_DIR", self.0.join("runtime"))
             .env("WAYLAND_DISPLAY", "wayland-0")
             .env("XDG_CACHE_HOME", self.0.join("cache"))
@@ -1013,4 +1016,250 @@ fn startup_teardown_gives_up_above_the_deadline() {
     );
     assert!(held >= TEARDOWN - Duration::from_millis(100), "{held:?}");
     assert!(held < ABOVE_TEARDOWN, "{held:?}");
+}
+
+// Paint trace (hardening task 12). The wheel's measurement line names every
+// paint: phase, buffer, wheel generation (`S`/`T` startup buffers 0/1, `F`
+// full and `H` hover paint inside a render, `P` prepaint; `!` marks a paint
+// onto a buffer the compositor still held).
+
+/// The paint trace of a finished run's stderr.
+fn trace(err: &str) -> Vec<String> {
+    err.split_whitespace()
+        .find_map(|w| w.strip_prefix("paint_trace="))
+        .unwrap_or_else(|| panic!("no paint_trace in {err:?}"))
+        .split(',')
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A run of the wheel with no drag: the pointer opens the first wheel.
+fn no_drag_run(name: &str) -> String {
+    let root = Root::new(name);
+    let mut child = None;
+    let mut c = Compositor::serve(&root.0.join("runtime"), Duration::from_secs(2), || {
+        child = Some(
+            root.cmd()
+                .env("INACIRCLE_MEASURE", "1")
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+    });
+    c.mapped(Duration::from_secs(2));
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    // The frame passes; whatever the wheel paints ahead of time is done.
+    c.release_held();
+    c.pump(Duration::from_millis(100));
+    finish(c, child.unwrap())
+}
+
+/// With no drag the pointer replaces the `Drop here` wheel at once, so the
+/// buffers painted for it while the compositor configured are obsolete:
+/// before the first commit the wheel paints only what it shows (the
+/// buffer-0 paint during the configure wait costs no waiting time and
+/// cannot know what comes), and the second buffer is painted after the
+/// commit, for the generation on screen.
+#[test]
+fn render_no_drag_startup_paints_no_obsolete_second_buffer() {
+    let err = no_drag_run("render-nodrag");
+    assert_eq!(trace(&err), ["S0g0", "F0g1", "P1g1"], "{err}");
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+}
+
+/// A drag whose list arrives: the second buffer is first painted for a
+/// wheel that is shown (never the startup wheel nobody will see), and no
+/// paint ever lands on a buffer the compositor holds.
+#[test]
+fn render_drag_to_stage2_paints_no_unused_buffer_and_never_a_busy_one() {
+    let root = Root::new("render-drag");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    drag_to_stage2(&mut c, &list);
+    let err = finish(c, child);
+    let t = trace(&err);
+    assert!(!t.iter().any(|p| p.starts_with("T1")), "{t:?}");
+    // While the list is on its way the wheel is about to be replaced: the
+    // free buffer is not made ready for the `Drop here` wheel (g0).
+    assert!(!t.contains(&"P1g0".to_owned()), "{t:?}");
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+    // A buffer's generation never goes back, and the stage swaps are in
+    // order: Drop here (0), the categories (1), the targets (2).
+    let gens: Vec<u32> = t
+        .iter()
+        .map(|p| {
+            p[p.find('g').unwrap() + 1..]
+                .trim_end_matches('!')
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(gens.windows(2).all(|w| w[0] <= w[1]), "{t:?}");
+    assert_eq!(gens.last(), Some(&2), "{t:?}");
+}
+
+/// Both buffers held by the compositor: nothing is painted or attached
+/// until the release (the compositor owns the pixels meanwhile), and the
+/// paint after it lands on the released buffer.
+#[test]
+fn render_delayed_release_never_paints_a_held_buffer() {
+    let root = Root::new("render-held");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    // `Drop here`, then the categories: both buffers are in use now.
+    c.attached(2, Duration::from_secs(5));
+    // The drag moves onto a slice before any release: the repaint waits.
+    c.drag_motion(960, 390);
+    c.pump(Duration::from_millis(150));
+    assert_eq!(c.attaches(), 2, "painted onto a held buffer");
+    c.release_held();
+    c.attached(3, Duration::from_secs(2));
+    c.drop_it();
+    c.release_held();
+    c.attached(4, Duration::from_secs(5));
+    let err = finish(c, child);
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+}
+
+/// The hover series of the A/B measurement (`#[ignore]`: it measures, it
+/// does not assert a budget). Stage 2 with two lit targets, then
+/// `HOVER_EVENTS` pointer motions cycling Markdown, Plain text and the hub,
+/// so every repaint changes the lit slice. One summary line on stdout:
+/// `HOVER exit=.. misses=.. <the wheel's measurement line>`.
+#[test]
+#[ignore]
+fn probe_hover_series() {
+    let root = Root::new("hoverseries");
+    root.markdown_action_cached();
+    root.action(
+        "pt",
+        "[ \"$1\" = --manifest ] || exit 1\nprintf 'inacircle-manifest 0\\n'\n\
+         printf 'action\\tt.txt\\tfamily=t\\tin=text/markdown\\tout=text/plain\\t\
+         ext=txt\\tlabel=Plain\\tgroup=g\\tcost=1\\tlossy=yes\\tbatch=yes\\n'",
+    );
+    // Refresh the cache with both actions.
+    let f = root.0.join("f/primer.txt");
+    fs::write(&f, "words\n").unwrap();
+    assert!(
+        root.cmd()
+            .arg("offer")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::remove_file(&f).unwrap();
+    let a = root.0.join("f/a.txt");
+    let b = root.0.join("f/b.md");
+    fs::write(&a, "words\n").unwrap();
+    fs::write(&b, "# words\n").unwrap();
+    let list = format!("file://{}\r\nfile://{}\r\n", a.display(), b.display()).into_bytes();
+    let (mut c, child) = start(&root, true);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    // `HOVER_SETTLE_MS` (diagnostic only, default 0): after every release
+    // the fake waits this long before its next event, so the wheel can
+    // prepaint the released buffer; 0 delivers the release and the next
+    // event together, the worst case of the series.
+    let settle = Duration::from_millis(
+        std::env::var("HOVER_SETTLE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    );
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    c.release_held();
+    c.pump(settle);
+    c.drag_motion(960, 390);
+    c.attached(3, Duration::from_secs(2));
+    c.release_held();
+    c.pump(settle);
+    c.drop_it();
+    c.attached(4, Duration::from_secs(5));
+    c.release_held();
+    c.pump(settle);
+    c.pointer_enters();
+    // The frame passes: the compositor releases, the wheel prepaints.
+    c.pump(Duration::from_millis(200));
+    c.release_held();
+    let n: usize = std::env::var("HOVER_EVENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let pts = [(960u32, 390u32), (960, 690), (960, 540)];
+    let mut misses = 0;
+    for k in 0..n {
+        let before = c.attaches();
+        let (x, y) = pts[k % pts.len()];
+        c.pointer_motion(x, y);
+        let t = Instant::now();
+        while c.attaches() == before && t.elapsed() < Duration::from_millis(100) {
+            c.pump(Duration::from_millis(2));
+        }
+        misses += usize::from(c.attaches() == before);
+        c.release_held();
+        c.pump(Duration::from_millis(2));
+    }
+    let attaches = c.attaches();
+    let err = finish(c, child);
+    let line = err
+        .lines()
+        .find(|l| l.contains("measure wheel"))
+        .unwrap_or(&err);
+    println!("HOVER misses={misses} attaches={attaches} {line}");
+}
+
+/// Whether the wheel with `SIGALRM` pending at `secs` of stopped time is
+/// killed by it: the exit status of a wheel stopped right after it
+/// connected, continued after `secs`.
+fn stopped_wheel_after(name: &str, secs: u64) -> std::process::ExitStatus {
+    use std::os::unix::net::UnixListener;
+    let rt = runtime_dir(name);
+    // A compositor that accepts and never answers.
+    let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
+    let mut child = Command::new(BIN)
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Connected: past the lock and the alarm.
+    let (_conn, _) = listener.accept().unwrap();
+    let pid = child.id() as i32;
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    // A stopped process runs no code, so only the kernel's timer can end it
+    // (the soft deadlines are not evaluated): the alarm stays pending and
+    // acts when the process continues.
+    std::thread::sleep(Duration::from_secs(secs));
+    // SAFETY: as above.
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    wait_exit(&mut child, Duration::from_secs(5))
+}
+
+/// The hard backstop of the startup is `STARTUP_BACKSTOP` (5 s: the soft
+/// path takes at most `STARTUP` + `TEARDOWN`, 3 s), not the user's 30 s: a
+/// startup stuck where no deadline reaches must not hold the grab for the
+/// user's stage.
+#[test]
+fn startup_alarm_backstop_kills_a_stuck_startup_after_five_seconds() {
+    use std::os::unix::process::ExitStatusExt;
+    let st = stopped_wheel_after("alarm5", 6);
+    assert_eq!(st.signal(), Some(libc::SIGALRM), "{st:?}");
 }

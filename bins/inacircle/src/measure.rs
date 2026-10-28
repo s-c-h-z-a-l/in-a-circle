@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 /// `hover_samples` ones; reported, not hidden.
 const HOVER_SAMPLES: usize = 4096;
 
+/// Paint records kept for the trace. Measurement-only memory, allocated
+/// once: 64 x 8 B = 512 B. A startup paints 2-3 times and a session a few
+/// dozen at most (a hover repaint per pointer event is counted, not
+/// recorded, once the trace is full); `paints` still counts every one.
+const PAINT_TRACE: usize = 64;
+
 /// What the wheel measured about itself. Pure bookkeeping: the caller
 /// supplies every clock reading. A reading below zero (the clock failed)
 /// is a marker never taken.
@@ -27,6 +33,12 @@ pub struct Meter {
     /// The same, to the first successful flush after that commit.
     flush: Option<(i64, Duration)>,
     hover_us: Vec<u64>,
+    /// The first paints in order: phase, buffer, generation, whether the
+    /// buffer was held by the compositor (it must never be).
+    paint_trace: Vec<(char, u8, u32, bool)>,
+    /// Every paint, recorded or not, and those onto a busy buffer.
+    paints: u64,
+    busy_paints: u64,
     /// Every hover repaint, kept or not.
     hover_count: u64,
     idle_wakeups: u64,
@@ -64,6 +76,9 @@ impl Meter {
             commit: None,
             flush: None,
             hover_us: Vec::with_capacity(HOVER_SAMPLES),
+            paint_trace: Vec::with_capacity(PAINT_TRACE),
+            paints: 0,
+            busy_paints: 0,
             hover_count: 0,
             idle_wakeups: 0,
             pss_kb: -1,
@@ -105,6 +120,17 @@ impl Meter {
         self.hover_count += 1;
         if self.hover_us.len() < HOVER_SAMPLES {
             self.hover_us.push(d.as_micros() as u64);
+        }
+    }
+
+    /// One paint into buffer `slot` at wheel `generation`. `phase`: `S`/`T`
+    /// the startup paints of buffer 0/1, `F` a full paint and `H` a hover
+    /// paint inside a render, `P` a prepaint. Never allocates.
+    pub fn paint(&mut self, phase: char, slot: usize, generation: u32, busy: bool) {
+        self.paints += 1;
+        self.busy_paints += u64::from(busy);
+        if self.paint_trace.len() < PAINT_TRACE {
+            self.paint_trace.push((phase, slot as u8, generation, busy));
         }
     }
 
@@ -201,6 +227,19 @@ impl Meter {
                 w.as_micros()
             );
         }
+        line += &format!(
+            " paints={} busy_paints={} paint_trace=",
+            self.paints, self.busy_paints
+        );
+        for (i, &(phase, slot, g, busy)) in self.paint_trace.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            line += &format!("{phase}{slot}g{g}{}", if busy { "!" } else { "" });
+        }
+        if self.paint_trace.is_empty() {
+            line.push('-');
+        }
         line += &format!(" hover_events={}", self.hover_count);
         if let (Some(&max), n) = (sorted.last(), sorted.len()) {
             // Nearest rank: the ceil(p * n)-th smallest.
@@ -210,6 +249,9 @@ impl Meter {
                 rank(50),
                 rank(95)
             );
+            // In event order: the maximum is usually one of the first.
+            let first: Vec<String> = self.hover_us.iter().take(4).map(u64::to_string).collect();
+            line += &format!(" hover_us_first={}", first.join(","));
         }
         line += &format!(
             " idle_wakeups={} events={} wheel_cpu_us={} meter_cpu_us={} drop_to_stage2_cpu_us={} list_to_level1_cpu_us={}",
