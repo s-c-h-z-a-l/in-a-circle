@@ -823,6 +823,14 @@ pub unsafe fn apply_in_child(ruleset: RawFd, limits: &Limits) -> io::Result<()> 
         check(libc::setrlimit(libc::RLIMIT_DATA, &data).into())?;
         check(libc::setrlimit(libc::RLIMIT_CORE, &core).into())?;
         check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).into())?;
+        // `inacircle` disables transparent huge pages for itself (D-29) and
+        // the flag is inherited across fork and exec; actions keep the
+        // system default, so clear it here. Runs before the seccomp filter
+        // is installed, so the filter needs no rule for it. The result is
+        // ignored on purpose: on a kernel without PR_SET_THP_DISABLE
+        // (EINVAL) the flag was never set, so there is nothing to clear,
+        // and failing the spawn over it would only lose the action.
+        let _ = libc::prctl(libc::PR_SET_THP_DISABLE, 0, 0, 0, 0);
         check(libc::syscall(
             libc::SYS_landlock_restrict_self,
             ruleset,
@@ -1044,6 +1052,41 @@ pub(crate) mod tests {
 
     fn stderr(o: &Output) -> String {
         String::from_utf8_lossy(&o.stderr).into_owned()
+    }
+
+    /// The sandboxed child gets the system THP default back (D-29): the
+    /// parent disables THP, `apply_in_child` clears it, and `/proc` is
+    /// readable here to see it.
+    #[test]
+    fn child_has_the_default_thp_setting() {
+        if abi_or_skip("child_has_the_default_thp_setting", 1).is_none()
+            || !seccomp_or_skip("child_has_the_default_thp_setting")
+        {
+            return;
+        }
+        let work = Tmp::new("thp");
+        let rs = ruleset(&[PathBuf::from("/proc")], &work.0);
+        let fd = rs.as_raw_fd();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("while read -r k v; do [ \"$k\" = THP_enabled: ] && echo \"$v\"; done < /proc/self/status")
+            .stdin(Stdio::null());
+        // SAFETY: prctl and apply_in_child are async-signal-safe; the
+        // ruleset outlives the spawn.
+        unsafe {
+            cmd.pre_exec(move || {
+                // As `inacircle` itself runs: THP off, inherited by the child.
+                cvt(libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0))?;
+                apply_in_child(fd, &NO_LIMIT)
+            });
+        }
+        let o = cmd.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).trim(),
+            "1",
+            "{}",
+            stderr(&o)
+        );
     }
 
     #[test]

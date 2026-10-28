@@ -736,6 +736,43 @@ fn two_step_route_end_to_end() {
     assert_eq!(fs::read_to_string(&out).unwrap(), "text\n+\n");
 }
 
+/// THP (D-29): `inacircle` runs with transparent huge pages disabled
+/// (`THP_enabled: 0`, so a small heap is not backed by a 2 MiB page). The
+/// action child gets the default back; that half is tested in the
+/// engine's sandbox tests, where the child can read `/proc`.
+#[test]
+fn thp_is_disabled_in_the_main_process() {
+    let e = Env::with_actions("thp", &[]);
+    // A plugin that keeps the engine alive for a second while its status is
+    // read; it then ends normally so the engine cleans its work directory.
+    plugin(&e, "thp", "text/plain", "text/markdown", "md", "sleep 1");
+    e.file("doc.txt", b"text\n");
+    let mut child = e.cmd(&["run", "markdown", "doc.txt"]).spawn().unwrap();
+    let status = format!("/proc/{}/status", child.id());
+    // Between fork and main the process still has the test's value (1), so
+    // poll until main has run; 800 ms is far above a start (~1 ms) and
+    // under the plugin's 1 s, so if the call is ever missing the loop ends
+    // with the engine still alive and the assert fails.
+    let deadline = Instant::now() + Duration::from_millis(800);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line = fs::read_to_string(&status)
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("THP_enabled:"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if line == "THP_enabled: 0" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait().unwrap();
+    assert_eq!(line, "THP_enabled: 0");
+}
+
 #[test]
 fn two_step_intermediate_symlink_swap_is_refused() {
     let e = Env::with_actions("swap", &[]);

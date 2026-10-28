@@ -992,6 +992,9 @@ fn trash_for(src: RawFd) -> io::Result<(TrashDir, u64)> {
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => volume_trash(dom)?,
         r => r?,
     };
+    // The `||` -> `&&` mutant of this check is a known survivor: telling
+    // the two apart needs a second mount, which a plain test cannot make
+    // (TODO: a userns test; see the T8 re-review).
     if domain(t.files.as_raw_fd())? != dom || domain(t.info.as_raw_fd())?.0 != dom.0 {
         return Err(io::Error::from_raw_os_error(libc::EXDEV));
     }

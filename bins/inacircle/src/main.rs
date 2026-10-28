@@ -80,6 +80,17 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_UNSUPPORTED: u8 = 3;
 
 fn main() -> ExitCode {
+    // Transparent huge pages off for this process (decision D-29). Measured
+    // on ARM: about 68 kB of live heap sat in a 2048 kB AnonHugePages region
+    // (base and hardening builds alike), which alone blows the 5 MB PSS
+    // budget. The flag survives fork and exec, so the sandbox resets it in
+    // the action child. Failure is ignored: kernels before 3.15 lack
+    // PR_SET_THP_DISABLE (EINVAL), and then there is nothing to disable
+    // and nothing lost; the budget is only measured, never enforced here.
+    //
+    // SAFETY: prctl with integer arguments only; no pointers, no memory
+    // is touched.
+    let _ = unsafe { libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0) };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let rest = args.get(1..).unwrap_or_default();
     let code = match args.first().and_then(|a| a.to_str()) {
