@@ -82,8 +82,9 @@ const EXIT_UNSUPPORTED: u8 = 3;
 fn main() -> ExitCode {
     // Transparent huge pages off for this process (decision D-29). Measured
     // on ARM: about 68 kB of live heap sat in a 2048 kB AnonHugePages region
-    // (base and hardening builds alike), which alone blows the 5 MB PSS
-    // budget. The flag survives fork and exec, so the sandbox resets it in
+    // (base and hardening builds alike). PSS held (worst 3.62 MB, budget
+    // 5 MB), but VmHWM/RSS reached ~5.2 MB, and the CI guard (D-27) measures
+    // that stricter proxy. The flag survives fork and exec, so the sandbox resets it in
     // the action child. Failure is ignored: kernels before 3.15 lack
     // PR_SET_THP_DISABLE (EINVAL), and then there is nothing to disable
     // and nothing lost; the budget is only measured, never enforced here.

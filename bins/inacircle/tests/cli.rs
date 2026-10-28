@@ -742,12 +742,31 @@ fn two_step_route_end_to_end() {
 /// engine's sandbox tests, where the child can read `/proc`.
 #[test]
 fn thp_is_disabled_in_the_main_process() {
+    // The child inherits the harness's flag and restores 1 before main; if
+    // the harness itself had THP disabled, "child has 0" would prove nothing.
+    let own = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    if !own
+        .lines()
+        .any(|l| l.split_whitespace().eq(["THP_enabled:", "1"]))
+    {
+        let msg = "thp test: the harness has THP disabled (or /proc unreadable), the check would be vacuous";
+        assert!(
+            !landlock_required() && std::env::var_os("CI").is_none(),
+            "{msg}"
+        );
+        eprintln!("{msg}: skipped");
+        return;
+    }
     let e = Env::with_actions("thp", &[]);
     // A plugin that keeps the engine alive for a second while its status is
     // read; it then ends normally so the engine cleans its work directory.
     plugin(&e, "thp", "text/plain", "text/markdown", "md", "sleep 1");
     e.file("doc.txt", b"text\n");
-    let mut child = e.cmd(&["run", "markdown", "doc.txt"]).spawn().unwrap();
+    let child = e
+        .cmd(&["run", "markdown", "doc.txt"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let status = format!("/proc/{}/status", child.id());
     // Between fork and main the process still has the test's value (1), so
     // poll until main has run; 800 ms is far above a start (~1 ms) and
@@ -767,9 +786,16 @@ fn thp_is_disabled_in_the_main_process() {
         if line == "THP_enabled: 0" {
             break;
         }
+        // 10 ms: ten starts (~1 ms), so the flag is seen within one tick
+        // of main; 80 polls fit under the deadline at negligible CPU.
         std::thread::sleep(Duration::from_millis(10));
     }
-    child.wait().unwrap();
+    // Without Landlock the engine refuses the plugin and exits at once, so
+    // the status read above raced; follow the sandbox skip/require rule.
+    let o = parse_out(child.wait_with_output().unwrap());
+    if skip_no_sandbox("thp_is_disabled_in_the_main_process", &o) {
+        return;
+    }
     assert_eq!(line, "THP_enabled: 0");
 }
 
@@ -1126,7 +1152,7 @@ fn cancel_end_to_end() {
     let e = Env::new("cancel");
     let a = e.test_input("a.test", &["sleep_ms=10000", "events=done"]);
     let b = e.test_input("b.test", &[]);
-    let mut child = e
+    let child = e
         .cmd(&[
             OsStr::new("run"),
             OsStr::new("--action"),
@@ -1196,7 +1222,7 @@ fn cancel_after_some_done_exits_0() {
     // Two source folders: two processes, the first finishes before the cancel.
     let a = e.test_input("d1/a.test", &["events=done"]);
     let b = e.test_input("d2/b.test", &["sleep_ms=10000", "events=done"]);
-    let mut child = e
+    let child = e
         .cmd(&[
             OsStr::new("run"),
             OsStr::new("--action"),
