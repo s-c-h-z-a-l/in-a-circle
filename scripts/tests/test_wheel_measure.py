@@ -341,5 +341,29 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertEqual(self.m.idle_gate({**ok, "window_s": 0})["verdict"], "INCOMPLETE")
 
 
+class AbRunnerTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "measure_ab", SCRIPT.with_name("measure-ab.py"))
+        self.ab = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ab)
+
+    def row(self, marker, failure=None):
+        return {"attempt": 3, "utc": "t", "resident_pages": 221, "executable_pages": 221,
+                "marker": marker, "failure": failure, "build": "B", "series": "ab1"}
+
+    def test_ledger_row_per_metric_with_build_and_residency(self):
+        rows = self.ab.to_ledger(self.row(MARKER), "startup")
+        self.assertEqual({r["metric"] for r in rows}, set(self.ab.METRICS))
+        self.assertTrue(all(r["build"] == "B" and r["series"] == "ab1" for r in rows))
+        self.assertIn("resident 221/221", rows[0]["note"])
+        self.assertEqual({r["status"] for r in rows}, {"valid"})
+
+    def test_failed_attempt_is_kept_as_invalid_never_dropped(self):
+        rows = self.ab.to_ledger(self.row(None, "wheel alive 5s after Escape"), "startup")
+        self.assertEqual(len(rows), len(self.ab.METRICS))
+        self.assertEqual({r["status"] for r in rows}, {"invalid"})
+
+
 if __name__ == "__main__":
     unittest.main()
