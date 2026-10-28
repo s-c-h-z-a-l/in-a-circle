@@ -440,10 +440,62 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
     assert!(dead(pid), "the hanging manifest outlived the wheel");
 }
 
-/// A drop of 1024 files stays within the 5 MB peak-RSS budget at stage 2.
-/// The budget is for the optimized binary (`cargo test --release`); a
-/// debug build, larger by itself, checks that the drop adds little over a
-/// one-file drop instead.
+/// The engine memory ceiling (docs/benchmarks/acceptance.md): 5 MB PSS,
+/// 5,000,000 bytes. `smaps_rollup` reports kB that are KiB, so a sample is
+/// multiplied by 1024 before it is compared.
+const PSS_CEILING_BYTES: u64 = 5_000_000;
+
+/// The gate over every PSS observation (`label`, KiB): each one must be a
+/// real measurement (non-zero) and at or below the ceiling. No sample is
+/// dropped, no minimum is taken, and an empty list is missing evidence,
+/// not a pass.
+fn pss_gate(samples: &[(&str, u64)]) -> Result<(), String> {
+    if samples.is_empty() {
+        return Err("no PSS observation: incomplete evidence".into());
+    }
+    for &(label, kib) in samples {
+        if kib == 0 {
+            return Err(format!("{label}: PSS 0 kB is not a measurement"));
+        }
+        if kib * 1024 > PSS_CEILING_BYTES {
+            return Err(format!(
+                "{label}: {kib} KiB = {} B exceeds {PSS_CEILING_BYTES} B",
+                kib * 1024
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_pss_gate_checks_every_sample_in_bytes() {
+    // 4882 KiB = 4,999,168 B passes; 4883 KiB = 5,000,192 B is over 5 MB
+    // although it is under the old 5120 KiB smoke limit.
+    let ok = [("a", 4882), ("b", 4882), ("c", 4882), ("d", 4882)];
+    assert_eq!(pss_gate(&ok), Ok(()));
+    // One bad sample among four fails, even when the others are low: the
+    // gate is not the minimum of two runs.
+    let one_over = [("1a", 2500), ("1b", 2500), ("1024a", 4883), ("1024b", 2500)];
+    let err = pss_gate(&one_over).unwrap_err();
+    assert!(err.starts_with("1024a:"), "{err}");
+    // The worst of the four decides, wherever it sits.
+    assert!(pss_gate(&[("x", 6000), ("y", 100)]).is_err());
+    assert!(pss_gate(&[("x", 100), ("y", 6000)]).is_err());
+}
+
+#[test]
+fn the_pss_gate_rejects_missing_or_zero_evidence() {
+    assert!(pss_gate(&[]).is_err());
+    assert!(pss_gate(&[("a", 2500), ("b", 0)]).is_err());
+}
+
+/// A drop of 1024 files stays within the 5 MB PSS ceiling at stage 2. All
+/// four observations (two runs of 1 file, two of 1024) are kept and each
+/// must pass `pss_gate`: no minimum, no 5120 KiB smoke limit. The budget
+/// is for the optimized binary (`cargo test --release`); a debug build,
+/// larger by itself, checks that the drop adds little over a one-file drop
+/// instead. The PSS is taken once, after stage 2 has painted (a sampled
+/// value, not a transient peak: acceptance.md).
 #[test]
 fn a_large_drop_stays_within_the_memory_budget() {
     let peak = |name: &str, n: usize| -> (u64, u64) {
@@ -471,27 +523,34 @@ fn a_large_drop_stays_within_the_memory_budget() {
         );
         kb
     };
-    // Shared and file-backed pages vary by tens of kB from run to run: the lower of
-    // two runs each.
-    let low = |a: (u64, u64), b: (u64, u64)| (a.0.min(b.0), a.1.min(b.1));
-    let (one, one_anon) = low(peak("rss1a", 1), peak("rss1b", 1));
-    let (many, many_anon) = low(peak("rss1024a", 1024), peak("rss1024b", 1024));
-    eprintln!(
-        "PSS at stage 2: 1 file {one} kB, 1024 files {many} kB (anonymous {one_anon} / {many_anon} kB)"
-    );
+    let runs = [
+        ("1 file, run a", peak("rss1a", 1), 1usize),
+        ("1 file, run b", peak("rss1b", 1), 1),
+        ("1024 files, run a", peak("rss1024a", 1024), 1024),
+        ("1024 files, run b", peak("rss1024b", 1024), 1024),
+    ];
+    for (label, (pss, anon), _) in &runs {
+        eprintln!("PSS at stage 2, {label}: {pss} kB (anonymous {anon} kB)");
+    }
     if cfg!(debug_assertions) {
         // Debug builds allocate more per file; the drop's own growth is its
         // anonymous memory (measured 160 kB). PSS is not the measure
         // here: it divides the shared pages among the processes alive at
-        // that moment, so beside other tests' wheels the two runs differ by
+        // that moment, so beside other tests' wheels the runs differ by
         // more than the drop adds. The budget itself is the release
-        // assertion below.
+        // assertion below. Worst against best, so no run is hidden.
+        let anon = |n: usize| runs.iter().filter(move |r| r.2 == n).map(|r| (r.1).1);
+        let one = anon(1).min().unwrap();
+        let many = anon(1024).max().unwrap();
         assert!(
-            many_anon <= one_anon + 512,
-            "1 file {one_anon} kB, 1024 files {many_anon} kB anonymous"
+            many <= one + 512,
+            "1 file {one} kB, 1024 files {many} kB anonymous"
         );
     } else {
-        assert!(many <= 5 * 1024, "1024 files: {many} kB");
+        let samples: Vec<(&str, u64)> = runs.iter().map(|r| (r.0, (r.1).0)).collect();
+        if let Err(why) = pss_gate(&samples) {
+            panic!("{why}");
+        }
     }
 }
 
@@ -536,6 +595,78 @@ fn reader_gone(w: &std::os::fd::OwnedFd) -> bool {
     // SAFETY: one valid pollfd.
     unsafe { libc::poll(&mut p, 1, 0) };
     p.revents & libc::POLLERR != 0
+}
+
+/// The context switches of every thread of `pid`, voluntary and
+/// involuntary: each is one time the kernel took the process off the CPU,
+/// so while the wheel waits for the user, no switch means no wakeup.
+fn context_switches(pid: u32) -> u64 {
+    let mut total = 0;
+    for task in fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+        let status = fs::read_to_string(task.unwrap().path().join("status")).unwrap();
+        total += status
+            .lines()
+            .filter(|l| l.contains("ctxt_switches:"))
+            .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+            .sum::<u64>();
+    }
+    total
+}
+
+/// The number of live child processes of `pid` (any thread).
+fn children(pid: u32) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .map(|t| fs::read_to_string(t.unwrap().path().join("children")).unwrap_or_default())
+        .map(|c| c.split_whitespace().count())
+        .sum()
+}
+
+/// Observation window of a stationary wheel: 2 s is far above any startup
+/// settle and long enough that a periodic timer of 1 s or faster would show
+/// at least one switch, yet short for the suite. The wheel's own deadlines
+/// are 30 s (user) and 2 s (startup, long over after the first 300 ms
+/// settle below), so none can fire inside the window.
+const IDLE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Idle, property by property (acceptance.md): a mapped wheel that nobody
+/// touches (1) takes no context switch during the window, so no
+/// autonomous periodic work (the poll sleeps on a deadline), (2) has no
+/// child process (no resident engine), (3) reports `idle_wakeups=0` (no
+/// premature empty poll) and (4) is gone, exit 0, once closed.
+#[test]
+fn a_stationary_wheel_wakes_for_nothing_and_leaves_no_engine() {
+    let root = Root::new("idle");
+    root.markdown_action_cached();
+    let (mut c, child) = start(&root, true);
+    let pid = child.id();
+    // A seat with pointer and keyboard and the pointer over the surface
+    // end the startup waits: what remains is the steady state of a wheel
+    // that waits for the user.
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    // The frame passes; the wheel prepaints the released buffer.
+    c.pump(Duration::from_millis(300));
+    c.release_held();
+    c.pump(Duration::from_millis(300));
+    let before = context_switches(pid);
+    std::thread::sleep(IDLE_WINDOW);
+    let after = context_switches(pid);
+    assert_eq!(
+        before,
+        after,
+        "{} switches while nobody touched the wheel",
+        after - before
+    );
+    assert_eq!(children(pid), 0, "a child process is resident");
+    let err = finish(c, child);
+    let line = err
+        .lines()
+        .find(|l| l.contains("measure wheel "))
+        .unwrap_or_else(|| panic!("no measure line: {err}"));
+    assert!(line.contains(" idle_wakeups=0 "), "{line}");
+    assert!(dead(pid as i32), "the wheel outlived its close");
 }
 
 /// The list is read once, on `enter`; the drop on a lit category is then

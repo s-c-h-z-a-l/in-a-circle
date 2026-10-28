@@ -8,11 +8,18 @@ met: `sample_gate` says whether enough valid observations exist, nothing more.
 Attempt record, one JSON object per line:
   {"metric": str, "condition": str, "series": str (default "A"),
    "unit": "us"|"bytes", "status": "valid"|"timeout"|"invalid"|"missing",
-   "value": int (non-negative; required for valid, null otherwise), "note": str?}
+   "value": int (non-negative; required for valid, null otherwise), "note": str?,
+   "build": str? (A/B build label; summarize --build selects one, never pools)}
+
+Acceptance helpers (T13a): kib_to_bytes, marker_attempts (a `measure wheel`
+line to attempts), memory_gate (every sample against 5,000,000 B) and
+idle_gate (idle properties kept apart). Verdicts are PASS, FAIL or
+INCOMPLETE; missing or zero evidence is never a PASS.
 """
 
 import argparse
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -20,10 +27,13 @@ import sys
 # CLAUDE.md Rules 2: timing acceptance needs >= 50 valid observations per
 # metric and condition. Below it the group is reported but not sufficient.
 MIN_VALID = 50
-UNITS = ("us", "bytes")
+UNITS = ("us", "bytes", "count")
 STATUSES = ("valid", "timeout", "invalid", "missing")
 NON_VALID = STATUSES[1:]
 DEFAULT_SERIES = "A"
+# Engine memory ceiling, docs/benchmarks/acceptance.md: 5 MB = 5,000,000 B
+# of PSS. Kernel "kB" in smaps_rollup are KiB: multiply by 1024 first.
+MEMORY_CEILING_BYTES = 5_000_000
 
 
 def nearest_rank(samples, percentile):
@@ -73,10 +83,14 @@ def parse_attempt(text, line_number):
     note = record.get("note")
     if note is not None and not isinstance(note, str):
         fail("note must be a string")
+    build = record.get("build")
+    if build is not None and (not isinstance(build, str) or not build):
+        fail("build must be a non-empty string")
     return {
         "metric": record["metric"],
         "condition": record["condition"],
         "series": series,
+        "build": build,
         "unit": record["unit"],
         "status": record["status"],
         "value": value,
@@ -94,7 +108,7 @@ def read_attempts(path):
     return attempts
 
 
-def summarize(attempts, min_valid=MIN_VALID):
+def summarize(attempts, min_valid=MIN_VALID, build=None):
     """Group by (metric, condition, series); never pool series or conditions.
 
     Every non-valid attempt stays in the group's `failures` (line, status,
@@ -103,12 +117,18 @@ def summarize(attempts, min_valid=MIN_VALID):
     """
     if min_valid < 1:
         raise ValueError(f"min_valid must be >= 1, got {min_valid}")
+    if build is not None:
+        attempts = [a for a in attempts if a.get("build") == build]
     grouped = {}
     for item in attempts:
         key = (item["metric"], item["condition"], item.get("series", DEFAULT_SERIES))
         grouped.setdefault(key, []).append(item)
     groups = []
     for (metric, condition, series), items in sorted(grouped.items()):
+        builds = {item.get("build") for item in items}
+        if len(builds) != 1:
+            raise ValueError(f"{metric}/{condition}/{series}: builds {sorted(map(str, builds))} "
+                             "would be pooled; select one with build=")
         units = {item["unit"] for item in items}
         if len(units) != 1:
             raise ValueError(f"{metric}/{condition}/{series}: mixed units {sorted(units)}")
@@ -119,6 +139,7 @@ def summarize(attempts, min_valid=MIN_VALID):
             "condition": condition,
             "series": series,
             "unit": units.pop(),
+            "build": builds.pop(),
             "attempts": len(items),
             "valid": len(values),
             "non_valid": {s: sum(1 for i in items if i["status"] == s) for s in NON_VALID},
@@ -192,6 +213,110 @@ def compare(a_summary, b_summary):
     return rows
 
 
+def kib_to_bytes(kib):
+    """smaps_rollup / VmHWM 'kB' are KiB."""
+    return kib * 1024
+
+
+def marker_attempts(line, *, condition, series, build, required, note=None, failure=None):
+    """Attempts from one `measure wheel` line, one per required metric.
+
+    A required metric absent from the line, or reported as -1 (never taken),
+    is `missing`; a line of None (no marker at all) makes every one missing.
+    `pss_bytes` comes from `pss_kb` (KiB -> B); 0 is `invalid`, not a value.
+    A functional `failure` (crash, hang, non-zero exit) makes every row
+    `invalid` with that reason: the run is kept, never silently skipped.
+    """
+    fields = {}
+    if line is not None:
+        for key, value in re.findall(r"(\w+)=(-?\d+)", line):
+            fields[key] = int(value)
+        if "pss_kb" in fields:
+            fields["pss_bytes"] = kib_to_bytes(fields["pss_kb"])
+    rows = []
+    for metric in required:
+        value = fields.get(metric)
+        unit = "bytes" if metric.endswith("_bytes") else "count" if metric in COUNT_METRICS else "us"
+        if failure is not None:
+            status, why = "invalid", f"functional failure: {failure}"
+        elif line is None:
+            status, why = "missing", "no measure line"
+        elif value is None:
+            status, why = "missing", "field absent from the marker"
+        elif value < 0:
+            status, why = "missing", "marker reports -1 (never taken)"
+        elif value == 0 and metric == "pss_bytes":
+            status, why = "invalid", "PSS 0 is not a measurement"
+        else:
+            status, why = "valid", None
+        rows.append({
+            "metric": metric, "condition": condition, "series": series, "build": build,
+            "unit": unit, "status": status,
+            "value": value if status == "valid" else None,
+            "note": "; ".join(x for x in (why, note) if x) or None,
+        })
+    return rows
+
+
+COUNT_METRICS = ("idle_wakeups", "events", "paints", "busy_paints", "hover_events")
+
+
+def memory_gate(summary, limit=MEMORY_CEILING_BYTES, min_samples=1):
+    """Verdict per byte-unit group of a summary: the maximum decides.
+
+    FAIL: any valid sample above `limit` (a ceiling, not a p95).
+    INCOMPLETE: fewer than `min_samples` valid, any non-valid attempt, or a
+    zero maximum. PASS only when none of those and all samples <= limit.
+    FAIL wins over INCOMPLETE: an observed breach does not need more data.
+    """
+    out = []
+    for g in summary["groups"]:
+        if g["unit"] != "bytes":
+            continue
+        non_valid = sum(g["non_valid"].values())
+        if g["max"] is not None and g["max"] > limit:
+            verdict, why = "FAIL", f"max {g['max']} B > {limit} B"
+        elif g["valid"] < min_samples:
+            verdict, why = "INCOMPLETE", f"{g['valid']} valid < {min_samples}"
+        elif non_valid:
+            verdict, why = "INCOMPLETE", f"{non_valid} non-valid attempt(s)"
+        elif not g["max"]:
+            verdict, why = "INCOMPLETE", "maximum is 0: not a measurement"
+        else:
+            verdict, why = "PASS", f"max {g['max']} B <= {limit} B"
+        out.append({"metric": g["metric"], "condition": g["condition"],
+                    "series": g["series"], "build": g.get("build"), "valid": g["valid"],
+                    "max": g["max"], "limit": limit, "verdict": verdict, "reason": why})
+    return out
+
+
+IDLE_PROPERTIES = ("premature_empty_polls", "context_switches", "resident_processes")
+
+
+def idle_gate(observation):
+    """Idle properties one by one for a stationary-wheel observation.
+
+    premature_empty_polls: the wheel's own counter (poll returned nothing
+    before a deadline); context_switches: external, over `window_s` seconds
+    (any autonomous periodic work); resident_processes: engine/children
+    still alive after the operation. Each must be 0. A missing key or a
+    window of 0 s is INCOMPLETE; protocol events and deadline expiry are
+    named by the caller and are not counted here.
+    """
+    props = {}
+    for key in IDLE_PROPERTIES:
+        value = observation.get(key)
+        props[key] = "INCOMPLETE" if value is None else "PASS" if value == 0 else "FAIL"
+    window = observation.get("window_s")
+    if "FAIL" in props.values():
+        verdict = "FAIL"
+    elif "INCOMPLETE" in props.values() or not window:
+        verdict = "INCOMPLETE"
+    else:
+        verdict = "PASS"
+    return {"verdict": verdict, "properties": props, "window_s": window}
+
+
 def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -211,6 +336,11 @@ def main(argv=None):
     s.add_argument("--attempts", required=True)
     s.add_argument("--output", required=True)
     s.add_argument("--min-valid", type=min_valid_arg, default=MIN_VALID)
+    s.add_argument("--build", help="only attempts of this build label")
+    g = sub.add_parser("gate-memory")
+    g.add_argument("--summary", required=True)
+    g.add_argument("--output", required=True)
+    g.add_argument("--min-samples", type=int, default=1)
     c = sub.add_parser("compare")
     c.add_argument("--a", required=True, help="summary JSON of the baseline")
     c.add_argument("--b", required=True, help="summary JSON of the candidate")
@@ -218,7 +348,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "summarize":
-            write_json(args.output, summarize(read_attempts(args.attempts), args.min_valid))
+            write_json(args.output, summarize(read_attempts(args.attempts), args.min_valid,
+                                              args.build))
+        elif args.command == "gate-memory":
+            summary = json.loads(Path(args.summary).read_text(encoding="utf-8"))
+            gates = memory_gate(summary, min_samples=args.min_samples)
+            write_json(args.output, {"gates": gates})
+            return 0 if gates and all(x["verdict"] == "PASS" for x in gates) else 1
         else:
             loaded = [json.loads(Path(p).read_text(encoding="utf-8")) for p in (args.a, args.b)]
             write_json(args.output, {"comparisons": compare(*loaded)})
