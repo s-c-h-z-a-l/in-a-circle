@@ -290,10 +290,16 @@ impl Catalog {
                         Some(lines) => lines,
                         None => match cached.iter().position(|e| e.bin.path == bin.path) {
                             Some(i) => {
-                                // The old entry stays as it was (old bin).
+                                // The old entry stays as it was (old bin),
+                                // unless it no longer fits: then it goes,
+                                // loudly, like any binary over the limits.
                                 let old = cached.swap_remove(i);
-                                if budget.take(&old).is_ok() {
-                                    entries.push(old);
+                                match budget.take(&old) {
+                                    Ok(()) => entries.push(old),
+                                    Err(why) => eprintln!(
+                                        "inacircle: {}: {why}; its actions are refused (the action catalog's limits)",
+                                        old.bin.path.display()
+                                    ),
                                 }
                                 continue;
                             }
@@ -835,30 +841,41 @@ fn read_cache(path: &Path) -> Option<Vec<Entry>> {
         .ok()?;
     // The size `fstat` shows is a pre-filter; the bytes read are the
     // authority (a file may grow while it is read): at most max + 1.
-    let rejected = |why: &str| {
-        eprintln!(
-            "inacircle: The action catalog was rejected and will be rebuilt ({why}). Its actions were not silently discarded."
-        );
-    };
     if file.metadata().ok()?.len() > CACHE_BYTES as u64 {
-        rejected("the cache file is too big");
+        cache_rejected("the cache file is too big");
         return None;
     }
+    read_cache_from(file)
+}
+
+fn cache_rejected(why: &str) {
+    eprintln!(
+        "inacircle: The action catalog was rejected and will be rebuilt ({why}). Its actions were not silently discarded."
+    );
+}
+
+/// The cache from an open reader, read bounded ([`CACHE_BYTES`] + 1 at
+/// most, whatever the file showed when opened).
+fn read_cache_from(file: impl std::io::Read) -> Option<Vec<Entry>> {
     let bytes = match action::read_bounded(file, CACHE_BYTES) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-            rejected("the cache file is too big");
+            cache_rejected("the cache file is too big");
             return None;
         }
         Err(_) => return None,
     };
-    match check_cache(&bytes) {
-        Ok(()) => parse_cache(&bytes),
-        Err(why) => {
-            rejected(why);
-            None
-        }
+    if let Err(why) = check_cache(&bytes) {
+        cache_rejected(why);
+        return None;
     }
+    // Within the limits but not what `write_cache` writes (another
+    // version, an unknown kind, a bad field): rejected as loudly.
+    let entries = parse_cache(&bytes);
+    if entries.is_none() {
+        cache_rejected("the cache file is malformed");
+    }
+    entries
 }
 
 /// The cache's limits on the whole file (bytes, lines, records, fields,
@@ -2064,23 +2081,31 @@ pub(crate) mod tests {
         assert!(read_cache(&path).is_none());
     }
 
-    /// A cache that grows while it is read: the read stops at the limit
-    /// plus one byte (the reader is bounded by what it reads, not by what
-    /// the file showed at the start).
+    /// A cache that grows while it is read (past the size the open file
+    /// showed, so the size pre-filter cannot see it): the cache reader
+    /// stops at the limit plus one byte and rejects it.
     #[test]
     fn a_cache_that_grows_while_read_is_cut_at_the_limit() {
+        /// A valid header, then `a` for ever.
         struct Growing(usize);
         impl std::io::Read for Growing {
             fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
                 assert!(self.0 < 1 << 20, "read far past the bound");
-                b.fill(b'a');
-                self.0 += b.len();
-                Ok(b.len())
+                let hdr = HDR.as_bytes();
+                let n = if self.0 < hdr.len() {
+                    let n = (hdr.len() - self.0).min(b.len());
+                    b[..n].copy_from_slice(&hdr[self.0..self.0 + n]);
+                    n
+                } else {
+                    b.fill(b'a');
+                    b.len()
+                };
+                self.0 += n;
+                Ok(n)
             }
         }
         let mut g = Growing(0);
-        let e = action::read_bounded(&mut g, CACHE_BYTES).unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(read_cache_from(&mut g).is_none());
         assert_eq!(g.0, CACHE_BYTES + 1);
     }
 
