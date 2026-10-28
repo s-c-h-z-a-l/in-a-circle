@@ -756,9 +756,20 @@ fn two_step_intermediate_symlink_swap_is_refused() {
         return;
     }
     assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
-    assert_eq!(
-        o.pairs("fail"),
-        [(a, "intermediate output changed".to_owned())]
+    // The swap runs right after step 1 prints `done`: the engine refuses
+    // it either when it checks the `done` output (the name is gone or is
+    // the link by then) or when it rechecks it before step 2. Both are
+    // refusals; which one depends only on scheduling.
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{}{}", o.stdout, o.stderr);
+    assert_eq!(fails[0].0, a);
+    let why = &fails[0].1;
+    assert!(
+        why == "intermediate output changed"
+            || why.starts_with("contract violation: done output 0/a.mid: ")
+            || why
+                == "contract violation: done output 0/a.mid is not a regular file in the work directory",
+        "{why}"
     );
     assert!(!e.files().join("doc").exists());
     for f in fs::read_dir(e.files()).unwrap().flatten() {
