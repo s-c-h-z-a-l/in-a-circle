@@ -32,4 +32,14 @@ fuzz_target!(|data: &[u8]| {
     if let Ok((d, _)) = doc::txt::read_limited(data, tight) {
         let _ = doc::md::write_limited(&d, tight);
     }
+    // The official budgets (what the shipped conversion uses): a short
+    // input stays far below them, so this is the accept path.
+    let official = doc::Limits::DEFAULT;
+    if let Ok(d) = doc::md::read_limited(data, official) {
+        let _ = doc::txt::write_limited(&d, official);
+        let _ = doc::md::write_limited(&d, official);
+    }
+    if let Ok((d, _)) = doc::txt::read_limited(data, official) {
+        let _ = doc::md::write_limited(&d, official);
+    }
 });
