@@ -1152,7 +1152,7 @@ fn cancel_end_to_end() {
     let e = Env::new("cancel");
     let a = e.test_input("a.test", &["sleep_ms=10000", "events=done"]);
     let b = e.test_input("b.test", &[]);
-    let child = e
+    let mut child = e
         .cmd(&[
             OsStr::new("run"),
             OsStr::new("--action"),
@@ -1222,7 +1222,7 @@ fn cancel_after_some_done_exits_0() {
     // Two source folders: two processes, the first finishes before the cancel.
     let a = e.test_input("d1/a.test", &["events=done"]);
     let b = e.test_input("d2/b.test", &["sleep_ms=10000", "events=done"]);
-    let child = e
+    let mut child = e
         .cmd(&[
             OsStr::new("run"),
             OsStr::new("--action"),
