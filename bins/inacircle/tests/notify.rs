@@ -1134,7 +1134,7 @@ fn history_failure_after_the_commit_keeps_the_output_without_undo() {
     e.file("b.txt", "hello\n");
     let hist = e.root.join("state/inacircle/history");
     // Calibration: what an ordinary run of the same shape writes before
-    // its commit record.
+    // its commit record (from its job start).
     let (fake, _rx) = server(|p, g| close(p, g.id));
     let r = plain_run(e.cmd(
         Some(&bus_of(&fake)),
@@ -1143,7 +1143,7 @@ fn history_failure_after_the_commit_keeps_the_output_without_undo() {
     fake.join();
     assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
     let text = fs::read(&hist).unwrap();
-    let begin = find(&text, b"\ngroup-begin\t").expect("no group record") + 1;
+    let begin = find(&text, b"\njob-start\t").expect("no job start") + 1;
     let commit = find(&text, b"\npublish-commit\t").expect("no commit record") + 1;
     // The next run may grow the history by that and 40 bytes more: its
     // intent fits (the lengths differ by a few digits at most), its commit

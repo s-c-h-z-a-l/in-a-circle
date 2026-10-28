@@ -269,8 +269,8 @@ fn txt_to_md_end_to_end() {
         "{job}"
     );
 
-    // The group is recorded with its baseline before the publishing rename
-    // and its committed place after it.
+    // The job's start first; the group is recorded with its baseline
+    // before the publishing rename and its committed place after it.
     let history = e.history();
     assert!(history.starts_with("inacircle-history 1\n"), "{history}");
     let records: Vec<Line> = history
@@ -282,6 +282,7 @@ fn txt_to_md_end_to_end() {
     assert_eq!(
         kinds,
         [
+            "job-start",
             "group-begin",
             "child",
             "group-end",
@@ -290,11 +291,11 @@ fn txt_to_md_end_to_end() {
         ],
         "{history}"
     );
-    assert_eq!(records[1].get("rel"), Some("jegyzet.md"));
+    assert_eq!(records[2].get("rel"), Some("jegyzet.md"));
     let folder = e.files().join("jegyzet");
-    assert_eq!(records[3].get("target"), Some(folder.to_str().unwrap()));
-    assert_eq!(records[4].get("actual"), Some(folder.to_str().unwrap()));
-    assert_eq!(records[4].get("durability"), Some("synced"));
+    assert_eq!(records[4].get("target"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[5].get("actual"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[5].get("durability"), Some("synced"));
     assert!(
         history
             .lines()
