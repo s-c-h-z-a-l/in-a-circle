@@ -1085,7 +1085,8 @@ pub struct Running {
     job: String,
     action: String,
     inputs: usize,
-    started: u64,
+    /// Own identity, taken once; `None` when `/proc` cannot tell.
+    id: Option<ProcId>,
     last: Instant,
 }
 
@@ -1099,7 +1100,7 @@ impl Running {
             job: job.0.clone(),
             action: action.to_owned(),
             inputs,
-            started: unix_secs(),
+            id: ProcId::of(std::process::id()),
             last: Instant::now(),
         };
         r.write(0, 0.0);
@@ -1120,14 +1121,18 @@ impl Running {
 
     fn write(&mut self, done: usize, progress: f32) {
         let Some(dir) = &self.dir else { return };
-        let line = Line::new("job")
+        let mut line = Line::new("job")
             .pair("id", &self.job)
             .pair("pid", &std::process::id().to_string())
             .pair("action", cut_at_boundary(&self.action, REGISTRY_ACTION_MAX))
             .pair("inputs", &self.inputs.to_string())
             .pair("done", &done.to_string())
-            .pair("progress", &format!("{progress:.3}"))
-            .pair("started", &self.started.to_string());
+            .pair("progress", &format!("{progress:.3}"));
+        if let Some(id) = &self.id {
+            line = line
+                .pair("start", &id.ticks.to_string())
+                .pair("boot", &id.boot);
+        }
         if let Ok(w) = dir.replace(&self.job, write_line(&line).as_bytes(), false) {
             self.written = Some(w);
         }
@@ -1151,29 +1156,78 @@ fn cut_at_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Start time of `pid` in unix seconds, from `/proc/<pid>/stat` (field 22,
-/// clock ticks since boot) and the boot time in `/proc/stat`.
-fn proc_start_secs(pid: u32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+/// Most bytes read from a `/proc` file for process identity: a `stat` line
+/// is `comm` (at most 16 bytes) plus 50-odd numbers, about 300 bytes; 4 KiB
+/// is far past that, and a longer file is not a `stat` line (read fails).
+const PROC_READ_MAX: usize = 4096;
+
+/// The first `PROC_READ_MAX` bytes of a `/proc` file, opened `O_NONBLOCK`
+/// (nothing under `/proc` should block; a hostile mount must not hang us).
+fn read_proc(path: &str) -> Option<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    String::from_utf8(action::read_bounded(&f, PROC_READ_MAX).ok()?).ok()
+}
+
+/// Start time of `pid` in clock ticks since boot: `/proc/<pid>/stat`
+/// field 22. It is a monotonic count, so a step of the wall clock (NTP,
+/// by hand) cannot change it, unlike a time derived from `btime`.
+fn proc_start_ticks(pid: u32) -> Option<u64> {
+    parse_start_ticks(&read_proc(&format!("/proc/{pid}/stat"))?)
+}
+
+fn parse_start_ticks(stat: &str) -> Option<u64> {
     // `comm` may contain spaces and parentheses: fields resume after the last ')'.
     let rest = &stat[stat.rfind(')')? + 1..];
     // rest starts at field 3 (state), so field 22 is index 19.
-    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
-    let btime: u64 = fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("btime "))?
-        .trim()
-        .parse()
-        .ok()?;
-    // SAFETY: sysconf has no preconditions.
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    (hz > 0).then(|| btime + ticks / hz as u64)
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Whether the process that registered the job (at `started`) still runs. A
-/// pid reused by a later process shows up as a start time after `started`.
-fn job_alive(pid: u32, started: Option<u64>) -> bool {
+/// This boot's id (`/proc/sys/kernel/random/boot_id`, a UUID of 36
+/// characters): ticks since boot are comparable only within one boot.
+fn boot_id() -> Option<String> {
+    let id = read_proc("/proc/sys/kernel/random/boot_id")?;
+    let id = id.trim();
+    (!id.is_empty() && id.len() <= 64).then(|| id.to_owned())
+}
+
+/// What a registry entry records of its process, besides the pid: the
+/// start time in ticks since boot and the boot id. Neither depends on the
+/// wall clock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcId {
+    ticks: u64,
+    boot: String,
+}
+
+impl ProcId {
+    fn of(pid: u32) -> Option<ProcId> {
+        Some(ProcId {
+            ticks: proc_start_ticks(pid)?,
+            boot: boot_id()?,
+        })
+    }
+}
+
+/// Whether the process now at the pid is the one that was recorded. An
+/// unreadable current identity (`None`) cannot prove a difference: same.
+fn same_process(recorded: &ProcId, now: Option<&ProcId>) -> bool {
+    now.is_none_or(|n| n == recorded)
+}
+
+/// Whether the process that registered the job still runs: the pid exists
+/// and, when the entry records an identity, it is the same start time in
+/// the same boot. A reused pid has another start time; an entry from a
+/// previous boot is dead whatever its pid now is.
+fn job_alive(pid: u32, recorded: Option<&ProcId>) -> bool {
+    job_alive_with(pid, recorded, ProcId::of(pid).as_ref())
+}
+
+fn job_alive_with(pid: u32, recorded: Option<&ProcId>, now: Option<&ProcId>) -> bool {
     let Ok(p) = libc::pid_t::try_from(pid) else {
         return false;
     };
@@ -1182,12 +1236,10 @@ fn job_alive(pid: u32, started: Option<u64>) -> bool {
     if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         return false;
     }
-    // EPERM (another user's process) counts as alive, unless /proc says it
-    // started after the job did.
-    match (started, proc_start_secs(pid)) {
-        (Some(s), Some(ps)) => ps <= s + 2,
-        _ => true,
-    }
+    // EPERM (another user's process) counts as alive, unless /proc shows
+    // another process there. An entry without an identity (written by an
+    // older version) is judged by the pid alone.
+    recorded.is_none_or(|r| same_process(r, now))
 }
 
 /// Why a registry listing is refused (rejection copy of the registry rows).
@@ -1198,7 +1250,10 @@ const REGISTRY_REFUSAL: &str = "The running-jobs registry exceeds its safety lim
 /// one write of at most 4 KiB, no sync (microseconds). A minute is far past
 /// that, so one in use is never taken under a working clock; if one is
 /// anyway (the writer stopped, the clock stepped), only that update's
-/// rename fails, and the job's next one (at most 250 ms later) writes anew.
+/// rename fails (the write is dropped silently). The job's next `update`
+/// writes anew; if none comes (its first write was the one lost), the job
+/// stays out of the registry until it ends, the same as a registry that
+/// could not be written at all (see [`Running::start`]).
 const STALE_TEMP: Duration = Duration::from_secs(60);
 
 /// Removes `name` if it is one of our temporary files
@@ -1282,7 +1337,12 @@ pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
             {
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("registry entry {name} cannot be opened: {e}"),
+                ));
+            }
         };
         let bytes = match action::read_bounded(&f, REGISTRY_ENTRY_MAX) {
             Ok(b) => b,
@@ -1311,8 +1371,15 @@ pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
         else {
             continue;
         };
-        let started = line.get("started").and_then(|s| s.parse().ok());
-        if !job_alive(pid, started) {
+        let recorded = line
+            .get("start")
+            .and_then(|s| s.parse().ok())
+            .zip(line.get("boot"))
+            .map(|(ticks, boot)| ProcId {
+                ticks,
+                boot: boot.to_owned(),
+            });
+        if !job_alive(pid, recorded.as_ref()) {
             // Removed only while the name is still the file just read: the
             // identity comes from its open fd, and holding the fd keeps the
             // inode from being freed and reused. What remains is the
@@ -5555,12 +5622,14 @@ mod tests {
         t.env(|| {
             let dir = jobs_dir().unwrap();
             fs::create_dir_all(&dir).unwrap();
-            // A live pid (ours) that registered the job long before it started.
+            // A live pid (ours) recorded with another start tick.
+            let own = ProcId::of(std::process::id()).unwrap();
             let old = Line::new("job")
                 .pair("id", "5-5")
                 .pair("pid", &std::process::id().to_string())
                 .pair("action", "x")
-                .pair("started", &(unix_secs() - 100_000).to_string());
+                .pair("start", &(own.ticks + 1000).to_string())
+                .pair("boot", &own.boot);
             fs::write(dir.join("5-5"), write_line(&old)).unwrap();
             assert!(list_running().unwrap().is_empty());
             assert!(!dir.join("5-5").exists());
@@ -6239,6 +6308,130 @@ mod tests {
             l = l.pair(k, v);
         }
         fs::write(dir.join(id), write_line(&l)).unwrap();
+    }
+
+    fn put_ident(dir: &Path, id: &str, pid: u32, start: u64, boot: &str, started: &str) {
+        let extra = [
+            ("start".to_owned(), start.to_string()),
+            ("boot".to_owned(), boot.to_owned()),
+            ("started".to_owned(), started.to_owned()),
+        ];
+        put_job(dir, id, pid, &extra, "x");
+    }
+
+    /// Liveness is the pid plus the start time in ticks since boot plus
+    /// the boot id; the wall clock is no input. A stale or far-future
+    /// `started` field (what a stepped clock would have made of a
+    /// btime-derived time) changes nothing.
+    #[test]
+    fn job_identity_is_pid_ticks_and_boot_not_wall_time() {
+        let t = Tmp::new("regident");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let me = std::process::id();
+            let own = ProcId::of(me).expect("/proc readable");
+            // Live job, whatever the wall clock said when it started.
+            for started in ["1", "99999999999", "0"] {
+                put_ident(&dir, "7-1", me, own.ticks, &own.boot, started);
+                assert_eq!(list_running().unwrap().len(), 1, "started={started}");
+            }
+            // The pid reused by a process that started at another tick.
+            put_ident(&dir, "7-1", me, own.ticks + 1, &own.boot, "1");
+            assert!(list_running().unwrap().is_empty());
+            assert!(!dir.join("7-1").exists(), "dead entry removed");
+            put_ident(&dir, "7-1", me, own.ticks.wrapping_sub(1), &own.boot, "1");
+            assert!(list_running().unwrap().is_empty());
+            // After a reboot: same pid, same ticks, another boot id.
+            put_ident(&dir, "7-1", me, own.ticks, "00000000-other-boot", "1");
+            assert!(list_running().unwrap().is_empty());
+            // No identity recorded (older version): the pid decides.
+            put_job(&dir, "7-1", me, &[], "x");
+            assert_eq!(list_running().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn job_alive_compares_identity_only() {
+        let me = std::process::id();
+        let rec = ProcId {
+            ticks: 100,
+            boot: "b".into(),
+        };
+        let other = |ticks, boot: &str| ProcId {
+            ticks,
+            boot: boot.into(),
+        };
+        assert!(job_alive_with(me, Some(&rec), Some(&rec)));
+        assert!(job_alive_with(me, Some(&rec), None), "unreadable /proc");
+        assert!(job_alive_with(me, None, Some(&rec)));
+        assert!(!job_alive_with(me, Some(&rec), Some(&other(101, "b"))));
+        assert!(!job_alive_with(me, Some(&rec), Some(&other(100, "c"))));
+        // A pid that does not exist is dead whatever is recorded.
+        let mut c = std::process::Command::new("true").spawn().unwrap();
+        let gone = c.id();
+        c.wait().unwrap();
+        assert!(!job_alive_with(gone, None, None));
+    }
+
+    #[test]
+    fn start_ticks_parse_after_the_last_paren_of_comm() {
+        // Fields 3..: state ppid ... starttime is field 22.
+        let tail: Vec<String> = (3..=30).map(|n| n.to_string()).collect();
+        let stat = format!("42 (a) b (c)) {}", tail.join(" "));
+        assert_eq!(parse_start_ticks(&stat), Some(22));
+        assert_eq!(parse_start_ticks("42 (x) S 1 2"), None);
+        assert_eq!(parse_start_ticks("no paren"), None);
+    }
+
+    /// A truncated history window that starts exactly at the job's
+    /// `job-start` line reads it whole (job undone); one that cuts inside
+    /// that line drops it, so the rest of the job is refused.
+    #[test]
+    fn a_window_at_or_inside_the_job_start_line() {
+        for (cut, ok) in [(0u64, true), (1, false), (6, false)] {
+            let t = Tmp::new(&format!("window-edge-{cut}"));
+            t.env(|| {
+                // A prior job, so the job's start is not at the header.
+                drop(Recorder::open(&JobId("9-9".into()), "a").finish(true));
+                let job = new_job_id();
+                let len0 = fs::metadata(history_path()).unwrap().len();
+                let f = job_of(&t, &job, &[("a", "d")]);
+                let mine = fs::metadata(history_path()).unwrap().len() - len0;
+                // Filler so the file ends HISTORY_TAIL_WINDOW - cut bytes
+                // ... after the start line begins: window start = len0 + cut.
+                let want = HISTORY_TAIL_WINDOW + cut - mine;
+                let line = |rel: usize| {
+                    write_line(
+                        &Line::new("child")
+                            .pair("job", "99-9")
+                            .pair("group", "00000000000000aa")
+                            .pair("rel", &"p".repeat(rel)),
+                    )
+                };
+                let one = line(200).len() as u64;
+                let n = want / one;
+                let rest = want - n * one; // folded into the last line
+                let mut h = OpenOptions::new()
+                    .append(true)
+                    .open(history_path())
+                    .unwrap();
+                for _ in 0..n - 1 {
+                    h.write_all(line(200).as_bytes()).unwrap();
+                }
+                h.write_all(line(200 + rest as usize).as_bytes()).unwrap();
+                drop(h);
+                let size = fs::metadata(history_path()).unwrap().len();
+                assert_eq!(size - HISTORY_TAIL_WINDOW, len0 + cut, "window start");
+                let r = undo(&job);
+                if ok {
+                    assert!(all_moved(&r.unwrap(), &f), "cut={cut}");
+                } else {
+                    assert_eq!(r.unwrap_err().to_string(), WINDOW_REFUSAL, "cut={cut}");
+                    assert!(f[0].exists(), "cut={cut}: nothing moved");
+                }
+            });
+        }
     }
 
     #[test]

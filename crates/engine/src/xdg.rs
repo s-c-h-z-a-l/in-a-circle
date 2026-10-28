@@ -267,8 +267,9 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `user-dirs.dirs` is read bounded and never through a symlink at its
-    /// own name or from a FIFO: each of those falls back to `~/Downloads`.
+    /// `user-dirs.dirs` is read bounded; a symlink at its own name is followed
+    /// to a regular file (D-34); a FIFO or directory, at the name or behind
+    /// a link, falls back to `~/Downloads`.
     #[test]
     fn user_dirs_read_is_bounded_typed_and_followed() {
         use crate::sys::tests::{mkfifo, within};
