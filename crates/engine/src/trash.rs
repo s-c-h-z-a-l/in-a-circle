@@ -2194,6 +2194,59 @@ pub(crate) mod tests {
         assert_eq!(l.path_at_check, Some(d.0.join("p/moved")));
     }
 
+    /// The known folder renamed away and a lookalike made at its path
+    /// (holding a same-named leaf): the lookalike is never the place; the
+    /// object's own fd resolves the real one.
+    #[test]
+    fn locate_never_takes_a_lookalike_at_the_known_path() {
+        let d = Dir::new("lookalike");
+        fs::create_dir_all(d.0.join("p/x")).unwrap();
+        let (p, x) = (d.fd("p"), d.fd("p/x"));
+        fs::rename(d.0.join("p"), d.0.join("real")).unwrap();
+        fs::create_dir_all(d.0.join("p/x")).unwrap();
+        let l = locate(
+            Some(&d.0.join("p")),
+            p.as_raw_fd(),
+            c"x",
+            x.as_raw_fd(),
+            OP,
+            CheckPoint::PostRestore,
+        );
+        assert_eq!(l.checked_at, CheckPoint::PostResolve);
+        assert_eq!(
+            l.path_at_check,
+            Some(fs::canonicalize(d.0.join("real/x")).unwrap())
+        );
+    }
+
+    /// The path read from `/proc` turned into a symlink to the same folder
+    /// before the reopen: that path is refused (no symlink on the way),
+    /// and the next attempt proves the real one.
+    #[test]
+    fn resolve_refuses_a_path_through_a_symlink() {
+        let d = Dir::new("resolve-link");
+        fs::create_dir_all(d.0.join("a/b")).unwrap();
+        let b = d.fd("a/b");
+        let root = d.0.clone();
+        let n = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let seen = n.clone();
+        let _f = fault(move |p| {
+            if p == Point::Resolve {
+                if seen.get() == 0 {
+                    fs::rename(root.join("a"), root.join("moved")).unwrap();
+                    symlink(root.join("moved"), root.join("a")).unwrap();
+                }
+                seen.set(seen.get() + 1);
+            }
+            None
+        });
+        let Resolved::At(p) = resolve(b.as_raw_fd()) else {
+            panic!("not resolved")
+        };
+        assert_eq!(p, fs::canonicalize(d.0.join("moved/b")).unwrap());
+        assert_eq!(n.get(), 2);
+    }
+
     /// A removed folder or a path longer than PATH_MAX is unverified at
     /// once: no reopen is tried.
     #[test]
