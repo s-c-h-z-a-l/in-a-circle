@@ -838,6 +838,10 @@ fn trash_in(root: RawFd, path: &Path, uid: u32, top: Option<&Path>) -> io::Resul
 fn home_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
     at(Point::Home)?;
     let data = xdg::data_home()?;
+    #[cfg(test)]
+    if !data.starts_with(std::env::temp_dir()) {
+        return Err(io::Error::other(NOT_A_TEST_TRASH));
+    }
     // Its nearest existing ancestor tells the domain before anything is
     // made: a home on another filesystem gets no new folders.
     let mut probe = data.as_path();
@@ -945,13 +949,17 @@ pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Resu
     trash_in(d.as_raw_fd(), &top_path.join(name), uid, Some(top_path))
 }
 
+/// Under test, a Trash outside the test's own temp folder is refused
+/// (fail closed: a test never makes or fills a real Trash).
+#[cfg(test)]
+const NOT_A_TEST_TRASH: &str = "a test reached a Trash outside its own folder";
+
 /// The volume Trash of mount `dom.0`.
 fn volume_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
     #[cfg(test)]
-    let point = match tests::TOPDIR.with_borrow(Clone::clone) {
-        Some(p) => p,
-        None => mount_point(dom.0)?,
-    };
+    let point = tests::TOPDIR
+        .with_borrow(Clone::clone)
+        .ok_or_else(|| io::Error::other(NOT_A_TEST_TRASH))?;
     #[cfg(not(test))]
     let point = mount_point(dom.0)?;
     let top = open_no_symlinks(
@@ -2099,6 +2107,22 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(volume_trash_at(d.fd("").as_raw_fd(), &d.0, uid).is_err());
+    }
+
+    /// A test never reaches a real Trash: without its own volume topdir,
+    /// or with a data home outside the temp folder, the Trash is refused
+    /// (not `EXDEV`, so no fallback either) before anything is made.
+    #[test]
+    fn a_test_without_its_own_trash_fails_closed() {
+        let d = Dir::new("closed");
+        let dom = domain(d.fd("").as_raw_fd()).unwrap();
+        TOPDIR.with_borrow_mut(|p| *p = None);
+        let e = volume_trash(dom).err().expect("a real volume Trash");
+        assert_eq!(e.to_string(), NOT_A_TEST_TRASH);
+        let e = with_env(&[("XDG_DATA_HOME", Some("/proc/inacircle-never"))], || {
+            home_trash(dom).err().expect("a Trash outside the test")
+        });
+        assert_eq!(e.to_string(), NOT_A_TEST_TRASH);
     }
 
     #[test]
