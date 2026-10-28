@@ -2145,11 +2145,11 @@ pub(crate) mod tests {
         assert_eq!(errno(r), Some(libc::EPERM));
     }
 
-    const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
-    const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
-    const FS_IOC32_SETFLAGS: libc::c_ulong = 0x4004_6602;
-    const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c_581f;
-    const FS_IOC_FSSETXATTR: libc::c_ulong = 0x401c_5820;
+    const FS_IOC_GETFLAGS: libc::Ioctl = 0x8008_6601u32 as libc::Ioctl;
+    const FS_IOC_SETFLAGS: libc::Ioctl = 0x4008_6602u32 as libc::Ioctl;
+    const FS_IOC32_SETFLAGS: libc::Ioctl = 0x4004_6602u32 as libc::Ioctl;
+    const FS_IOC_FSGETXATTR: libc::Ioctl = 0x801c_581fu32 as libc::Ioctl;
+    const FS_IOC_FSSETXATTR: libc::Ioctl = 0x401c_5820u32 as libc::Ioctl;
 
     /// Sets the nodump flag on `fd` with one of the flag ioctls.
     fn flag_ioctl(which: usize, fd: RawFd) -> io::Result<()> {
@@ -2244,7 +2244,7 @@ pub(crate) mod tests {
 
     /// `_IOW('f', 133, struct fsverity_enable_arg)`, 128-byte argument
     /// (include/uapi/linux/fsverity.h).
-    const FS_IOC_ENABLE_VERITY: libc::c_ulong = 0x4080_6685;
+    const FS_IOC_ENABLE_VERITY: libc::Ioctl = 0x4080_6685u32 as libc::Ioctl;
 
     /// Tries to enable fs-verity on `p`, opened read-only as an input is.
     fn enable_verity(p: &std::ffi::CStr) -> io::Result<()> {

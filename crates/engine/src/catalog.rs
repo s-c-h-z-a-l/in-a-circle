@@ -997,6 +997,128 @@ pub(crate) mod tests {
     /// timing-sensitive cache checks apart).
     static LOCK: Mutex<()> = Mutex::new(());
 
+    /// An entry for the budget tests: a short binary path and `lines`.
+    fn entry(lines: Vec<Line>) -> Entry {
+        Entry {
+            bin: Bin {
+                path: PathBuf::from("/b"),
+                mtime: 1,
+                size: 1,
+                builtin: false,
+            },
+            lines,
+        }
+    }
+
+    fn action_line(items: usize, pad: usize) -> Line {
+        let mut l = Line::new("action");
+        for _ in 0..items {
+            l = l.bare(&"a".repeat(pad));
+        }
+        l
+    }
+
+    /// Largest `n` in `0..=hi` for which `ok(n)` holds (`ok` is monotone).
+    fn largest(hi: usize, ok: impl Fn(usize) -> bool) -> usize {
+        let (mut lo, mut hi) = (0, hi);
+        assert!(ok(lo));
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    /// Every cache limit is exact: the value at the limit is taken, one
+    /// more is refused, and a refusal takes nothing.
+    #[test]
+    fn cache_budget_limits_are_exact() {
+        // Binaries: CACHE_BINS fit, the next one does not.
+        let mut b = CacheBudget::new();
+        for _ in 0..CACHE_BINS {
+            b.take(&entry(vec![])).unwrap();
+        }
+        assert_eq!(b.bins, CACHE_BINS);
+        assert!(b.take(&entry(vec![])).unwrap_err().contains("binaries"));
+        assert_eq!(b.bins, CACHE_BINS, "a refusal takes nothing");
+
+        // Actions, and the records total at its exact maximum.
+        let mut b = CacheBudget::new();
+        for _ in 0..CACHE_BINS - 1 {
+            b.take(&entry(vec![])).unwrap();
+        }
+        b.take(&entry(vec![action_line(0, 0); CACHE_ACTIONS]))
+            .unwrap();
+        assert_eq!(b.bins + b.actions, CACHE_RECORDS);
+        let mut b = CacheBudget::new();
+        let over = entry(vec![action_line(0, 0); CACHE_ACTIONS + 1]);
+        assert!(b.take(&over).unwrap_err().contains("actions"));
+        assert_eq!((b.bins, b.actions), (0, 0));
+
+        // Fields: the bin's 4 plus the items, exactly CACHE_TOTAL_FIELDS.
+        let per = CACHE_FIELDS_PER_RECORD;
+        let mut full = vec![action_line(per, 1); (CACHE_TOTAL_FIELDS - 4) / per];
+        let rest = (CACHE_TOTAL_FIELDS - 4) % per;
+        full.push(action_line(rest, 1));
+        let mut b = CacheBudget::new();
+        b.take(&entry(full.clone())).unwrap();
+        assert_eq!(b.fields, CACHE_TOTAL_FIELDS);
+        full.push(action_line(1, 1));
+        let mut b = CacheBudget::new();
+        assert!(b.take(&entry(full)).unwrap_err().contains("fields"));
+
+        // Fields of one record: 32 fit, 33 do not.
+        let mut b = CacheBudget::new();
+        b.take(&entry(vec![action_line(per, 1)])).unwrap();
+        let mut b = CacheBudget::new();
+        let e = b.take(&entry(vec![action_line(per + 1, 1)])).unwrap_err();
+        assert!(e.contains("too big"));
+
+        // One line's bytes: the longest accepted line is exactly the limit.
+        let fits = |n: usize| {
+            CacheBudget::new()
+                .take(&entry(vec![action_line(1, n)]))
+                .is_ok()
+        };
+        let n = largest(CACHE_LINE_BYTES + 1, fits);
+        let w = manifest::write_line(&action_line(1, n));
+        assert_eq!(w.len() - 1, CACHE_LINE_BYTES);
+
+        // A binary path at the line limit is accepted, one byte more is not.
+        let long = |n: usize| {
+            let mut e = entry(vec![]);
+            e.bin.path = PathBuf::from("/".to_owned() + &"p".repeat(n));
+            CacheBudget::new().take(&e).is_ok()
+        };
+        let n = largest(CACHE_LINE_BYTES + 1, long);
+        let mut e = entry(vec![]);
+        e.bin.path = PathBuf::from("/".to_owned() + &"p".repeat(n));
+        assert_eq!(
+            manifest::write_line(&bin_line(&e.bin)).len() - 1,
+            CACHE_LINE_BYTES
+        );
+
+        // Total bytes: filler lines, then the last line sized to land on
+        // CACHE_BYTES exactly.
+        let filler = vec![action_line(1, 20_000); 13];
+        let fits = |n: usize| {
+            let mut lines = filler.clone();
+            lines.push(action_line(1, n));
+            CacheBudget::new().take(&entry(lines)).is_ok()
+        };
+        let n = largest(20_000, fits);
+        assert!(n > 0 && n < 20_000);
+        let mut lines = filler;
+        lines.push(action_line(1, n));
+        let mut b = CacheBudget::new();
+        b.take(&entry(lines)).unwrap();
+        assert_eq!(b.bytes, CACHE_BYTES);
+    }
+
     struct Fix {
         root: PathBuf,
         _g: std::sync::MutexGuard<'static, ()>,
