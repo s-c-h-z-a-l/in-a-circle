@@ -83,21 +83,23 @@ pub fn runtime_dir() -> Option<PathBuf> {
     abs_env("XDG_RUNTIME_DIR")
 }
 
-/// The longest `user-dirs.dirs` read (no G0-P row; derived): xdg-user-dirs
+/// The longest `user-dirs.dirs` read (G0-P row `user_dirs_bytes`, D-34): xdg-user-dirs
 /// writes about eight short lines (under 0.5 KiB); eight keys with a 4096 B
 /// path each plus quotes stay under 34 KiB, so 64 KiB is about twice the
 /// worst real shape. A longer file is no user-dirs file we know: the
 /// fallback (`~/Downloads`) is used, as for an unreadable one.
 const USER_DIRS_MAX_BYTES: usize = 64 * 1024;
 
-/// The file's text, opened without blocking and never through a symlink at
-/// its own name, only a regular file, read at most `USER_DIRS_MAX_BYTES`.
-/// `None` for anything else (the caller falls back).
+/// The file's text, opened without blocking, only a regular file (checked
+/// on the open fd), read at most `USER_DIRS_MAX_BYTES`. A symlink at its
+/// name is followed: unlike the engine's own state files, this is the
+/// user's config, which dotfile managers link (D-34). `None` for anything
+/// else (the caller falls back).
 fn read_user_dirs(path: &std::path::Path) -> Option<String> {
     use std::os::unix::fs::OpenOptionsExt;
     let f = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .ok()?;
     if !f.metadata().ok()?.is_file() {
@@ -268,7 +270,7 @@ pub(crate) mod tests {
     /// `user-dirs.dirs` is read bounded and never through a symlink at its
     /// own name or from a FIFO: each of those falls back to `~/Downloads`.
     #[test]
-    fn user_dirs_read_is_bounded_typed_and_not_followed() {
+    fn user_dirs_read_is_bounded_typed_and_followed() {
         use crate::sys::tests::{mkfifo, within};
         let tmp = std::env::temp_dir().join(format!("engine-xdg-ud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -303,14 +305,24 @@ pub(crate) mod tests {
         assert_eq!(get(), PathBuf::from("/data/dl"));
         std::fs::write(&f, pad(USER_DIRS_MAX_BYTES + 1)).unwrap();
         assert_eq!(get(), tmp.join("Downloads"));
-        // A symlink at the name is not followed (positive control above:
-        // the same content as a regular file is read).
+        // A symlink at the name is followed (a dotfile manager's link to
+        // the user's own config, D-34).
         let real = tmp.join("real");
         std::fs::write(&real, want).unwrap();
         std::fs::remove_file(&f).unwrap();
         std::os::unix::fs::symlink(&real, &f).unwrap();
+        assert_eq!(get(), PathBuf::from("/data/dl"));
+        // ... but only to a regular file: a link to a FIFO neither blocks
+        // nor is read, nor is a link to a directory.
+        let fifo = tmp.join("fifo");
+        mkfifo(&fifo);
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&fifo, &f).unwrap();
         assert_eq!(get(), tmp.join("Downloads"));
-        // A FIFO neither blocks nor is read.
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&cfg, &f).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        // A FIFO at the name itself neither blocks nor is read.
         std::fs::remove_file(&f).unwrap();
         mkfifo(&f);
         assert_eq!(get(), tmp.join("Downloads"));

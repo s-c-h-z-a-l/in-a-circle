@@ -46,11 +46,14 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileExt};
 use std::path::{Path, PathBuf};
 
-/// Trash names tried per group (`<leaf>`, `<leaf>.2` … `<leaf>.8`): a
+/// Trash names tried per group (`<leaf>`, `<leaf>.2` … `<leaf>.64`): a
 /// finite budget against earlier trashed items of the same name, not a
-/// probability estimate. Past it the group is kept (`NameTaken`). Proposed
-/// `trash_name_attempts` (parameters.json; finalised at G0-P).
-pub const TRASH_NAME_ATTEMPTS: u32 = 8;
+/// probability estimate. Past it the group is kept (`NameTaken`). G0-P
+/// `trash_name_attempts` (D-34): 64, not 8, because with 8 the ninth undo
+/// of an output with the same name would be refused; 63 taken names plus
+/// the free one cost ~18 us (T9 preflight, `names-cost.txt`: 17.7 us
+/// median on tmpfs, 18.1 us on btrfs), far under the action-start budget.
+pub const TRASH_NAME_ATTEMPTS: u32 = 64;
 /// The largest `.trashinfo` written or read back: a 4096-byte path
 /// percent-encoded is at most 12288 B, plus 52 B of header and date
 /// (12340 B). Past it no info is written and the group is kept
@@ -1789,8 +1792,8 @@ pub(crate) mod tests {
         assert!(n.as_bytes().len() <= BASE_MAX);
     }
 
-    /// Eight names are tried: with seven taken the eighth is found, with
-    /// all eight taken (in either folder) there is none.
+    /// 64 names are tried (`trash_name_attempts`): with 63 taken the 64th
+    /// is found, with all 64 taken (in either folder) there is none.
     #[test]
     fn choose_name_tries_a_bounded_number_of_names() {
         let d = Dir::new("names");
@@ -1804,13 +1807,13 @@ pub(crate) mod tests {
                 fs::write(d.0.join("info").join(format!("{n}.trashinfo")), "x").unwrap();
             }
         };
-        for k in 0..7 {
+        for k in 0..63 {
             take(k);
         }
         let (f, i) = (d.fd("files"), d.fd("info"));
         let got = choose_name(f.as_raw_fd(), i.as_raw_fd(), b"g").unwrap();
-        assert_eq!(got.as_bytes(), b"g.8");
-        take(7);
+        assert_eq!(got.as_bytes(), b"g.64");
+        take(63);
         assert_eq!(choose_name(f.as_raw_fd(), i.as_raw_fd(), b"g"), None);
     }
 
