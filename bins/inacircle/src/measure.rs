@@ -123,8 +123,8 @@ impl Meter {
         }
     }
 
-    /// One paint into buffer `slot` at wheel `generation`. `phase`: `S`/`T`
-    /// the startup paints of buffer 0/1, `F` a full paint and `H` a hover
+    /// One paint into buffer `slot` at wheel `generation`. `phase`: `S`
+    /// the startup paint of buffer 0, `F` a full paint and `H` a hover
     /// paint inside a render, `P` a prepaint. Never allocates.
     pub fn paint(&mut self, phase: char, slot: usize, generation: u32, busy: bool) {
         self.paints += 1;

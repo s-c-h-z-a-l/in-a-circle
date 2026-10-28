@@ -107,6 +107,27 @@ menu. Release binary against the fake compositor (this cloud VM), one file,
 8 runs: median 320 µs, max 358 µs (budget 1 ms). The niri numbers come
 from the user's manual test and are not recorded here yet.
 
+#### Startup paint moved, not removed (hardening T12)
+
+The second shm buffer is no longer painted before the first commit (the
+wheel it would show is replaced at once by the pointer or the drag).
+It is first painted at the stage-1 swap or by the prepaint after the
+first commit. Release binary against the fake compositor, 10 alternating
+runs, same machine, medians (ranges in parentheses):
+
+| point | before | after | change |
+|---|---|---|---|
+| `main` → the wheel's commit (`main_to_commit_cpu_us`) | 639 µs (600–696) | 354 µs (343–375) | -285 µs |
+| the early list → the lit level-1 wheel's commit (`list_to_level1_cpu_us`) | ~155 µs (130–207) | ~335 µs (304–345) | +~180 µs |
+
+Part of the saving moved to the swap: the first use of buffer 1 touches
+its pages and does a full paint there. Both points stay well under their
+1 ms budget; the net is about 105 µs on the drag path, and the full
+285 µs on a path without a list (the buffer is painted after the commit,
+outside the window). The hover maximum (about 100 µs, the full paint of a
+just-released stale buffer in the first events after a swap) is unchanged
+within noise; it is not a T12 result.
+
 Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
 same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind
 without a shell avoids it. A 1024-file drop takes ~3 ms from the drop to

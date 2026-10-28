@@ -1234,8 +1234,8 @@ impl Surface {
             if swapped {
                 meter.swapped(crate::cpu_us(libc::RUSAGE_SELF));
             }
-            // After the timings are taken: reading smaps costs tens of µs.
-            // After the timings, like the PSS read: the trace costs a push.
+            // After the timings are taken: the trace costs a push, and
+            // reading smaps costs tens of µs.
             meter.paint(phase, i, m.generation(), was_busy);
             if started.is_none() {
                 let c0 = crate::cpu_us(libc::RUSAGE_SELF);
@@ -1756,6 +1756,156 @@ mod tests {
         assert_eq!(s.shown, Some((m.generation(), m.hover())));
     }
 
+    /// The compositor holds both buffers (no release yet): a hover, a
+    /// stage swap and the prepaint write into neither, and send nothing.
+    /// Checked on the bytes of the buffers themselves, at the point of
+    /// writing, not on a count taken after the choice of buffer. After one
+    /// release only the released buffer changes.
+    #[test]
+    fn render_never_writes_into_a_buffer_the_compositor_holds() {
+        let (mut s, server) = render_surface();
+        let mut m = Machine::with_menus(two_lit, empty_targets);
+        m.wheel()
+            .paint_full(s.shm.as_mut().unwrap().canvas(0), None);
+        s.painted[0] = Some((m.generation(), None));
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        s.render(&m).unwrap(); // buffer 0 attached
+        m.on(Input::DragList(1, Ok(b"a".to_vec())));
+        s.render(&m).unwrap(); // the swap: buffer 1 attached
+        assert!(s.busy[0] && s.busy[1], "{:?} {:?}", s.busy, s.shown);
+        let _ = wheel_commits(&mut s, &server);
+        let held = [
+            s.shm.as_mut().unwrap().canvas(0).to_vec(),
+            s.shm.as_mut().unwrap().canvas(1).to_vec(),
+        ];
+        // Changes of every kind while nothing is released.
+        for (x, y) in [(960.0, 690.0), (960.0, 540.0), (960.0, 390.0)] {
+            m.on(Input::DragMotion(x, y));
+            s.render(&m).unwrap();
+            s.prepaint(&m);
+        }
+        for (i, before) in held.iter().enumerate() {
+            assert!(
+                s.shm.as_mut().unwrap().canvas(i) == &before[..],
+                "buffer {i} written while the compositor holds it"
+            );
+        }
+        assert!(
+            wheel_commits(&mut s, &server).is_empty(),
+            "attached a held buffer"
+        );
+        // Release buffer 0 only: it takes the frame, buffer 1 stays as is.
+        let release = msg(s.id.bufs[0], op::wl_buffer::RELEASE, &[]);
+        deliver_to(&mut s, &server, &release, &m);
+        s.render(&m).unwrap();
+        let commits = wheel_commits(&mut s, &server);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].0, s.id.bufs[0]);
+        assert!(s.shm.as_mut().unwrap().canvas(0) != &held[0][..]);
+        assert!(s.shm.as_mut().unwrap().canvas(1) == &held[1][..]);
+    }
+
+    /// The damage sent with each commit covers every pixel that differs
+    /// between the frame on screen before and after it (the attached
+    /// buffer's pixels at the commit), with buffers alternating, and stays
+    /// well under the whole box for a hover. Damage computed against the
+    /// buffer being drawn, not the one on screen, leaves the pixels the
+    /// other buffer still shows undamaged.
+    #[test]
+    fn render_damage_covers_what_changed_on_screen() {
+        let (mut s, server) = render_surface();
+        let mut m = Machine::with_menus(two_lit, empty_targets);
+        m.wheel()
+            .paint_full(s.shm.as_mut().unwrap().canvas(0), None);
+        s.painted[0] = Some((m.generation(), None));
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        // `tight`: the damage must also stay near the change. Not asked
+        // of the frames whose buffer was prepainted in full (first hovers
+        // after the swap): their damage is the whole box by design.
+        let mut on_screen: Vec<u8> = Vec::new();
+        let step = |s: &mut Surface, m: &Machine, what: &str, tight: bool, screen: &mut Vec<u8>| {
+            s.render(m).unwrap();
+            let commits = wheel_commits(s, &server);
+            assert_eq!(commits.len(), 1, "{what}: one commit");
+            let (buf, rects) = &commits[0];
+            let i = s.id.bufs.iter().position(|b| b == buf).unwrap();
+            let now = s.shm.as_mut().unwrap().canvas(i).to_vec();
+            let b = BOX as usize;
+            let mut diff = (usize::MAX, usize::MAX, 0, 0);
+            for p in 0..b * b {
+                let (x, y) = (p % b, p / b);
+                let changed =
+                    screen.is_empty() || screen[4 * p..4 * p + 4] != now[4 * p..4 * p + 4];
+                if !changed {
+                    continue;
+                }
+                diff = (diff.0.min(x), diff.1.min(y), diff.2.max(x), diff.3.max(y));
+                assert!(
+                    rects.iter().any(|r| {
+                        (r[0]..r[0] + r[2]).contains(&(x as i32))
+                            && (r[1]..r[1] + r[3]).contains(&(y as i32))
+                    }),
+                    "{what}: pixel ({x},{y}) changed on screen but is not damaged: {rects:?}"
+                );
+            }
+            if tight && diff.2 >= diff.0 {
+                let area: i64 = rects
+                    .iter()
+                    .map(|r| i64::from(r[2]) * i64::from(r[3]))
+                    .sum();
+                let bbox = ((diff.2 - diff.0 + 1) * (diff.3 - diff.1 + 1)) as i64;
+                assert!(
+                    area <= 4 * bbox + 64 * 64,
+                    "{what}: damage {area} px for a change within {bbox} px"
+                );
+            }
+            *screen = now;
+            i
+        };
+        let first_shown = step(&mut s, &m, "first", false, &mut on_screen);
+        // The compositor releases every buffer but the one on screen, so
+        // the buffers alternate.
+        let release_others = |s: &mut Surface, m: &Machine, shown: usize| {
+            for i in (0..2).filter(|&i| i != shown) {
+                let release = msg(s.id.bufs[i], op::wl_buffer::RELEASE, &[]);
+                deliver_to(s, &server, &release, m);
+            }
+        };
+        release_others(&mut s, &m, first_shown);
+        s.prepaint(&m);
+        m.on(Input::DragList(1, Ok(b"a".to_vec())));
+        let shown = step(&mut s, &m, "swap", false, &mut on_screen);
+        release_others(&mut s, &m, shown);
+        s.prepaint(&m);
+        // Buffers alternate through several hovers, then back to none.
+        let path = [
+            (960.0, 390.0),
+            (960.0, 690.0),
+            (960.0, 540.0),
+            (960.0, 390.0),
+            (960.0, 690.0),
+            (960.0, 390.0),
+        ];
+        for (k, (x, y)) in path.into_iter().enumerate() {
+            m.on(Input::DragMotion(x, y));
+            let shown = step(&mut s, &m, &format!("hover {k}"), k >= 2, &mut on_screen);
+            // No prepaint: each hover paints over what that buffer showed
+            // two frames ago, so only the damage rectangles can tell what
+            // differs from the frame on screen.
+            release_others(&mut s, &m, shown);
+        }
+    }
+
     #[test]
     fn idle_wakeups_exclude_our_deadlines() {
         let now = Instant::now();
@@ -1871,6 +2021,21 @@ mod tests {
     /// The requests the surface sent so far, as (object, opcode), and the
     /// fds that came with them.
     fn requests(s: &mut Surface, server: &OwnedFd) -> (Vec<(u32, u16)>, Vec<OwnedFd>) {
+        let (bytes, fds) = drain(s, server);
+        let word = |i: usize| u32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap());
+        let mut reqs = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let (obj, head) = (word(i), word(i + 4));
+            reqs.push((obj, (head & 0xffff) as u16));
+            i += (head >> 16) as usize;
+        }
+        (reqs, fds)
+    }
+
+    /// Flushes the surface and takes every byte (and fd) the compositor's
+    /// end has received so far.
+    fn drain(s: &mut Surface, server: &OwnedFd) -> (Vec<u8>, Vec<OwnedFd>) {
         s.flush().unwrap();
         let (mut bytes, mut fds) = (Vec::new(), Vec::new());
         loop {
@@ -1911,15 +2076,31 @@ mod tests {
                 }
             }
         }
+        (bytes, fds)
+    }
+
+    /// The wheel surface's commits so far: the buffer each attached and the
+    /// `damage_buffer` rectangles (x, y, w, h) sent before it.
+    fn wheel_commits(s: &mut Surface, server: &OwnedFd) -> Vec<(u32, Vec<[i32; 4]>)> {
+        let (bytes, _) = drain(s, server);
         let word = |i: usize| u32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap());
-        let mut reqs = Vec::new();
+        let (mut out, mut buf, mut rects) = (Vec::new(), 0, Vec::new());
         let mut i = 0;
         while i < bytes.len() {
             let (obj, head) = (word(i), word(i + 4));
-            reqs.push((obj, (head & 0xffff) as u16));
+            if obj == s.id.wheel {
+                match (head & 0xffff) as u16 {
+                    op::wl_surface::ATTACH => buf = word(i + 8),
+                    op::wl_surface::DAMAGE_BUFFER => {
+                        rects.push([0, 4, 8, 12].map(|o| word(i + 8 + o) as i32));
+                    }
+                    op::wl_surface::COMMIT => out.push((buf, std::mem::take(&mut rects))),
+                    _ => {}
+                }
+            }
             i += (head >> 16) as usize;
         }
-        (reqs, fds)
+        out
     }
 
     /// The source writes the list and closes its end; the surface reads it.
@@ -2284,7 +2465,7 @@ mod tests {
             mimes: vec![URI_LIST.into()],
         });
         s.render(&m).unwrap();
-        assert!(s.busy[0] && s.busy[1]);
+        assert!(s.busy[0] && s.busy[1], "{:?} {:?}", s.busy, s.shown);
         requests(&mut s, &server);
         // A third wheel while neither is released.
         m.on(Input::DragList(1, Ok(b"a".to_vec())));
