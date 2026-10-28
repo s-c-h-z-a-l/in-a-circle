@@ -227,10 +227,6 @@ impl StateDir {
         Ok(File::from(fd))
     }
 
-    fn stat(&self, name: &str) -> io::Result<libc::stat> {
-        stat_at(self.raw(), &c_name(name.as_bytes())?)
-    }
-
     /// `bytes` in a fresh file under a random name (exclusive, never
     /// through a symlink, 0600), synced when asked.
     fn temp(&self, base: &str, bytes: &[u8], sync: bool) -> io::Result<(String, File)> {
@@ -1189,6 +1185,45 @@ fn job_alive(pid: u32, started: Option<u64>) -> bool {
 /// Why a registry listing is refused (rejection copy of the registry rows).
 const REGISTRY_REFUSAL: &str = "The running-jobs registry exceeds its safety limits.";
 
+/// How long a temporary registry file of ours must be untouched before a
+/// listing removes it: one lives from its exclusive create to its rename,
+/// one write of at most 4 KiB, no sync (microseconds). A minute is far past
+/// that, so one in use is never taken under a working clock; if one is
+/// anyway (the writer stopped, the clock stepped), only that update's
+/// rename fails, and the job's next one (at most 250 ms later) writes anew.
+const STALE_TEMP: Duration = Duration::from_secs(60);
+
+/// Removes `name` if it is one of our temporary files
+/// (`.<base>.<16 hex>.tmp`, see `StateDir::temp`) left by a crash: a
+/// regular file of ours (checked on its open fd), untouched for
+/// [`STALE_TEMP`], unlinked only while the name is still that file.
+fn remove_stale_temp(dir: &StateDir, name: &str) {
+    let ours = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .and_then(|n| n.rsplit_once('.'))
+        .is_some_and(|(base, hex)| {
+            !base.is_empty()
+                && hex.len() == 16
+                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        });
+    if !ours {
+        return;
+    }
+    let Ok(f) = dir.open_file(name, libc::O_RDONLY, 0) else {
+        return;
+    };
+    let stale = f
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .is_some_and(|age| age > STALE_TEMP);
+    if stale && let Ok(st) = fstat(f.as_raw_fd()) {
+        let _ = dir.unlink_if(name, ident(&st));
+    }
+}
+
 fn registry_refusal(what: String) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -1218,13 +1253,30 @@ pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
     let (names, more) = read_dir_upto(dir.raw(), REGISTRY_ENTRIES_MAX)?;
     let mut out = Vec::new();
     for name in &names {
-        let Some(name) = name.to_str().ok().filter(|n| !n.starts_with('.')) else {
+        let Ok(name) = name.to_str() else {
             continue;
         };
-        let Ok(f) = dir.open_file(name, libc::O_RDONLY, 0) else {
+        if name.starts_with('.') {
+            remove_stale_temp(&dir, name);
             continue;
+        }
+        let f = match dir.open_file(name, libc::O_RDONLY, 0) {
+            Ok(f) => f,
+            // Gone since the listing (the job ended), or not a regular file
+            // of ours (a symlink: ELOOP; a socket: ENXIO; the type and
+            // owner checks: no errno): not an entry. Anything else (EACCES,
+            // EMFILE, EIO) leaves an entry unread: fail closed.
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    None | Some(libc::ENOENT | libc::ELOOP | libc::ENXIO)
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
         };
-        let bytes = match action::read_bounded(f, REGISTRY_ENTRY_MAX) {
+        let bytes = match action::read_bounded(&f, REGISTRY_ENTRY_MAX) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 return Err(registry_refusal(format!(
@@ -1253,7 +1305,15 @@ pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
         };
         let started = line.get("started").and_then(|s| s.parse().ok());
         if !job_alive(pid, started) {
-            if let Ok(st) = dir.stat(name) {
+            // Removed only while the name is still the file just read: the
+            // identity comes from its open fd, and holding the fd keeps the
+            // inode from being freed and reused. What remains is the
+            // check-to-unlink window of `unlink_if` against a rename onto
+            // this name in between; the only writer of a name is the job
+            // with that id (`Running`), and this one is dead, so only
+            // another process of this user acting on purpose could, and it
+            // could unlink the entry itself anyway.
+            if let Ok(st) = fstat(f.as_raw_fd()) {
                 let _ = dir.unlink_if(name, ident(&st));
             }
             continue;
@@ -6231,6 +6291,67 @@ mod tests {
             assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
             assert!(list_running().unwrap().is_empty());
             assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        });
+    }
+
+    /// An entry that cannot be opened for a reason other than "gone, or
+    /// not a regular file of ours" is an error, never "no job runs"; the
+    /// skipped kinds (a FIFO, a symlink) still let the rest be listed.
+    #[test]
+    fn registry_open_errors_fail_closed() {
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root opens a mode-000 file");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("regopen");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let me = std::process::id();
+            put_job(&dir, "5-1", me, &[], "x");
+            crate::sys::tests::mkfifo(&dir.join("5-2"));
+            std::os::unix::fs::symlink(dir.join("5-1"), dir.join("5-3")).unwrap();
+            let l = list_running().unwrap();
+            assert_eq!(l.len(), 1, "{l:?}");
+            put_job(&dir, "5-4", me, &[], "x");
+            fs::set_permissions(dir.join("5-4"), fs::Permissions::from_mode(0o000)).unwrap();
+            let e = list_running().unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        });
+    }
+
+    /// Our own temporary files left by a crash (`.<id>.<16 hex>.tmp`, a
+    /// regular file of ours, untouched for a minute) are removed as the
+    /// dead entries are, so they cannot fill the listing for good. A fresh
+    /// one and any other dot file stay.
+    #[test]
+    fn registry_own_stale_temps_heal() {
+        let t = Tmp::new("regtmp");
+        t.env(|| {
+            let dir = jobs_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let old = SystemTime::now() - Duration::from_secs(3600);
+            let temp = |i: usize, stale: bool| {
+                let p = dir.join(format!(".5-{i}.{i:016x}.tmp"));
+                let f = File::create(&p).unwrap();
+                if stale {
+                    f.set_modified(old).unwrap();
+                }
+                p
+            };
+            for i in 0..=REGISTRY_ENTRIES_MAX {
+                temp(i, true);
+            }
+            assert!(list_running().is_err(), "129 entries: over the limit");
+            assert!(list_running().unwrap().is_empty());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+            let fresh = temp(1, false);
+            let other = dir.join(".5-2.notours.tmp");
+            File::create(&other).unwrap().set_modified(old).unwrap();
+            assert!(list_running().unwrap().is_empty());
+            assert!(fresh.exists() && other.exists());
         });
     }
 

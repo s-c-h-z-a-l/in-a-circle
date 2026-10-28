@@ -668,9 +668,12 @@ No daemon:
   process is gone is ignored. A listing examines at most 128 entries and
   reads each entry bounded (4096 bytes, 16 fields); past a limit, or when
   the folder cannot be read, it is an error, never a shorter or empty list,
-  and `undo`, `jobs` and `cancel` fail on it (undo moves nothing). The
-  dead entries among those examined are removed first, so a pile left by
-  crashes heals;
+  and `undo`, `jobs` and `cancel` fail on it (undo moves nothing), as
+  they do on an entry that cannot be opened (anything but one that is gone
+  or is not a regular file of this user). The dead entries among those
+  examined, and our own temporary files untouched for a minute, are
+  removed first (each only while its name is still the file just opened),
+  so a pile left by crashes heals;
 - the history is read in a window: the header by itself (256 bytes), then
   at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
   with at most 32 fields, a job with at most 1024 outputs and groups, paths
