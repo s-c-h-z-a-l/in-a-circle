@@ -52,20 +52,36 @@ fn grouped(n: usize) -> String {
     out
 }
 
+/// A byte budget as MiB for a message (budgets are whole MiB; a fraction
+/// would round down, never overstate the limit).
+fn mib(bytes: usize) -> usize {
+    bytes / (1024 * 1024)
+}
+
+/// The text of the input-size rejection, from the budget itself.
+fn input_too_large() -> String {
+    format!(
+        "This text file is larger than {} MiB.",
+        mib(LIMITS.input_bytes)
+    )
+}
+
 /// The `fail` reason of a budget error (rejection copies of the G0-P rows).
 fn limit_reason(e: LimitError) -> String {
     match e {
-        LimitError::Exceeded("input") => "This text file is larger than 8 MiB.".to_string(),
+        LimitError::Exceeded("input") => input_too_large(),
         LimitError::Exceeded("nodes") => format!(
             "This document has too many text elements (limit {}).",
             grouped(LIMITS.nodes)
         ),
-        LimitError::Exceeded("owned text") => {
-            "This document expands beyond the 32 MiB text budget.".to_string()
-        }
-        LimitError::Exceeded("output") => {
-            "The converted text would be larger than 32 MiB.".to_string()
-        }
+        LimitError::Exceeded("owned text") => format!(
+            "This document expands beyond the {} MiB text budget.",
+            mib(LIMITS.text_bytes)
+        ),
+        LimitError::Exceeded("output") => format!(
+            "The converted text would be larger than {} MiB.",
+            mib(LIMITS.output_bytes)
+        ),
         LimitError::Exceeded(other) => format!("This document passes the {other} limit."),
         LimitError::Allocation => "Not enough memory to convert this text file.".to_string(),
     }
@@ -172,7 +188,7 @@ fn process(
     let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-            ev.fail(input, "This text file is larger than 8 MiB.");
+            ev.fail(input, &input_too_large());
             return Outcome::Failed;
         }
         Err(e) => {

@@ -186,6 +186,31 @@ fn md_reference_expansion_stops_at_the_text_budget() {
     );
 }
 
+/// `&nGt;` is 5 bytes and decodes to 6 (U+226B U+20D2): the budget is charged
+/// the decoded length, so the entity form needs exactly one byte more per
+/// reference and copy than five plain bytes, at the boundary.
+#[test]
+fn md_entity_decoding_is_charged_by_decoded_bytes() {
+    let k = 40;
+    let ent = "&nGt;".repeat(k);
+    let plain = "xxxxx".repeat(k);
+    let need = |input: &str| {
+        let ok = |b: usize| md::read_limited(input.as_bytes(), lim(|l| l.text_bytes = b)).is_ok();
+        let m = min_ok(1 << 20, ok);
+        assert!(ok(m) && !ok(m - 1));
+        m
+    };
+    // Autolink: the destination and the link text are two copies.
+    let a = need(&format!("<http://a/{ent}>\n")) - need(&format!("<http://a/{plain}>\n"));
+    assert_eq!(a, 2 * k, "autolink");
+    // Inline target: one copy.
+    let i = need(&format!("[a](/u{ent})\n")) - need(&format!("[a](/u{plain})\n"));
+    assert_eq!(i, k, "inline target");
+    // Link reference definition: one copy kept.
+    let r = need(&format!("[x]: /u{ent}\n")) - need(&format!("[x]: /u{plain}\n"));
+    assert_eq!(r, k, "reference definition");
+}
+
 /// NUL becomes U+FFFD: 1 byte to 3, charged as owned text before the copy.
 #[test]
 fn md_nul_replacement_is_charged() {

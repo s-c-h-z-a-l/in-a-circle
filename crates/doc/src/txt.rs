@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 
 /// Reads plain text. Paragraphs are separated by blank (whitespace-only)
 /// lines; lines inside a paragraph are joined by `HardBreak`. Runs of more
-/// than one blank line between paragraphs are merged and reported.
+/// than one blank line between paragraphs are merged, blank lines before
+/// the first and after the last paragraph and the spaces of whitespace-only
+/// lines are dropped; each is reported as `Loss::BlankLines`.
 /// Text is valid UTF-8 without NUL bytes; anything else is
 /// `ReadError::NotText`. Linear in the input; no recursion. Unbudgeted
 /// compatibility entry point; the shipped conversion uses [`read_limited`].
@@ -46,11 +48,19 @@ pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<(Document, BTreeSet<
         rest = &rest[next..];
 
         if line.trim().is_empty() {
+            // A whitespace-only line keeps nothing of its spaces.
+            if !line.is_empty() {
+                losses.insert(Loss::BlankLines);
+            }
             blanks += 1;
             continue;
         }
         // A paragraph is charged when its first line starts it.
         if inlines.is_empty() {
+            // Blank lines before the first paragraph are dropped.
+            if blanks > 0 {
+                losses.insert(Loss::BlankLines);
+            }
             m.node();
         } else if blanks > 0 {
             if blanks > 1 {
@@ -66,6 +76,11 @@ pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<(Document, BTreeSet<
             let t = m.own(line);
             m.push(&mut inlines, Inline::Text(t));
         }
+    }
+    // Blank lines after the last paragraph (or a text of blank lines only)
+    // are dropped. The last line's own terminator is not a blank line.
+    if blanks > 0 && !m.failed() {
+        losses.insert(Loss::BlankLines);
     }
     if !inlines.is_empty() {
         m.push(&mut blocks, Block::Paragraph(inlines));
@@ -323,10 +338,32 @@ mod tests {
 
     #[test]
     fn empty_and_blank_input() {
-        for input in [&b""[..], b"  \n\n"] {
-            let (d, l) = read(input).unwrap();
-            assert!(d.blocks.is_empty());
-            assert!(l.is_empty());
+        let (d, l) = read(b"").unwrap();
+        assert!(d.blocks.is_empty() && l.is_empty());
+        // Nothing but blank lines: they are dropped, and said so.
+        let (d, l) = read(b"  \n\n").unwrap();
+        assert!(d.blocks.is_empty());
+        assert!(l.contains(&Loss::BlankLines));
+    }
+
+    #[test]
+    fn edge_and_whitespace_only_lines_reported() {
+        for input in [
+            &b"\n\n\nalpha\n"[..],
+            b"\nalpha\n",
+            b"alpha\n\n\n\n",
+            b"alpha\n\n",
+            b"a\n   \nb\n",
+            b"a\n\t\nb\n",
+            b"a\r\n\r\n",
+        ] {
+            let (_, l) = read(input).unwrap();
+            assert!(l.contains(&Loss::BlankLines), "{input:?}");
+        }
+        // Terminators and single blank separators lose nothing.
+        for input in [&b"alpha\n"[..], b"alpha", b"a\n\nb\n", b"a\r\n\r\nb\r\n"] {
+            let (_, l) = read(input).unwrap();
+            assert!(l.is_empty(), "{input:?}");
         }
     }
 

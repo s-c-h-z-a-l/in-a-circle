@@ -725,7 +725,7 @@ fn txt_to_md_is_lossy_in_the_catalog_and_a_stale_cache_is_replaced() {
     assert!(
         o.pairs("warn")
             .iter()
-            .any(|(_, m)| m.contains("repeated blank lines")),
+            .any(|(_, m)| m.contains("blank lines")),
         "{}",
         o.stdout
     );

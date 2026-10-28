@@ -20,7 +20,7 @@ use super::scan::{
     close_tag, is_space_or_tab, link_destination, link_label, link_title, open_tag, peek,
     skip_spaces, skip_spnl, utf8,
 };
-use super::{LinkDef, Refs, inlines, normalize_label, unescape};
+use super::{LinkDef, Refs, decoded_len, inlines, normalize_label, unescape};
 use crate::budget::Meter;
 use crate::{Block, Document};
 
@@ -683,18 +683,27 @@ impl<'m> Parser<'m> {
         let content = std::mem::take(&mut self.nodes[n].content);
         let mut pos = 0;
         while content[pos..].starts_with('[') {
-            let Some((len, label, def)) = parse_link_def(&content[pos..]) else {
+            let Some((len, label, dest, title)) = parse_link_def(&content[pos..]) else {
                 break;
             };
             let key = normalize_label(label);
             // A kept definition is one node plus its key, destination and
             // title (the first definition of a label wins; later ones are
-            // dropped and cost nothing).
+            // dropped and cost nothing). Destination and title are charged
+            // by their decoded length, before they are decoded.
             if !key.is_empty()
                 && !self.refs.contains_key(&key)
                 && self.m.node()
-                && self.m.text(key.len() + def.dest.len() + def.title.len())
+                && self.m.text(
+                    key.len()
+                        .saturating_add(decoded_len(dest, true))
+                        .saturating_add(decoded_len(title, true)),
+                )
             {
+                let def = LinkDef {
+                    dest: unescape(dest),
+                    title: unescape(title),
+                };
                 self.refs.insert(key, def);
             }
             if self.m.failed() {
@@ -1087,8 +1096,9 @@ fn html_block_end(t: u8, s: &[u8]) -> bool {
 }
 
 /// Link reference definition at the start of `s`: (consumed length
-/// including the line ending, raw label, definition).
-fn parse_link_def(s: &str) -> Option<(usize, &str, LinkDef)> {
+/// including the line ending, raw label, raw destination, raw title). The
+/// caller decodes them once the budget has paid for the result.
+fn parse_link_def(s: &str) -> Option<(usize, &str, &str, &str)> {
     let b = s.as_bytes();
     let (mut i, label) = link_label(b, 0)?;
     if is_blank(utf8(label)) || peek(b, i) != b':' {
@@ -1121,11 +1131,7 @@ fn parse_link_def(s: &str) -> Option<(usize, &str, LinkDef)> {
         }
         None => return None,
     };
-    let def = LinkDef {
-        dest: unescape(utf8(dest)),
-        title: unescape(utf8(title)),
-    };
-    Some((end, utf8(label), def))
+    Some((end, utf8(label), utf8(dest), utf8(title)))
 }
 
 #[cfg(test)]

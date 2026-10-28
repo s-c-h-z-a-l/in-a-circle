@@ -79,7 +79,7 @@ impl Loss {
             Loss::Images => "images replaced by their alt text",
             Loss::Html => "HTML dropped",
             Loss::HeadingLevels => "heading levels lost",
-            Loss::BlankLines => "repeated blank lines merged into one paragraph break",
+            Loss::BlankLines => "blank lines merged or dropped",
             Loss::Whitespace => "runs of spaces or tabs may collapse when rendered",
         }
     }
@@ -124,7 +124,11 @@ impl Limits {
         // 32 MiB: 2.8x the worst real owned/input ratio times the input
         // limit; link reference expansion stops here.
         text_bytes: 32 * 1024 * 1024,
-        // 32 MiB: 4x the input limit, 2x the theoretical escape bound.
+        // 32 MiB: 4x the input limit. Measured worst case of escape
+        // expansion is 4.81x (every leading space of a line becomes
+        // `&#32;`, 1 -> 5 bytes): such an input of 8 MiB fails cleanly on
+        // this budget (`Exceeded("output")`, from about 6.6 MiB of input);
+        // realistic text expands far less.
         output_bytes: 32 * 1024 * 1024,
     };
 

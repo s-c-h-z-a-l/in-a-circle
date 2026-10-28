@@ -429,6 +429,9 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     }
 
     let mut notifier = notify.then(|| {
+        // `lossy` is only the gate (a warning of a lossless route says
+        // nothing about formatting); the line itself needs a warning of an
+        // input that has an output (`Summary::lost_done`).
         let label = route.last().map_or(name.as_str(), |a| a.label.as_str());
         Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
     });

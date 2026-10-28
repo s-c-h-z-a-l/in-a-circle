@@ -16,7 +16,7 @@
 //! and their content is kept. This bounds the recursion of every writer.
 
 use super::scan::{close_tag, link_destination, link_label, link_title, open_tag, utf8};
-use super::{Refs, char_ref, decode, normalize_label, punct::PUNCT, unescape};
+use super::{Refs, char_ref, decode, decoded_len, normalize_label, punct::PUNCT, unescape};
 use crate::Inline;
 use crate::budget::Meter;
 use std::collections::HashMap;
@@ -537,10 +537,16 @@ impl Parser<'_> {
 
     fn autolink(&mut self, i: usize, n: usize, email: bool) {
         self.pos = i + n + 1;
-        // Two nodes (link, its text); the text, the destination (with
-        // `mailto:`) and the link text are three strings of at most `n`
-        // bytes each, charged before they are made.
-        if !self.m.nodes(2) || !self.m.text(2 * n + "mailto:".len()) {
+        // Two nodes (link, its text); the destination (with `mailto:`) and
+        // the link text are two strings of the decoded length each (a
+        // reference can decode to more bytes than it takes), charged
+        // before they are made.
+        let d = decoded_len(&self.s[i..i + n], false);
+        if !self.m.nodes(2)
+            || !self
+                .m
+                .text(d.saturating_mul(2).saturating_add("mailto:".len()))
+        {
             return;
         }
         if self.nodes.try_reserve(2).is_err() {
@@ -834,11 +840,14 @@ impl Parser<'_> {
             return None;
         }
         self.pos = end + 1;
-        // The unescaped copies are at most as long as their sources.
-        if !self.m.text(dest.len() + title.len()) {
+        // Charged by the decoded length (a reference can decode to more
+        // bytes than its source), before the copies are made.
+        let (dest, title) = (utf8(dest), utf8(title));
+        let n = decoded_len(dest, true).saturating_add(decoded_len(title, true));
+        if !self.m.text(n) {
             return None;
         }
-        Some((unescape(utf8(dest)), unescape(utf8(title))))
+        Some((unescape(dest), unescape(title)))
     }
 
     /// Full (`[label]`), collapsed (`[]`) or shortcut reference for the

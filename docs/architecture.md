@@ -116,8 +116,10 @@ are in `CLAUDE.md`.
   start; missing means a greyed-out slice that says what to install).
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
-  the action reports it. The planner therefore never takes it as a
-  lossless intermediate, and the notice says formatting was lost.
+  the action reports it (blank lines at the start or end of the text and
+  the spaces of whitespace-only lines count). The planner therefore never
+  takes it as a lossless intermediate, and the notice says formatting was
+  lost for a run whose output actually lost something.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -338,9 +340,10 @@ Every action runs sandboxed, set up in the child between `fork` and
   complete, durable and synced; otherwise the recording warning (`history
   not written: …; undo unavailable`, `… not confirmed on disk; undo
   unavailable`) is a body line instead. Cancelled: `Cancelled`,
-  `<n> done, <r> not converted`. A lossy action that produced output starts
-  the body with `Formatting was lost.`; a run the sandbox gate refused ends
-  it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
+  `<n> done, <r> not converted`. An output whose lossy action reported a
+  loss (a `warn` for an input that has an output) starts the body with
+  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  the sandbox gate refused ends it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
   so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`

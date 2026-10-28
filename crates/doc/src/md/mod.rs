@@ -136,6 +136,42 @@ fn decode(s: &str, backslashes: bool) -> String {
     out
 }
 
+/// The exact byte length `decode(s, backslashes)` produces, computed without
+/// building the result (one reference's text at a time in a scratch buffer),
+/// so a budget is charged the real size, not an estimate: `&nGt;` is 5
+/// bytes and decodes to 6.
+fn decoded_len(s: &str, backslashes: bool) -> usize {
+    let b = s.as_bytes();
+    let mut scratch = String::new();
+    let (mut i, mut total) = (0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'\\' if backslashes && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) => {
+                total += 1;
+                i += 2;
+            }
+            b'&' => {
+                scratch.clear();
+                match char_ref(b, i, &mut scratch) {
+                    Some(end) => {
+                        total += scratch.len();
+                        i = end;
+                    }
+                    None => {
+                        total += 1;
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                total += 1;
+                i += 1;
+            }
+        }
+    }
+    total
+}
+
 /// Longest HTML5 entity name is 31 characters; this bounds the scan.
 const MAX_ENTITY_NAME: usize = 32;
 

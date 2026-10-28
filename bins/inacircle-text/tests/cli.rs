@@ -139,7 +139,7 @@ fn each_loss_is_warned_once_in_stable_order() {
     assert_eq!(
         msgs,
         [
-            "repeated blank lines merged into one paragraph break",
+            "blank lines merged or dropped",
             "runs of spaces or tabs may collapse when rendered"
         ]
     );
@@ -404,10 +404,7 @@ fn txt_to_md_reports_the_blank_line_loss() {
     let out = stdout(&o);
     let warns = lines(&out, "warn");
     assert_eq!(warns.len(), 1, "{out}");
-    assert_eq!(
-        warns[0][2],
-        "repeated blank lines merged into one paragraph break"
-    );
+    assert_eq!(warns[0][2], "blank lines merged or dropped");
     assert!(stdout(&Command::new(env!("CARGO_BIN_EXE_inacircle-text")).arg("--manifest").output().unwrap())
         .contains("text.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes"));
 }

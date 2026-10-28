@@ -41,6 +41,11 @@ const PROBLEM_LINES: usize = 3;
 /// Outputs and problems a [`Summary`] keeps: enough for every text.
 const KEEP_DONE: usize = 2;
 const KEEP_PROBLEMS: usize = 4;
+/// Warned inputs a [`Summary`] keeps to match against their `done`. 64 is
+/// a few hundred bytes of paths and far above a normal selection; past it
+/// the summary no longer tells which inputs were warned about and says
+/// "lost" if any input has an output (it did lose something).
+const KEEP_LOST: usize = 64;
 
 /// What the final notification says, in memory that does not grow with
 /// the number of inputs.
@@ -55,7 +60,18 @@ pub struct Summary {
     pub skipped: usize,
     pub failed: usize,
     pub cancelled: bool,
+    /// The route has a `lossy=yes` action: only then can a warning mean
+    /// lost formatting (the gate; the loss itself is `lost_done`).
     pub lossy: bool,
+    /// Some input with an output also had a warning. The text family warns
+    /// only about a loss; an input that fails does not count (it has no
+    /// output).
+    pub lost_done: bool,
+    /// The first inputs that were warned about (the engine relays an
+    /// input's `warn` lines before its `done`, so a `done` finds its input
+    /// here). At most `KEEP_LOST`: a run with more falls back to "some
+    /// input lost something", see `lost_done`.
+    lost_inputs: Vec<PathBuf>,
     pub sandboxed: bool,
     /// An output went to the download folder (the source folder was not
     /// writable).
@@ -88,6 +104,9 @@ impl Summary {
                     self.to_downloads = true;
                 }
                 self.done_count += 1;
+                if self.lost_inputs.contains(input) {
+                    self.lost_done = true;
+                }
             }
             Outcome::Failed { input, reason } => {
                 // Failures stay ahead of skips: the first `failed` entries
@@ -126,7 +145,15 @@ impl Summary {
                 }
                 self.unknown_count += 1;
             }
-            Outcome::Warned { .. } => {}
+            Outcome::Warned { input, .. } => {
+                if self.lost_inputs.contains(input) {
+                    // Another warning of an input already known.
+                } else if self.lost_inputs.len() < KEEP_LOST {
+                    self.lost_inputs.push(input.clone());
+                } else if self.done_count > 0 {
+                    self.lost_done = true;
+                }
+            }
         }
     }
 
@@ -164,7 +191,7 @@ pub fn running_text(label: &str, done: usize, total: usize, fraction: f32) -> (S
 /// server reads the body as markup, so `&`, `<` and `>` are escaped.
 pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
     let mut body = Vec::new();
-    if s.lossy && s.done_count > 0 {
+    if s.lossy && s.lost_done {
         body.push("Formatting was lost.".to_owned());
     }
     let summary = if s.cancelled {
@@ -853,6 +880,13 @@ mod tests {
         }
     }
 
+    fn warn(input: &str) -> Outcome {
+        Outcome::Warned {
+            input: input.into(),
+            message: "blank lines merged".into(),
+        }
+    }
+
     fn skip(input: &str, reason: &str) -> Outcome {
         Outcome::Skipped {
             input: input.into(),
@@ -1066,7 +1100,11 @@ mod tests {
 
     #[test]
     fn lossy_first_line() {
-        let mut s = summary(&[done("/d/a.txt", "/d/a.md"), done("/d/b.txt", "/d/b.md")]);
+        let mut s = summary(&[
+            warn("/d/a.txt"),
+            done("/d/a.txt", "/d/a.md"),
+            done("/d/b.txt", "/d/b.md"),
+        ]);
         s.lossy = true;
         assert_eq!(lines(&final_text(&s, false).1), ["Formatting was lost."]);
         s.set_counts((2, 1, 0, 0));
@@ -1082,8 +1120,44 @@ mod tests {
     }
 
     #[test]
+    fn no_loss_no_formatting_line() {
+        // A lossy action whose run lost nothing: no line.
+        let mut s = summary(&[done("/d/a.txt", "/d/a.md")]);
+        s.lossy = true;
+        assert!(final_text(&s, false).1.is_empty());
+        // The warning belongs to an input that failed, not to the done one.
+        let mut s = summary(&[
+            warn("/d/b.txt"),
+            done("/d/a.txt", "/d/a.md"),
+            fail("/d/b.txt", "bad"),
+        ]);
+        s.lossy = true;
+        assert_eq!(lines(&final_text(&s, false).1), ["b.txt: bad"]);
+        // A warning of a route without a lossy action says nothing about
+        // formatting.
+        let s = summary(&[warn("/d/a.txt"), done("/d/a.txt", "/d/a.md")]);
+        assert!(final_text(&s, false).1.is_empty());
+    }
+
+    #[test]
+    fn warned_inputs_past_the_keep_fall_back_to_some_loss() {
+        let mut outcomes = vec![done("/d/z.txt", "/d/z.md")];
+        for i in 0..=KEEP_LOST {
+            outcomes.push(warn(&format!("/d/{i}.txt")));
+        }
+        let mut s = summary(&outcomes);
+        s.lossy = true;
+        assert!(s.lost_inputs.len() <= KEEP_LOST);
+        assert_eq!(lines(&final_text(&s, false).1), ["Formatting was lost."]);
+    }
+
+    #[test]
     fn no_sandbox_last_line() {
-        let mut s = summary(&[done("/d/a.txt", "/d/a.md"), fail("/d/b.txt", "bad")]);
+        let mut s = summary(&[
+            warn("/d/a.txt"),
+            done("/d/a.txt", "/d/a.md"),
+            fail("/d/b.txt", "bad"),
+        ]);
         s.sandboxed = false;
         s.lossy = true;
         assert_eq!(

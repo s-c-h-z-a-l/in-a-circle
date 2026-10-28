@@ -423,12 +423,47 @@ fn final_notice_after_a_run() {
     assert_eq!(r.unavailable(), 0, "{}", r.stderr);
     assert_eq!(n.len(), 1);
     assert_eq!((n[0].replaces, n[0].summary.as_str()), (0, "a.md"));
-    // `text.txt-to-md` is `lossy=yes` (T10): the notice says so even for
-    // text that happened to survive.
+    // `text.txt-to-md` is `lossy=yes`, but this text lost nothing: no
+    // formatting line (D-35).
+    assert!(plain_body(&n[0].body), "{}", n[0].body);
+    assert_eq!(n[0].actions, ["undo", "Undo"]);
+    // The close ended the Undo window at once.
+    assert!(r.elapsed < Duration::from_secs(5), "{:?}", r.elapsed);
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+}
+
+#[test]
+fn final_notice_says_formatting_was_lost_when_it_was() {
+    let e = Env::new("final-lost");
+    e.file("a.txt", "alpha\n\n\nbeta\n");
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    let (fake, rx) = server(move |p, g| {
+        // The run is blocked in this call: what it printed came first.
+        std::thread::sleep(Duration::from_millis(50));
+        let out = seen2.lock().unwrap().clone();
+        assert!(out.lines().any(|l| l.starts_with("done\t")), "{out}");
+        assert!(out.lines().any(|l| l.starts_with("summary\t")), "{out}");
+        close(p, g.id);
+    });
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "markdown", "a.txt"],
+    );
+    c.env("INACIRCLE_UNDO_WAIT_MS", "20000");
+    let r = run(c, &seen);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(r.unavailable(), 0, "{}", r.stderr);
+    assert_eq!(n.len(), 1);
+    assert_eq!((n[0].replaces, n[0].summary.as_str()), (0, "a.md"));
+    // The blank-line run was merged: the run lost something, and says so.
     assert!(
-        n[0].body.starts_with("Formatting was lost.") || plain_body(&n[0].body),
-        "{}",
-        n[0].body
+        n[0].body.starts_with("Formatting was lost."),
+        "{:?} {}",
+        n[0].body,
+        r.stdout
     );
     assert_eq!(n[0].actions, ["undo", "Undo"]);
     // The close ended the Undo window at once.
