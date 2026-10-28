@@ -46,6 +46,7 @@ EXIT_DEADLINE_S = 5.0  # far above a normal close; protects the session
 PAUSE_S = 0.35
 SERIES_PAUSE_S = 10.0
 POLL_S = 0.05
+MAP_DEADLINE_S = 2.0  # mapping takes one compositor round trip; 2 s is 2x the settle wait
 CMD_TIMEOUT_S = 5  # every helper command (niri msg, wtype, pgrep)
 METRICS = ("main_to_commit_cpu_us", "main_to_commit_wall_us", "main_to_flush_cpu_us",
            "main_to_flush_wall_us", "wheel_cpu_us", "pss_bytes", "idle_wakeups")
@@ -102,6 +103,28 @@ class Build:
                 f"exec {self.exe} 2>>{self.log}")
 
 
+def wheel_mapped(exe):
+    """True once the wheel process is alive and its layer surface is mapped.
+
+    Proof: `niri msg --json layers` lists a layer surface in the "inacircle"
+    namespace (the wheel's own, see surface.rs). Polled up to MAP_DEADLINE_S;
+    any error or absence counts as not proven.
+    """
+    deadline = time.monotonic() + MAP_DEADLINE_S
+    while True:
+        try:
+            if pids(exe):
+                r = subprocess.run(["niri", "msg", "--json", "layers"], capture_output=True,
+                                   text=True, timeout=CMD_TIMEOUT_S)
+                if r.returncode == 0 and '"inacircle"' in r.stdout:
+                    return True
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_S)
+
+
 def attempt(build, series, index):
     row = {"build": build.label, "series": series, "attempt": index,
            "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
@@ -118,7 +141,15 @@ def attempt(build, series, index):
         row["engine_seen"] = bool(pids(build.exe))
         if not row["engine_seen"] and failure is None:
             failure = "no wheel process after the settle time"
-        subprocess.run(["wtype", "-k", "Escape", "-s", "50"], timeout=CMD_TIMEOUT_S)
+        # Input goes into the focused window of the session: send Escape only
+        # with proof that OUR wheel is alive and has a mapped layer surface.
+        # Otherwise the attempt is invalid and the launched process is killed
+        # below (the exit wait finds it alive and SIGKILLs it).
+        row["mapped"] = row["engine_seen"] and wheel_mapped(build.exe)
+        if row["mapped"]:
+            subprocess.run(["wtype", "-k", "Escape", "-s", "50"], timeout=CMD_TIMEOUT_S)
+        elif failure is None:
+            failure = "wheel not verified alive and mapped; no input sent"
     except (subprocess.TimeoutExpired, OSError) as error:
         failure = failure or f"harness command failed: {error}"
         row.setdefault("engine_seen", False)
@@ -140,6 +171,11 @@ def attempt(build, series, index):
     row["marker"] = marks[-1] if marks else None
     row["failure"] = failure
     return row
+
+
+def all_metrics_valid(row):
+    """An attempt counts only when every gated metric is valid."""
+    return all(x["status"] == "valid" for x in to_ledger(row, CONDITION))
 
 
 def to_ledger(row, condition):
@@ -229,8 +265,7 @@ def main():
 
     def valid_count(series, label):
         return sum(1 for r in rows if r["series"] == series and r["build"] == label
-                   and r["failure"] is None and r["marker"] is not None
-                   and "main_to_commit_cpu_us=-1" not in r["marker"])
+                   and all_metrics_valid(r))
 
     seen = {}
     try:

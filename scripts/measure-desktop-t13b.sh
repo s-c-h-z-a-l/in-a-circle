@@ -12,8 +12,7 @@
 # A-bin-dir/B-bin-dir hold `inacircle` (and `inacircle-text`) of the A build
 # (~/inacircle-teszt/A-169163b) and the candidate release. Raw results:
 # <out-dir>/{attempts.jsonl,runs.json,environment.json,wheel-*.log}; then
-# summarize per series with scripts/measure-wheel.py (--build, one series
-# at a time) and compare A against B.
+# summarize per series with scripts/summarize-ab.py <out-dir> and compare A against B.
 set -euo pipefail
 [ "${1:-}" = --i-am-present ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 A=${2:?A-bin-dir}; B=${3:?B-bin-dir}; OUT=${4:?out-dir}

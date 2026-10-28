@@ -364,6 +364,38 @@ class AbRunnerTests(unittest.TestCase):
         self.assertEqual(len(rows), len(self.ab.METRICS))
         self.assertEqual({r["status"] for r in rows}, {"invalid"})
 
+    def test_no_input_unless_wheel_verified_alive_and_mapped(self):
+        import types
+        calls = []
+        ab = self.ab
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        saved = (ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S)
+        ab.subprocess.run, ab.time.sleep = fake_run, lambda s: None
+        ab.pids = lambda exe: []  # the wheel never appears
+        ab.residency = lambda exe: (0, 0)
+        ab.MAP_DEADLINE_S = 0.0
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                build = ab.Build("B", d, d)
+                row = ab.attempt(build, "ab1", 1)
+        finally:
+            ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S = saved
+        self.assertFalse(any(c[0] == "wtype" for c in calls), calls)
+        self.assertFalse(row["mapped"])
+        self.assertIsNotNone(row["failure"])
+        self.assertEqual({r["status"] for r in ab.to_ledger(row, "startup")}, {"invalid"})
+
+    def test_valid_count_requires_every_gated_metric(self):
+        ok = self.row(MARKER)
+        no_pss = self.row(MARKER.replace("pss_kb=", "pss_kb=0 x="))
+        self.assertTrue(self.ab.all_metrics_valid(ok))
+        self.assertFalse(self.ab.all_metrics_valid(no_pss))
+        self.assertFalse(self.ab.all_metrics_valid(self.row(None)))
+
 
 if __name__ == "__main__":
     unittest.main()
