@@ -652,6 +652,85 @@ fn catalog_from_actions_dir_list() {
     assert_eq!(o.code, Some(2));
 }
 
+/// The catalog cache file(s) of `e`, as (path, text).
+fn catalog_caches(e: &Env) -> Vec<(PathBuf, String)> {
+    fs::read_dir(e.root.join("cache/inacircle"))
+        .unwrap()
+        .map(|d| d.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("catalog")
+        })
+        .map(|p| {
+            let t = fs::read_to_string(&p).unwrap();
+            (p, t)
+        })
+        .collect()
+}
+
+/// `text.txt-to-md` is `lossy=yes` everywhere the catalog is seen (T10, spec
+/// 5): the shipped manifest, the cache, and so the planner (no lossless
+/// intermediate) and the notice. A cache written by the old binary (said
+/// `lossy=no`) cannot stay active: its stamp (size, mtime) is the old
+/// binary's, so the next run rescans and rewrites it.
+#[test]
+fn txt_to_md_is_lossy_in_the_catalog_and_a_stale_cache_is_replaced() {
+    let e = Env::new("lossy-catalog");
+    e.file("a.txt", b"alpha\n\n\nbeta\n");
+    let o = e.run(&["run", "--action", "text.txt-to-md", "a.txt"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let action_line = |t: &str| {
+        t.lines()
+            .find(|l| l.starts_with("action\ttext.txt-to-md\t"))
+            .map(str::to_owned)
+    };
+    let caches = catalog_caches(&e);
+    assert_eq!(caches.len(), 1);
+    let (path, text) = &caches[0];
+    assert!(
+        action_line(text).unwrap().contains("\tlossy=yes\t"),
+        "{text}"
+    );
+    // The previous binary's cache: lossless claim, other size stamp.
+    let stale: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("action\ttext.txt-to-md\t") {
+                l.replace("\tlossy=yes\t", "\tlossy=no\t")
+            } else if l.starts_with("bin\t") && l.contains("inacircle-text") {
+                l.split('\t')
+                    .map(|f| if f.starts_with("size=") { "size=1" } else { f })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    assert_ne!(&stale, text);
+    fs::write(path, &stale).unwrap();
+    let o = e.run(&["run", "--action", "text.txt-to-md", "a.txt"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let fresh = catalog_caches(&e);
+    let line = action_line(&fresh[0].1).unwrap();
+    assert!(
+        line.contains("\tlossy=yes\t"),
+        "stale lossless cache stayed: {line}"
+    );
+    // The notice says so: the run is reported lossy.
+    assert!(
+        o.pairs("warn")
+            .iter()
+            .any(|(_, m)| m.contains("repeated blank lines")),
+        "{}",
+        o.stdout
+    );
+}
+
 // ---- two-step routes through plugin scripts ----
 
 /// A `#!/bin/sh` plugin in `actions/`: `--manifest` prints one action

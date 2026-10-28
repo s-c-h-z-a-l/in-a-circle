@@ -401,6 +401,25 @@ mod tests {
         assert_eq!(ids(route(&cat, "a/x", "b/y")), Some(vec!["c".into()]));
     }
 
+    /// The shipped text actions (T10): `text.txt-to-md` is lossy, so plain
+    /// text reaches a Markdown-only target by no two-step route, while the
+    /// direct lossy step itself is still planned.
+    #[test]
+    fn lossy_txt_to_md_is_not_a_lossless_intermediate() {
+        let cat = Catalog {
+            actions: vec![
+                act("text.txt-to-md", "text/plain", "text/markdown", 10, true),
+                act("text.md-to-txt", "text/markdown", "text/plain", 10, true),
+                act("x.md-to-html", "text/markdown", "text/html", 5, false),
+            ],
+        };
+        assert_eq!(ids(route(&cat, "text/plain", "text/html")), None);
+        assert_eq!(
+            ids(route(&cat, "text/plain", "text/markdown")),
+            Some(vec!["text.txt-to-md".into()])
+        );
+    }
+
     #[test]
     fn two_steps_through_lossless_only() {
         let lossy = Catalog {

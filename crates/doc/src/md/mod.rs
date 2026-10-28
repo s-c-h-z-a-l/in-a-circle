@@ -14,7 +14,8 @@ mod inline;
 mod punct;
 mod scan;
 
-use crate::{Block, Document, Inline, Loss, ReadError};
+use crate::budget::{Meter, Sink};
+use crate::{Block, Document, Inline, LimitError, Limits, Loss, ReadError};
 use std::collections::{BTreeSet, HashMap};
 
 /// Reads CommonMark 0.31.2. NUL characters become U+FFFD; invalid UTF-8
@@ -26,12 +27,38 @@ use std::collections::{BTreeSet, HashMap};
 /// Two phases, as in the spec's parsing strategy: `block` builds the block
 /// structure and collects link reference definitions, then every
 /// paragraph's and heading's raw text goes through `inlines`.
+///
+/// Unbudgeted compatibility entry point; the shipped conversion uses
+/// [`read_limited`].
 pub fn read(bytes: &[u8]) -> Result<Document, ReadError> {
+    read_limited(bytes, Limits::UNLIMITED)
+}
+
+/// [`read`] under `limits`: the input size is checked first; the NUL
+/// replacement copy, every block and inline node, every owned string and
+/// every copy of a reference's destination and title is charged before it
+/// is made, so the parse stops at the budget (`ReadError::Limit`).
+pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<Document, ReadError> {
+    if bytes.len() > limits.input_bytes {
+        return Err(LimitError::Exceeded("input").into());
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
-    let doc = if text.contains('\0') {
-        block::parse(&text.replace('\0', "\u{fffd}"))
+    let mut m = Meter::new(limits);
+    let nuls = bytes.iter().filter(|&&b| b == 0).count();
+    let doc = if nuls > 0 {
+        // Each NUL (1 byte) becomes U+FFFD (3 bytes): the copy is charged
+        // as owned text and reserved fallibly before it is made.
+        let mut copy = String::new();
+        if m.text(bytes.len() + 2 * nuls) {
+            m.reserve_str(&mut copy, bytes.len() + 2 * nuls);
+        }
+        m.result()?;
+        for c in text.chars() {
+            copy.push(if c == '\0' { '\u{fffd}' } else { c });
+        }
+        block::parse(&copy, &mut m)?
     } else {
-        block::parse(text)
+        block::parse(text, &mut m)?
     };
     Ok(doc)
 }
@@ -51,8 +78,8 @@ pub(crate) type Refs = HashMap<String, LinkDef>;
 /// content: lines joined with `\n`, each line's leading spaces/tabs and the
 /// block's final whitespace removed; interior trailing spaces are kept (they
 /// decide hard breaks). `refs` holds every definition of the document.
-fn inlines(raw: &str, refs: &Refs) -> Vec<Inline> {
-    inline::parse(raw, refs)
+fn inlines(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
+    inline::parse(raw, refs, m)
 }
 
 /// Matching form of a link label: Unicode case fold (approximated as
@@ -177,37 +204,59 @@ fn char_ref(s: &[u8], i: usize, out: &mut String) -> Option<usize> {
 /// one `\n`, empty output is `""`. Adjacent lists alternate `-`/`*` and
 /// `.`/`)` so they stay separate lists. Recurses over nested blocks; the
 /// readers bound nesting depth.
+/// Unbudgeted compatibility entry point; see [`write_limited`].
 pub fn write(doc: &Document) -> (String, BTreeSet<Loss>) {
-    let mut losses = BTreeSet::new();
-    let mut out = blocks_to_string(&doc.blocks, true, &mut losses);
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    (out, losses)
+    write_limited(doc, Limits::UNLIMITED).expect("allocation failed while writing Markdown")
 }
 
-fn blocks_to_string(blocks: &[Block], loose: bool, losses: &mut BTreeSet<Loss>) -> String {
+/// [`write`] under `limits.output_bytes`: every piece (a nested block's
+/// text included) is counted before it is appended, so the writer stops at
+/// the budget instead of producing the whole output first.
+pub fn write_limited(
+    doc: &Document,
+    limits: Limits,
+) -> Result<(String, BTreeSet<Loss>), LimitError> {
+    let mut losses = BTreeSet::new();
+    let mut sink = Sink::new(limits);
+    let mut out = blocks_to_string(&doc.blocks, true, &mut losses, &mut sink);
+    if !out.is_empty() {
+        sink.push(&mut out, '\n');
+    }
+    sink.result()?;
+    Ok((out, losses))
+}
+
+fn blocks_to_string(
+    blocks: &[Block],
+    loose: bool,
+    losses: &mut BTreeSet<Loss>,
+    sink: &mut Sink,
+) -> String {
     let mut out = String::new();
     let mut prev: Option<&Block> = None;
     // (ordered, alternate delimiter) of the directly preceding list.
     let mut prev_list: Option<(bool, bool)> = None;
     for b in blocks {
+        if sink.failed() {
+            break;
+        }
         let alt = match (b, prev_list) {
             (Block::List { start, .. }, Some((ordered, alt))) if ordered == start.is_some() => !alt,
             _ => false,
         };
-        let s = block_to_string(b, alt, losses);
+        let s = block_to_string(b, alt, losses, sink);
         if s.is_empty() {
             continue;
         }
         if let Some(p) = prev {
-            out.push_str(if loose || needs_blank(p, b) {
+            let sep = if loose || needs_blank(p, b) {
                 "\n\n"
             } else {
                 "\n"
-            });
+            };
+            sink.push_str(&mut out, sep);
         }
-        out.push_str(&s);
+        sink.push_str(&mut out, &s);
         prev_list = match b {
             Block::List { start, .. } => Some((start.is_some(), alt)),
             _ => None,
@@ -234,36 +283,40 @@ fn needs_blank(prev: &Block, next: &Block) -> bool {
     }
 }
 
-fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>) -> String {
+fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut Sink) -> String {
     match b {
         Block::Paragraph(c) => {
-            let mut w = InlineWriter::new(true, false, losses);
+            let mut w = InlineWriter::new(true, false, losses, sink);
             w.inlines(c, true);
             w.out
         }
         Block::Heading { level, content } => {
-            let mut w = InlineWriter::new(false, true, losses);
+            let mut w = InlineWriter::new(false, true, losses, sink);
             w.inlines(content, true);
-            let mut out = "#".repeat(usize::from((*level).clamp(1, 6)));
-            if !w.out.is_empty() {
-                out.push(' ');
-                out.push_str(&w.out);
+            let text = w.out;
+            let mut out = String::new();
+            for _ in 0..usize::from((*level).clamp(1, 6)) {
+                sink.push(&mut out, '#');
+            }
+            if !text.is_empty() {
+                sink.push(&mut out, ' ');
+                sink.push_str(&mut out, &text);
             }
             out
         }
-        Block::CodeBlock { info, text } => code_block(info, text),
+        Block::CodeBlock { info, text } => code_block(info, text, sink),
         Block::BlockQuote(inner) => {
-            let body = blocks_to_string(inner, true, losses);
+            let body = blocks_to_string(inner, true, losses, sink);
             if body.is_empty() {
                 return body;
             }
             let mut out = String::new();
             for (i, line) in body.split('\n').enumerate() {
                 if i > 0 {
-                    out.push('\n');
+                    sink.push(&mut out, '\n');
                 }
-                out.push_str(if line.is_empty() { ">" } else { "> " });
-                out.push_str(line);
+                sink.push_str(&mut out, if line.is_empty() { ">" } else { "> " });
+                sink.push_str(&mut out, line);
             }
             out
         }
@@ -274,8 +327,11 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>) -> String 
         } => {
             let mut out = String::new();
             for (i, item) in items.iter().enumerate() {
+                if sink.failed() {
+                    break;
+                }
                 if i > 0 {
-                    out.push_str(if *tight { "\n" } else { "\n\n" });
+                    sink.push_str(&mut out, if *tight { "\n" } else { "\n\n" });
                 }
                 let marker = match start {
                     None if alt => "* ".to_string(),
@@ -286,22 +342,23 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>) -> String 
                         if alt { ')' } else { '.' }
                     ),
                 };
-                let mut body = blocks_to_string(item, !*tight, losses);
+                let mut body = blocks_to_string(item, !*tight, losses, sink);
                 // "- ---" would be a thematic break, not an item.
                 if marker == "- " && (body == "---" || body.starts_with("---\n")) {
                     body.replace_range(..3, "***");
                 }
-                let pad = " ".repeat(marker.len());
                 for (j, line) in body.split('\n').enumerate() {
                     if j == 0 {
-                        out.push_str(&marker);
+                        sink.push_str(&mut out, &marker);
                     } else {
-                        out.push('\n');
+                        sink.push(&mut out, '\n');
                         if !line.is_empty() {
-                            out.push_str(&pad);
+                            for _ in 0..marker.len() {
+                                sink.push(&mut out, ' ');
+                            }
                         }
                     }
-                    out.push_str(line);
+                    sink.push_str(&mut out, line);
                 }
                 if body.is_empty() {
                     out.truncate(out.trim_end().len());
@@ -317,7 +374,7 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>) -> String 
 /// Fenced code block. The fence is longer than any run of the fence
 /// character in the text; an info string containing a backtick forces a
 /// tilde fence (a backtick fence's info string may not contain backticks).
-fn code_block(info: &str, text: &str) -> String {
+fn code_block(info: &str, text: &str, sink: &mut Sink) -> String {
     let info = info.replace(['\n', '\r'], " ");
     let info = info.trim();
     let ch = if info.contains('`') { '~' } else { '`' };
@@ -330,22 +387,37 @@ fn code_block(info: &str, text: &str) -> String {
             run = 0;
         }
     }
-    let fence: String = std::iter::repeat_n(ch, (longest + 1).max(3)).collect();
-    let mut out = String::with_capacity(text.len() + 2 * fence.len() + info.len() + 3);
-    out.push_str(&fence);
-    out.push_str(info);
-    out.push('\n');
-    if !text.is_empty() {
-        out.push_str(text.strip_suffix('\n').unwrap_or(text));
-        out.push('\n');
+    // The fence is at most one longer than a run in `text`: no more than
+    // the text itself, which the sink counts as it is appended.
+    let mut out = String::new();
+    let fence_len = (longest + 1).max(3);
+    let body = if text.is_empty() {
+        0
+    } else {
+        text.strip_suffix('\n').unwrap_or(text).len() + 1
+    };
+    if !sink.room(&mut out, 2 * fence_len + info.len() + 1 + body) {
+        return out;
     }
-    out.push_str(&fence);
+    for _ in 0..fence_len {
+        sink.push(&mut out, ch);
+    }
+    sink.push_str(&mut out, info);
+    sink.push(&mut out, '\n');
+    if !text.is_empty() {
+        sink.push_str(&mut out, text.strip_suffix('\n').unwrap_or(text));
+        sink.push(&mut out, '\n');
+    }
+    for _ in 0..fence_len {
+        sink.push(&mut out, ch);
+    }
     out
 }
 
 struct InlineWriter<'a> {
     out: String,
     losses: &'a mut BTreeSet<Loss>,
+    sink: &'a mut Sink,
     /// Nothing but whitespace emitted on the current line so far.
     line_start: bool,
     /// Escape block markers at line start (not needed inside headings).
@@ -355,10 +427,16 @@ struct InlineWriter<'a> {
 }
 
 impl<'a> InlineWriter<'a> {
-    fn new(markers: bool, single_line: bool, losses: &'a mut BTreeSet<Loss>) -> Self {
+    fn new(
+        markers: bool,
+        single_line: bool,
+        losses: &'a mut BTreeSet<Loss>,
+        sink: &'a mut Sink,
+    ) -> Self {
         InlineWriter {
             out: String::new(),
             losses,
+            sink,
             line_start: true,
             markers,
             single_line,
@@ -368,6 +446,9 @@ impl<'a> InlineWriter<'a> {
     /// `end_of_line`: the end of `items` is the end of a rendered line.
     fn inlines(&mut self, items: &[Inline], end_of_line: bool) {
         for (idx, item) in items.iter().enumerate() {
+            if self.sink.failed() {
+                return;
+            }
             let next = items.get(idx + 1);
             match item {
                 Inline::Text(t) => {
@@ -386,16 +467,16 @@ impl<'a> InlineWriter<'a> {
                     content,
                 } => {
                     self.line_start = false;
-                    self.out.push('[');
+                    self.sink.push(&mut self.out, '[');
                     self.inlines(content, false);
-                    self.out.push(']');
+                    self.sink.push(&mut self.out, ']');
                     self.target(dest, title);
                 }
                 Inline::Image { dest, title, alt } => {
                     self.line_start = false;
-                    self.out.push_str("![");
+                    self.sink.push_str(&mut self.out, "![");
                     self.inlines(alt, false);
-                    self.out.push(']');
+                    self.sink.push(&mut self.out, ']');
                     self.target(dest, title);
                 }
                 Inline::SoftBreak => self.line_break("\n"),
@@ -406,7 +487,7 @@ impl<'a> InlineWriter<'a> {
                 }
                 Inline::Html(h) => {
                     self.line_start = false;
-                    self.out.push_str(h);
+                    self.sink.push_str(&mut self.out, h);
                 }
             }
         }
@@ -414,18 +495,18 @@ impl<'a> InlineWriter<'a> {
 
     fn line_break(&mut self, br: &str) {
         if self.single_line {
-            self.out.push(' ');
+            self.sink.push(&mut self.out, ' ');
         } else {
-            self.out.push_str(br);
+            self.sink.push_str(&mut self.out, br);
             self.line_start = true;
         }
     }
 
     fn wrapped(&mut self, delim: &str, c: &[Inline]) {
         self.line_start = false;
-        self.out.push_str(delim);
+        self.sink.push_str(&mut self.out, delim);
         self.inlines(c, false);
-        self.out.push_str(delim);
+        self.sink.push_str(&mut self.out, delim);
     }
 
     fn code_span(&mut self, t: &str) {
@@ -451,56 +532,60 @@ impl<'a> InlineWriter<'a> {
         let pad = t.starts_with('`')
             || t.ends_with('`')
             || (t.starts_with(' ') && t.ends_with(' ') && t.chars().any(|c| c != ' '));
-        self.out.push_str(&ticks);
+        self.sink.push_str(&mut self.out, &ticks);
         if pad {
-            self.out.push(' ');
+            self.sink.push(&mut self.out, ' ');
         }
-        self.out.push_str(t);
+        self.sink.push_str(&mut self.out, t);
         if pad {
-            self.out.push(' ');
+            self.sink.push(&mut self.out, ' ');
         }
-        self.out.push_str(&ticks);
+        self.sink.push_str(&mut self.out, &ticks);
     }
 
     /// `(dest "title")`.
     fn target(&mut self, dest: &str, title: &str) {
-        self.out.push('(');
+        self.sink.push(&mut self.out, '(');
         let plain = !dest.is_empty()
             && !dest.starts_with('<')
             && !dest.chars().any(|c| c.is_whitespace() || c.is_control());
         if plain {
             for c in dest.chars() {
                 if matches!(c, '\\' | '(' | ')' | '&') {
-                    self.out.push('\\');
+                    self.sink.push(&mut self.out, '\\');
                 }
-                self.out.push(c);
+                self.sink.push(&mut self.out, c);
             }
         } else {
-            self.out.push('<');
+            self.sink.push(&mut self.out, '<');
             for c in dest.chars() {
                 if matches!(c, '\\' | '<' | '>' | '&') {
-                    self.out.push('\\');
+                    self.sink.push(&mut self.out, '\\');
                 }
-                self.out.push(if c == '\n' || c == '\r' { ' ' } else { c });
+                self.sink
+                    .push(&mut self.out, if c == '\n' || c == '\r' { ' ' } else { c });
             }
-            self.out.push('>');
+            self.sink.push(&mut self.out, '>');
         }
         if !title.is_empty() {
-            self.out.push_str(" \"");
+            self.sink.push_str(&mut self.out, " \"");
             for c in title.chars() {
                 if matches!(c, '\\' | '"' | '&') {
-                    self.out.push('\\');
+                    self.sink.push(&mut self.out, '\\');
                 }
-                self.out.push(c);
+                self.sink.push(&mut self.out, c);
             }
-            self.out.push('"');
+            self.sink.push(&mut self.out, '"');
         }
-        self.out.push(')');
+        self.sink.push(&mut self.out, ')');
     }
 
     fn text(&mut self, t: &str, end_of_line: bool) {
         let mut rest = t;
         while let Some(c) = rest.chars().next() {
+            if self.sink.failed() {
+                return;
+            }
             match c {
                 c if c.is_whitespace() && c != '\n' => {
                     let n = rest
@@ -512,9 +597,11 @@ impl<'a> InlineWriter<'a> {
                         // Rendering would strip it; an entity keeps it.
                         for ch in run.chars() {
                             match ch {
-                                ' ' => self.out.push_str("&#32;"),
-                                '\t' => self.out.push_str("&#9;"),
-                                _ => self.out.push_str(&format!("&#x{:X};", ch as u32)),
+                                ' ' => self.sink.push_str(&mut self.out, "&#32;"),
+                                '\t' => self.sink.push_str(&mut self.out, "&#9;"),
+                                _ => self
+                                    .sink
+                                    .push_str(&mut self.out, &format!("&#x{:X};", ch as u32)),
                             }
                         }
                     } else {
@@ -525,7 +612,7 @@ impl<'a> InlineWriter<'a> {
                         {
                             self.losses.insert(Loss::Whitespace);
                         }
-                        self.out.push_str(run);
+                        self.sink.push_str(&mut self.out, run);
                     }
                     rest = after;
                 }
@@ -538,13 +625,13 @@ impl<'a> InlineWriter<'a> {
                         .find(|c: char| !c.is_ascii_digit())
                         .unwrap_or(rest.len());
                     let (digits, after) = rest.split_at(n);
-                    self.out.push_str(digits);
+                    self.sink.push_str(&mut self.out, digits);
                     rest = after;
                     if n <= 9
                         && let Some(p) = rest.chars().next().filter(|p| matches!(p, '.' | ')'))
                     {
-                        self.out.push('\\');
-                        self.out.push(p);
+                        self.sink.push(&mut self.out, '\\');
+                        self.sink.push(&mut self.out, p);
                         rest = &rest[1..];
                     }
                     self.line_start = false;
@@ -557,9 +644,9 @@ impl<'a> InlineWriter<'a> {
                         && self.markers
                         && matches!(c, '-' | '+' | '=' | '~'));
                     if escape {
-                        self.out.push('\\');
+                        self.sink.push(&mut self.out, '\\');
                     }
-                    self.out.push(c);
+                    self.sink.push(&mut self.out, c);
                     self.line_start = false;
                     rest = &rest[c.len_utf8()..];
                 }

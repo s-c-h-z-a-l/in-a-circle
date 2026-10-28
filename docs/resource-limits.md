@@ -66,6 +66,13 @@ window plus about 300 B per file (about 60 MB at 200 000 files); office
 streamed XML (< 100 MB); audio (< 10 MB). json <-> toml needs the whole
 tree (about 5-10x the file), so those actions get a file size limit.
 
+The text family (txt <-> md) is held by structure budgets charged while it
+builds, not after: 8 MiB input, 524,288 nodes, 32 MiB of owned text, 32 MiB
+of output. The node budget was 131,072 at first; the densest real text
+measured (a registry file, 15.9 B/node) reached it at about 2 MiB, so it
+is 2^19, which holds an 8 MiB input at that density for roughly 100-200 MB
+peak, a fifth of the smallest RLIMIT_DATA net.
+
 ### The machine side
 
 A basic user has 8 GB RAM, a power user 32-96 GB. Spawn-per-use lets several

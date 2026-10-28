@@ -1,5 +1,6 @@
-//! `inacircle-text`: the text family. txt -> md is lossless, md -> txt is
-//! lossy and reports what it dropped. Contract v0 (docs/architecture.md).
+//! `inacircle-text`: the text family. Both directions are lossy and report
+//! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
+//! structure). Contract v0 (docs/architecture.md).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -8,14 +9,67 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use action::{Command, Events, Invocation, parse_args};
-use doc::{Loss, ReadError};
+use doc::{LimitError, Limits, Loss, ReadError};
 
-/// `document_input_bytes` (G0-P): one TXT/Markdown input is read at most
-/// this far. 8 MiB is 12.9x the largest real text measured (pcre2.txt,
-/// 652 KB) and fits a book-sized file; the conversion peaks near twice the
-/// input, and the sandbox's RLIMIT_DATA (>= 1 GiB) is the second net. Past
-/// it the input fails (`fail`, nothing staged) and the batch goes on.
-const DOCUMENT_INPUT_BYTES: usize = 8 * 1024 * 1024;
+/// The structure budgets of one conversion (G0-P rows `document_*`, see
+/// [`Limits::DEFAULT`] for the values and their reasons). The input is read
+/// at most `input_bytes` (+1 to detect more); past any budget the input
+/// fails (`fail`, nothing staged) and the batch goes on. The sandbox's
+/// RLIMIT_DATA (>= 1 GiB) is the second net.
+const LIMITS: Limits = Limits::DEFAULT;
+
+/// Why a conversion stopped.
+enum ConvertError {
+    NotText,
+    Limit(LimitError),
+}
+
+impl From<ReadError> for ConvertError {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::NotText => ConvertError::NotText,
+            ReadError::Limit(l) => ConvertError::Limit(l),
+        }
+    }
+}
+
+impl From<LimitError> for ConvertError {
+    fn from(e: LimitError) -> Self {
+        ConvertError::Limit(e)
+    }
+}
+
+/// `n` with thousands separators (`524,288`), for the rejection copy.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The `fail` reason of a budget error (rejection copies of the G0-P rows).
+fn limit_reason(e: LimitError) -> String {
+    match e {
+        LimitError::Exceeded("input") => "This text file is larger than 8 MiB.".to_string(),
+        LimitError::Exceeded("nodes") => format!(
+            "This document has too many text elements (limit {}).",
+            grouped(LIMITS.nodes)
+        ),
+        LimitError::Exceeded("owned text") => {
+            "This document expands beyond the 32 MiB text budget.".to_string()
+        }
+        LimitError::Exceeded("output") => {
+            "The converted text would be larger than 32 MiB.".to_string()
+        }
+        LimitError::Exceeded(other) => format!("This document passes the {other} limit."),
+        LimitError::Allocation => "Not enough memory to convert this text file.".to_string(),
+    }
+}
 
 fn manifest_text() -> String {
     let action = |id: &str, input: &str, out: &str, ext: &str, label: &str, lossy: &str| {
@@ -40,7 +94,7 @@ fn manifest_text() -> String {
         "text/markdown",
         "md",
         "Markdown",
-        "no",
+        "yes",
     ));
     s.push_str(&action(
         "text.md-to-txt",
@@ -76,16 +130,16 @@ impl Conversion {
     }
 
     /// Converted text plus every loss from the reader and the writer.
-    fn convert(self, bytes: &[u8]) -> Result<(String, BTreeSet<Loss>), ReadError> {
+    fn convert(self, bytes: &[u8]) -> Result<(String, BTreeSet<Loss>), ConvertError> {
         match self {
             Conversion::TxtToMd => {
-                let (d, losses) = doc::txt::read(bytes)?;
-                let (text, more) = doc::md::write(&d);
+                let (d, losses) = doc::txt::read_limited(bytes, LIMITS)?;
+                let (text, more) = doc::md::write_limited(&d, LIMITS)?;
                 Ok((text, merge_losses(losses, more)))
             }
             Conversion::MdToTxt => {
-                let d = doc::md::read(bytes)?;
-                Ok(doc::txt::write(&d))
+                let d = doc::md::read_limited(bytes, LIMITS)?;
+                Ok(doc::txt::write_limited(&d, LIMITS)?)
             }
         }
     }
@@ -115,7 +169,7 @@ fn process(
         ev.skip(input, "non-UTF-8 path");
         return Outcome::Unsupported;
     }
-    let bytes = match action::read_file_bounded(input, DOCUMENT_INPUT_BYTES) {
+    let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
             ev.fail(input, "This text file is larger than 8 MiB.");
@@ -128,9 +182,13 @@ fn process(
     };
     let (text, losses) = match conv.convert(&bytes) {
         Ok(r) => r,
-        Err(ReadError::NotText) => {
+        Err(ConvertError::NotText) => {
             ev.skip(input, "unsupported");
             return Outcome::Unsupported;
+        }
+        Err(ConvertError::Limit(e)) => {
+            ev.fail(input, &limit_reason(e));
+            return Outcome::Failed;
         }
     };
     let out = match action::output_path(&inv.work, i, input, conv.ext()) {

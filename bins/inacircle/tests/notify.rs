@@ -423,7 +423,13 @@ fn final_notice_after_a_run() {
     assert_eq!(r.unavailable(), 0, "{}", r.stderr);
     assert_eq!(n.len(), 1);
     assert_eq!((n[0].replaces, n[0].summary.as_str()), (0, "a.md"));
-    assert!(plain_body(&n[0].body), "{}", n[0].body);
+    // `text.txt-to-md` is `lossy=yes` (T10): the notice says so even for
+    // text that happened to survive.
+    assert!(
+        n[0].body.starts_with("Formatting was lost.") || plain_body(&n[0].body),
+        "{}",
+        n[0].body
+    );
     assert_eq!(n[0].actions, ["undo", "Undo"]);
     // The close ended the Undo window at once.
     assert!(r.elapsed < Duration::from_secs(5), "{:?}", r.elapsed);

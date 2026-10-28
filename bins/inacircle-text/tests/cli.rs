@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const MANIFEST: &str = "inacircle-manifest 0\n\
-action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=no\tbatch=yes\n\
+action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
 
 /// A unique temporary directory, removed on drop.
@@ -387,6 +387,78 @@ fn text_input_is_bounded() {
     // Nothing staged for the refused input (index 0 of that run).
     assert!(!work.join("0/over.md").exists());
     assert!(work.join("1/small.md").is_file());
+}
+
+/// txt -> md is `lossy=yes`: `alpha\n\n\nbeta` loses a blank line, and the
+/// action says so (the manifest, the planner and the notice read the same
+/// flag, so a lossless route can never be chosen through it).
+#[test]
+fn txt_to_md_reports_the_blank_line_loss() {
+    let root = tmp("blanklines");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.txt");
+    fs::write(&a, "alpha\n\n\nbeta\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let warns = lines(&out, "warn");
+    assert_eq!(warns.len(), 1, "{out}");
+    assert_eq!(
+        warns[0][2],
+        "repeated blank lines merged into one paragraph break"
+    );
+    assert!(stdout(&Command::new(env!("CARGO_BIN_EXE_inacircle-text")).arg("--manifest").output().unwrap())
+        .contains("text.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes"));
+}
+
+/// `document_nodes`: `2n - 1 + 1` nodes for `n` lines in one paragraph; the
+/// limit (524,288 = 2^19) converts, one more line is a `fail` that names the
+/// limit, nothing is staged, and the next input of the batch still converts.
+#[test]
+fn text_node_budget_max_and_max_plus_one() {
+    let root = tmp("nodes");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let at = root.join("at.txt");
+    let over = root.join("over.txt");
+    let small = root.join("small.txt");
+    let n = (1 << 19) / 2;
+    fs::write(&at, "a\n".repeat(n)).unwrap();
+    fs::write(&over, "a\n".repeat(n + 1)).unwrap();
+    fs::write(&small, "x\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&at]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(lines(&stdout(&o), "done").len(), 1);
+    let o = run_raw("text.txt-to-md", &work, &[&over, &small]);
+    assert_eq!(o.status.code(), Some(0), "the small one is done");
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(
+        fails[0][2],
+        "This document has too many text elements (limit 524,288)."
+    );
+    assert!(!work.join("0/over.md").exists());
+    assert!(work.join("1/small.md").is_file());
+}
+
+/// The md reader's budgets reach the action too: a hostile Markdown is a
+/// `fail` with the budget's own words, not `unsupported`.
+#[test]
+fn markdown_node_budget_is_a_fail_not_unsupported() {
+    let root = tmp("mdnodes");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.md");
+    fs::write(&a, "> a\n".repeat(300_000)).unwrap();
+    let o = run_raw("text.md-to-txt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "skip").len(), 0, "{out}");
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert!(fails[0][2].contains("too many text elements"), "{out}");
 }
 
 /// A FIFO as an input fails at once (never blocks); a symlink to a text

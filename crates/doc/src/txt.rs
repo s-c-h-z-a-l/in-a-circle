@@ -1,19 +1,32 @@
 //! Plain-text reader and writer.
 
-use crate::{Block, Document, Inline, Loss, ReadError};
+use crate::budget::{Meter, Sink};
+use crate::{Block, Document, Inline, LimitError, Limits, Loss, ReadError};
 use std::collections::BTreeSet;
 
 /// Reads plain text. Paragraphs are separated by blank (whitespace-only)
 /// lines; lines inside a paragraph are joined by `HardBreak`. Runs of more
 /// than one blank line between paragraphs are merged and reported.
 /// Text is valid UTF-8 without NUL bytes; anything else is
-/// `ReadError::NotText`. Linear in the input; no recursion.
+/// `ReadError::NotText`. Linear in the input; no recursion. Unbudgeted
+/// compatibility entry point; the shipped conversion uses [`read_limited`].
 pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
+    read_limited(bytes, Limits::UNLIMITED)
+}
+
+/// [`read`] under `limits`: the input size is checked first, then every
+/// paragraph, `Text` and `HardBreak` is charged as one node and every line
+/// as its bytes of owned text before it is built (`ReadError::Limit`).
+pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<(Document, BTreeSet<Loss>), ReadError> {
+    if bytes.len() > limits.input_bytes {
+        return Err(LimitError::Exceeded("input").into());
+    }
     let s = std::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
     if s.contains('\0') {
         return Err(ReadError::NotText);
     }
     let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    let mut m = Meter::new(limits);
     let mut losses = BTreeSet::new();
     let mut blocks = Vec::new();
     let mut inlines: Vec<Inline> = Vec::new();
@@ -21,7 +34,7 @@ pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
 
     // Split on LF, CRLF and lone CR without allocating a normalized copy.
     let mut rest = s;
-    while !rest.is_empty() {
+    while !rest.is_empty() && !m.failed() {
         let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
         let line = &rest[..end];
         let mut next = end;
@@ -36,22 +49,28 @@ pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
             blanks += 1;
             continue;
         }
-        if !inlines.is_empty() {
-            if blanks > 0 {
-                if blanks > 1 {
-                    losses.insert(Loss::BlankLines);
-                }
-                blocks.push(Block::Paragraph(std::mem::take(&mut inlines)));
-            } else {
-                inlines.push(Inline::HardBreak);
+        // A paragraph is charged when its first line starts it.
+        if inlines.is_empty() {
+            m.node();
+        } else if blanks > 0 {
+            if blanks > 1 {
+                losses.insert(Loss::BlankLines);
             }
+            m.push(&mut blocks, Block::Paragraph(std::mem::take(&mut inlines)));
+            m.node();
+        } else if m.node() {
+            m.push(&mut inlines, Inline::HardBreak);
         }
         blanks = 0;
-        inlines.push(Inline::Text(line.to_string()));
+        if m.node() {
+            let t = m.own(line);
+            m.push(&mut inlines, Inline::Text(t));
+        }
     }
     if !inlines.is_empty() {
-        blocks.push(Block::Paragraph(inlines));
+        m.push(&mut blocks, Block::Paragraph(inlines));
     }
+    m.result()?;
     Ok((Document { blocks }, losses))
 }
 
@@ -60,151 +79,191 @@ pub fn read(bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ReadError> {
 /// skipped); non-empty output ends with exactly one `\n`, empty output is `""`.
 /// List nesting: content under a bullet item is indented 2 spaces, under an
 /// ordered item by the marker's width (3 spaces under `1. `).
+/// Unbudgeted compatibility entry point; see [`write_limited`].
 pub fn write(doc: &Document) -> (String, BTreeSet<Loss>) {
-    let mut losses = BTreeSet::new();
-    let mut out = blocks_to_string(&doc.blocks, true, &mut losses);
+    write_limited(doc, Limits::UNLIMITED).expect("allocation failed while writing plain text")
+}
+
+/// [`write`] under `limits.output_bytes`: every piece is counted before it
+/// is appended, so the output never grows past the budget.
+pub fn write_limited(
+    doc: &Document,
+    limits: Limits,
+) -> Result<(String, BTreeSet<Loss>), LimitError> {
+    let mut w = Writer {
+        sink: Sink::new(limits),
+        losses: BTreeSet::new(),
+    };
+    let mut out = w.blocks(&doc.blocks, true);
     if !out.is_empty() {
-        out.push('\n');
+        w.sink.push(&mut out, '\n');
     }
-    (out, losses)
+    w.sink.result()?;
+    Ok((out, w.losses))
 }
 
-fn blocks_to_string(blocks: &[Block], loose: bool, losses: &mut BTreeSet<Loss>) -> String {
-    let sep = if loose { "\n\n" } else { "\n" };
-    let mut parts: Vec<String> = Vec::new();
-    for b in blocks {
-        if let Some(s) = block_to_string(b, losses)
-            && !s.is_empty()
-        {
-            parts.push(s);
-        }
-    }
-    parts.join(sep)
+struct Writer {
+    sink: Sink,
+    losses: BTreeSet<Loss>,
 }
 
-fn block_to_string(b: &Block, losses: &mut BTreeSet<Loss>) -> Option<String> {
-    Some(match b {
-        Block::Paragraph(c) => inlines_to_string(c, losses),
-        Block::Heading { level, content } => {
-            if *level != 1 {
-                losses.insert(Loss::HeadingLevels);
+impl Writer {
+    fn blocks(&mut self, blocks: &[Block], loose: bool) -> String {
+        let sep = if loose { "\n\n" } else { "\n" };
+        let mut out = String::new();
+        let mut any = false;
+        for b in blocks {
+            if self.sink.failed() {
+                break;
             }
-            inlines_to_string(content, losses)
+            if let Some(s) = self.block(b)
+                && !s.is_empty()
+            {
+                if any {
+                    self.sink.push_str(&mut out, sep);
+                }
+                self.sink.push_str(&mut out, &s);
+                any = true;
+            }
         }
-        Block::CodeBlock { text, .. } => {
-            let text = text.strip_suffix('\n').unwrap_or(text);
-            prefix_lines(text, "    ")
-        }
-        Block::BlockQuote(inner) => {
-            let body = blocks_to_string(inner, true, losses);
-            if body.is_empty() {
+        out
+    }
+
+    fn block(&mut self, b: &Block) -> Option<String> {
+        Some(match b {
+            Block::Paragraph(c) => self.inlines(c),
+            Block::Heading { level, content } => {
+                if *level != 1 {
+                    self.losses.insert(Loss::HeadingLevels);
+                }
+                self.inlines(content)
+            }
+            Block::CodeBlock { text, .. } => {
+                let text = text.strip_suffix('\n').unwrap_or(text);
+                self.prefix_lines(text, "    ")
+            }
+            Block::BlockQuote(inner) => {
+                let body = self.blocks(inner, true);
+                if body.is_empty() {
+                    return None;
+                }
+                let mut out = String::new();
+                for (i, line) in body.split('\n').enumerate() {
+                    if i > 0 {
+                        self.sink.push(&mut out, '\n');
+                    }
+                    self.sink
+                        .push_str(&mut out, if line.is_empty() { ">" } else { "> " });
+                    self.sink.push_str(&mut out, line);
+                }
+                out
+            }
+            Block::List {
+                start,
+                tight,
+                items,
+            } => {
+                let mut out = String::new();
+                for (i, item) in items.iter().enumerate() {
+                    if self.sink.failed() {
+                        break;
+                    }
+                    if i > 0 {
+                        self.sink
+                            .push_str(&mut out, if *tight { "\n" } else { "\n\n" });
+                    }
+                    let marker = match start {
+                        None => "- ".to_string(),
+                        Some(n) => format!("{}. ", n.saturating_add(i as u64)),
+                    };
+                    let body = self.blocks(item, !*tight);
+                    let pad = if start.is_none() { 2 } else { marker.len() };
+                    for (j, line) in body.split('\n').enumerate() {
+                        if j == 0 {
+                            self.sink.push_str(&mut out, &marker);
+                        } else {
+                            self.sink.push(&mut out, '\n');
+                            if !line.is_empty() {
+                                for _ in 0..pad {
+                                    self.sink.push(&mut out, ' ');
+                                }
+                            }
+                        }
+                        self.sink.push_str(&mut out, line);
+                    }
+                    if body.is_empty() {
+                        out.truncate(out.trim_end().len());
+                    }
+                }
+                out
+            }
+            Block::ThematicBreak => "----".to_string(),
+            Block::HtmlBlock(_) => {
+                self.losses.insert(Loss::Html);
                 return None;
             }
-            let mut out = String::new();
-            for (i, line) in body.split('\n').enumerate() {
-                if i > 0 {
-                    out.push('\n');
-                }
-                out.push_str(if line.is_empty() { ">" } else { "> " });
-                out.push_str(line);
-            }
-            out
-        }
-        Block::List {
-            start,
-            tight,
-            items,
-        } => {
-            let mut out = String::new();
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(if *tight { "\n" } else { "\n\n" });
-                }
-                let marker = match start {
-                    None => "- ".to_string(),
-                    Some(n) => format!("{}. ", n.saturating_add(i as u64)),
-                };
-                let body = blocks_to_string(item, !*tight, losses);
-                let pad = " ".repeat(if start.is_none() { 2 } else { marker.len() });
-                for (j, line) in body.split('\n').enumerate() {
-                    if j == 0 {
-                        out.push_str(&marker);
-                    } else {
-                        out.push('\n');
-                        if !line.is_empty() {
-                            out.push_str(&pad);
-                        }
-                    }
-                    out.push_str(line);
-                }
-                if body.is_empty() {
-                    out.truncate(out.trim_end().len());
-                }
-            }
-            out
-        }
-        Block::ThematicBreak => "----".to_string(),
-        Block::HtmlBlock(_) => {
-            losses.insert(Loss::Html);
-            return None;
-        }
-    })
-}
-
-fn prefix_lines(text: &str, prefix: &str) -> String {
-    let mut out = String::with_capacity(text.len() + prefix.len());
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        if !line.is_empty() {
-            out.push_str(prefix);
-        }
-        out.push_str(line);
+        })
     }
-    out
-}
 
-fn inlines_to_string(inlines: &[Inline], losses: &mut BTreeSet<Loss>) -> String {
-    let mut out = String::new();
-    push_inlines(inlines, &mut out, losses);
-    out
-}
+    fn prefix_lines(&mut self, text: &str, prefix: &str) -> String {
+        let mut out = String::new();
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.sink.push(&mut out, '\n');
+            }
+            if !line.is_empty() {
+                self.sink.push_str(&mut out, prefix);
+            }
+            self.sink.push_str(&mut out, line);
+        }
+        out
+    }
 
-fn push_inlines(inlines: &[Inline], out: &mut String, losses: &mut BTreeSet<Loss>) {
-    for i in inlines {
-        match i {
-            Inline::Text(t) => out.push_str(t),
-            Inline::Emph(c) | Inline::Strong(c) => {
-                losses.insert(Loss::Emphasis);
-                push_inlines(c, out, losses);
+    fn inlines(&mut self, inlines: &[Inline]) -> String {
+        let mut out = String::new();
+        self.push_inlines(inlines, &mut out);
+        out
+    }
+
+    fn push_inlines(&mut self, inlines: &[Inline], out: &mut String) {
+        for i in inlines {
+            if self.sink.failed() {
+                return;
             }
-            Inline::Code(t) => {
-                losses.insert(Loss::InlineCode);
-                out.push_str(t);
-            }
-            Inline::Link { dest, content, .. } => {
-                losses.insert(Loss::Links);
-                let text = inlines_to_string(content, losses);
-                if dest.is_empty() || text == *dest {
-                    out.push_str(if dest.is_empty() { &text } else { dest });
-                } else if text.is_empty() {
-                    out.push_str(dest);
-                } else {
-                    out.push_str(&text);
-                    out.push_str(" (");
-                    out.push_str(dest);
-                    out.push(')');
+            match i {
+                Inline::Text(t) => self.sink.push_str(out, t),
+                Inline::Emph(c) | Inline::Strong(c) => {
+                    self.losses.insert(Loss::Emphasis);
+                    self.push_inlines(c, out);
                 }
-            }
-            Inline::Image { alt, .. } => {
-                losses.insert(Loss::Images);
-                push_inlines(alt, out, losses);
-            }
-            Inline::SoftBreak => out.push(' '),
-            Inline::HardBreak => out.push('\n'),
-            Inline::Html(_) => {
-                losses.insert(Loss::Html);
+                Inline::Code(t) => {
+                    self.losses.insert(Loss::InlineCode);
+                    self.sink.push_str(out, t);
+                }
+                Inline::Link { dest, content, .. } => {
+                    self.losses.insert(Loss::Links);
+                    let text = self.inlines(content);
+                    if dest.is_empty() || text == *dest {
+                        self.sink
+                            .push_str(out, if dest.is_empty() { &text } else { dest });
+                    } else if text.is_empty() {
+                        self.sink.push_str(out, dest);
+                    } else {
+                        self.sink.push_str(out, &text);
+                        self.sink.push_str(out, " (");
+                        self.sink.push_str(out, dest);
+                        self.sink.push(out, ')');
+                    }
+                }
+                Inline::Image { alt, .. } => {
+                    self.losses.insert(Loss::Images);
+                    self.push_inlines(alt, out);
+                }
+                Inline::SoftBreak => self.sink.push(out, ' '),
+                Inline::HardBreak => self.sink.push(out, '\n'),
+                Inline::Html(_) => {
+                    self.losses.insert(Loss::Html);
+                }
             }
         }
     }

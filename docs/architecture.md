@@ -114,13 +114,22 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
+  paragraph break (and runs of spaces may collapse when rendered), and
+  the action reports it. The planner therefore never takes it as a
+  lossless intermediate, and the notice says formatting was lost.
+- The text family stops a document at structure budgets, charged while it
+  is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
+  and inlines, including link reference definitions), 32 MiB of owned
+  text (link reference expansion included), 32 MiB of output. Past one,
+  the input fails with the budget's own message and the batch goes on.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
 
 ```
 inacircle-manifest 0
-action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=no	batch=yes
+action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 ```
 
