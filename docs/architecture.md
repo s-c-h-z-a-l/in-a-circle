@@ -487,13 +487,20 @@ choice has run.
    awaited for at most 1 s (`ui_teardown_deadline`), the connection is
    closed, and only then is the lock released.
    A start that fails (no configure within 2 s, no position and a seat
-   without a pointer, a seat without a keyboard, a Wayland error, a setup
+   without a pointer, a seat that has no keyboard by then, a Wayland error before the
+   first commit, a setup
    error) takes the same ordered close, then exit 1 and one desktop
    notification, "Could not open the circle." with the proven cause (an
    unproven one gets the general copy), through the bounded notification
    path (the open within 500 ms, the call within 500 ms, a 2 s alarm as the
    last guard). No retry and no second window; without a bus it is one
    line on stderr.
+   The wheel is not shown before the seat has a keyboard (Esc could not
+   close it); a keyboard that comes late, within the 2 s, is waited for,
+   and one that never comes is the named cause at the deadline. A keyboard
+   lost after the wheel is up closes it in order (exit 0, no notification).
+   An error after the first commit is only logged (exit 1): the wheel did
+   open, so it is never announced as "Could not open".
 5. A choice: the Wayland connection is closed (the surface disappears), the
    lock released, `alarm(0)`; then the same run path as
    `inacircle run --notify <preset> <files…>` (executor, journal,

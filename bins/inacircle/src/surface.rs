@@ -59,9 +59,8 @@ const READ_CHUNK: usize = 4096;
 /// timeout normally ends in an orderly close.
 const SOFT_MARGIN: Duration = Duration::from_millis(500);
 /// `ui_startup_deadline`: from the connection to the wheel's first commit.
-/// The fake-compositor preflight (docs/benchmarks/wheel-reference.md, task
-/// 11) puts a normal startup near 5 ms there; 2 s is 400 times that and
-/// still a wait a user takes for a slow session, so it is a policy ceiling,
+/// The fake-compositor measurement (docs/benchmarks/wheel-startup-deadlines.md)
+/// puts a normal startup near 5 ms there; 2 s is 400 times that and still a wait a user takes for a slow session, so it is a policy ceiling,
 /// not a measured presentation bound. Past it the wheel closes in order and
 /// says why (`StartupError`); it does not wait for the user's stage.
 pub const STARTUP: Duration = Duration::from_millis(2000);
@@ -90,7 +89,8 @@ pub type Chosen = Option<(Vec<PathBuf>, String)>;
 pub enum StartupError {
     /// No position arrived and the seat has no pointer: proven.
     PointerUnavailable,
-    /// The seat has no keyboard, so Esc could not close the overlay.
+    /// The seat had no keyboard by the startup deadline, so Esc could not
+    /// close the overlay.
     KeyboardUnavailable,
     /// The compositor never configured the overlay in time.
     ConfigureTimeout,
@@ -99,6 +99,10 @@ pub enum StartupError {
     Protocol(io::Error),
     /// Setup before the surface failed: the alarm, the lock, the shm pool.
     Initialization(io::Error),
+    /// The wheel had been on the screen (the first commit was done) when the
+    /// connection or the protocol failed. It did open, so this is not a
+    /// startup failure and is only logged, never announced as one.
+    AfterOpen(io::Error),
 }
 
 impl fmt::Display for StartupError {
@@ -111,6 +115,7 @@ impl fmt::Display for StartupError {
             }
             StartupError::Protocol(e) => write!(f, "{e}"),
             StartupError::Initialization(e) => write!(f, "initialization failed: {e}"),
+            StartupError::AfterOpen(e) => write!(f, "the wheel closed on an error: {e}"),
         }
     }
 }
@@ -127,7 +132,7 @@ impl StartupError {
     fn compositor_silent(&self) -> bool {
         matches!(
             self,
-            StartupError::ConfigureTimeout | StartupError::Protocol(_)
+            StartupError::ConfigureTimeout | StartupError::Protocol(_) | StartupError::AfterOpen(_)
         )
     }
 }
@@ -140,6 +145,11 @@ pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> Result<Chosen, Startup
     let mut s = Surface::connect()?;
     s.meter = meter.take();
     let r = s.setup(m).and_then(|()| s.event_loop(m));
+    // A failure once the wheel was on the screen is not a failure to open.
+    let r = match r {
+        Err(StartupError::Protocol(e)) if s.user_stage => Err(StartupError::AfterOpen(e)),
+        r => r,
+    };
     *meter = s.meter.take();
     // Release the grabs and the surfaces, then drop the connection; the
     // caller frees the lock after this returns.
@@ -327,8 +337,6 @@ struct Surface {
     user_stage: bool,
     /// The seat's capabilities, once announced.
     caps: Option<u32>,
-    /// A failure the event handler found, for the loop to return.
-    refused: Option<StartupError>,
     /// The teardown's `sync` callback, and its `done`.
     ack_cb: u32,
     acked: bool,
@@ -378,15 +386,14 @@ impl Surface {
         Ok(Surface::new(conn))
     }
 
-    /// A failure the event handler recorded, if any.
-    fn refused(&mut self) -> Result<(), StartupError> {
-        self.refused.take().map_or(Ok(()), Err)
-    }
-
     /// The startup clock ran out: the cause, as far as it is proven.
     fn startup_timeout(&self) -> StartupError {
         if self.size.is_none() {
             StartupError::ConfigureTimeout
+        } else if self.caps.is_some_and(|c| c & SEAT_KEYBOARD == 0) {
+            // The wheel is not shown without a keyboard (see `render`), so
+            // a seat that never offered one is the proven cause.
+            StartupError::KeyboardUnavailable
         } else if self.caps.is_some_and(|c| c & SEAT_POINTER == 0) {
             StartupError::PointerUnavailable
         } else {
@@ -457,7 +464,6 @@ impl Surface {
             deadline: Instant::now() + STARTUP,
             user_stage: false,
             caps: None,
-            refused: None,
             ack_cb: 0,
             acked: false,
             globals: Globals::default(),
@@ -507,7 +513,6 @@ impl Surface {
     fn wait(&mut self, m: &Machine, done: fn(&Surface) -> bool) -> Result<(), StartupError> {
         self.flush_start()?;
         self.dispatch(m)?;
-        self.refused()?;
         while !done(self) {
             match self.conn.read(self.deadline) {
                 Ok(true) => {}
@@ -515,7 +520,6 @@ impl Surface {
                 Err(e) => return Err(self.start_error(e)),
             }
             self.dispatch(m)?;
-            self.refused()?;
         }
         Ok(())
     }
@@ -735,14 +739,25 @@ impl Surface {
                     c.req(id.seat, op::wl_seat::GET_KEYBOARD, &[U(id.keyboard)]);
                 }
                 self.caps = Some(caps);
-                // Before the wheel is up, a seat without a keyboard (or one
-                // that lost it) cannot take Esc: the overlay would be an
-                // exclusive grab nobody can cancel. The pointer is judged
-                // later, at the deadline: a drag brings its own position.
-                if !self.user_stage && caps & SEAT_KEYBOARD == 0 && self.refused.is_none() {
-                    self.refused = Some(StartupError::KeyboardUnavailable);
+                // Without a keyboard Esc cannot close the overlay, so the
+                // wheel is not shown (`render`) until the seat has one; the
+                // capability may come after the first event, so the verdict
+                // waits for the startup deadline (`startup_timeout`). The
+                // pointer is judged there too: a drag brings its own
+                // position.
+                if caps & SEAT_KEYBOARD != 0 {
+                    if !self.user_stage {
+                        self.render(m)?;
+                    }
+                    None
+                } else if self.user_stage {
+                    // Lost once the wheel is up: Esc is gone, so close in
+                    // order now instead of holding the grab until the stage
+                    // ends. A close, not an error.
+                    Some(Input::Closed)
+                } else {
+                    None
                 }
-                None
             }
             (Iface::LayerSurface, op::zwlr_layer_surface_v1::CONFIGURE) => {
                 let (serial, w, h) = (e.u32()?, e.u32()?, e.u32()?);
@@ -1121,8 +1136,14 @@ impl Surface {
         let Some((x, y)) = m.origin() else {
             return Ok(());
         };
-        let want = Some((m.generation(), m.hover()));
         let first = self.shown.is_none();
+        // The first commit waits for a keyboard when the seat has announced
+        // its capabilities without one: the keyboard capability may still
+        // come, and `startup_timeout` names it if it does not.
+        if first && self.caps.is_some_and(|c| c & SEAT_KEYBOARD == 0) {
+            return Ok(());
+        }
+        let want = Some((m.generation(), m.hover()));
         if self.shown == want {
             self.pending = false;
             return Ok(());
@@ -1226,7 +1247,6 @@ impl Surface {
     fn event_loop(&mut self, m: &mut Machine) -> Result<Chosen, StartupError> {
         loop {
             self.dispatch(m)?;
-            self.refused()?;
             self.pump_read();
             self.pump_early();
             if let Some(end) = self.feed(m)? {

@@ -883,6 +883,10 @@ const NOTICE_BACKSTOP_SECS: u32 = 2;
 /// Called with the surface, the lock and the main alarm already gone.
 fn wheel_failed(e: &surface::StartupError) -> u8 {
     eprintln!("inacircle: wheel: {e}");
+    if matches!(e, surface::StartupError::AfterOpen(_)) {
+        // The circle did open; "Could not open the circle." would be false.
+        return EXIT_FAILED;
+    }
     // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
     // kills the process: the backstop if the notification hangs.
     unsafe { libc::alarm(NOTICE_BACKSTOP_SECS) };

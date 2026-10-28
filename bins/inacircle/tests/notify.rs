@@ -1511,6 +1511,34 @@ fn startup_does_not_blame_the_pointer_for_an_unknown_cause() {
     assert!(!g.body.is_empty());
 }
 
+/// The wheel was on the screen when the connection broke: "Could not open
+/// the circle." would be false. The log line and the exit stay; no notice.
+#[test]
+fn failure_after_the_first_commit_does_not_say_it_could_not_open() {
+    let e = Env::new("startup-late-fail");
+    let listener = UnixListener::bind(e.root.join("runtime/bus")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = None;
+    let mut c = Compositor::serve_with(
+        &e.root.join("runtime"),
+        Duration::from_secs(2),
+        Script::default(),
+        || child = Some(wheel_cmd(&e, None).spawn().unwrap()),
+    );
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    c.disconnect();
+    let (code, stderr) = reap(child.unwrap());
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("inacircle: wheel:"), "{stderr}");
+    assert!(
+        !stderr.contains("notifications unavailable"),
+        "a notice was attempted: {stderr}"
+    );
+    assert!(listener.accept().is_err(), "the bus was touched");
+}
+
 /// Esc is a cancel, not an error: exit 0, and the bus is never touched.
 #[test]
 fn startup_esc_is_a_cancel_without_a_notification() {

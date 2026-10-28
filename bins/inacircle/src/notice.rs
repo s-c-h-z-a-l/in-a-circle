@@ -282,7 +282,10 @@ pub fn startup_error_text(e: &StartupError) -> (String, String) {
         StartupError::Protocol(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             "The wheel could not start in time."
         }
-        StartupError::Protocol(_) => "The connection to the compositor failed.",
+        // Never announced (see `wheel_failed`); the text is for completeness.
+        StartupError::AfterOpen(_) | StartupError::Protocol(_) => {
+            "The connection to the compositor failed."
+        }
         StartupError::Initialization(_) => "The wheel could not be set up.",
     };
     (COULD_NOT_OPEN.to_owned(), body.to_owned())

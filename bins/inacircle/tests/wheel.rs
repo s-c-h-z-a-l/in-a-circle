@@ -478,7 +478,7 @@ fn a_large_drop_stays_within_the_memory_budget() {
     );
     if cfg!(debug_assertions) {
         // Debug builds allocate more per file; the drop's own growth is its
-        // anonymous memory (measured 310-345 kB). PSS is not the measure
+        // anonymous memory (measured 160 kB). PSS is not the measure
         // here: it divides the shared pages among the processes alive at
         // that moment, so beside other tests' wheels the two runs differ by
         // more than the drop adds. The budget itself is the release
@@ -836,18 +836,62 @@ fn startup_without_a_position_does_not_blame_the_pointer() {
     assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
 }
 
-/// A seat without a keyboard cannot take Esc: refused at once, named.
+/// A seat without a keyboard cannot take Esc, but the capability may come
+/// late: the wheel waits for it until the startup deadline, then fails
+/// with the proven cause.
 #[test]
-fn startup_without_a_keyboard_fails_at_once() {
+fn startup_without_a_keyboard_fails_at_the_startup_deadline() {
     let root = Root::new("startup-nokbd");
     let t0 = Instant::now();
     let (mut c, child) = start_with(&root, Script::default());
     c.mapped(Duration::from_secs(2));
     seat_up(&mut c, POINTER);
+    c.pointer_enters();
     let (code, err, took) = until_gone(&mut c, child, t0);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("keyboard was unavailable"), "{err}");
-    assert!(took < STARTUP, "waited for the deadline: {took:?}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// The keyboard capability arrives after the first (pointer-only) one,
+/// inside the deadline: the wheel opens, and Esc closes it.
+#[test]
+fn startup_keyboard_arriving_late_within_the_deadline_still_opens() {
+    let root = Root::new("startup-latekbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    c.pointer_enters();
+    c.pump(Duration::from_millis(300));
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// The keyboard goes away after the wheel is on the screen: Esc could no
+/// longer close it, so it closes in order at once. Not a failure.
+#[test]
+fn keyboard_lost_after_the_first_commit_closes_in_order() {
+    let root = Root::new("startup-lostkbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    c.seat_caps(POINTER);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+    assert!(
+        c.layer_requests().contains(&7),
+        "layer surface not destroyed"
+    );
 }
 
 /// The pointer enters before the configure: the position waits for the
