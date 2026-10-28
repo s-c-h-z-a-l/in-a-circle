@@ -761,6 +761,19 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
+    /// A file whose `stat` size is smaller than what a read returns (a
+    /// file that grows while read; `/proc` files show 0): the read itself
+    /// is cut at max + 1, the size is only a pre-filter.
+    #[test]
+    fn bounded_file_read_cuts_a_file_longer_than_its_stat() {
+        let p = Path::new("/proc/self/maps");
+        assert_eq!(fs::metadata(p).unwrap().len(), 0);
+        // Positive control: there is more than 64 B to read.
+        assert!(read_file_bounded(p, 1 << 20).unwrap().len() > 64);
+        let e = read_file_bounded(p, 64).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
     // ---- --inputs-from limits ----
 
     fn from_file(d: &Path, body: &[u8], argv: &[&str]) -> Result<Invocation, String> {
@@ -819,11 +832,8 @@ mod tests {
         over.push(b'\n');
         let e = from_file(&d, &over, &[]).unwrap_err();
         assert!(e.contains("safety limit"), "{e}");
-        // The size shown by the file system is a pre-filter only: a list
-        // that grows past the limit while being read is refused too.
-        let mut grown = at;
-        grown.extend_from_slice(&[b'\n'; 1]);
-        assert!(from_file(&d, &grown, &[]).is_err());
+        // A list that grows past the limit while it is read: see
+        // `bounded_file_read_cuts_a_file_longer_than_its_stat`.
     }
 
     #[test]
@@ -853,17 +863,21 @@ mod tests {
                 .len(),
             4096
         );
-        // A line past INPUT_ENCODED_LINE_BYTES is refused before decoding.
-        let mut body = vec![b'/'];
-        body.resize(INPUT_ENCODED_LINE_BYTES, b'p');
-        body.push(b'\n');
-        assert!(from_file(&d, &body, &[]).is_err()); // 8192 B: path over 4096
-        body.insert(1, b'p');
-        assert!(
-            from_file(&d, &body, &[])
-                .unwrap_err()
-                .contains("safety limit")
-        );
+        // A line past INPUT_ENCODED_LINE_BYTES is refused before it is
+        // decoded. Seen through a line that does not decode (a bad escape
+        // at its end): at 8192 B the decoder's error comes back, at 8193 B
+        // the limit's, so the decoder never ran on it.
+        let bad = |n: usize| {
+            let mut body = vec![b'/'];
+            body.resize(n - 2, b'p');
+            body.extend_from_slice(b"\\q\n");
+            assert_eq!(body.len(), n + 1);
+            from_file(&d, &body, &[]).unwrap_err()
+        };
+        let e = bad(INPUT_ENCODED_LINE_BYTES);
+        assert!(e.contains("unknown escape"), "{e}");
+        let e = bad(INPUT_ENCODED_LINE_BYTES + 1);
+        assert_eq!(e, INPUT_REFUSAL);
     }
 
     #[test]
