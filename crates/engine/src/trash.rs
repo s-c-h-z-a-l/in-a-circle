@@ -297,6 +297,9 @@ pub(crate) enum Point {
     /// After the info's identity check, before its detaching rename (an
     /// errno replaces the rename).
     Detach,
+    /// Before a foreign file caught at our detached name is put back (an
+    /// errno replaces the rename).
+    PutBack,
     /// The parents' syncs after the move.
     Sync,
     /// Before the home Trash is looked at (an `EXDEV` makes the home Trash
@@ -571,7 +574,9 @@ pub(crate) fn close_info(dir: RawFd, info: &Info) -> Closure {
             Ok(()) if stat_at(dir, &info.detached).is_ok_and(|st| ident(&st) == info.id) => {
                 InfoState::Detached
             }
-            Ok(()) => match rename_noreplace(dir, &info.detached, dir, &info.name) {
+            Ok(()) => match at(Point::PutBack)
+                .and_then(|()| rename_noreplace(dir, &info.detached, dir, &info.name))
+            {
                 Ok(()) => InfoState::ForeignRestored,
                 Err(e) => InfoState::ForeignKeptDetached(errno(&e)),
             },

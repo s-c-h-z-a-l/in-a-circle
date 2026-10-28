@@ -4056,6 +4056,124 @@ mod tests {
         });
     }
 
+    /// The group changed in the Trash, our info renamed away by another
+    /// program and a foreign info at our name, the way back taken: the
+    /// pair is not ours any more, so our info is closed wherever it went
+    /// (neutralised through its fd) and the foreign one is untouched.
+    #[test]
+    fn undo_closes_its_renamed_info_when_the_restore_collides() {
+        let t = Tmp::new("t8-mismatch-renamed");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            let (files, info) = (t.trash().join("files"), t.trash().join("info"));
+            let w2 = w.clone();
+            let _f = fault(move |p| {
+                if p == Point::AfterMove {
+                    fs::write(files.join("a/extra"), "x").unwrap();
+                    fs::rename(info.join("a.trashinfo"), info.join("mine-moved")).unwrap();
+                    fs::write(info.join("a.trashinfo"), "foreign").unwrap();
+                    fs::create_dir(&w2).unwrap();
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::RecoveryKept { reason, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert_eq!(*reason, UndoReason::RestoreCollision);
+            let info = t.trash().join("info");
+            assert_eq!(
+                fs::read_to_string(info.join("a.trashinfo")).unwrap(),
+                "foreign"
+            );
+            assert!(
+                fs::read(info.join("mine-moved"))
+                    .unwrap()
+                    .starts_with(b"inacircle-detached")
+            );
+        });
+    }
+
+    /// A foreign file caught at our detached name cannot go back (its
+    /// name was taken again): it stays there, and the undo says where.
+    #[test]
+    fn undo_reports_a_foreign_info_kept_at_the_detached_name() {
+        let t = Tmp::new("t8-foreign-kept");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let (files, info) = (t.trash().join("files"), t.trash().join("info"));
+            let _f = fault(move |p| {
+                match p {
+                    // The data name taken: the move fails, our info closes.
+                    Point::BeforeMove => fs::create_dir(files.join("a")).unwrap(),
+                    Point::Detach => {
+                        fs::rename(info.join("a.trashinfo"), info.join("mine-moved")).unwrap();
+                        fs::write(info.join("a.trashinfo"), "foreign 1").unwrap();
+                    }
+                    Point::PutBack => fs::write(info.join("a.trashinfo"), "foreign 2").unwrap(),
+                    _ => {}
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            assert!(f.exists());
+            let d = detached(&t);
+            assert_eq!(d, [b"foreign 1".to_vec()]);
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("another program's Trash metadata kept at")
+                        && w.ends_with(".inacircle-detached")),
+                "{r:?}"
+            );
+        });
+    }
+
+    /// After a crash past the move, a foreign folder stands at our Trash
+    /// name (ours taken elsewhere): recovery never takes it for ours, so
+    /// it is never moved out of the Trash into the user's place.
+    #[test]
+    fn undo_recovery_leaves_a_foreign_folder_at_its_trash_name() {
+        let t = Tmp::new("t8-rec-foreign");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            crash_at(&job, Point::AfterMove);
+            let files = t.trash().join("files");
+            fs::rename(files.join("a"), t.0.join("ours-away")).unwrap();
+            fs::create_dir(files.join("a")).unwrap();
+            fs::write(files.join("a/theirs"), "x").unwrap();
+            let _ = undo(&job).unwrap();
+            assert_eq!(fs::read_to_string(files.join("a/theirs")).unwrap(), "x");
+            assert!(!w.exists());
+            assert_eq!(pairs(&t), Vec::<(String, String)>::new());
+        });
+    }
+
+    /// After a crash before the move, the Trash's `files` is not where the
+    /// intent says, and the group is still at its source: a warning, and a
+    /// fresh undo moves it (never `Uncertain`).
+    #[test]
+    fn undo_recovery_with_the_trash_moved_runs_a_fresh_undo() {
+        let t = Tmp::new("t8-rec-moved");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            fs::rename(t.trash().join("files"), t.0.join("files-old")).unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert!(!w.exists());
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("Trash metadata could not be checked")),
+                "{r:?}"
+            );
+        });
+    }
+
     /// A real EACCES at the move (the parent made read-only): kept.
     #[test]
     fn undo_permission_denied_keeps_the_group() {
@@ -4085,7 +4203,12 @@ mod tests {
             let real = t.0.join("real-trash");
             fs::create_dir(&real).unwrap();
             symlink(&real, t.trash()).unwrap();
+            // A rejected home Trash refuses: no fallback to the volume's
+            // (the fixture topdir stays without a `.Trash-$uid`).
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = Some(t.0.clone()));
             assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::NoTrash]);
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = None);
+            assert!(!t.0.join(format!(".Trash-{}", euid())).exists());
             assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
             fs::remove_file(t.trash()).unwrap();
             let (job, _, g) = single(&t, "b");
