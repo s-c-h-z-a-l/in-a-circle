@@ -43,6 +43,15 @@
 //! exit 0.
 //! A choice tears the wheel down, releases the lock, then runs the preset
 //! as `run --notify` does, exit code included.
+//!
+//! The wheel's start is bounded on its own clock (`surface::STARTUP`),
+//! apart from the user's wait. A start that fails (no configure, no
+//! position, no keyboard, a broken connection, a setup error) closes in
+//! order: the surfaces and the keyboard grab, the connection, the lock, the
+//! alarm; only then one desktop notification says why (`Could not open the
+//! circle.` and the cause), bounded by its own deadlines, and the exit is 1.
+//! No retry, no second window. Esc, a close by the compositor and a second
+//! instance are not failures and notify nothing.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -810,8 +819,10 @@ fn cmd_wheel() -> u8 {
     });
     // The deadline first: it covers the lock too (a slow runtime dir).
     if let Err(e) = default_sigalrm() {
-        eprintln!("inacircle: cannot arm the deadline: {e}");
-        return EXIT_FAILED;
+        return wheel_failed(&surface::StartupError::Initialization(io::Error::new(
+            e.kind(),
+            format!("cannot arm the deadline: {e}"),
+        )));
     }
     // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
     // kills the process: the backstop if anything below hangs.
@@ -821,8 +832,10 @@ fn cmd_wheel() -> u8 {
         Ok(Some(l)) => l,
         Ok(None) => return EXIT_DONE,
         Err(e) => {
-            eprintln!("inacircle: wheel lock: {e}");
-            return EXIT_FAILED;
+            return wheel_failed(&surface::StartupError::Initialization(io::Error::new(
+                e.kind(),
+                format!("wheel lock: {e}"),
+            )));
         }
     };
     let mut machine = wheel::Machine::new();
@@ -849,11 +862,34 @@ fn cmd_wheel() -> u8 {
             EXIT_DONE
         }
         Err(e) => {
-            eprintln!("inacircle: wheel: {e}");
+            // The surface, the lock and the alarm are settled above; the
+            // desktop hears first, and the catalog refresh (manifests, with
+            // their own deadlines) comes after, so it cannot delay it.
+            let code = wheel_failed(&e);
             Catalog::load();
-            EXIT_FAILED
+            code
         }
     }
+}
+
+/// `alarm` seconds for the failure notice: the open (`notice::ERROR_OPEN`,
+/// 0.5 s) plus the call (`notice::CALL_WAIT`, 0.5 s) is 1 s of waiting at
+/// most; `alarm` counts whole seconds, so 2 s leaves a second for
+/// scheduling. Past it the process is killed, the lock long since free.
+const NOTICE_BACKSTOP_SECS: u32 = 2;
+
+/// Tells that the wheel failed to open: the log line first (it exists even
+/// if the bus hangs), then one bounded notification under a short alarm.
+/// Called with the surface, the lock and the main alarm already gone.
+fn wheel_failed(e: &surface::StartupError) -> u8 {
+    eprintln!("inacircle: wheel: {e}");
+    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
+    // kills the process: the backstop if the notification hangs.
+    unsafe { libc::alarm(NOTICE_BACKSTOP_SECS) };
+    notice::notify_startup_error(e);
+    // SAFETY: as above; 0 cancels the pending alarm.
+    unsafe { libc::alarm(0) };
+    EXIT_FAILED
 }
 
 /// Runs the wheel's choice exactly as `inacircle run --notify <preset>

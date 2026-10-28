@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 mod fake_compositor;
 
-use fake_compositor::{Compositor, source_writes};
+use fake_compositor::{Compositor, Delay, KEYBOARD, POINTER, Script, source_writes};
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
 
@@ -27,6 +27,8 @@ fn wheel(rt: &Path) -> (Option<i32>, String, String, Duration) {
         .env("XDG_RUNTIME_DIR", rt)
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("WAYLAND_SOCKET")
+        // Never the developer's session bus: a failed start notifies.
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .output()
         .unwrap();
     (
@@ -42,6 +44,17 @@ fn try_lock(f: &fs::File) -> bool {
     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
+/// Releases the lock at once. A plain `drop` closes only this process's
+/// descriptor: a thread of this test binary that forks (every test spawns
+/// children) holds a copy of it until its `exec` closes it, and `flock`
+/// belongs to the open file description, so the lock would stay held for
+/// that window and the next wheel would see a second instance (a flaky 0
+/// where 1 is expected). `LOCK_UN` releases it for every copy.
+fn unlock(f: &fs::File) {
+    // SAFETY: flock on an fd the file owns.
+    assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) }, 0);
+}
+
 #[test]
 fn second_instance_exits_at_once() {
     let rt = runtime_dir("second");
@@ -49,11 +62,14 @@ fn second_instance_exits_at_once() {
     assert!(try_lock(&lock));
     let (code, stdout, stderr, took) = wheel(&rt);
     assert_eq!(code, Some(0), "{stderr}");
-    assert!(took < Duration::from_millis(100), "{took:?}");
+    // Far below the startup deadline it would hit if it went on to
+    // Wayland; the bound only has to survive a loaded machine.
+    assert!(took < Duration::from_secs(1), "{took:?}");
     assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
 
     // Without the lock held it goes on to Wayland, which is not there: an
     // error, and the lock is free again afterwards.
+    unlock(&lock);
     drop(lock);
     let (code, _, stderr, _) = wheel(&rt);
     assert_eq!(code, Some(1), "{stderr}");
@@ -87,6 +103,7 @@ fn alarm_works_even_if_the_parent_disabled_sigalrm() {
     let mut cmd = Command::new(BIN);
     cmd.env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // SAFETY: the closure runs in the forked child before exec and calls
@@ -140,6 +157,7 @@ fn bad_lock(name: &str, plant: impl FnOnce(&Path), limit: Duration) {
     let mut child = Command::new(BIN)
         .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -216,6 +234,9 @@ impl Root {
             .env("XDG_DATA_HOME", self.0.join("home/.local/share"))
             .env("HOME", self.0.join("home"))
             .env("INACIRCLE_ACTIONS_DIR", self.0.join("actions"))
+            // Never the developer's session bus; the fallback
+            // `<runtime>/bus` does not exist here.
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .stdin(std::process::Stdio::null());
         c
     }
@@ -289,10 +310,21 @@ impl Drop for Root {
 /// The proportional set size (`Pss`) of a live process, in kB: the
 /// budget's measure (shared libc and loader pages count by their share).
 fn pss_kb(pid: u32) -> u64 {
+    rollup_kb(pid, "Pss:")
+}
+
+/// The anonymous memory (`Anonymous`) of a live process, in kB: its heap
+/// and stacks, which no other process shares, so what a drop adds to it
+/// does not depend on how many wheels run beside it.
+fn anon_kb(pid: u32) -> u64 {
+    rollup_kb(pid, "Anonymous:")
+}
+
+fn rollup_kb(pid: u32, field: &str) -> u64 {
     let rollup = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap();
     rollup
         .lines()
-        .find_map(|l| l.strip_prefix("Pss:"))
+        .find_map(|l| l.strip_prefix(field))
         .and_then(|v| v.split_whitespace().next()?.parse().ok())
         .unwrap()
 }
@@ -411,7 +443,7 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
 /// one-file drop instead.
 #[test]
 fn a_large_drop_stays_within_the_memory_budget() {
-    let peak = |name: &str, n: usize| -> u64 {
+    let peak = |name: &str, n: usize| -> (u64, u64) {
         let root = Root::new(name);
         root.markdown_action_cached();
         let list = root.files(n);
@@ -428,7 +460,7 @@ fn a_large_drop_stays_within_the_memory_budget() {
         let mut child = child.unwrap();
         c.mapped(Duration::from_secs(2));
         drag_to_stage2(&mut c, &list);
-        let kb = pss_kb(child.id());
+        let kb = (pss_kb(child.id()), anon_kb(child.id()));
         c.close();
         assert_eq!(
             wait_exit(&mut child, Duration::from_secs(5)).code(),
@@ -438,14 +470,23 @@ fn a_large_drop_stays_within_the_memory_budget() {
     };
     // Shared and file-backed pages vary by tens of kB from run to run: the lower of
     // two runs each.
-    let one = peak("rss1a", 1).min(peak("rss1b", 1));
-    let many = peak("rss1024a", 1024).min(peak("rss1024b", 1024));
-    eprintln!("PSS at stage 2: 1 file {one} kB, 1024 files {many} kB");
+    let low = |a: (u64, u64), b: (u64, u64)| (a.0.min(b.0), a.1.min(b.1));
+    let (one, one_anon) = low(peak("rss1a", 1), peak("rss1b", 1));
+    let (many, many_anon) = low(peak("rss1024a", 1024), peak("rss1024b", 1024));
+    eprintln!(
+        "PSS at stage 2: 1 file {one} kB, 1024 files {many} kB (anonymous {one_anon} / {many_anon} kB)"
+    );
     if cfg!(debug_assertions) {
-        // Debug builds allocate more per file; under a loaded full-suite run
-        // the drop's own growth measured 310-345 kB here. The budget itself is
-        // the release assertion below.
-        assert!(many <= one + 512, "1 file {one} kB, 1024 files {many} kB");
+        // Debug builds allocate more per file; the drop's own growth is its
+        // anonymous memory (measured 310-345 kB). PSS is not the measure
+        // here: it divides the shared pages among the processes alive at
+        // that moment, so beside other tests' wheels the two runs differ by
+        // more than the drop adds. The budget itself is the release
+        // assertion below.
+        assert!(
+            many_anon <= one_anon + 512,
+            "1 file {one_anon} kB, 1024 files {many_anon} kB anonymous"
+        );
     } else {
         assert!(many <= 5 * 1024, "1024 files: {many} kB");
     }
@@ -635,4 +676,297 @@ fn level1_from_the_early_list_within_budget() {
     if !cfg!(debug_assertions) {
         assert!(us <= 1000, "{us} us");
     }
+}
+
+// Bounded startup and teardown (hardening task 11). The fake compositor's
+// script decides what arrives, and when; the wheel has no bus to notify on
+// (`Root::cmd` removes the variable), so these see the exit code, the
+// timing and the log line. The notification itself is in `notify.rs`.
+
+/// The proposed `ui_startup_deadline` (parameters.g0p.json), and the pair
+/// of delays the preflight measured around it.
+const STARTUP: Duration = Duration::from_millis(2000);
+const BELOW_STARTUP: Duration = Duration::from_millis(1900);
+const ABOVE_STARTUP: Duration = Duration::from_millis(2100);
+/// `ui_teardown_deadline` and its pair.
+const TEARDOWN: Duration = Duration::from_millis(1000);
+const BELOW_TEARDOWN: Duration = Duration::from_millis(900);
+const ABOVE_TEARDOWN: Duration = Duration::from_millis(1100);
+/// How long a test waits for the wheel before it fails the test: a hung
+/// wheel must fail, never hang the suite. Well past every deadline above.
+const PATIENCE: Duration = Duration::from_secs(8);
+
+/// The wheel against a fake compositor that behaves as `script` says.
+fn start_with(root: &Root, script: Script) -> (Compositor, std::process::Child) {
+    let mut child = None;
+    let c = Compositor::serve_with(
+        &root.0.join("runtime"),
+        Duration::from_secs(2),
+        script,
+        || {
+            child = Some(
+                root.cmd()
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        },
+    );
+    (c, child.unwrap())
+}
+
+/// Serves the compositor until the wheel hangs up, then reaps it: exit
+/// code, its stderr, and how long it ran.
+fn until_gone(
+    c: &mut Compositor,
+    mut child: std::process::Child,
+    t0: Instant,
+) -> (Option<i32>, String, Duration) {
+    if c.hangs_up(PATIENCE).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the wheel did not hang up within {PATIENCE:?}");
+    }
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    let took = t0.elapsed();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    (st.code(), err, took)
+}
+
+/// A mapped overlay whose seat has `caps` and the devices they imply.
+fn seat_up(c: &mut Compositor, caps: u32) {
+    c.seat_bound(Duration::from_secs(2));
+    c.seat_caps(caps);
+    c.seat_devices(caps, Duration::from_secs(2));
+}
+
+#[test]
+fn startup_without_a_configure_fails_at_the_startup_deadline() {
+    let root = Root::new("startup-noconf");
+    let t0 = Instant::now();
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let (mut c, child) = start_with(&root, script);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    eprintln!("PREFLIGHT startup no-configure: exit={code:?} took={took:?} stderr={err:?}");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("did not configure"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// The pair around the startup deadline: a configure 100 ms before it still
+/// opens the wheel, one 100 ms after it does not.
+#[test]
+fn startup_configure_below_the_deadline_still_opens() {
+    let root = Root::new("startup-below");
+    root.markdown_action_cached();
+    let script = Script {
+        configure: Delay::After(BELOW_STARTUP),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, mut child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(4));
+    // The startup is over once the wheel is on the screen; the drag gives
+    // the position.
+    let _early = c.drag_enters(0, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    eprintln!(
+        "PREFLIGHT startup configure@{BELOW_STARTUP:?}: first wheel commit at {:?}",
+        t0.elapsed()
+    );
+    c.close();
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(st.code(), Some(0));
+}
+
+#[test]
+fn startup_configure_above_the_deadline_fails() {
+    let root = Root::new("startup-above");
+    let script = Script {
+        configure: Delay::After(ABOVE_STARTUP),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    eprintln!(
+        "PREFLIGHT startup configure@{ABOVE_STARTUP:?}: exit={code:?} took={took:?} stderr={err:?}"
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        took < ABOVE_STARTUP,
+        "gave up only after the late configure: {took:?}"
+    );
+}
+
+/// The wheel is configured but no position ever comes, and the seat has no
+/// pointer: that is the named cause, at the startup deadline (not the
+/// 30 s the stage used to take, and not a silent exit 0).
+#[test]
+fn startup_without_a_pointer_names_the_pointer() {
+    let root = Root::new("startup-nopointer");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, KEYBOARD);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("pointer position was unavailable"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// With a pointer present the missing position has no proven cause: the
+/// pointer is not blamed.
+#[test]
+fn startup_without_a_position_does_not_blame_the_pointer() {
+    let root = Root::new("startup-nopos");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(!err.contains("pointer position was unavailable"), "{err}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// A seat without a keyboard cannot take Esc: refused at once, named.
+#[test]
+fn startup_without_a_keyboard_fails_at_once() {
+    let root = Root::new("startup-nokbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took < STARTUP, "waited for the deadline: {took:?}");
+}
+
+/// The pointer enters before the configure: the position waits for the
+/// size, and the wheel opens.
+#[test]
+fn startup_pointer_before_the_configure_still_opens() {
+    let root = Root::new("startup-reorder");
+    let script = Script {
+        configure: Delay::After(Duration::from_millis(300)),
+        ..Script::default()
+    };
+    let (mut c, mut child) = start_with(&root, script);
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.pointer_enters();
+    c.mapped(Duration::from_secs(4));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(st.code(), Some(0));
+}
+
+fn wheel_esc() -> u32 {
+    1
+}
+
+/// Esc between the configure and the first position is a clean cancel:
+/// exit 0, nothing logged.
+#[test]
+fn startup_esc_before_the_first_commit_cancels_cleanly() {
+    let root = Root::new("startup-esc");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// Esc once the wheel is on the screen is the same clean cancel.
+#[test]
+fn startup_esc_after_the_first_commit_cancels_cleanly() {
+    let root = Root::new("startup-esc2");
+    root.markdown_action_cached();
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    let _early = c.drag_enters(0, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// The compositor drops the connection during startup: a failure, at once.
+#[test]
+fn startup_compositor_hangup_fails_at_once() {
+    let root = Root::new("startup-hangup");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    c.disconnect();
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("wheel:"), "{err}");
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// Orderly teardown, below the deadline: the layer surface (the keyboard
+/// grab) is destroyed first, and the wheel waits for the compositor's
+/// answer to its `sync` before it closes the connection.
+#[test]
+fn startup_teardown_waits_for_the_ack_below_the_deadline() {
+    let root = Root::new("startup-td-below");
+    let script = Script {
+        teardown_ack: Delay::After(BELOW_TEARDOWN),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(c.teardown_acked(), "the wheel left before the ack");
+    assert!(c.layer_requests().contains(&7), "no layer surface destroy");
+    let held = c.since_destroy().expect("destroyed");
+    eprintln!(
+        "PREFLIGHT teardown ack@{BELOW_TEARDOWN:?}: client left {held:?} after the layer destroy, acked={}",
+        c.teardown_acked()
+    );
+    assert!(held >= BELOW_TEARDOWN, "{held:?}");
+    assert!(held < TEARDOWN + Duration::from_millis(500), "{held:?}");
+}
+
+/// Above the deadline the wheel gives up on the answer and closes.
+#[test]
+fn startup_teardown_gives_up_above_the_deadline() {
+    let root = Root::new("startup-td-above");
+    let script = Script {
+        teardown_ack: Delay::After(ABOVE_TEARDOWN),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(!c.teardown_acked(), "it waited past the deadline");
+    let held = c.since_destroy().expect("destroyed");
+    eprintln!(
+        "PREFLIGHT teardown ack@{ABOVE_TEARDOWN:?}: client left {held:?} after the layer destroy, acked={}",
+        c.teardown_acked()
+    );
+    assert!(held >= TEARDOWN - Duration::from_millis(100), "{held:?}");
+    assert!(held < ABOVE_TEARDOWN, "{held:?}");
 }

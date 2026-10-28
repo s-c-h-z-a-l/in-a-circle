@@ -18,9 +18,19 @@
 //! offer is destroyed once we are done with it, except the dropped one
 //! until its data is read.
 //!
-//! Every error ends the wheel: nothing here retries. Returning drops the
-//! connection, which removes the surface; the caller then frees the lock.
+//! Two clocks, never mixed. Startup (connect, registry, configure, the
+//! first position, the first commit of the wheel) has `STARTUP`; the
+//! user's wait (`STAGE`, re-armed per stage) starts only when the wheel is
+//! on the screen. A startup that does not finish ends in a named
+//! [`StartupError`], not in the stage's 30 s.
+//!
+//! Every error ends the wheel: nothing here retries. The close is ordered
+//! (`teardown`): the layer surface (the keyboard grab) and the surfaces are
+//! destroyed, the compositor's answer to a `sync` is awaited for at most
+//! `TEARDOWN`, and only then is the connection dropped; the caller then
+//! frees the lock, and only after that tells the desktop.
 
+use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
@@ -48,6 +58,19 @@ const READ_CHUNK: usize = 4096;
 /// The surface gives up this much before the `alarm` would kill us, so a
 /// timeout normally ends in an orderly close.
 const SOFT_MARGIN: Duration = Duration::from_millis(500);
+/// `ui_startup_deadline`: from the connection to the wheel's first commit.
+/// The fake-compositor preflight (docs/benchmarks/wheel-reference.md, task
+/// 11) puts a normal startup near 5 ms there; 2 s is 400 times that and
+/// still a wait a user takes for a slow session, so it is a policy ceiling,
+/// not a measured presentation bound. Past it the wheel closes in order and
+/// says why (`StartupError`); it does not wait for the user's stage.
+pub const STARTUP: Duration = Duration::from_millis(2000);
+/// `ui_teardown_deadline`: the most the close waits for the compositor to
+/// confirm that the layer surface is gone. The close itself is a handful of
+/// requests (about 0.2 ms on the fake); the ceiling only bounds a
+/// compositor that has stopped answering, and past it the connection is
+/// dropped anyway, which removes the surfaces.
+pub const TEARDOWN: Duration = Duration::from_millis(1000);
 
 const DND_COPY: u32 = 1;
 const LAYER_OVERLAY: u32 = 3;
@@ -61,15 +84,67 @@ const SEAT_KEYBOARD: u32 = 2;
 /// The files and preset chosen, or `None` if the wheel closed without one.
 pub type Chosen = Option<(Vec<PathBuf>, String)>;
 
+/// Why the wheel did not open (or broke on the way). A cancel, a close by
+/// the compositor and a second instance are not errors.
+#[derive(Debug)]
+pub enum StartupError {
+    /// No position arrived and the seat has no pointer: proven.
+    PointerUnavailable,
+    /// The seat has no keyboard, so Esc could not close the overlay.
+    KeyboardUnavailable,
+    /// The compositor never configured the overlay in time.
+    ConfigureTimeout,
+    /// The Wayland connection or protocol failed, or the start did not
+    /// finish in time for a cause that is not proven (`TimedOut`).
+    Protocol(io::Error),
+    /// Setup before the surface failed: the alarm, the lock, the shm pool.
+    Initialization(io::Error),
+}
+
+impl fmt::Display for StartupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StartupError::PointerUnavailable => f.write_str("the pointer position was unavailable"),
+            StartupError::KeyboardUnavailable => f.write_str("the keyboard was unavailable"),
+            StartupError::ConfigureTimeout => {
+                f.write_str("the compositor did not configure the overlay in time")
+            }
+            StartupError::Protocol(e) => write!(f, "{e}"),
+            StartupError::Initialization(e) => write!(f, "initialization failed: {e}"),
+        }
+    }
+}
+
+impl From<io::Error> for StartupError {
+    fn from(e: io::Error) -> StartupError {
+        StartupError::Protocol(e)
+    }
+}
+
+impl StartupError {
+    /// Whether the compositor is known not to answer: the close then does
+    /// not wait for its confirmation.
+    fn compositor_silent(&self) -> bool {
+        matches!(
+            self,
+            StartupError::ConfigureTimeout | StartupError::Protocol(_)
+        )
+    }
+}
+
 /// Shows the wheel and runs `m` until it closes or chooses.
 ///
 /// With a `meter` (the measurement switch) the surface feeds it and hands it
 /// back, on every path.
-pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> io::Result<Chosen> {
+pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> Result<Chosen, StartupError> {
     let mut s = Surface::connect()?;
     s.meter = meter.take();
     let r = s.setup(m).and_then(|()| s.event_loop(m));
     *meter = s.meter.take();
+    // Release the grabs and the surfaces, then drop the connection; the
+    // caller frees the lock after this returns.
+    let ack = !matches!(&r, Err(e) if e.compositor_silent());
+    s.teardown(m, ack);
     r
 }
 
@@ -245,8 +320,18 @@ struct Surface {
     conn: Conn,
     id: Ids,
     shm: Option<Shm>,
-    /// Soft deadline of the current stage.
+    /// Soft deadline of the current clock: `STARTUP` until the wheel's
+    /// first commit, then the user's stage.
     deadline: Instant,
+    /// The wheel has been committed: the deadline is the user's.
+    user_stage: bool,
+    /// The seat's capabilities, once announced.
+    caps: Option<u32>,
+    /// A failure the event handler found, for the loop to return.
+    refused: Option<StartupError>,
+    /// The teardown's `sync` callback, and its `done`.
+    ack_cb: u32,
+    acked: bool,
     globals: Globals,
     synced: bool,
     /// Size from the last configure; the first one maps the surface.
@@ -283,10 +368,85 @@ struct Surface {
 }
 
 impl Surface {
-    fn connect() -> io::Result<Surface> {
-        let conn = Conn::connect()
-            .map_err(|e| io::Error::new(e.kind(), format!("cannot reach the compositor: {e}")))?;
+    fn connect() -> Result<Surface, StartupError> {
+        let conn = Conn::connect().map_err(|e| {
+            StartupError::Protocol(io::Error::new(
+                e.kind(),
+                format!("cannot reach the compositor: {e}"),
+            ))
+        })?;
         Ok(Surface::new(conn))
+    }
+
+    /// A failure the event handler recorded, if any.
+    fn refused(&mut self) -> Result<(), StartupError> {
+        self.refused.take().map_or(Ok(()), Err)
+    }
+
+    /// The startup clock ran out: the cause, as far as it is proven.
+    fn startup_timeout(&self) -> StartupError {
+        if self.size.is_none() {
+            StartupError::ConfigureTimeout
+        } else if self.caps.is_some_and(|c| c & SEAT_POINTER == 0) {
+            StartupError::PointerUnavailable
+        } else {
+            // Configured, a pointer (or no word from the seat), and still no
+            // position: nothing proves why, so nothing is blamed.
+            StartupError::Protocol(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "startup incomplete: no cursor position arrived after the configure",
+            ))
+        }
+    }
+
+    /// An error from the connection while starting: a timeout is the
+    /// startup clock's, anything else is the connection's.
+    fn start_error(&self, e: io::Error) -> StartupError {
+        if e.kind() == io::ErrorKind::TimedOut && !self.user_stage {
+            self.startup_timeout()
+        } else {
+            StartupError::Protocol(e)
+        }
+    }
+
+    /// `flush` with the startup clock's classification.
+    fn flush_start(&mut self) -> Result<(), StartupError> {
+        self.flush().map_err(|e| self.start_error(e))
+    }
+
+    /// The ordered close. First the layer surface (the keyboard grab, then
+    /// the overlay) and the surfaces are destroyed; then, with `ack`, the
+    /// compositor's answer to a `sync` is awaited, so the grab is known to
+    /// be released before the lock is; all within `TEARDOWN`. Whatever goes
+    /// wrong here is ignored: dropping the connection removes the surfaces
+    /// anyway.
+    fn teardown(&mut self, m: &Machine, ack: bool) {
+        let until = Instant::now() + TEARDOWN;
+        // No render waits for a buffer that will not be released.
+        self.pending = false;
+        let (id, c) = (&self.id, &mut self.conn);
+        for (obj, op) in [
+            (id.layer, op::zwlr_layer_surface_v1::DESTROY),
+            (id.sub, op::wl_subsurface::DESTROY),
+            (id.wheel, op::wl_surface::DESTROY),
+            (id.surface, op::wl_surface::DESTROY),
+        ] {
+            if obj != 0 {
+                c.req(obj, op, &[]);
+            }
+        }
+        if ack {
+            self.ack_cb = c.new_id(Iface::Callback);
+            c.req(DISPLAY, op::wl_display::SYNC, &[U(self.ack_cb)]);
+        }
+        if self.conn.flush(until).is_err() {
+            return;
+        }
+        while ack && !self.acked {
+            if !matches!(self.conn.read(until), Ok(true)) || self.dispatch(m).is_err() {
+                return;
+            }
+        }
     }
 
     fn new(conn: Conn) -> Surface {
@@ -294,7 +454,12 @@ impl Surface {
             conn,
             id: Ids::default(),
             shm: None,
-            deadline: Instant::now() + STAGE.saturating_sub(SOFT_MARGIN),
+            deadline: Instant::now() + STARTUP,
+            user_stage: false,
+            caps: None,
+            refused: None,
+            ack_cb: 0,
+            acked: false,
             globals: Globals::default(),
             synced: false,
             size: None,
@@ -338,18 +503,19 @@ impl Surface {
         Ok(())
     }
 
-    /// Reads and dispatches until `done`, within the stage's deadline.
-    fn wait(&mut self, m: &Machine, done: fn(&Surface) -> bool) -> io::Result<()> {
-        self.flush()?;
+    /// Reads and dispatches until `done`, within the current deadline.
+    fn wait(&mut self, m: &Machine, done: fn(&Surface) -> bool) -> Result<(), StartupError> {
+        self.flush_start()?;
         self.dispatch(m)?;
+        self.refused()?;
         while !done(self) {
-            if !self.conn.read(self.deadline)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "compositor did not answer",
-                ));
+            match self.conn.read(self.deadline) {
+                Ok(true) => {}
+                Ok(false) => return Err(self.startup_timeout()),
+                Err(e) => return Err(self.start_error(e)),
             }
             self.dispatch(m)?;
+            self.refused()?;
         }
         Ok(())
     }
@@ -373,7 +539,7 @@ impl Surface {
             .ok_or_else(|| other(format!("the compositor lacks {name} v{min}")))
     }
 
-    fn setup(&mut self, m: &mut Machine) -> io::Result<()> {
+    fn setup(&mut self, m: &mut Machine) -> Result<(), StartupError> {
         let c = &mut self.conn;
         self.id.registry = c.new_id(Iface::Registry);
         c.req(
@@ -445,7 +611,7 @@ impl Surface {
             &[U(KEYBOARD_EXCLUSIVE)],
         );
         c.req(id.surface, op::wl_surface::COMMIT, &[]);
-        self.flush()?;
+        self.flush_start()?;
 
         // While the compositor configures: the wheel surface and buffer 0.
         self.build_wheel_surface()?;
@@ -457,7 +623,7 @@ impl Surface {
         // The configure is acked and the overlay mapped in `handle`; its
         // inputs wait in the queue for the event loop.
         self.wait(m, |s| s.size.is_some())?;
-        self.flush()?;
+        self.flush_start()?;
         // While the pointer position is on its way: buffer 1.
         if self.painted[1].is_none() && !self.busy[1] {
             let shm = self.shm.as_mut().expect("built above");
@@ -467,8 +633,8 @@ impl Surface {
         Ok(())
     }
 
-    fn build_wheel_surface(&mut self) -> io::Result<()> {
-        let shm = Shm::new()?;
+    fn build_wheel_surface(&mut self) -> Result<(), StartupError> {
+        let shm = Shm::new().map_err(StartupError::Initialization)?;
         let (id, c) = (&mut self.id, &mut self.conn);
         id.wheel = c.new_id(Iface::Surface);
         c.req(
@@ -550,7 +716,11 @@ impl Surface {
                 None
             }
             (Iface::Callback, op::wl_callback::DONE) => {
-                self.synced = true;
+                if e.obj == self.ack_cb && self.ack_cb != 0 {
+                    self.acked = true;
+                } else {
+                    self.synced = true;
+                }
                 None
             }
             (Iface::Seat, op::wl_seat::CAPABILITIES) => {
@@ -563,6 +733,14 @@ impl Surface {
                 if caps & SEAT_KEYBOARD != 0 && id.keyboard == 0 {
                     id.keyboard = c.new_id(Iface::Keyboard);
                     c.req(id.seat, op::wl_seat::GET_KEYBOARD, &[U(id.keyboard)]);
+                }
+                self.caps = Some(caps);
+                // Before the wheel is up, a seat without a keyboard (or one
+                // that lost it) cannot take Esc: the overlay would be an
+                // exclusive grab nobody can cancel. The pointer is judged
+                // later, at the deadline: a drag brings its own position.
+                if !self.user_stage && caps & SEAT_KEYBOARD == 0 && self.refused.is_none() {
+                    self.refused = Some(StartupError::KeyboardUnavailable);
                 }
                 None
             }
@@ -1045,9 +1223,10 @@ impl Surface {
         }
     }
 
-    fn event_loop(&mut self, m: &mut Machine) -> io::Result<Chosen> {
+    fn event_loop(&mut self, m: &mut Machine) -> Result<Chosen, StartupError> {
         loop {
             self.dispatch(m)?;
+            self.refused()?;
             self.pump_read();
             self.pump_early();
             if let Some(end) = self.feed(m)? {
@@ -1057,10 +1236,18 @@ impl Surface {
             if !self.inputs.is_empty() {
                 continue;
             }
-            self.flush()?;
+            self.flush_start()?;
             self.prepaint(m);
+            // The wheel's first commit ends the startup; the user's stage
+            // (soft deadline and the `alarm` backstop) starts from here.
+            if !self.user_stage && self.shown.is_some() {
+                self.begin_user_stage();
+            }
             let now = Instant::now();
             if now >= self.deadline {
+                if !self.user_stage {
+                    return Err(self.startup_timeout());
+                }
                 self.inputs.push(Input::Deadline);
                 continue;
             }
@@ -1098,7 +1285,7 @@ impl Surface {
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(e);
+                return Err(e.into());
             }
             if pfds[0].revents != 0 {
                 // Readable (or hung up, which the read reports).
@@ -1107,6 +1294,20 @@ impl Surface {
             }
         }
     }
+
+    /// The wheel is on the screen: from here the user's stage runs.
+    fn begin_user_stage(&mut self) {
+        self.user_stage = true;
+        self.deadline = user_deadline(Instant::now());
+        // SAFETY: alarm(2) has no memory effects; see main.
+        unsafe { libc::alarm(STAGE.as_secs() as u32) };
+    }
+}
+
+/// The user's stage ends this long after `from`: `STAGE` less the margin
+/// that lets the surface close in order before the `alarm`.
+fn user_deadline(from: Instant) -> Instant {
+    from + STAGE.saturating_sub(SOFT_MARGIN)
 }
 
 /// The free buffers that still hold an older wheel than `generation`.
@@ -1344,6 +1545,19 @@ mod tests {
     /// A `poll` that returns at one of our own deadlines (the stage's, or
     /// the drop read's) is not an idle wakeup; one with nothing ready
     /// before them is.
+    #[test]
+    fn startup_and_user_clocks_are_separate() {
+        let now = Instant::now();
+        // The user's stage is its own 30 s less the soft margin, counted
+        // from the wheel's commit, however long the startup took.
+        assert_eq!(user_deadline(now) - now, STAGE - SOFT_MARGIN);
+        assert!(STARTUP < STAGE - SOFT_MARGIN);
+        // A new surface runs on the startup clock.
+        let (s, _server) = fake_compositor();
+        assert!(!s.user_stage);
+        assert!(s.deadline <= Instant::now() + STARTUP);
+    }
+
     #[test]
     fn idle_wakeups_exclude_our_deadlines() {
         let now = Instant::now();

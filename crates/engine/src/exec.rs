@@ -328,7 +328,9 @@ pub fn run(
     };
     if route.is_empty() || route.len() > 2 {
         all(&mut sink, "invalid route");
-        return sink.report(false);
+        // The gate's own result: a bad route is not a missing sandbox, and
+        // the notice must not say it is.
+        return sink.report(gate.is_ok());
     }
     if let Err(e) = gate {
         all(&mut sink, &format!("sandbox unavailable: {e}"));
@@ -2897,7 +2899,7 @@ pub(crate) mod tests {
         for route in [&[][..], &[&a, &a, &a][..]] {
             let tok = CancelToken::install().unwrap();
             let mut seen = Seen::default();
-            run(route, std::slice::from_ref(&input), &mut seen, &tok);
+            let report = run(route, std::slice::from_ref(&input), &mut seen, &tok);
             assert_eq!(
                 seen.0,
                 [Outcome::Failed {
@@ -2905,6 +2907,10 @@ pub(crate) mod tests {
                     reason: "invalid route".to_owned()
                 }]
             );
+            // The sandbox was not the problem: the report carries the
+            // gate's result, so the notice does not say "Sandbox
+            // unavailable." for a route error.
+            assert_eq!(report.sandboxed, sandbox::ready().is_ok());
         }
         assert_eq!(
             fs::read_dir(&t.0).unwrap().count(),

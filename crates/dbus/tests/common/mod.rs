@@ -272,6 +272,27 @@ impl Peer {
         });
     }
 
+    /// `signal_from` to a client that may have finished and left: false if
+    /// it has. A server that reacts to a call after replying (a signal
+    /// about it) races a client with nothing more to wait for, which exits
+    /// at once; that is the client behaving, not the server failing.
+    pub fn try_signal_from(
+        &mut self,
+        sender: &str,
+        path: &str,
+        interface: &str,
+        member: &str,
+        body: Vec<Value>,
+    ) -> bool {
+        self.try_send(Message {
+            path: Some(path.into()),
+            interface: Some(interface.into()),
+            member: Some(member.into()),
+            sender: Some(sender.into()),
+            ..Peer::base(Kind::Signal, body)
+        })
+    }
+
     /// Answers the client's `Hello` with `name`.
     pub fn hello(&mut self, name: &str) {
         let m = self.recv();

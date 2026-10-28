@@ -11,6 +11,8 @@ use dbus::notifications::{Event, Notice, Notifications};
 use engine::exec::{CancelToken, Durability, Observer, Outcome, PublicationReason, Wake};
 use engine::journal::{self, GroupOutcome, JobId, UndoReason, UndoResult};
 
+use crate::surface::StartupError;
+
 /// A run that takes longer than this gets a "running" notification.
 pub const RUNNING_AFTER: Duration = Duration::from_secs(1);
 /// At most four progress updates a second.
@@ -31,8 +33,18 @@ const WAKE_EVENTS: usize = 64;
 /// Wakes in a row that spend all of `WAKE_FRAMES` past which the server is
 /// taken as broken (a flood of signals about other notifications).
 const SPENT_WAKES: u32 = 4;
-/// A call once the run is over.
+/// A call once the run is over. `notification_rpc_deadline`
+/// (parameters.g0p.json): one RPC gets 500 ms, the figure the D-Bus crate's
+/// own per-call wait has; the preflight put a working fake server's reply
+/// in the microseconds, so this only bounds a server that stopped.
 const CALL_WAIT: Duration = Duration::from_millis(500);
+/// The whole open (connect, authenticate, `Hello`, capabilities, owner,
+/// match) for the failure notice: one shared 500 ms frame, the same
+/// `notification_rpc_deadline` row, so the open cannot cost more than one
+/// call does.
+const ERROR_OPEN: Duration = Duration::from_millis(500);
+/// The notification's summary when the wheel did not open.
+const COULD_NOT_OPEN: &str = "Could not open the circle.";
 
 /// The most characters in a summary or in one body line.
 const MAX_CHARS: usize = 200;
@@ -41,10 +53,13 @@ const PROBLEM_LINES: usize = 3;
 /// Outputs and problems a [`Summary`] keeps: enough for every text.
 const KEEP_DONE: usize = 2;
 const KEEP_PROBLEMS: usize = 4;
-/// Warned inputs a [`Summary`] keeps to match against their `done`. 64 is
-/// a few hundred bytes of paths and far above a normal selection; past it
-/// the summary no longer tells which inputs were warned about and says
-/// "lost" if any input has an output (it did lose something).
+/// Warned inputs a [`Summary`] keeps to match against their `done`. A
+/// warning needs a lossy action to have dropped something from that very
+/// input, so a normal selection has a handful; 64 is far above that and
+/// costs at most 64 paths (about 8 kB for ordinary paths, 256 kB at the
+/// 4096-byte path limit). Past it the summary no longer tells which inputs
+/// were warned about, sets `lost_overflow`, and from then on says "lost"
+/// for any input that has an output: it never claims that nothing was lost.
 const KEEP_LOST: usize = 64;
 
 /// What the final notification says, in memory that does not grow with
@@ -72,6 +87,9 @@ pub struct Summary {
     /// here). At most `KEEP_LOST`: a run with more falls back to "some
     /// input lost something", see `lost_done`.
     lost_inputs: Vec<PathBuf>,
+    /// A warned input did not fit in `lost_inputs`: any input converted
+    /// from then on may be that one, so each counts as having lost.
+    lost_overflow: bool,
     pub sandboxed: bool,
     /// An output went to the download folder (the source folder was not
     /// writable).
@@ -104,7 +122,7 @@ impl Summary {
                     self.to_downloads = true;
                 }
                 self.done_count += 1;
-                if self.lost_inputs.contains(input) {
+                if self.lost_overflow || self.lost_inputs.contains(input) {
                     self.lost_done = true;
                 }
             }
@@ -150,8 +168,12 @@ impl Summary {
                     // Another warning of an input already known.
                 } else if self.lost_inputs.len() < KEEP_LOST {
                     self.lost_inputs.push(input.clone());
-                } else if self.done_count > 0 {
-                    self.lost_done = true;
+                } else {
+                    self.lost_overflow = true;
+                    // The converted inputs so far may include this one.
+                    if self.done_count > 0 {
+                        self.lost_done = true;
+                    }
                 }
             }
         }
@@ -246,6 +268,55 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
         body.push("Sandbox unavailable.".to_owned());
     }
     (fit(&summary, false), body_of(&body, markup))
+}
+
+/// The notification for a wheel that did not open: the summary and the
+/// cause, in plain text (the markup escaping is the sender's). The cause is
+/// named only as far as it is proven; an unknown one gets the general copy
+/// and never blames the pointer.
+pub fn startup_error_text(e: &StartupError) -> (String, String) {
+    let body = match e {
+        StartupError::PointerUnavailable => "The pointer position was unavailable.",
+        StartupError::KeyboardUnavailable => "The keyboard was unavailable.",
+        StartupError::ConfigureTimeout => "The compositor did not respond in time.",
+        StartupError::Protocol(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            "The wheel could not start in time."
+        }
+        StartupError::Protocol(_) => "The connection to the compositor failed.",
+        StartupError::Initialization(_) => "The wheel could not be set up.",
+    };
+    (COULD_NOT_OPEN.to_owned(), body.to_owned())
+}
+
+/// Shows the failure notice once, through the bounded path the run's final
+/// notice uses: the open within `ERROR_OPEN`, the call within `CALL_WAIT`,
+/// no actions (no Undo, no Cancel), nothing to wait for afterwards. No bus,
+/// or a bus that fails or stays silent, is one line on stderr; it never
+/// changes the exit.
+pub fn notify_startup_error(e: &StartupError) {
+    let (summary, body) = startup_error_text(e);
+    let Some(addr) = dbus::session_address() else {
+        eprintln!("inacircle: notifications unavailable: no unix session bus address");
+        return;
+    };
+    let mut bus = match Notifications::open_within(&addr, Instant::now() + ERROR_OPEN) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("inacircle: notifications unavailable: {e}");
+            return;
+        }
+    };
+    let body = body_of(&[body], bus.has("body-markup"));
+    let n = Notice {
+        replaces: 0,
+        summary: &summary,
+        body: &body,
+        actions: &[],
+        progress: None,
+    };
+    if let Err(e) = bus.notify(&n, Instant::now() + CALL_WAIT) {
+        eprintln!("inacircle: notifications unavailable: {e}");
+    }
 }
 
 /// Why a group was kept, as the user reads it after a count.
@@ -1149,6 +1220,82 @@ mod tests {
         s.lossy = true;
         assert!(s.lost_inputs.len() <= KEEP_LOST);
         assert_eq!(lines(&final_text(&s, false).1), ["Formatting was lost."]);
+    }
+
+    #[test]
+    fn warned_inputs_past_the_keep_never_claim_that_nothing_was_lost() {
+        // The cap is crossed by inputs that all end in a failure; the next
+        // one is warned about, then converted. It is not in the kept list,
+        // so the match cannot find it: the notice must still say that the
+        // run lost something.
+        let mut outcomes = Vec::new();
+        for i in 0..KEEP_LOST {
+            outcomes.push(warn(&format!("/d/{i}.txt")));
+            outcomes.push(fail(&format!("/d/{i}.txt"), "bad"));
+        }
+        let last = format!("/d/{KEEP_LOST}.txt");
+        outcomes.push(warn(&last));
+        outcomes.push(done(&last, "/d/last.md"));
+        let mut s = summary(&outcomes);
+        s.lossy = true;
+        assert!(s.lost_done, "overflow was taken as no loss");
+        assert_eq!(
+            lines(&final_text(&s, false).1)[0],
+            "Formatting was lost.",
+            "{:?}",
+            final_text(&s, false)
+        );
+        // Control: the same run kept within the cap finds no loss when the
+        // converted input was never warned about.
+        let mut outcomes = vec![warn("/d/0.txt"), fail("/d/0.txt", "bad")];
+        outcomes.push(done("/d/z.txt", "/d/z.md"));
+        let mut s = summary(&outcomes);
+        s.lossy = true;
+        assert!(!s.lost_done);
+    }
+
+    #[test]
+    fn startup_error_text_names_the_proven_cause() {
+        use std::io::{Error, ErrorKind};
+        let text = |e: StartupError| startup_error_text(&e);
+        let summary = "Could not open the circle.";
+        assert_eq!(
+            text(StartupError::PointerUnavailable),
+            (
+                summary.into(),
+                "The pointer position was unavailable.".into()
+            )
+        );
+        assert_eq!(
+            text(StartupError::KeyboardUnavailable),
+            (summary.into(), "The keyboard was unavailable.".into())
+        );
+        assert_eq!(
+            text(StartupError::ConfigureTimeout),
+            (
+                summary.into(),
+                "The compositor did not respond in time.".into()
+            )
+        );
+        assert_eq!(
+            text(StartupError::Initialization(Error::other("x"))),
+            (summary.into(), "The wheel could not be set up.".into())
+        );
+        assert_eq!(
+            text(StartupError::Protocol(Error::other("x"))),
+            (
+                summary.into(),
+                "The connection to the compositor failed.".into()
+            )
+        );
+        // An unproven cause (a timeout with a pointer present) is the
+        // general copy and never mentions the pointer.
+        let (_, body) = text(StartupError::Protocol(Error::new(ErrorKind::TimedOut, "t")));
+        assert_eq!(body, "The wheel could not start in time.");
+        assert!(!body.to_lowercase().contains("pointer"));
+        // No cause text leaks into the notice: the log has it.
+        let (_, body) = text(StartupError::Protocol(Error::other("secret <b>path</b>")));
+        assert!(!body.contains("secret"));
     }
 
     #[test]

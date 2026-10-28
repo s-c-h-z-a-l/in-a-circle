@@ -471,16 +471,29 @@ choice has run.
    `O_NONBLOCK | O_NOFOLLOW` (a symlink or FIFO there is an error, exit 1).
    A held lock makes a second instance exit 0 at once, before touching
    Wayland.
-3. The surface is shown (below). The wheel has two levels: categories,
-   then the chosen category's targets. Each wait (the drop, the category
-   choice after a fallback drop, the target choice) has 30 s. The drop and
-   the category choice re-arm `alarm` (and the
+3. The surface is shown (below). Its start has its own clock, 2 s from
+   the connection to the wheel's first commit (`ui_startup_deadline`), apart
+   from the user's wait. The wheel has two levels: categories, then the
+   chosen category's targets. Each user wait (the drop, the category choice
+   after a fallback drop, the target choice) has 30 s, counted from the
+   commit; the drop and the category choice re-arm `alarm` (and the
    surface's own deadline, 500 ms shorter so a timeout normally ends in an
    orderly close). The deadline will become configurable.
 4. Closed without a choice (Esc, a click off the wheel, the drag leaving
-   without a drop, the deadline, a Wayland error, the compositor closing
-   the connection): surface torn down, lock released, exit 0 (1 on an
-   error). Nothing runs and nothing is notified.
+   without a drop, the deadline, the compositor closing the surface):
+   surface torn down, lock released, exit 0. Nothing runs and nothing is
+   notified. The teardown is ordered: the layer surface (the keyboard grab)
+   and the surfaces are destroyed, the compositor's answer to a `sync` is
+   awaited for at most 1 s (`ui_teardown_deadline`), the connection is
+   closed, and only then is the lock released.
+   A start that fails (no configure within 2 s, no position and a seat
+   without a pointer, a seat without a keyboard, a Wayland error, a setup
+   error) takes the same ordered close, then exit 1 and one desktop
+   notification, "Could not open the circle." with the proven cause (an
+   unproven one gets the general copy), through the bounded notification
+   path (the open within 500 ms, the call within 500 ms, a 2 s alarm as the
+   last guard). No retry and no second window; without a bus it is one
+   line on stderr.
 5. A choice: the Wayland connection is closed (the surface disappears), the
    lock released, `alarm(0)`; then the same run path as
    `inacircle run --notify <preset> <files…>` (executor, journal,

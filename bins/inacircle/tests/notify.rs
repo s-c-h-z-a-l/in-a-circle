@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use dbus::{Address, Message, Value};
 use fake::{Fake, Peer};
 
+mod fake_compositor;
+use fake_compositor::{Compositor, Delay, KEYBOARD, POINTER, Script};
+
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
 const ACTIONS: [&str; 2] = ["inacircle-text", "inacircle-testaction"];
 const IFACE: &str = "org.freedesktop.Notifications";
@@ -308,8 +311,12 @@ fn serve_open(p: &mut Peer) {
     p.reply(&m, vec![]);
 }
 
+/// A signal about notification `id`. A client that already finished (a
+/// final notice with no button to wait for) is gone by the time the
+/// server reacts: the write then fails with a broken pipe, and that is not
+/// the server's failure (the fixture used to panic here, a flaky test).
 fn signal(p: &mut Peer, member: &str, id: u32, arg: Value) {
-    p.signal_from(OWNER, PATH, IFACE, member, vec![Value::U32(id), arg]);
+    let _ = p.try_signal_from(OWNER, PATH, IFACE, member, vec![Value::U32(id), arg]);
 }
 
 fn invoke(p: &mut Peer, id: u32, key: &str) {
@@ -1261,4 +1268,504 @@ fn unwritable_history_offers_no_undo_and_says_why() {
     assert!(!e.files().join("a").exists());
     assert!(e.files().join("a.txt").exists());
     assert_eq!(r.code, Some(1), "{}{}", r.stdout, r.stderr);
+}
+
+// The wheel's failed start (hardening task 11): a fake compositor that
+// does not let the wheel open, a scripted notification server, and the
+// order of what happens between them.
+
+/// The wheel (no arguments), its compositor `wayland-0` in the runtime dir.
+fn wheel_cmd(e: &Env, bus: Option<&str>) -> Command {
+    let mut c = e.cmd(bus, &[] as &[&str]);
+    c.env("WAYLAND_DISPLAY", "wayland-0");
+    c
+}
+
+/// How long a test waits before it fails: a hung wheel must fail the test.
+const PATIENCE: Duration = Duration::from_secs(10);
+/// The proposed `ui_startup_deadline` (parameters.g0p.json).
+const STARTUP: Duration = Duration::from_millis(2000);
+/// Esc, as the wheel reads it.
+const KEY_ESC: u32 = 1;
+
+/// The notification server a failed start meets.
+#[derive(Clone, Copy)]
+enum Bus {
+    /// No session bus at all.
+    Missing,
+    /// A server that answers as a notification server does.
+    Working,
+    /// One that accepts the connection and never says a word.
+    Silent,
+}
+
+/// What a failed start looked like from outside.
+struct Failed {
+    code: Option<i32>,
+    stderr: String,
+    took: Duration,
+    notices: Vec<Got>,
+    /// At the moment the first `Notify` arrived (the wheel then waits for
+    /// the reply): was the wheel lock already free, was the wheel's
+    /// compositor connection already closed, and had the layer surface
+    /// (the keyboard grab) been destroyed. `None`: no `Notify` came.
+    at_notify: Option<(bool, bool, bool)>,
+}
+
+/// Whether `wheel.lock` can be taken now (and is left free).
+fn lock_is_free(path: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(f) = fs::File::open(path) else {
+        return true;
+    };
+    // SAFETY: flock on an fd the file owns; LOCK_UN releases what we took.
+    unsafe {
+        let free = libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0;
+        libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+        free
+    }
+}
+
+/// Reaps `child` within `PATIENCE` (a hung wheel is killed and fails the
+/// test); its exit code and stderr.
+fn reap(mut child: std::process::Child) -> (Option<i32>, String) {
+    let until = Instant::now() + PATIENCE;
+    let st = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the wheel did not exit within {PATIENCE:?}");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    (st.code(), stderr)
+}
+
+/// Starts the wheel against a fake compositor with `script`, lets `drive`
+/// bring it to the point of failing, and watches until it exits. The bus
+/// server holds the first `Notify` until this thread has looked at the
+/// compositor and the lock: a barrier, not a timing guess.
+fn failed_start(e: &Env, bus: Bus, script: Script, drive: impl FnOnce(&mut Compositor)) -> Failed {
+    let lock_path = e.root.join("runtime/inacircle/wheel.lock");
+    let (arrive_tx, arrive_rx) = mpsc::channel::<bool>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (fake, notices) = match bus {
+        Bus::Missing => (None, None),
+        Bus::Working => {
+            let (f, rx) = server_hooked(
+                move |_, _| {
+                    let _ = arrive_tx.send(lock_is_free(&lock_path));
+                    let _ = go_rx.recv_timeout(PATIENCE);
+                },
+                |_, _| {},
+            );
+            (Some(f), Some(rx))
+        }
+        Bus::Silent => (
+            Some(Fake::start(|p| {
+                // Reads what the client sends and never answers; the client
+                // gives up at its deadline and closes.
+                let mut b = [0u8; 256];
+                while matches!(p.stream.read(&mut b), Ok(n) if n > 0) {}
+            })),
+            None,
+        ),
+    };
+    let addr = fake.as_ref().map(bus_of);
+    let t0 = Instant::now();
+    let mut child = None;
+    let mut c = Compositor::serve_with(
+        &e.root.join("runtime"),
+        Duration::from_secs(2),
+        script,
+        || {
+            child = Some(wheel_cmd(e, addr.as_deref()).spawn().unwrap());
+        },
+    );
+    let child = child.unwrap();
+    drive(&mut c);
+    let until = Instant::now() + PATIENCE;
+    let mut at_notify = None;
+    let mut child = child;
+    loop {
+        c.service();
+        if let Ok(free) = arrive_rx.try_recv() {
+            let closed = c.eof();
+            at_notify = Some((free, closed, c.layer_requests().contains(&7)));
+            let _ = go_tx.send(());
+            break;
+        }
+        if child.try_wait().unwrap().is_some() || Instant::now() >= until {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (code, stderr) = reap(child);
+    let took = t0.elapsed();
+    if let Some(f) = fake {
+        f.join();
+    }
+    Failed {
+        code,
+        stderr,
+        took,
+        notices: notices.map_or_else(Vec::new, |rx| rx.try_iter().collect()),
+        at_notify,
+    }
+}
+
+/// The overlay mapped, and a seat with `caps` and the devices they imply.
+fn seat_up(c: &mut Compositor, caps: u32) {
+    c.mapped(Duration::from_secs(4));
+    c.seat_bound(Duration::from_secs(2));
+    c.seat_caps(caps);
+    c.seat_devices(caps, Duration::from_secs(2));
+}
+
+const COULD_NOT_OPEN: &str = "Could not open the circle.";
+
+/// The notice a failed start must leave: once, after the keyboard grab and
+/// the connection and the lock are gone, with no Undo or any button.
+fn assert_one_notice(f: &Failed) -> &Got {
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.notices.len(), 1, "{}", f.stderr);
+    let g = &f.notices[0];
+    assert_eq!(g.summary, COULD_NOT_OPEN);
+    assert_eq!(g.replaces, 0);
+    assert!(g.actions.is_empty(), "{:?}", g.actions);
+    assert_eq!(
+        f.at_notify,
+        Some((true, true, true)),
+        "lock free, connection closed, layer destroyed before the Notify"
+    );
+    assert_eq!(f.unavailable(), 0, "{}", f.stderr);
+    g
+}
+
+impl Failed {
+    fn unavailable(&self) -> usize {
+        self.stderr
+            .lines()
+            .filter(|l| l.starts_with("inacircle: notifications unavailable: "))
+            .count()
+    }
+}
+
+/// No configure: the surface and the connection and the lock go first, then
+/// one notice that names the real cause.
+#[test]
+fn startup_failure_notifies_after_the_surface_and_the_lock_are_gone() {
+    let e = Env::new("startup-order");
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let f = failed_start(&e, Bus::Working, script, |_| {});
+    eprintln!(
+        "PREFLIGHT order (no configure): at_notify(lock_free,conn_closed,layer_destroyed)={:?} took={:?} summary={:?} body={:?}",
+        f.at_notify,
+        f.took,
+        f.notices.first().map(|g| g.summary.clone()),
+        f.notices.first().map(|g| g.body.clone())
+    );
+    let g = assert_one_notice(&f);
+    assert!(g.body.contains("did not respond"), "{}", g.body);
+    assert!(
+        f.took >= STARTUP - Duration::from_millis(100),
+        "{:?}",
+        f.took
+    );
+}
+
+/// A proven missing pointer is named, in the product's words.
+#[test]
+fn startup_names_a_missing_pointer() {
+    let e = Env::new("startup-pointer");
+    let f = failed_start(&e, Bus::Working, Script::default(), |c| {
+        seat_up(c, KEYBOARD)
+    });
+    let g = assert_one_notice(&f);
+    assert_eq!(g.body, "The pointer position was unavailable.");
+}
+
+/// The cause is not known (the seat has a pointer, nothing came): the
+/// notice does not blame the pointer.
+#[test]
+fn startup_does_not_blame_the_pointer_for_an_unknown_cause() {
+    let e = Env::new("startup-unknown");
+    let f = failed_start(&e, Bus::Working, Script::default(), |c| {
+        seat_up(c, POINTER | KEYBOARD)
+    });
+    let g = assert_one_notice(&f);
+    assert!(!g.body.to_lowercase().contains("pointer"), "{}", g.body);
+    assert!(!g.body.is_empty());
+}
+
+/// Esc is a cancel, not an error: exit 0, and the bus is never touched.
+#[test]
+fn startup_esc_is_a_cancel_without_a_notification() {
+    let e = Env::new("startup-esc");
+    let listener = UnixListener::bind(e.root.join("runtime/bus")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = None;
+    let mut c = Compositor::serve_with(
+        &e.root.join("runtime"),
+        Duration::from_secs(2),
+        Script::default(),
+        || child = Some(wheel_cmd(&e, None).spawn().unwrap()),
+    );
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(KEY_ESC);
+    let _ = c.hangs_up(PATIENCE);
+    let (code, stderr) = reap(child.unwrap());
+    assert_eq!((code, stderr.as_str()), (Some(0), ""));
+    assert!(listener.accept().is_err(), "the bus was touched");
+}
+
+/// A second instance leaves quietly: exit 0, no Wayland, no notification.
+#[test]
+fn startup_second_instance_stays_silent() {
+    use std::os::fd::AsRawFd;
+    let e = Env::new("startup-second");
+    fs::create_dir_all(e.root.join("runtime/inacircle")).unwrap();
+    let lock = fs::File::create(e.root.join("runtime/inacircle/wheel.lock")).unwrap();
+    // SAFETY: flock on an fd the file owns.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let bus = e.root.join("runtime/bus");
+    let bus_listener = UnixListener::bind(&bus).unwrap();
+    bus_listener.set_nonblocking(true).unwrap();
+    let wayland = UnixListener::bind(e.root.join("runtime/wayland-0")).unwrap();
+    wayland.set_nonblocking(true).unwrap();
+    let child = wheel_cmd(&e, None).spawn().unwrap();
+    let (code, stderr) = reap(child);
+    assert_eq!((code, stderr.as_str()), (Some(0), ""));
+    assert!(bus_listener.accept().is_err(), "the bus was touched");
+    assert!(wayland.accept().is_err(), "it went on to Wayland");
+}
+
+/// A setup failure before the surface (the lock path is a FIFO) is told
+/// too, as a setup failure; the compositor is never reached.
+#[test]
+fn startup_lock_setup_error_notifies_without_touching_wayland() {
+    let e = Env::new("startup-lockerr");
+    let dir = e.root.join("runtime/inacircle");
+    fs::create_dir_all(&dir).unwrap();
+    let c = std::ffi::CString::new(dir.join("wheel.lock").as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo reads the NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let wayland = UnixListener::bind(e.root.join("runtime/wayland-0")).unwrap();
+    wayland.set_nonblocking(true).unwrap();
+    let (fake, rx) = server(|_, _| {});
+    let bus = bus_of(&fake);
+    let child = wheel_cmd(&e, Some(&bus)).spawn().unwrap();
+    let (code, stderr) = reap(child);
+    fake.join();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("lock"), "{stderr}");
+    let notices: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(notices.len(), 1, "{stderr}");
+    assert_eq!(notices[0].summary, COULD_NOT_OPEN);
+    assert_eq!(notices[0].body, "The wheel could not be set up.");
+    assert!(notices[0].actions.is_empty());
+    assert!(wayland.accept().is_err(), "it went on to Wayland");
+}
+
+/// No session bus: one log line, the same exit, nothing hangs.
+#[test]
+fn startup_failure_without_a_bus_logs_and_exits() {
+    let e = Env::new("startup-nobus");
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let f = failed_start(&e, Bus::Missing, script, |_| {});
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.unavailable(), 1, "{}", f.stderr);
+    assert!(
+        f.took < STARTUP + Duration::from_millis(1500),
+        "{:?}",
+        f.took
+    );
+}
+
+/// A notification server that never answers costs at most the aggregate
+/// 500 ms open frame, and the exit code is the same.
+#[test]
+fn startup_failure_with_a_silent_bus_is_bounded() {
+    let e = Env::new("startup-silent");
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let f = failed_start(&e, Bus::Silent, script, |_| {});
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.unavailable(), 1, "{}", f.stderr);
+    assert!(
+        f.took < STARTUP + Duration::from_millis(500) + Duration::from_millis(1500),
+        "{:?}",
+        f.took
+    );
+}
+
+/// A notification server with a slow tongue: each of the three open steps
+/// (capabilities, owner, match rule) is answered `open_step` late, and
+/// every `Notify` `notify` late. The delays are the scenario, not a
+/// guess at the client's speed.
+fn slow_server(open_step: Duration, notify: Duration) -> (Fake, Receiver<Got>) {
+    let (tx, rx) = mpsc::channel();
+    let fake = Fake::start(move |p| {
+        p.handshake();
+        for (member, body) in [
+            ("GetCapabilities", vec![strings(&CAPS)]),
+            ("GetNameOwner", vec![Value::Str(OWNER.into())]),
+            ("AddMatch", vec![]),
+        ] {
+            let Some(m) = p.try_recv() else { return };
+            assert_eq!(m.member.as_deref(), Some(member));
+            std::thread::sleep(open_step);
+            if !p.try_send(Peer::reply_msg(&m, body)) {
+                return;
+            }
+        }
+        while let Some(m) = p.try_recv() {
+            if m.member.as_deref() == Some("Notify") {
+                std::thread::sleep(notify);
+                let g = got(&m, FIRST_ID);
+                if p.try_send(Peer::reply_msg(&m, vec![Value::U32(FIRST_ID)])) {
+                    tx.send(g).unwrap();
+                }
+            }
+        }
+    });
+    (fake, rx)
+}
+
+/// A failed start (no configure) against `slow_server`.
+fn failed_start_slow(name: &str, open_step: Duration, notify: Duration) -> Failed {
+    let e = Env::new(name);
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let (fake, rx) = slow_server(open_step, notify);
+    let addr = bus_of(&fake);
+    let t0 = Instant::now();
+    let mut child = None;
+    let mut c = Compositor::serve_with(
+        &e.root.join("runtime"),
+        Duration::from_secs(2),
+        script,
+        || child = Some(wheel_cmd(&e, Some(&addr)).spawn().unwrap()),
+    );
+    let child = child.unwrap();
+    // Serve the compositor until the wheel hangs up and a moment more: the
+    // notification comes after.
+    let _ = c.hangs_up(PATIENCE);
+    let (code, stderr) = reap(child);
+    let took = t0.elapsed();
+    fake.join();
+    Failed {
+        code,
+        stderr,
+        took,
+        notices: rx.try_iter().collect(),
+        at_notify: None,
+    }
+}
+
+/// The named pair around `notification_rpc_deadline` (500 ms per call): a
+/// `Notify` answered after 450 ms is shown; one after 550 ms is given up.
+#[test]
+fn startup_notice_call_below_the_rpc_deadline_is_shown() {
+    let f = failed_start_slow(
+        "startup-rpc-below",
+        Duration::ZERO,
+        Duration::from_millis(450),
+    );
+    eprintln!(
+        "PREFLIGHT rpc notify@450ms: notices={} unavailable={} took={:?} stderr={:?}",
+        f.notices.len(),
+        f.unavailable(),
+        f.took,
+        f.stderr
+    );
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.notices.len(), 1, "{}", f.stderr);
+    assert_eq!(f.unavailable(), 0, "{}", f.stderr);
+}
+
+#[test]
+fn startup_notice_call_above_the_rpc_deadline_is_given_up() {
+    let f = failed_start_slow(
+        "startup-rpc-above",
+        Duration::ZERO,
+        Duration::from_millis(550),
+    );
+    eprintln!(
+        "PREFLIGHT rpc notify@550ms: notices={} unavailable={} took={:?} stderr={:?}",
+        f.notices.len(),
+        f.unavailable(),
+        f.took,
+        f.stderr
+    );
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.unavailable(), 1, "{}", f.stderr);
+    assert!(
+        f.took < STARTUP + Duration::from_millis(1500),
+        "{:?}",
+        f.took
+    );
+}
+
+/// The open is one 500 ms frame, not 500 ms per step: three steps of
+/// 140 ms (420 ms in all) open; three of 200 ms (600 ms) are given up.
+#[test]
+fn startup_notice_open_within_the_aggregate_frame_is_shown() {
+    let f = failed_start_slow(
+        "startup-open-below",
+        Duration::from_millis(140),
+        Duration::ZERO,
+    );
+    eprintln!(
+        "PREFLIGHT open 3x140ms: notices={} unavailable={} took={:?} stderr={:?}",
+        f.notices.len(),
+        f.unavailable(),
+        f.took,
+        f.stderr
+    );
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.notices.len(), 1, "{}", f.stderr);
+    assert_eq!(f.unavailable(), 0, "{}", f.stderr);
+}
+
+#[test]
+fn startup_notice_open_past_the_aggregate_frame_is_given_up() {
+    let f = failed_start_slow(
+        "startup-open-above",
+        Duration::from_millis(200),
+        Duration::ZERO,
+    );
+    eprintln!(
+        "PREFLIGHT open 3x200ms: notices={} unavailable={} took={:?} stderr={:?}",
+        f.notices.len(),
+        f.unavailable(),
+        f.took,
+        f.stderr
+    );
+    assert_eq!(f.code, Some(1), "{}", f.stderr);
+    assert_eq!(f.unavailable(), 1, "{}", f.stderr);
+    assert!(f.notices.is_empty());
 }
