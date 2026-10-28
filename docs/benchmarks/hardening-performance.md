@@ -87,8 +87,8 @@ failures; N = 50 valid of 50 attempts per row):
 
 - A/A p95 spread 5.5% (3628 vs 3428); the A/B effect is B **-45% / -46%**
   p95, reproduced in two independent alternating runs, far outside the A/A
-  spread. No order trend beyond the A/A spread (first/second-half p50s in
-  the raw analysis).
+  spread. aa2 drifts upward (first-half p50 2763, second-half 3302 us);
+  the other series do not, and the drift is far below the A/B effect.
 - `wheel_cpu_us` p95: B -8.9% / -10.3% against A. Process PSS p95 at plain
   startup: A 2.74 MB, B 1.82 MB (both under 5,000,000 B).
 - The improvement is the commit-first change (no obsolete full paint before
