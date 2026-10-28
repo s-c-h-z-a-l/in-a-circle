@@ -618,8 +618,9 @@ running jobs and history.
 No daemon:
 
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
-  (header `inacircle-history 1`), manifest-style lines. Before an
-  output group's publishing rename, its whole manifest (`group-begin`
+  (header `inacircle-history 1`), manifest-style lines. A job's first
+  record is `job-start` (its id), written when it opens the history.
+  Before an output group's publishing rename, its whole manifest (`group-begin`
   with the wrapper's identity and the child count, one `child` per output
   with its private baseline, `group-end` with the count and the names'
   bytes) and a `publish-intent` (planned place) are appended as one block
@@ -671,8 +672,9 @@ No daemon:
   at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
   with at most 32 fields, a job with at most 1024 outputs and groups, paths
   of at most 4096 bytes and 1 MiB in all. A job that is not provably inside
-  the window (a finished-job line written well before it started has to
-  come first), or over a limit, is refused before anything moves;
+  the window (its `job-start` has to be there, before any other line of
+  it; the append lock orders the records, no clock is trusted), or over a
+  limit, is refused before anything moves;
 - cancelling: `SIGTERM` to the supervisor.
 
 A jobs view (name, paths, what into what, progress, estimated time,

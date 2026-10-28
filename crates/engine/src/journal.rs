@@ -2,7 +2,10 @@
 //! formats go through the `manifest` crate.
 //!
 //! History (`$XDG_STATE_HOME/inacircle/history`), header
-//! `inacircle-history 1`. Every published output group is recorded before
+//! `inacircle-history 1`. A job's first record is `job-start` (`job=`
+//! only), written under the append lock when its recorder opens: every
+//! other record of the job follows it in the file, by the lock's order,
+//! not by any clock. Every published output group is recorded before
 //! its publishing rename (`group-begin`, one `child` per output with its
 //! private baseline, `group-end`, `publish-intent`: one block on an
 //! `O_APPEND` descriptor, written in whole-line chunks under the history's
@@ -110,12 +113,6 @@ const HISTORY_PATH_BYTES_PER_JOB: usize = 1_048_576;
 const HISTORY_TAIL_WINDOW: u64 = 8 * 1024 * 1024;
 /// `history_read_chunk_bytes` (G0-P): the history reader's buffer.
 const HISTORY_READ_CHUNK: usize = 1024;
-/// How much older than a job's start a line must have been written to
-/// prove, from the `time` of a finished job's line, that none of the job's
-/// own records can precede it in the file: the job id's clock second is
-/// whole seconds (1 s), a line can wait for the append lock ([`LOCK_WAIT`],
-/// 2 s) after its `time` was taken, and 2 s of slack.
-const ANCHOR_MARGIN_SECS: u64 = 5;
 /// Running-job files are rewritten at most this often.
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
 
@@ -858,7 +855,7 @@ impl Recorder {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        Recorder {
+        let mut r = Recorder {
             file,
             failed,
             job: job.0.clone(),
@@ -869,7 +866,16 @@ impl Recorder {
             unconfirmed: 0,
             uncertain: 0,
             unprepared: 0,
-        }
+        };
+        // The job's first record: what proves, in a history window, that
+        // none of its records lie before it. Not synced by itself: the
+        // first group's block is, and its `fsync` covers this line too. An
+        // error is sticky, so nothing of the job is published without it.
+        let job_field = r.job_field.clone();
+        let _ = r.write(false, |b| {
+            b.raw(format_args!("job-start\tjob={job_field}\n"))
+        });
+        r
     }
 
     /// One block of records (see [`append`]); the first error is sticky.
@@ -1341,9 +1347,13 @@ struct JobRecords {
     outputs: usize,
     /// Decoded path bytes kept so far.
     path_bytes: usize,
-    /// In a window that does not start at the history's start, a record of
-    /// the job was seen before any line that proves it started later.
+    /// In a window that does not start at the history's start, a line of
+    /// the job came before its `job-start`.
     incomplete: bool,
+    /// The job's `job-start` record was read.
+    started: bool,
+    /// A record of the job other than `job-start` was read.
+    records: bool,
 }
 
 type Fault = &'static str;
@@ -1439,6 +1449,7 @@ const BEGIN: &[&str] = &[
 const CHILD: &[&str] = &[
     "job", "group", "rel", "type", "dev", "ino", "uid", "mode", "nlink", "size", "mtime", "ctime",
 ];
+const START: &[&str] = &["job"];
 const JOB: &[&str] = &["id", "time", "action", "status", "sandbox"];
 const JOB_WITHDRAWN: &[&str] = &["id", "time", "action", "status", "sandbox", "undo"];
 const END: &[&str] = &["job", "group", "children", "bytes"];
@@ -1706,6 +1717,19 @@ impl JobRecords {
     /// Takes one parsed line; an error is a framing fault of this job.
     fn take(&mut self, l: &Line, job: &str) -> Result<(), Fault> {
         let mine = |k: &str| l.get(k) == Some(job);
+        let ours = if l.kind == "job" {
+            mine("id")
+        } else {
+            mine("job")
+        };
+        self.take_kind(l, &mine)?;
+        if ours && l.kind != "job-start" {
+            self.records = true;
+        }
+        Ok(())
+    }
+
+    fn take_kind(&mut self, l: &Line, mine: &dyn Fn(&str) -> bool) -> Result<(), Fault> {
         match l.kind.as_str() {
             "job" if mine("id") => {
                 // Exactly the fields `finish` writes; `undo` only as `no`.
@@ -1721,6 +1745,16 @@ impl JobRecords {
             }
             "job" => {}
             _ if !mine("job") => {}
+            "job-start" => {
+                fields(l, START)?;
+                if self.started {
+                    return Err("a duplicate job start");
+                }
+                if self.records {
+                    return Err("a job start after the job's records");
+                }
+                self.started = true;
+            }
             "undo" => self.undone = true,
             "skip" | "fail" => self.known = true,
             "unknown" => {
@@ -2004,16 +2038,6 @@ fn read_line_bounded(rd: &mut dyn BufRead, buf: &mut Vec<u8>) -> io::Result<Got>
     })
 }
 
-/// What a window that starts inside the history needs to prove the job's
-/// records are all in it (see [`scan_file`]).
-struct Tail {
-    /// The job's start (unix seconds, from its id); `None`: not provable.
-    started: Option<u64>,
-    /// A finished job's line written long enough before the job started
-    /// was seen: everything of the job is after it.
-    anchored: bool,
-}
-
 /// Reads a whole history stream (header, then lines) and collects the
 /// records of one job. Pure: no file, no lock. See [`scan_records`].
 #[cfg(any(test, fuzzing))]
@@ -2021,7 +2045,7 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
     let mut buf = Vec::new();
     rd.take(HEADER_MAX as u64).read_until(b'\n', &mut buf)?;
     let version = parse_header(&buf)?;
-    scan_records(rd, version, job, None)
+    scan_records(rd, version, job, false)
 }
 
 /// The lines after the header, for one job. It streams (only lines that
@@ -2032,13 +2056,13 @@ fn job_records(rd: &mut dyn BufRead, job: &JobId) -> io::Result<JobRecords> {
 /// [`HISTORY_LINE_BYTES`], has more than [`HISTORY_FIELDS`] fields, is not
 /// UTF-8 or does not parse, and any framing fault or limit of the job's
 /// records, is `broken`: undo then refuses. Other jobs' lines are skipped,
-/// however damaged. With a `tail` (a window not from the start) a record of
-/// the job before the proof that it all follows is `incomplete`.
+/// however damaged. In a `windowed` read (a window not from the start) a
+/// line of the job before its `job-start` makes it `incomplete`.
 fn scan_records(
     rd: &mut dyn BufRead,
     version: u32,
     job: &JobId,
-    mut tail: Option<Tail>,
+    windowed: bool,
 ) -> io::Result<JobRecords> {
     let mut r = JobRecords::default();
     let mut buf = Vec::new();
@@ -2070,14 +2094,6 @@ fn scan_records(
             if version == VERSION && seen_ours && !over && is_job_id_prefix(&buf, &job.0) {
                 r.broken.get_or_insert("a record cut off");
             }
-            if let Some(t) = tail.as_mut()
-                && !t.anchored
-                && ended
-                && !over
-                && buf.starts_with(b"job\tid=")
-            {
-                t.anchored = finished_before(&buf, t.started);
-            }
             continue;
         }
         if version == OLD_VERSION {
@@ -2085,9 +2101,6 @@ fn scan_records(
             return Ok(r);
         }
         seen_ours = true;
-        if tail.as_ref().is_some_and(|t| !t.anchored) {
-            r.incomplete = true;
-        }
         let fault = if over {
             Err("over the limit: a record longer than the history's line limit")
         } else if !ended {
@@ -2104,30 +2117,17 @@ fn scan_records(
         if let Err(why) = fault {
             r.broken.get_or_insert(why);
         }
+        // Any line naming the job (even a damaged one, or one of another
+        // job that holds the needle) before its start: the start may be
+        // the one outside the window, so the job may not be whole.
+        if windowed && !r.started {
+            r.incomplete = true;
+        }
     }
     if r.groups.iter().any(|g| !g.ended) {
         r.broken.get_or_insert("a group without its end");
     }
     Ok(r)
-}
-
-/// Whether `line` is a finished job's `job` line written at least
-/// [`ANCHOR_MARGIN_SECS`] before `started`.
-fn finished_before(line: &[u8], started: Option<u64>) -> bool {
-    let Some(started) = started else {
-        return false;
-    };
-    let Ok(text) = std::str::from_utf8(line) else {
-        return false;
-    };
-    let Ok(l) = parse_line(text) else {
-        return false;
-    };
-    l.kind == "job"
-        && l.get("time")
-            .and_then(|t| t.parse::<u64>().ok())
-            .and_then(|t| t.checked_add(ANCHOR_MARGIN_SECS))
-            .is_some_and(|t| t <= started)
 }
 
 /// A read of `f` at its own offsets, up to `end`: no shared file offset,
@@ -2161,11 +2161,13 @@ pub const WINDOW_REFUSAL: &str = "This action's record is older than the history
 /// now, from the first whole line, through a [`HISTORY_READ_CHUNK`] buffer
 /// (nothing of the window is held). Lines appended meanwhile are not read.
 /// If the window does not start at the history's start, the job must be
-/// provably all inside it: a line of a job that finished at least
-/// [`ANCHOR_MARGIN_SECS`] before this one started has to come before the
-/// job's first record there. Otherwise (or if the window holds no record of
-/// it) the job is refused as older than the window: a job with records
-/// before the window must not be undone as if it were whole.
+/// provably all inside it: its `job-start` has to be in the window, before
+/// any other line of it. The append lock orders the records (a job's
+/// recorder writes its start before anything else), so no clock is
+/// trusted. Otherwise the job is refused as older than the window: a job
+/// with records before the window must not be undone as if it were whole.
+/// (A version 1 job written before `job-start` existed is refused there
+/// too; inside an untruncated history its start is optional.)
 fn scan_file(f: &File, job: &JobId) -> io::Result<JobRecords> {
     let size = f.metadata()?.len();
     let Some((version, header_len)) = read_header_len(f)? else {
@@ -2198,15 +2200,9 @@ fn scan_file(f: &File, job: &JobId) -> io::Result<JobRecords> {
             read_line_bounded(&mut rd, &mut Vec::new())?;
         }
     }
-    let tail = (truncated && version == VERSION).then(|| Tail {
-        started: job.0.split('-').next().and_then(|s| s.parse().ok()),
-        anchored: false,
-    });
-    let r = scan_records(&mut rd, version, job, tail)?;
-    if truncated
-        && version == VERSION
-        && (r.incomplete || !(r.known || r.undone || r.old || r.broken.is_some()))
-    {
+    let windowed = truncated && version == VERSION;
+    let r = scan_records(&mut rd, version, job, windowed)?;
+    if windowed && (r.incomplete || !r.started) {
         return Err(io::Error::other(WINDOW_REFUSAL));
     }
     Ok(r)
@@ -2695,6 +2691,7 @@ mod tests {
             assert_eq!(
                 kinds,
                 [
+                    "job-start",
                     "group-begin",
                     "child",
                     "child",
@@ -3370,7 +3367,8 @@ mod tests {
                 }
                 let text = history();
                 let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
-                assert_eq!((v, lines.len()), (1, 16), "{text}");
+                // Per run: `job-start`, `skip`, `job`.
+                assert_eq!((v, lines.len()), (1, 24), "{text}");
                 let names: Vec<_> = fs::read_dir(&dir)
                     .unwrap()
                     .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -3474,6 +3472,12 @@ mod tests {
     fn a_complete_record_reads_back_whole() {
         let r = read(&good()).unwrap();
         assert!(r.known && r.broken.is_none(), "{:?}", r.broken);
+        // A `job-start` first is part of the record (v1 lines without it
+        // stay readable, above).
+        let mut l = good();
+        l.insert(0, format!("job-start\tjob={J}\n"));
+        let r = read(&l).unwrap();
+        assert!(r.known && r.started && r.broken.is_none(), "{:?}", r.broken);
         let [g] = &r.groups[..] else { panic!() };
         assert_eq!(g.children.len(), 2);
         assert_eq!(g.children[1].rel, Path::new("b%.md"));
@@ -3550,6 +3554,16 @@ mod tests {
                 l.push(last.trim_end_matches('\n').to_owned())
             }),
             ("garbled", |l| l.push(format!("child\tjob={J}\\q\n"))),
+            ("job-start after records", |l| {
+                l.push(format!("job-start\tjob={J}\n"))
+            }),
+            ("duplicate job-start", |l| {
+                l.insert(0, format!("job-start\tjob={J}\n"));
+                l.insert(0, format!("job-start\tjob={J}\n"))
+            }),
+            ("job-start field", |l| {
+                l.insert(0, format!("job-start\tjob={J}\tx=1\n"))
+            }),
         ];
         for (what, edit) in cases {
             let mut l = good();
@@ -5928,9 +5942,8 @@ mod tests {
     }
 
     /// A fresh job in the 8 MiB window behind a long old prefix is handled
-    /// (the prefix is never read); the same job with a prefix before it
-    /// that is not provably older, or fully outside, is refused before
-    /// anything moves.
+    /// (the prefix is never read); a job partly or fully outside it is
+    /// refused before anything moves.
     #[test]
     fn a_fresh_job_behind_a_big_prefix_is_handled_and_one_outside_is_not() {
         let filler = |w: &mut dyn Write, bytes: usize, last_time: u64| {
@@ -5978,9 +5991,8 @@ mod tests {
             assert_eq!(e.to_string(), WINDOW_REFUSAL);
             assert!(f[0].exists(), "nothing moved");
         });
-        // (3) A job whose first group lies before the window and the second
-        // inside: without the proof (the only finished-job line in the
-        // window is not older than the job) it is refused, nothing moved.
+        // (3) A job whose start and first group lie before the window and
+        // the second group inside: refused, nothing moved.
         let t = Tmp::new("window-part");
         t.env(|| {
             let job = new_job_id();
@@ -5992,6 +6004,89 @@ mod tests {
             let e = undo(&job).unwrap_err();
             assert_eq!(e.to_string(), WINDOW_REFUSAL);
             assert!(f.iter().all(|p| p.exists()), "nothing moved");
+        });
+    }
+
+    /// In a window that does not start at the history's start, only the
+    /// job's own `job-start` proves that none of its records lie before
+    /// the window, not any clock: each case below has a finished-job line
+    /// that the old rule (a `job` line whose `time` is 5 s before the job
+    /// started) took as proof, with the job's first group outside.
+    #[test]
+    fn only_the_jobs_own_start_proves_it_whole_in_the_window() {
+        // Another job's `job` line, written after `time` was taken.
+        let late = |w: &mut dyn Write, time: u64| {
+            writeln!(
+                w,
+                "job\tid=77-7\ttime={time}\taction=a\tstatus=done\tsandbox=yes"
+            )
+            .unwrap();
+        };
+        let filler = |w: &mut dyn Write| {
+            let l = write_line(
+                &Line::new("child")
+                    .pair("job", "99-9")
+                    .pair("group", "00000000000000aa")
+                    .pair("rel", &"p".repeat(200)),
+            );
+            for _ in 0..(9 << 20) / l.len() + 1 {
+                w.write_all(l.as_bytes()).unwrap();
+            }
+        };
+        let append = |w: &mut dyn FnMut(&mut dyn Write)| {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(history_path())
+                .unwrap();
+            w(&mut f);
+        };
+        let started = |job: &JobId| -> u64 { job.0.split('-').next().unwrap().parse().unwrap() };
+        // (a) `finish()`'s error branch: `time` is taken, then two append
+        // lock waits (2 s each) and scheduling delay pass before the line
+        // lands; here 6 s, after this job's first group.
+        // (b) A wall clock stepped forward (NTP, by hand) by an hour
+        // between the other job's `time` and this job's start (the job's
+        // start is injected through its id).
+        let jump = JobId(format!("{}-1-bbbbbbbb", unix_secs() + 3600));
+        for (name, job, back) in [("delay", new_job_id(), 6), ("jump", jump.clone(), 3600)] {
+            let t = Tmp::new(&format!("window-{name}"));
+            t.env(|| {
+                let mut rec = Recorder::open(&job, "convert");
+                let mut f = publish(&t, &mut rec, "a", &[("x.md", "1")]);
+                append(&mut |w| filler(w));
+                append(&mut |w| late(w, started(&job) - back));
+                f.extend(publish(&t, &mut rec, "b", &[("x.md", "2")]));
+                assert!(rec.finish(true).undoable);
+                let e = undo(&job).unwrap_err();
+                assert_eq!(e.to_string(), WINDOW_REFUSAL, "{name}");
+                assert!(f.iter().all(|p| p.exists()), "{name}: nothing moved");
+            });
+        }
+        // (c) The job's start inside the window, but a record of it before
+        // the start: refused (a record cannot precede its job's start).
+        let t = Tmp::new("window-before-start");
+        t.env(|| {
+            let job = new_job_id();
+            drop(Recorder::open(&JobId("9-9".into()), "a").finish(true));
+            append(&mut |w| filler(w));
+            append(&mut |w| late(w, 1));
+            append(&mut |w| writeln!(w, "skip\tjob={}\tin=x\treason=y", job.0).unwrap());
+            let f = job_of(&t, &job, &[("a", "d")]);
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.to_string(), WINDOW_REFUSAL);
+            assert!(f[0].exists(), "nothing moved");
+        });
+        // (d) Positive control: the same history with the job's start in
+        // the window and nothing of it before: undone.
+        let t = Tmp::new("window-start-ok");
+        t.env(|| {
+            let job = new_job_id();
+            drop(Recorder::open(&JobId("9-9".into()), "a").finish(true));
+            append(&mut |w| filler(w));
+            append(&mut |w| late(w, 1));
+            let f = job_of(&t, &job, &[("a", "d"), ("b", "e")]);
+            assert!(fs::metadata(history_path()).unwrap().len() > 9 << 20);
+            assert!(all_moved(&undo(&job).unwrap(), &f));
         });
     }
 
