@@ -657,16 +657,22 @@ mod tests {
     // loads, jt/jf, unknown opcodes panic), but it is our own reading of
     // them. Only x86_64 also gets a real kernel trial; on aarch64 there is
     // none until the ARM CI/VM exists (U-01), so for that arch these tests
-    // are the only check of the program, and cover just the blocks written
-    // below (ioctl, fcntl), not every policy row.
+    // are the only check of the program. The table test at the end runs
+    // every policy row through the whole program; the block tests above it
+    // go deeper into the argument blocks.
 
     /// Runs `filter(arch)` on a syscall: the verdict, and the indices of the
     /// instructions it went through.
     fn run_filter(arch: Arch, nr: u32, args: [u64; 6]) -> (u32, Vec<usize>) {
+        run_filter_as(arch, arch.audit(), nr, args)
+    }
+
+    /// As [`run_filter`], for a task whose `seccomp_data.arch` is `audit`.
+    fn run_filter_as(arch: Arch, audit: u32, nr: u32, args: [u64; 6]) -> (u32, Vec<usize>) {
         // struct seccomp_data: nr, arch, instruction_pointer, args[6].
         let mut data = [0u8; 64];
         data[0..4].copy_from_slice(&nr.to_le_bytes());
-        data[4..8].copy_from_slice(&arch.audit().to_le_bytes());
+        data[4..8].copy_from_slice(&audit.to_le_bytes());
         for (i, a) in args.iter().enumerate() {
             data[16 + 8 * i..24 + 8 * i].copy_from_slice(&a.to_le_bytes());
         }
@@ -774,6 +780,120 @@ mod tests {
             );
             assert_eq!(call(F_SETFL, 0o4000), SECCOMP_RET_ALLOW, "{arch:?}");
             assert_eq!(call(3, 0), SECCOMP_RET_ALLOW, "{arch:?} F_GETFL");
+        }
+    }
+
+    /// What a policy row must give for syscall arguments that are all zero,
+    /// written out here, not read from the program's own tables: the
+    /// verdict of a row is the rule's, whichever block the jump leads to.
+    fn zero_args_verdict(rule: Rule) -> u32 {
+        match rule {
+            Rule::Eperm => errno(libc::EPERM),
+            Rule::Eacces => errno(libc::EACCES),
+            Rule::Enosys => errno(libc::ENOSYS),
+            // Command 0 is not in the allowed list.
+            Rule::Ioctl => errno(libc::EPERM),
+            // Command 0 is not in the denied list.
+            Rule::Fcntl => SECCOMP_RET_ALLOW,
+            // No flags, exit signal 0.
+            Rule::Clone => SECCOMP_RET_ALLOW,
+            // The caller (pid 0).
+            Rule::Prlimit => SECCOMP_RET_ALLOW,
+            // Option 0 is not in the denied list.
+            Rule::Prctl => SECCOMP_RET_ALLOW,
+        }
+    }
+
+    /// The whole program, driven by the policy table, on both architectures:
+    /// every row gives its rule's verdict; every syscall number the table
+    /// does not name is allowed; a number appears once per architecture
+    /// (a duplicate would be shadowed); x32 numbers are refused on x86_64
+    /// only; a task of another architecture is killed.
+    #[test]
+    fn every_policy_row_gets_its_rules_verdict_on_both_architectures() {
+        const SPAN: u32 = 600; // past the highest number in the table (452)
+        for arch in ARCHES {
+            let mut named = std::collections::BTreeSet::new();
+            for row in POLICY {
+                let Some(nr) = nr_on(row, arch) else { continue };
+                assert!(named.insert(nr), "{arch:?}: syscall {nr} is named twice");
+                let (v, _) = run_filter(arch, nr, [0; 6]);
+                assert_eq!(v, zero_args_verdict(row.rule), "{arch:?} syscall {nr}");
+            }
+            assert!(named.len() > 50, "{arch:?}: the table is far too short");
+            assert!(*named.iter().max().unwrap() < SPAN);
+            for nr in (0..SPAN).filter(|n| !named.contains(n)) {
+                let (v, _) = run_filter(arch, nr, [0; 6]);
+                assert_eq!(v, SECCOMP_RET_ALLOW, "{arch:?}: unnamed syscall {nr}");
+            }
+            // x32 shares x86_64's audit arch: refused, named or not.
+            let x32 = |nr: u32| run_filter(arch, X32_SYSCALL_BIT | nr, [0; 6]).0;
+            match arch {
+                Arch::X86_64 => {
+                    assert_eq!(x32(0), errno(libc::EPERM));
+                    assert_eq!(x32(41), errno(libc::EPERM));
+                }
+                Arch::Aarch64 => assert_eq!(x32(0), SECCOMP_RET_ALLOW, "no x32 on arm"),
+            }
+            // Another architecture's task (or a made-up audit value).
+            let other = match arch {
+                Arch::X86_64 => Arch::Aarch64.audit(),
+                Arch::Aarch64 => Arch::X86_64.audit(),
+            };
+            for audit in [other, 0, arch.audit() ^ 1] {
+                let (v, seen) = run_filter_as(arch, audit, 0, [0; 6]);
+                assert_eq!(v, SECCOMP_RET_KILL_PROCESS, "{arch:?} audit {audit:#x}");
+                assert_eq!(seen.len(), 3, "decided in the head, before the rules");
+            }
+        }
+    }
+
+    /// The clone, prlimit64 and prctl blocks through the whole program: the
+    /// escapes the inventory names are denied one by one, the approved flags
+    /// together are allowed, exit signals up to `NSIG` pass and the next one
+    /// does not, a prlimit on another process (or with the pid's upper half
+    /// set) is denied, and only the three prctl options.
+    #[test]
+    fn clone_prlimit_and_prctl_blocks_decide_as_documented() {
+        let eperm = errno(libc::EPERM);
+        for arch in ARCHES {
+            let call = |rule: fn(&Rule) -> bool, args: [u64; 6]| {
+                run_filter(arch, nr_of(rule, arch), args).0
+            };
+            let clone = |flags: u64| call(|r| matches!(r, Rule::Clone), [flags, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                clone(u64::from(CLONE_APPROVED & !CSIGNAL) | 17),
+                SECCOMP_RET_ALLOW
+            );
+            for bit in (0..32)
+                .map(|b| 1u32 << b)
+                .filter(|b| CLONE_ESCAPES & b != 0)
+            {
+                assert_eq!(clone(u64::from(bit)), eperm, "{arch:?} flag {bit:#x}");
+                assert_eq!(
+                    clone(u64::from(CLONE_APPROVED & !CSIGNAL | bit)),
+                    eperm,
+                    "{arch:?} flag {bit:#x} with the approved ones"
+                );
+            }
+            assert_eq!(clone(u64::from(NSIG)), SECCOMP_RET_ALLOW, "{arch:?}");
+            assert_eq!(clone(u64::from(NSIG) + 1), eperm, "{arch:?}");
+            assert_eq!(clone(1 << 32), eperm, "{arch:?}: the high word");
+
+            let prlimit = |pid: u64| call(|r| matches!(r, Rule::Prlimit), [pid, 0, 0, 0, 0, 0]);
+            assert_eq!(prlimit(0), SECCOMP_RET_ALLOW);
+            assert_eq!(prlimit(1), eperm);
+            assert_eq!(prlimit(1 << 32), eperm);
+
+            let prctl = |opt: u64| call(|r| matches!(r, Rule::Prctl), [opt, 0, 0, 0, 0, 0]);
+            for opt in PRCTL_DENIED {
+                assert_eq!(prctl(u64::from(opt)), eperm, "{arch:?} option {opt}");
+                // `int option`: the upper half is not part of it.
+                assert_eq!(prctl(1 << 32 | u64::from(opt)), eperm, "{arch:?} {opt}");
+            }
+            for opt in [15u64, 38, 22] {
+                assert_eq!(prctl(opt), SECCOMP_RET_ALLOW, "{arch:?} option {opt}");
+            }
         }
     }
 }
