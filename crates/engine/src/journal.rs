@@ -4706,6 +4706,53 @@ mod tests {
         });
     }
 
+    /// The common crash: `close_info` neutralises in place, so the
+    /// half-neutralised info (neutral text over its first bytes) is under
+    /// the `.trashinfo` name. It is still ours: closed under the detached
+    /// name, never left at the name with the rest of its old `Path=`.
+    #[test]
+    fn undo_recovery_finishes_a_half_neutralised_info_at_its_name() {
+        let t = Tmp::new("t8-rec-half-name");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info");
+            let op = intent_op();
+            let n = format!("inacircle-detached-trashinfo op={op}\n");
+            let mut f = OpenOptions::new()
+                .write(true)
+                .open(info.join("a.trashinfo"))
+                .unwrap();
+            std::io::Write::write_all(&mut f, &n.as_bytes()[..12]).unwrap();
+            drop(f);
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(
+                fs::read(info.join(format!(".{op}.inacircle-detached"))).unwrap(),
+                n.as_bytes()
+            );
+            // Nothing half-neutralised is left under any name.
+            for e in fs::read_dir(&info).unwrap().flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .ends_with(".inacircle-detached")
+                {
+                    continue;
+                }
+                let b = fs::read(e.path()).unwrap();
+                assert!(
+                    !b.starts_with(b"inacircle-detached"),
+                    "{:?}: {}",
+                    e.path(),
+                    String::from_utf8_lossy(&b)
+                );
+            }
+        });
+    }
+
     /// An empty file at our info name, after our info was closed under the
     /// detached name, is someone else's: never neutralised.
     #[test]
@@ -4768,7 +4815,18 @@ mod tests {
             let parent = w.parent().unwrap().to_owned();
             fs::rename(&parent, t.0.join("out-away")).unwrap();
             fs::create_dir(&parent).unwrap();
-            let _ = undo(&job).unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(
+                    one(&r),
+                    GroupOutcome::RecoveryKept { .. } | GroupOutcome::Uncertain { .. }
+                ),
+                "{r:?}"
+            );
+            assert!(
+                fs::read_dir(&parent).unwrap().next().is_none(),
+                "the look-alike folder is not empty"
+            );
             assert!(!w.exists(), "restored into a look-alike folder");
             assert_eq!(trashed(&t), ["a"]);
         });
