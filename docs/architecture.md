@@ -688,7 +688,12 @@ No daemon:
 
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
   (header `inacircle-history 1`), manifest-style lines. A job's first
-  record is `job-start` (its id), written when it opens the history.
+  record is `job-start`, written when it opens the history: its id and
+  its owner (the supervisor's pid, start time in ticks since boot, boot
+  id and pid namespace; without them when `/proc` cannot tell). Every
+  block is appended after a newline check under the append lock: a last
+  line another run left cut off gets its newline first, so it spoils only
+  its own record.
   Before an output group's publishing rename, its whole manifest (`group-begin`
   with the wrapper's identity and the child count, one `child` per output
   with its private baseline, `group-end` with the count and the names'
@@ -802,7 +807,13 @@ inacircle cancel <job-id>
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
 - `undo` of a job that is still running is refused (exit 1): cancel it
-  first. It prints one line per output group: `moved <Trash path>`,
+  first. The registry is not the only check (it may be missing, without
+  `$XDG_RUNTIME_DIR`, or unwritten after an error): a job whose history
+  has no closing `job` line is undone only once the owner its `job-start`
+  names is provably gone (no process at the pid, or another start time or
+  boot). An owner that cannot be checked (a record from before owners,
+  another pid namespace) refuses the undo: unknown means nothing moves.
+  A job that died midway is undoable as soon as its process is gone. It prints one line per output group: `moved <Trash path>`,
   `kept <path|-> <reason>`, `restored <path|-> <reason>`,
   `recovery-kept <path|-> <reason> <errno|->` or
   `uncertain <op> <reason> <last path seen|->` (a hint, not a proved

@@ -2,8 +2,11 @@
 //! formats go through the `manifest` crate.
 //!
 //! History (`$XDG_STATE_HOME/inacircle/history`), header
-//! `inacircle-history 1`. A job's first record is `job-start` (`job=`
-//! only), written under the append lock when its recorder opens: every
+//! `inacircle-history 1`. A job's first record is `job-start` (`job=` and
+//! its owner: `pid`, `start` ticks, `boot` id, `pidns`; `job=` alone when
+//! `/proc` cannot tell), written under the append lock when its recorder
+//! opens: undo decides from the owner whether a job without its closing
+//! `job` line still runs (the registry may be missing). Every
 //! other record of the job follows it in the file, by the lock's order,
 //! not by any clock. Every published output group is recorded before
 //! its publishing rename (`group-begin`, one `child` per output with its
@@ -627,7 +630,11 @@ impl Block<'_> {
     }
 }
 
-/// Writes one block under the append lock, then syncs it when asked.
+/// Writes one block under the append lock, then syncs it when asked. A
+/// last line cut off (another run's short write whose newline failed too,
+/// or a run that died mid-write) gets its newline first, under the same
+/// lock, so the block never joins it: one cut line spoils only its own
+/// record, never this block's first one.
 fn append(
     f: &mut File,
     lock: &File,
@@ -636,6 +643,7 @@ fn append(
 ) -> io::Result<()> {
     {
         let _held = Held::take(lock)?;
+        end_line(f)?;
         let mut b = Block {
             f,
             buf: Vec::with_capacity(CHUNK),
@@ -649,10 +657,9 @@ fn append(
     Ok(())
 }
 
-/// A history whose last line was cut off (a run died mid-write) gets a
-/// newline, so this run's first record starts a line of its own.
-fn end_line(f: &mut File, lock: &File) -> io::Result<()> {
-    let _held = Held::take(lock)?;
+/// A history whose last line was cut off gets a newline, so the next
+/// record starts a line of its own (the caller holds the append lock).
+fn end_line(f: &mut File) -> io::Result<()> {
     let len = f.metadata()?.len();
     let mut last = [0u8];
     if len > 0 && f.read_at(&mut last, len - 1)? == 1 && last[0] != b'\n' {
@@ -854,6 +861,8 @@ pub struct Recorder {
     uncertain: usize,
     /// Committed groups that had no intent of this recorder.
     unprepared: usize,
+    /// This job in [`OPEN_JOBS`] while the recorder lives.
+    _open: OpenJob,
 }
 
 /// What a re-run of [`Recorder::prepare_group`] for the same group must
@@ -892,12 +901,17 @@ impl Recorder {
     /// not reported here: it is sticky, refuses every publication and comes
     /// back as [`Recorded::warning`].
     pub fn open(job: &JobId, action: &str) -> Recorder {
+        Recorder::open_as(job, action, Owner::me())
+    }
+
+    /// [`Recorder::open`] with the owner its `job-start` names (`None`:
+    /// none, as a record from before owners).
+    fn open_as(job: &JobId, action: &str, owner: Option<Owner>) -> Recorder {
         let file = history_dir()
             .and_then(|d| StateDir::create(&d))
             .and_then(|d| {
                 let lock = d.open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)?;
-                let mut f = open_history(&d, &lock)?;
-                end_line(&mut f, &lock)?;
+                let f = open_history(&d, &lock)?;
                 Ok((f, lock))
             });
         let (file, failed) = match file {
@@ -915,14 +929,24 @@ impl Recorder {
             unconfirmed: 0,
             uncertain: 0,
             unprepared: 0,
+            _open: OpenJob::new(&job.0),
         };
         // The job's first record: what proves, in a history window, that
         // none of its records lie before it. Not synced by itself: the
         // first group's block is, and its `fsync` covers this line too. An
         // error is sticky, so nothing of the job is published without it.
+        // It names the owner, so undo can tell whether the job still runs
+        // without the registry (which may be missing or unwritable).
         let job_field = r.job_field.clone();
-        let _ = r.write(false, |b| {
-            b.raw(format_args!("job-start\tjob={job_field}\n"))
+        let _ = r.write(false, |b| match &owner {
+            Some(o) => b.raw(format_args!(
+                "job-start\tjob={job_field}\tpid={}\tstart={}\tboot={}\tpidns={}\n",
+                o.pid,
+                o.id.ticks,
+                enc(o.id.boot.as_bytes()),
+                o.ns
+            )),
+            None => b.raw(format_args!("job-start\tjob={job_field}\n")),
         });
         r
     }
@@ -1070,9 +1094,7 @@ impl Recorder {
             // history cannot prove the withdrawal: say so. The reader still
             // fails closed on a cut line (`a record cut off`).
             if let Some((f, lock)) = &mut self.file {
-                let written =
-                    end_line(f, lock).and_then(|()| append(f, lock, true, |b| b.line(&l)));
-                marker_unproven = written.is_err();
+                marker_unproven = append(f, lock, true, |b| b.line(&l)).is_err();
             }
         } else if self.write(false, |b| b.line(&l)).is_err() {
             undoable = false;
@@ -1272,6 +1294,117 @@ impl ProcId {
         })
     }
 }
+
+/// This process's pid namespace (the inode in `/proc/self/ns/pid`, which
+/// reads `pid:[<inode>]`). A pid means a process only within one pid
+/// namespace: a history shared with a container, or read from one, names
+/// pids that `kill` here cannot check.
+fn pid_ns() -> Option<u64> {
+    // `pid:[` + at most 20 digits + `]`: 27 bytes; 64 leaves room and a
+    // longer link is not a namespace link (refused).
+    let mut buf = [0u8; 64];
+    // SAFETY: the path is NUL-terminated, buf is writable for its length;
+    // readlink writes at most that many bytes and never a NUL.
+    let n = unsafe {
+        libc::readlink(
+            c"/proc/self/ns/pid".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    let n = usize::try_from(n).ok().filter(|&n| n < buf.len())?;
+    let s = std::str::from_utf8(&buf[..n]).ok()?;
+    s.strip_prefix("pid:[")?.strip_suffix(']')?.parse().ok()
+}
+
+/// The process that runs a job, as its `job-start` record names it: the
+/// pid, its identity (start ticks and boot id, the registry's [`ProcId`])
+/// and its pid namespace. Undo decides from it, not from the registry,
+/// whether a job without its closing `job` line still runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Owner {
+    pid: u32,
+    id: ProcId,
+    ns: u64,
+}
+
+impl Owner {
+    /// This process; `None` when `/proc` cannot tell (its job is then
+    /// recorded without an owner, and its undo waits for the `job` line).
+    fn me() -> Option<Owner> {
+        let pid = std::process::id();
+        Some(Owner {
+            pid,
+            id: ProcId::of(pid)?,
+            ns: pid_ns()?,
+        })
+    }
+}
+
+/// The jobs whose [`Recorder`] is open in this process. For a job this
+/// process owns, `/proc` would only say that the process lives; whether
+/// its recorder is still open (the run goes on) is known exactly here.
+static OPEN_JOBS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A job's entry in [`OPEN_JOBS`], removed on drop (finish, an early
+/// return, a panic's unwinding).
+struct OpenJob(String);
+
+impl OpenJob {
+    fn new(job: &str) -> OpenJob {
+        OPEN_JOBS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(job.to_owned());
+        OpenJob(job.to_owned())
+    }
+}
+
+impl Drop for OpenJob {
+    fn drop(&mut self) {
+        let mut open = OPEN_JOBS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = open.iter().position(|j| *j == self.0) {
+            open.swap_remove(i);
+        }
+    }
+}
+
+/// Whether the job its `job-start` names may still run, for a job without
+/// its closing `job` line. Unknown counts as running: an owner that is not
+/// recorded (a record from before owners, or `/proc` could not tell), or a
+/// pid namespace that is not ours (or unreadable). Our own process answers
+/// from [`OPEN_JOBS`]; another is alive while its pid exists with the
+/// recorded identity ([`job_alive_with`]: an unreadable `/proc` cannot
+/// prove it dead). A dead owner's job is undoable, as after a crash.
+fn may_run(job: &JobId, owner: Option<&Owner>) -> Option<io::Error> {
+    let Some(o) = owner else {
+        return Some(io::Error::other(OWNER_UNKNOWN));
+    };
+    if pid_ns() != Some(o.ns) {
+        return Some(io::Error::other(OWNER_UNKNOWN));
+    }
+    let alive = if Owner::me().as_ref() == Some(o) {
+        OPEN_JOBS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&job.0)
+    } else {
+        job_alive(o.pid, Some(&o.id))
+    };
+    alive.then(running_refusal)
+}
+
+fn running_refusal() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ResourceBusy,
+        "job is running; cancel it first",
+    )
+}
+
+/// Undo's refusal of a job whose running state it cannot check.
+const OWNER_UNKNOWN: &str = "whether this job is still running cannot be checked (its record names no process of this system); nothing undone";
 
 /// Whether the process now at the pid is the one that was recorded. An
 /// unreadable current identity (`None`) cannot prove a difference: same.
@@ -1557,6 +1690,10 @@ struct JobRecords {
     started: bool,
     /// A record of the job other than `job-start` was read.
     records: bool,
+    /// The closing `job` line was read: the run is over.
+    ended: bool,
+    /// The process its `job-start` names.
+    owner: Option<Owner>,
 }
 
 type Fault = &'static str;
@@ -1652,7 +1789,10 @@ const BEGIN: &[&str] = &[
 const CHILD: &[&str] = &[
     "job", "group", "rel", "type", "dev", "ino", "uid", "mode", "nlink", "size", "mtime", "ctime",
 ];
+/// A `job-start` from before owners (and one whose owner `/proc` could not
+/// tell): undo cannot check whether its job still runs.
 const START: &[&str] = &["job"];
+const START_OWNED: &[&str] = &["job", "pid", "start", "boot", "pidns"];
 const JOB: &[&str] = &["id", "time", "action", "status", "sandbox"];
 const JOB_WITHDRAWN: &[&str] = &["id", "time", "action", "status", "sandbox", "undo"];
 const END: &[&str] = &["job", "group", "children", "bytes"];
@@ -1710,6 +1850,24 @@ const R_RECOVERY_KEPT: &str = "recovery-kept";
 const R_UNCERTAIN: &str = "recovery-uncertain";
 
 /// `dev:ino`.
+/// The owner of a `job-start` (`START_OWNED` values): a real pid, a boot id
+/// as [`boot_id`] reads one.
+fn owner(v: &[&str]) -> Result<Owner, Fault> {
+    let pid = small(v[1])?;
+    let boot = String::from_utf8(path_dec(v[3])?).map_err(|_| "a bad boot id")?;
+    if pid == 0 || boot.is_empty() || boot.len() > 64 {
+        return Err("a bad job owner");
+    }
+    Ok(Owner {
+        pid,
+        id: ProcId {
+            ticks: num(v[2])?,
+            boot,
+        },
+        ns: num(v[4])?,
+    })
+}
+
 fn pair_id(s: &str) -> Result<(u64, u64), Fault> {
     let (d, i) = s.split_once(':').ok_or("a bad identity")?;
     Ok((num(d)?, num(i)?))
@@ -1944,12 +2102,17 @@ impl JobRecords {
                     return Err("a job record with an unknown undo value");
                 }
                 self.known = true;
+                self.ended = true;
                 self.withdrawn |= withdrawn;
             }
             "job" => {}
             _ if !mine("job") => {}
             "job-start" => {
-                fields(l, START)?;
+                if l.items.len() == START_OWNED.len() {
+                    self.owner = Some(owner(&fields(l, START_OWNED)?)?);
+                } else {
+                    fields(l, START)?;
+                }
                 if self.started {
                     return Err("a duplicate job start");
                 }
@@ -2597,7 +2760,9 @@ impl trash::Log for HistLog<'_> {
 /// format; after the first move, problems are outcomes and warnings, never
 /// an `Err`. The history is held under an exclusive `flock` for the whole
 /// undo (waiting at most 2 s), so two undos of one job cannot both run. A
-/// job that is still running is refused (`ResourceBusy`). An undo a crash
+/// job that is still running is refused (`ResourceBusy`): by the registry,
+/// and, for a job without its closing `job` line, by the owner its
+/// `job-start` names ([`may_run`]; one that cannot be checked refuses too). An undo a crash
 /// interrupted is resumed from its records: endings are reported as
 /// recorded, an open intent is recovered (see [`trash::recover`]).
 ///
@@ -2605,10 +2770,7 @@ impl trash::Log for HistLog<'_> {
 pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     // Not knowing which jobs run is an error: nothing is moved on a guess.
     if list_running()?.iter().any(|(id, ..)| id == job) {
-        return Err(io::Error::new(
-            io::ErrorKind::ResourceBusy,
-            "job is running; cancel it first",
-        ));
+        return Err(running_refusal());
     }
     let dir = match StateDir::open(&history_dir()?) {
         Ok(d) => d,
@@ -2629,14 +2791,21 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     if !r.known && !r.old && !r.undone {
         return Err(old_or_unknown(&dir, job));
     }
+    // The registry above may be missing or unwritten (no runtime folder,
+    // a failed write); the history decides too. A job that has not ended
+    // is undone only once its owner is provably gone.
+    if !r.old
+        && !r.ended
+        && let Some(e) = may_run(job, r.owner.as_ref())
+    {
+        return Err(e);
+    }
     if let Some(e) = refusal(&r) {
         return Err(e);
     }
     if !r.known {
         return Err(io::Error::new(io::ErrorKind::NotFound, "unknown job"));
     }
-    // A line another run left cut off would swallow our first record.
-    end_line(&mut file, &lock)?;
     let mut res = UndoResult::default();
     let mut log = HistLog {
         file: &mut file,
@@ -5474,7 +5643,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_removes_unchanged_outputs_and_their_folders() {
+    fn undo_moves_unchanged_groups_to_the_trash() {
         let t = Tmp::new("undo");
         t.env(|| {
             let job = new_job_id();
@@ -5835,6 +6004,204 @@ mod tests {
             drop(running);
             drop(rec.finish(true));
             assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+    }
+
+    /// `t.env` without `$XDG_RUNTIME_DIR`: no registry at all.
+    fn without_runtime_dir<R>(t: &Tmp, f: impl FnOnce() -> R) -> R {
+        let (s, d) = (t.0.join("state"), t.0.join("data"));
+        with_env(
+            &[
+                ("XDG_STATE_HOME", Some(s.to_str().unwrap())),
+                ("XDG_RUNTIME_DIR", None),
+                ("XDG_DATA_HOME", Some(d.to_str().unwrap())),
+            ],
+            f,
+        )
+    }
+
+    /// A running job the registry does not know (`unregistered` is true):
+    /// undo moves nothing and says the job runs; after its end the same
+    /// undo moves it, and a second group published meanwhile goes too.
+    fn running_without_registry_is_refused(t: &Tmp) {
+        let job = new_job_id();
+        let running = Running::start(&job, "a", 2);
+        assert!(running.written.is_none(), "the job must be unregistered");
+        assert!(list_running().unwrap().is_empty());
+        let mut rec = Recorder::open(&job, "a");
+        let a = publish(t, &mut rec, "a", &[("x.md", "a")]);
+        let e = undo(&job).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy, "{e}");
+        assert!(e.to_string().contains("running"), "{e}");
+        assert!(a.iter().all(|f| f.exists()), "nothing moved");
+        assert!(trashed(t).is_empty());
+        let b = publish(t, &mut rec, "b", &[("x.md", "b")]);
+        let fin = rec.finish(true);
+        drop(running);
+        assert!(fin.undoable, "{:?}", fin.warning);
+        let files: Vec<PathBuf> = a.into_iter().chain(b).collect();
+        assert!(all_moved(&undo(&job).unwrap(), &files));
+    }
+
+    /// T16 A-I1: without `$XDG_RUNTIME_DIR` a running job is not in the
+    /// registry; the history's `job-start` owner still refuses its undo.
+    #[test]
+    fn undo_refuses_a_running_job_without_a_runtime_dir() {
+        let t = Tmp::new("undorun-noxdg");
+        without_runtime_dir(&t, || running_without_registry_is_refused(&t));
+    }
+
+    /// T16 A-I1: a registry write that fails (a jobs folder this user
+    /// cannot write) is dropped silently; undo still refuses.
+    #[test]
+    fn undo_refuses_a_running_job_whose_registry_write_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("undorun-ro");
+        t.env(|| {
+            let jobs = jobs_dir().unwrap();
+            fs::create_dir_all(&jobs).unwrap();
+            fs::set_permissions(&jobs, fs::Permissions::from_mode(0o500)).unwrap();
+            running_without_registry_is_refused(&t);
+            fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
+        });
+    }
+
+    /// A child process that waits until killed (never longer than the
+    /// sleep: 60 s, far past any test), and its owner record.
+    fn child_owner() -> (std::process::Child, Owner) {
+        let c = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = c.id();
+        let id = ProcId::of(pid).expect("/proc readable in tests");
+        let ns = pid_ns().expect("/proc readable in tests");
+        (c, Owner { pid, id, ns })
+    }
+
+    /// A job published by `owner` whose recorder is gone without its `job`
+    /// line (its process stopped recording, or died): the files.
+    fn unended_job(t: &Tmp, owner: Option<Owner>) -> (JobId, Vec<PathBuf>) {
+        let job = new_job_id();
+        let mut rec = Recorder::open_as(&job, "a", owner);
+        let f = publish(t, &mut rec, "a", &[("x.md", "a")]);
+        drop(rec);
+        (job, f)
+    }
+
+    /// The owner check across processes: another process that still runs
+    /// with the recorded identity refuses the undo; once it is dead (as
+    /// after a crash) the job is undoable, without any registry.
+    #[test]
+    fn undo_waits_for_another_owner_process_to_end() {
+        let t = Tmp::new("owner-other");
+        without_runtime_dir(&t, || {
+            let (mut c, owner) = child_owner();
+            let (job, f) = unended_job(&t, Some(owner));
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::ResourceBusy, "{e}");
+            assert!(f[0].exists());
+            c.kill().unwrap();
+            c.wait().unwrap();
+            assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+    }
+
+    /// A live pid whose start time is not the recorded one is another
+    /// process (pid reuse): the owner is dead and the job undoable.
+    #[test]
+    fn a_reused_owner_pid_is_not_the_owner() {
+        let t = Tmp::new("owner-reused");
+        without_runtime_dir(&t, || {
+            let (mut c, mut owner) = child_owner();
+            owner.id.ticks += 1;
+            let (job, f) = unended_job(&t, Some(owner));
+            let r = undo(&job);
+            c.kill().unwrap();
+            c.wait().unwrap();
+            assert!(all_moved(&r.unwrap(), &f));
+        });
+    }
+
+    /// Fail closed: a job without its `job` line whose owner cannot be
+    /// checked (a `job-start` from before owners, or a pid of another pid
+    /// namespace) is never moved; with its `job` line it is undone.
+    #[test]
+    fn undo_refuses_an_unended_job_whose_owner_cannot_be_checked() {
+        let t = Tmp::new("owner-unknown");
+        without_runtime_dir(&t, || {
+            let me = Owner::me().unwrap();
+            let elsewhere = Owner {
+                ns: me.ns ^ 1,
+                ..me
+            };
+            for owner in [None, Some(elsewhere)] {
+                let (job, f) = unended_job(&t, owner.clone());
+                let e = undo(&job).unwrap_err();
+                assert_eq!(e.to_string(), OWNER_UNKNOWN, "{owner:?}");
+                assert!(f[0].exists());
+            }
+            let job = new_job_id();
+            let mut rec = Recorder::open_as(&job, "a", None);
+            let f = publish(&t, &mut rec, "z", &[("x.md", "z")]);
+            assert!(rec.finish(true).undoable);
+            assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+    }
+
+    /// The owner is recorded whole and read strictly: a bad value is a
+    /// damaged record, not a missing owner.
+    #[test]
+    fn the_job_start_owner_is_read_strictly() {
+        let me = Owner::me().unwrap();
+        let line = format!(
+            "job-start\tjob=J\tpid={}\tstart={}\tboot={}\tpidns={}\n",
+            me.pid, me.id.ticks, me.id.boot, me.ns
+        );
+        let read = |l: &str| {
+            job_records(
+                &mut format!("{MAGIC} 1\n{l}").as_bytes(),
+                &JobId("J".into()),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&line).owner, Some(me.clone()));
+        for bad in [
+            line.replace(&format!("pid={}", me.pid), "pid=0"),
+            line.replace(&format!("pid={}", me.pid), "pid=x"),
+            line.replace(&format!("start={}", me.id.ticks), "start=-1"),
+            line.replace(&format!("boot={}", me.id.boot), "boot="),
+            line.replace(&format!("pidns={}", me.ns), "pidns=01"),
+            line.replace("\tpidns=", "\tns="),
+        ] {
+            let r = read(&bad);
+            assert!(r.broken.is_some() && r.owner.is_none(), "{bad:?}");
+        }
+    }
+
+    /// T16 A-m2: another job's line cut off without its newline (a short
+    /// write whose newline failed too) between this job's intent and its
+    /// commit does not swallow the commit: the job undoes, the cut job is
+    /// refused.
+    #[test]
+    fn another_jobs_cut_line_does_not_swallow_a_commit() {
+        let t = Tmp::new("cut-other");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "a");
+            let p = try_publish(&t, &mut rec, "a", &[("x.md", "a")], &mut |_, _| {
+                let mut f = OpenOptions::new().append(true).open(history_path())?;
+                f.write_all(b"child\tjob=99-9\tgroup=00000000000000aa\trel=pa")
+            })
+            .unwrap();
+            let f = commit(&mut rec, "/in/a", &p);
+            assert!(rec.finish(true).undoable);
+            assert!(
+                history().contains("rel=pa\npublish-commit\t"),
+                "the commit starts its own line"
+            );
+            assert!(all_moved(&undo(&job).unwrap(), &f));
+            assert!(undo(&JobId("99-9".into())).is_err());
         });
     }
 
@@ -6439,23 +6806,23 @@ mod tests {
         assert_eq!(&body[CHUNK - 1..CHUNK + 1], b"ab");
     }
 
-    /// `end_line` adds a newline only to a non-empty file whose last byte is
-    /// not one.
+    /// Every `append` first ends a cut-off last line: a newline only for a
+    /// non-empty file whose last byte is not one, then the block.
     #[test]
-    fn end_line_terminates_only_a_cut_off_line() {
+    fn append_terminates_only_a_cut_off_line() {
         let t = Tmp::new("endl");
         let lock = File::create(t.0.join("lock")).unwrap();
         for (before, after) in [
-            ("", ""),
-            ("\n", "\n"),
-            ("a\n", "a\n"),
-            ("x", "x\n"),
-            ("a\nbc", "a\nbc\n"),
+            ("", "r\n"),
+            ("\n", "\nr\n"),
+            ("a\n", "a\nr\n"),
+            ("x", "x\nr\n"),
+            ("a\nbc", "a\nbc\nr\n"),
         ] {
             let p = t.0.join("h");
             fs::write(&p, before).unwrap();
             let mut f = OpenOptions::new().read(true).append(true).open(&p).unwrap();
-            end_line(&mut f, &lock).unwrap();
+            append(&mut f, &lock, false, |b| b.text("r\n")).unwrap();
             assert_eq!(fs::read_to_string(&p).unwrap(), after, "{before:?}");
         }
     }
@@ -6574,6 +6941,34 @@ mod tests {
                 assert!(r.unwrap().dir.is_none());
                 assert_eq!(fs::read_dir(&real).unwrap().count(), 0, "written through");
             }
+        });
+    }
+
+    /// T16 A-m3: with a symlinked jobs folder (live or dangling) undo,
+    /// `jobs` and `cancel` (both `list_running`) refuse: whether a job runs
+    /// is unknown, never "none". Nothing moves.
+    #[test]
+    fn a_symlinked_jobs_folder_refuses_undo_and_listing() {
+        let t = Tmp::new("jobslink-undo");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "a")]);
+            let base = jobs_dir().unwrap();
+            fs::create_dir_all(base.parent().unwrap()).unwrap();
+            let real = t.0.join("real-jobs");
+            fs::create_dir_all(&real).unwrap();
+            for target in [real.clone(), t.0.join("gone")] {
+                let _ = fs::remove_file(&base);
+                symlink(&target, &base).unwrap();
+                let e = undo(&job).unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::NotADirectory, "{e}");
+                assert!(e.to_string().contains("symbolic link"), "{e}");
+                assert!(list_running().is_err());
+                assert!(f[0].exists());
+                assert!(trashed(&t).is_empty());
+            }
+            fs::remove_file(&base).unwrap();
+            assert!(all_moved(&undo(&job).unwrap(), &f), "positive control");
         });
     }
 
