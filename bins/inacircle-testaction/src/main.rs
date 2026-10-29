@@ -350,3 +350,29 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The socket steps of the sandbox probes parse: a pathname connect and
+    /// the two socket pair types; anything else is an error. Kills the
+    /// deleted arms of `parse_step`.
+    #[test]
+    fn socket_steps_parse() {
+        assert!(matches!(
+            parse_step("unix_connect", "/run/x.sock"),
+            Ok(Step::UnixConnect(p)) if p == "/run/x.sock"
+        ));
+        assert!(matches!(
+            parse_step("socketpair", "stream"),
+            Ok(Step::SocketPair(true))
+        ));
+        assert!(matches!(
+            parse_step("socketpair", "dgram"),
+            Ok(Step::SocketPair(false))
+        ));
+        assert!(parse_step("socketpair", "seqpacket").is_err());
+        assert!(parse_step("no_such_step", "1").is_err());
+    }
+}

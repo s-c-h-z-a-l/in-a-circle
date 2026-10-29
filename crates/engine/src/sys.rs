@@ -206,4 +206,24 @@ pub(crate) mod tests {
         rx.recv_timeout(Duration::from_secs(secs))
             .expect("blocked: no result in time")
     }
+
+    /// `open_dir_follow` opens a directory only (a regular file is
+    /// `ENOTDIR`, a FIFO never blocks it) and sets close-on-exec. Kills
+    /// the two `|` -> `&` of its flags.
+    #[test]
+    fn open_dir_follow_opens_directories_only_and_closes_on_exec() {
+        use std::os::fd::AsRawFd;
+        let root = std::env::temp_dir().join(format!("engine-sys-odf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), "x").unwrap();
+        let fd = super::open_dir_follow(root.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: fd is open.
+        let fl = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(fl & libc::FD_CLOEXEC, 0);
+        let e =
+            super::open_dir_follow(root.join("file").as_os_str().as_encoded_bytes()).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::ENOTDIR));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

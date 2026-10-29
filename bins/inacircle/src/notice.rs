@@ -1533,4 +1533,121 @@ mod tests {
         assert!(!lines[1].contains("a\nb") && lines[1].starts_with("in Trash at /t/a"));
         assert_eq!(lines[2], "history: the undo was not recorded");
     }
+
+    fn evidence(path: Option<&str>) -> LocationEvidence {
+        LocationEvidence {
+            path_at_check: path.map(PathBuf::from),
+            last_unverified_path: None,
+            anchor: AnchorHint {
+                parent_dev: 1,
+                parent_ino: 2,
+                object_dev: 1,
+                object_ino: 3,
+                leaf: "x".into(),
+                op: OperationId(7),
+            },
+            checked_at: CheckPoint::PostMove,
+        }
+    }
+
+    /// Every reason a group can be kept has its own words; the rest share
+    /// one. Kills the deleted arms of `kept_why` and `restored_why`.
+    #[test]
+    fn each_kept_reason_has_its_own_words() {
+        use engine::journal::UndoReason as R;
+        let words = [
+            (R::Changed, "kept because it changed"),
+            (R::Missing, "not found where it was saved"),
+            (R::AncestorChanged, "kept: its folder moved"),
+            (R::NoTrash, "kept: no Trash on the same disk"),
+            (R::NameTaken, "kept: no free name in Trash"),
+            (R::TooLong, "kept: path too long for Trash"),
+            (R::HistoryNotWritten(1), "kept: history not writable"),
+            (R::InfoNotWritten(1), "kept: Trash info not written"),
+            (R::MoveRefused(1), "kept: could not move to Trash"),
+            (R::PostMoveMismatch, "kept"),
+        ];
+        for (r, want) in words {
+            assert_eq!(kept_why(r), want, "{r:?}");
+        }
+        assert_eq!(
+            restored_why(R::InfoChanged),
+            "moved back: Trash info changed"
+        );
+        assert_eq!(
+            restored_why(R::PostMoveMismatch),
+            "moved back because it changed"
+        );
+    }
+
+    /// An undo with no group at all undid nothing; more problem lines than
+    /// fit are counted. Kills `>` -> `>=` on `all` (twice) and `>` -> `<`
+    /// on `more` in `undo_text`.
+    #[test]
+    fn undo_text_handles_no_groups_and_too_many_problem_lines() {
+        let none = UndoResult::default();
+        let (summary, body) = undo_text(&none, false);
+        assert_eq!(summary, "Nothing undone");
+        assert!(!body.contains("Moved to Trash"), "{body}");
+        let kept = |p: &str| GroupOutcome::RecoveryKept {
+            group: GroupId(1),
+            location: evidence(Some(p)),
+            reason: UndoReason::RestoreCollision,
+            errno: None,
+            durability: Durability::Synced,
+        };
+        let many = UndoResult {
+            groups: (0..PROBLEM_LINES + 2)
+                .map(|i| kept(&format!("/t/{i}")))
+                .collect(),
+            warnings: Vec::new(),
+        };
+        let (_, body) = undo_text(&many, false);
+        assert!(body.contains("\u{2026} and 2 more"), "{body}");
+        let few = UndoResult {
+            groups: (0..PROBLEM_LINES)
+                .map(|i| kept(&format!("/t/{i}")))
+                .collect(),
+            warnings: Vec::new(),
+        };
+        let (_, body) = undo_text(&few, false);
+        assert!(!body.contains("more"), "{body}");
+    }
+
+    /// The problem list keeps `KEEP_PROBLEMS` entries, however many skips
+    /// come; a warning overflow with nothing converted yet loses nothing.
+    /// Kills `<` -> `<=` (skips) and `>` -> `>=` (`done_count`) in
+    /// `Summary::record`.
+    #[test]
+    fn the_summary_keeps_bounded_problem_lists() {
+        let skips: Vec<Outcome> = (0..KEEP_PROBLEMS + 3)
+            .map(|i| skip(&format!("/in/{i}"), "unsupported"))
+            .collect();
+        assert_eq!(summary(&skips).problems.len(), KEEP_PROBLEMS);
+        let warns: Vec<Outcome> = (0..KEEP_LOST + 1)
+            .map(|i| warn(&format!("/in/{i}")))
+            .collect();
+        let s = summary(&warns);
+        assert!(s.lost_overflow && !s.lost_done);
+        let mut with_done = vec![done("/d/a", "/d/a.md")];
+        with_done.extend(warns);
+        assert!(summary(&with_done).lost_done);
+    }
+
+    /// The list of unknown places keeps `KEEP_PROBLEMS` inputs, but the
+    /// count is of all. Kills `<` -> `<=` on `unknown.len()`.
+    #[test]
+    fn the_unknown_list_is_bounded_and_the_count_is_not() {
+        let unknown = |i: usize| Outcome::PublishedUnknown {
+            input: format!("/in/{i}").into(),
+            group: GroupId(1),
+            location: evidence(None),
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Synced,
+        };
+        let all: Vec<Outcome> = (0..KEEP_PROBLEMS + 3).map(unknown).collect();
+        let s = summary(&all);
+        assert_eq!(s.unknown.len(), KEEP_PROBLEMS);
+        assert_eq!(s.unknown_count, KEEP_PROBLEMS + 3);
+    }
 }

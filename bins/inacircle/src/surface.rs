@@ -2607,4 +2607,17 @@ mod tests {
         o.keep(9);
         assert_eq!(o.release(), None);
     }
+
+    /// Which startup failures close without waiting for the compositor's
+    /// confirmation. Kills the two constant replacements.
+    #[test]
+    fn only_a_silent_compositor_skips_the_close_confirmation() {
+        let e = || io::Error::other("x");
+        assert!(StartupError::ConfigureTimeout.compositor_silent());
+        assert!(StartupError::Protocol(e()).compositor_silent());
+        assert!(StartupError::AfterOpen(e()).compositor_silent());
+        assert!(!StartupError::PointerUnavailable.compositor_silent());
+        assert!(!StartupError::KeyboardUnavailable.compositor_silent());
+        assert!(!StartupError::Initialization(e()).compositor_silent());
+    }
 }

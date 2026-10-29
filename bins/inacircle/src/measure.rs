@@ -486,4 +486,28 @@ mod tests {
         assert!(m.report(0, -1).contains("hover_us_p50=2 "));
         assert_eq!(field(&m.report(0, -1), "hover_us_max"), Some("4"));
     }
+
+    #[test]
+    fn a_pair_needs_both_readings() {
+        assert_eq!(pair(1, 2), Some((1, 2)));
+        assert_eq!(pair(0, 0), Some((0, 0)));
+        assert_eq!(pair(-1, 2), None);
+        assert_eq!(pair(1, -1), None);
+        assert_eq!(pair(-1, -1), None);
+    }
+
+    /// Paints are counted exactly (busy ones apart) and the trace keeps the
+    /// first `PAINT_TRACE` of them. Kills `+=` -> `*=` / `-=` and `<` ->
+    /// `<=` in `Meter::paint`.
+    #[test]
+    fn paints_are_counted_and_the_trace_is_bounded() {
+        let mut m = Meter::new(0, 0, Instant::now());
+        for i in 0..(PAINT_TRACE + 5) {
+            m.paint('F', 0, 1, i % 2 == 0);
+        }
+        assert_eq!(m.paints, (PAINT_TRACE + 5) as u64);
+        assert_eq!(m.busy_paints, (PAINT_TRACE as u64 + 5).div_ceil(2));
+        assert_eq!(m.paint_trace.len(), PAINT_TRACE);
+        assert_eq!(m.paint_trace.capacity(), PAINT_TRACE);
+    }
 }

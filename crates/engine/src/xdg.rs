@@ -399,4 +399,12 @@ pub(crate) mod tests {
         assert_eq!(with_env(&v, download_dir).unwrap(), tmp);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// The user-dirs bound is 64 KiB (derivation at the constant); the
+    /// boundary tests compare against the constant itself, so the value is
+    /// pinned here. Kills `*` -> `+`.
+    #[test]
+    fn the_user_dirs_bound_is_64_kib() {
+        assert_eq!(USER_DIRS_MAX_BYTES, 65_536);
+    }
 }

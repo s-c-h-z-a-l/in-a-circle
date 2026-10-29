@@ -261,6 +261,17 @@ struct Entry {
     count: u32,
 }
 
+impl Entry {
+    /// One child seen running, at the readings `cpu` and `mono` (µs; a
+    /// negative one failed): counted, and the first valid pair kept.
+    fn seen(&mut self, cpu: i64, mono: i64) {
+        self.count += 1;
+        if self.first.is_none() && cpu >= 0 && mono >= 0 {
+            self.first = Some((cpu, mono));
+        }
+    }
+}
+
 impl Observer for Printer<'_> {
     fn event(&mut self, o: &Outcome) {
         print_outcome(o);
@@ -273,11 +284,7 @@ impl Observer for Printer<'_> {
     fn started(&mut self, _pid: u32) {
         // Clocks first, nothing else between the event and the reading.
         if let Some(e) = &mut self.entry {
-            let (cpu, mono) = (cpu_us(libc::RUSAGE_SELF), monotonic_us().unwrap_or(-1));
-            e.count += 1;
-            if e.first.is_none() && cpu >= 0 && mono >= 0 {
-                e.first = Some((cpu, mono));
-            }
+            e.seen(cpu_us(libc::RUSAGE_SELF), monotonic_us().unwrap_or(-1));
         }
     }
 
@@ -1307,5 +1314,45 @@ mod tests {
         let g = group_menu_for(vec![pdf], Some(md_catalog()));
         assert!(g.slices[0].as_ref().is_some_and(|d| !d.lit), "dim");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Only the first valid pair is kept; every child is counted. Kills the
+    /// `&&` -> `||` of `Entry::seen`.
+    #[test]
+    fn the_entry_keeps_the_first_valid_pair_and_counts_all() {
+        let mut e = Entry::default();
+        e.seen(-1, 5);
+        e.seen(5, -1);
+        assert_eq!((e.first, e.count), (None, 2));
+        e.seen(10, 20);
+        e.seen(30, 40);
+        e.seen(-1, -1);
+        assert_eq!((e.first, e.count), (Some((10, 20)), 5));
+    }
+
+    /// `CLOCK_MONOTONIC` in µs, compared with an independent reading of
+    /// the same clock before and after. Kills the constant and the three
+    /// arithmetic mutants.
+    #[test]
+    fn monotonic_us_reads_the_monotonic_clock() {
+        let ns = || {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: clock_gettime writes one timespec into `ts`.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) },
+                0
+            );
+            i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec)
+        };
+        let before = ns();
+        let us = i128::from(monotonic_us().unwrap());
+        let after = ns();
+        assert!(
+            us * 1000 >= before - 1000 && us * 1000 <= after,
+            "{us} not in {before}..{after}"
+        );
     }
 }

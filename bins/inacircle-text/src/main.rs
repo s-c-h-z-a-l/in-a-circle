@@ -285,4 +285,21 @@ mod tests {
         let merged: Vec<Loss> = merge_losses(r, w).into_iter().collect();
         assert_eq!(merged, [Loss::BlankLines, Loss::Whitespace]);
     }
+
+    /// Thousands separators sit every three digits from the right, for
+    /// lengths that are not a multiple of three too. Kills `-` -> `+`.
+    #[test]
+    fn grouped_puts_a_comma_every_three_digits_from_the_right() {
+        for (n, want) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (12_345, "12,345"),
+            (524_288, "524,288"),
+            (1_234_567, "1,234,567"),
+            (12_345_678, "12,345,678"),
+        ] {
+            assert_eq!(grouped(n), want);
+        }
+    }
 }

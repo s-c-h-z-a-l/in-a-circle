@@ -6929,4 +6929,987 @@ mod tests {
             assert!(l[0].1.len() <= REGISTRY_ACTION_MAX && !l[0].1.is_empty());
         });
     }
+
+    // ---- mutation pass 3 (T16a-2): survivors of the journal's mutants ----
+
+    /// Pins the three budget constants of this file that no boundary test
+    /// can see (the boundary tests compare against the constant itself).
+    /// Each derivation is at the constant: 4 x 1024 intents, 8 MiB window,
+    /// 16 KiB chunk. Kills `4 * HISTORY_DIRS` -> `+`, the two `*` of the
+    /// window and the `*` of CHUNK.
+    #[test]
+    fn the_budget_constants_keep_their_documented_values() {
+        assert_eq!(HISTORY_INTENTS, 4096);
+        assert_eq!(HISTORY_TAIL_WINDOW, 8_388_608);
+        assert_eq!(CHUNK, 16_384);
+    }
+
+    fn sd_root(t: &Tmp, name: &str) -> PathBuf {
+        let p = t.0.join(name);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn running_as_root() -> bool {
+        euid() == 0
+    }
+
+    /// `StateDir::open` must not wait on a FIFO planted at the state
+    /// folder's name: `O_DIRECTORY` fails it at once. Without the flag
+    /// (`|` -> `&`) the read-only open of a FIFO blocks for a writer. The
+    /// open runs on a thread with a bounded wait; a blocked one is freed by
+    /// opening the write end, then the test fails.
+    #[test]
+    fn opening_the_state_folder_never_waits_on_a_fifo() {
+        let t = Tmp::new("sd-fifo");
+        let p = t.0.join("fifo");
+        let c = c_name(p.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c is NUL-terminated.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = p.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(StateDir::open(&q).is_err());
+        });
+        let got = rx.recv_timeout(Duration::from_secs(20));
+        if got.is_err() {
+            // Free the blocked reader (a non-blocking write open succeeds
+            // while a reader waits), so the thread ends.
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&p);
+        }
+        assert_eq!(got, Ok(true), "the open blocked on a FIFO or accepted it");
+    }
+
+    /// A private folder keeps its mode; one writable by others loses only
+    /// the group and other write bits. `mode & 0o7777` -> `|` would set
+    /// every permission bit (setuid, sticky, world-readable) through
+    /// the `fchmod`.
+    #[test]
+    fn opening_the_state_folder_tightens_only_the_write_bits_of_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("sd-mode");
+        let p = sd_root(&t, "d");
+        for (before, after) in [
+            (0o700, 0o700),
+            (0o777, 0o755),
+            (0o770, 0o750),
+            (0o722, 0o700),
+        ] {
+            fs::set_permissions(&p, fs::Permissions::from_mode(before)).unwrap();
+            StateDir::open(&p).unwrap();
+            let m = fs::metadata(&p).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(m, after, "from {before:o}");
+        }
+    }
+
+    /// A real error from the exclusive create (here: no write access to
+    /// the folder) is reported as it is, not retried into "no free
+    /// temporary name" (`AlreadyExists`). Kills the match guard -> `true` and
+    /// `==` -> `!=` in `StateDir::temp`.
+    #[test]
+    fn a_temp_file_error_other_than_a_name_clash_is_reported_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        if running_as_root() {
+            return;
+        }
+        let t = Tmp::new("sd-temp");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o500)).unwrap();
+        let e = d.temp("x", b"a", false).unwrap_err();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+    }
+
+    fn leftovers(p: &Path, prefix: &str) -> Vec<String> {
+        fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with(prefix))
+            .collect()
+    }
+
+    /// A replace whose rename fails (a directory holds the name) removes
+    /// its temp file, and only through `remove_own`'s identity check.
+    /// Kills `remove_own` -> `()` and `!=` -> `==` in `unlink_if`.
+    #[test]
+    fn a_failed_replace_leaves_no_temporary_file() {
+        let t = Tmp::new("sd-replace");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::create_dir(p.join("name")).unwrap();
+        assert!(d.replace("name", b"x", false).is_err());
+        assert_eq!(leftovers(&p, ".name."), Vec::<String>::new());
+        assert!(p.join("name").is_dir());
+    }
+
+    /// `unlink_if` removes the file it was asked about and refuses another
+    /// one under the same name.
+    #[test]
+    fn unlink_if_checks_the_identity() {
+        let t = Tmp::new("sd-unlink");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        let (id, f) = d.replace("a", b"1", false).unwrap();
+        let (id2, _f2) = d.replace("a", b"2", false).unwrap();
+        assert_ne!(
+            id, id2,
+            "the first file is held open: its inode is not reused"
+        );
+        assert!(d.unlink_if("a", id).is_err(), "another file under the name");
+        assert!(p.join("a").exists());
+        d.unlink_if("a", id2).unwrap();
+        assert!(!p.join("a").exists());
+        drop(f);
+    }
+
+    /// The header line is exact: the magic and the canonical version.
+    /// Kills `||` -> `&&` in `parse_header` (either half alone accepted).
+    #[test]
+    fn a_header_needs_the_magic_and_the_canonical_version() {
+        assert_eq!(parse_header(format!("{MAGIC} 1\n").as_bytes()).unwrap(), 1);
+        assert!(parse_header(format!("{MAGIC} 01\n").as_bytes()).is_err());
+        assert!(parse_header(format!("{MAGIC} +1\n").as_bytes()).is_err());
+        assert!(parse_header(b"other-history 1\n").is_err());
+        assert!(parse_header(format!("{MAGIC} 1").as_bytes()).is_err());
+    }
+
+    /// A history that cannot be opened (not NotFound) is an error, never
+    /// "no history, make one" (which would archive or create beside it).
+    /// Kills the `NotFound` guard -> `true` in `open_v1`.
+    #[test]
+    fn open_v1_reports_an_unreadable_history() {
+        use std::os::unix::fs::PermissionsExt;
+        if running_as_root() {
+            return;
+        }
+        let t = Tmp::new("sd-v1");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::write(p.join(HISTORY), manifest::header(MAGIC, VERSION)).unwrap();
+        fs::set_permissions(p.join(HISTORY), fs::Permissions::from_mode(0o000)).unwrap();
+        let r = open_v1(&d);
+        fs::set_permissions(p.join(HISTORY), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// An empty history (a run died before its header) is finished by the
+    /// next one through a descriptor it can write to. Kills `O_RDWR |
+    /// O_APPEND` -> `&` (read-only: the header write fails).
+    #[test]
+    fn an_empty_history_gets_its_header() {
+        let t = Tmp::new("sd-empty");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::write(p.join(HISTORY), b"").unwrap();
+        let lock = d
+            .open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)
+            .unwrap();
+        open_history(&d, &lock).unwrap();
+        assert_eq!(
+            fs::read_to_string(p.join(HISTORY)).unwrap(),
+            manifest::header(MAGIC, VERSION)
+        );
+    }
+
+    /// The archive step reports the real error (no write access) instead
+    /// of trying every archive name and claiming they are all taken.
+    /// Kills the `AlreadyExists` guard -> `true` in `archive`.
+    #[test]
+    fn archiving_reports_an_error_other_than_a_taken_name() {
+        use std::os::unix::fs::PermissionsExt;
+        if running_as_root() {
+            return;
+        }
+        let t = Tmp::new("sd-archive");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::write(p.join(HISTORY), manifest::header(MAGIC, OLD_VERSION)).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o500)).unwrap();
+        let e = archive(&d).unwrap_err();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        assert!(p.join(HISTORY).exists());
+    }
+
+    /// Another run made the history first: `create_history` finds it and
+    /// uses it. Kills `!=` -> `==` on the link error (the exclusive-create
+    /// fallback would fail on the existing file).
+    #[test]
+    fn creating_the_history_after_another_run_made_it_uses_that_one() {
+        let t = Tmp::new("sd-create");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        fs::write(p.join(HISTORY), manifest::header(MAGIC, VERSION)).unwrap();
+        create_history(&d).unwrap();
+        assert_eq!(
+            fs::read_to_string(p.join(HISTORY)).unwrap(),
+            manifest::header(MAGIC, VERSION)
+        );
+        assert_eq!(leftovers(&p, ".history"), Vec::<String>::new());
+    }
+
+    /// A group whose publication failed after its intent is aborted, and
+    /// the next group is prepared afresh. Kills the `p.group == group.group`
+    /// guard -> `true` in `prepare_group`.
+    #[test]
+    fn a_failed_publication_is_aborted_and_the_next_group_prepared_afresh() {
+        let t = Tmp::new("rec-abort");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let failed = try_publish(&t, &mut rec, "a", &[("x.md", "1")], &mut |_, _| {
+                Err(io::Error::other("the publication failed"))
+            });
+            assert!(failed.is_err());
+            publish(&t, &mut rec, "b", &[("x.md", "2")]);
+            let r = rec.finish(true);
+            assert!(r.undoable, "{:?}", r.warning);
+            assert!(history().lines().any(|l| l.starts_with("publish-abort\t")));
+        });
+    }
+
+    /// The records of a publication are matched on group and operation
+    /// both: a commit that no prepared group (or a prepared group of
+    /// another operation) announced is counted, makes the job not undoable
+    /// and says so; nothing is counted when it was announced. Kills the
+    /// guard -> `true` and `&&` -> `||` in `Recorder::group`, `+=` -> `-=`
+    /// / `*=` on `unprepared`, and the `+` of `refused` in `finish`.
+    #[test]
+    fn a_commit_nobody_announced_is_counted_and_refuses_undo() {
+        let t = Tmp::new("rec-unprepared");
+        t.env(|| {
+            let other = new_job_id();
+            let mut rec2 = Recorder::open(&other, "convert");
+            let p2 = try_publish(&t, &mut rec2, "z", &[("x.md", "z")], &mut |_, _| Ok(())).unwrap();
+            drop(rec2);
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let mut seen = None;
+            let failed = try_publish(&t, &mut rec, "a", &[("x.md", "1")], &mut |g, _| {
+                seen = Some(g.clone());
+                Err(io::Error::other("the publication failed"))
+            });
+            assert!(failed.is_err());
+            let mine = seen.unwrap();
+            // Another group: counted twice, the prepared one stays pending.
+            rec.group(&p2.group, &p2.location, &p2.durability);
+            rec.group(&p2.group, &p2.location, &p2.durability);
+            // The prepared group with another operation: counted too.
+            let mut wrong_op = mine.clone();
+            wrong_op.op = OperationId(mine.op.0 ^ 1);
+            rec.group(&wrong_op, &p2.location, &p2.durability);
+            // The same operation under another group id: counted too.
+            let mut wrong_group = mine.clone();
+            wrong_group.group = GroupId(mine.group.0 ^ 1);
+            rec.group(&wrong_group, &p2.location, &p2.durability);
+            let r = rec.finish(true);
+            assert!(!r.undoable);
+            let w = r.warning.unwrap();
+            assert!(
+                w.contains("4 output folder(s) committed without a record"),
+                "{w}"
+            );
+            assert!(!w.contains("not confirmed on disk"), "{w}");
+            assert!(!w.contains("input(s) published"), "{w}");
+        });
+    }
+
+    /// Two unconfirmed groups are counted as two, and nothing else is
+    /// claimed. Kills `unconfirmed += 1` -> `*=`, and the `> 0` -> `>=`
+    /// of the three warning counters in `finish`.
+    #[test]
+    fn unconfirmed_groups_are_counted_and_alone_in_the_warning() {
+        let t = Tmp::new("rec-unconfirmed");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            for stem in ["a", "b"] {
+                let p =
+                    try_publish(&t, &mut rec, stem, &[("x.md", "1")], &mut |_, _| Ok(())).unwrap();
+                rec.group(
+                    &p.group,
+                    &p.location,
+                    &Durability::Unconfirmed("no sync".into()),
+                );
+            }
+            let r = rec.finish(true);
+            assert!(!r.undoable);
+            let w = r.warning.unwrap();
+            assert_eq!(
+                w,
+                "2 output folder(s) not confirmed on disk; undo unavailable"
+            );
+        });
+    }
+
+    #[test]
+    fn a_clean_job_has_no_warning() {
+        let t = Tmp::new("rec-clean");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            publish(&t, &mut rec, "a", &[("x.md", "1")]);
+            let r = rec.finish(true);
+            assert!(r.undoable && r.warning.is_none());
+        });
+    }
+
+    #[test]
+    fn a_name_is_cut_at_a_character_boundary_inside_the_limit() {
+        assert_eq!(cut_at_boundary("abc", 2), "ab");
+        assert_eq!(cut_at_boundary("abc", 9), "abc");
+        assert_eq!(cut_at_boundary("a\u{e9}", 2), "a");
+        assert_eq!(cut_at_boundary("a\u{e9}", 3), "a\u{e9}");
+        assert_eq!(cut_at_boundary("\u{20ac}\u{20ac}", 4), "\u{20ac}");
+        assert_eq!(cut_at_boundary("\u{20ac}", 1), "");
+        assert_eq!(cut_at_boundary("", 5), "");
+    }
+
+    /// The process identity is read from `/proc` as it is: the start
+    /// time is this process's own (not a constant), the boot id is the
+    /// kernel's. Kills the `Some(0)` / `Some(1)` / `Some("")` /
+    /// `Some("xyzzy")` replacements.
+    #[test]
+    fn the_process_identity_is_the_real_one() {
+        let me = proc_start_ticks(std::process::id()).unwrap();
+        assert!(me > 1);
+        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let after = &stat[stat.rfind(')').unwrap() + 2..];
+        let field: u64 = after.split(' ').nth(19).unwrap().parse().unwrap();
+        assert_eq!(me, field);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let theirs = proc_start_ticks(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            theirs.unwrap() >= me,
+            "a later process cannot have started earlier"
+        );
+        let kernel = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        assert_eq!(boot_id().as_deref(), Some(kernel.trim()));
+    }
+
+    fn age(p: &Path, secs: u64) {
+        let f = OpenOptions::new().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// Only our own temp names, stale ones, are removed; a name with an
+    /// empty base is not ours, and neither is a fresh one. Kills the `&&`
+    /// -> `||` of the name check in `remove_stale_temp`.
+    #[test]
+    fn only_stale_temp_files_of_ours_are_removed() {
+        let t = Tmp::new("sd-stale");
+        let p = sd_root(&t, "d");
+        let d = StateDir::open(&p).unwrap();
+        let hex = "0123456789abcdef";
+        let names = [
+            (format!(".x.{hex}.tmp"), 3600, false),
+            (format!(".x.{}.tmp", "0123456789abcde"), 3600, true),
+            (format!(".x.{}.tmp", "0123456789abcdeg"), 3600, true),
+            (format!("..{hex}.tmp"), 3600, true),
+            (format!(".y.{hex}.tmp"), 1, true),
+        ];
+        for (n, secs, _) in &names {
+            fs::write(p.join(n), "x").unwrap();
+            age(&p.join(n), *secs);
+        }
+        for (n, _, _) in &names {
+            remove_stale_temp(&d, n);
+        }
+        for (n, _, kept) in &names {
+            assert_eq!(p.join(n).exists(), *kept, "{n}");
+        }
+    }
+
+    /// Unit-level reader faults: each makes the job's record broken.
+    fn broken_with(lines: Vec<String>) -> Option<&'static str> {
+        read(&lines).unwrap().broken
+    }
+
+    fn abort_line() -> String {
+        write_line(
+            &Line::new("publish-abort")
+                .pair("op", "00000000000000bb")
+                .pair("job", J)
+                .pair("group", "00000000000000aa"),
+        )
+    }
+
+    /// An abort closes the group: a second abort, a commit or an intent
+    /// after it is a fault. Kills `||` -> `&&` in `GroupRec::closed`.
+    #[test]
+    fn an_abort_closes_its_group() {
+        let g = good();
+        let upto_intent = || g[..5].to_vec();
+        let mut one = upto_intent();
+        one.push(abort_line());
+        assert_eq!(broken_with(one), None);
+        let mut twice = upto_intent();
+        twice.push(abort_line());
+        twice.push(abort_line());
+        assert!(broken_with(twice).is_some());
+        let mut commit = upto_intent();
+        commit.push(abort_line());
+        commit.push(g[5].clone());
+        assert!(broken_with(commit).is_some());
+        let mut intent = upto_intent();
+        intent.push(abort_line());
+        intent.push(g[4].clone());
+        assert!(broken_with(intent).is_some());
+    }
+
+    fn uncertain_line() -> String {
+        write_line(
+            &Line::new("publish-uncertain")
+                .pair("op", "00000000000000bb")
+                .pair("job", J)
+                .pair("group", "00000000000000aa")
+                .pair("location_known", "no")
+                .pair("parent_dev", "1")
+                .pair("parent_ino", "2")
+                .pair("leaf", "a")
+                .pair("object_dev", "1")
+                .pair("object_ino", "2")
+                .pair("reason", "AncestorChanged")
+                .pair("durability", "synced"),
+        )
+    }
+
+    /// An uncertain commit needs an intent and a group not yet closed.
+    /// Kills `||` -> `&&` in the `publish-uncertain` arm.
+    #[test]
+    fn an_uncertain_commit_needs_an_intent_and_an_open_group() {
+        let g = good();
+        let mut ok = g[..5].to_vec();
+        ok.push(uncertain_line());
+        assert_eq!(broken_with(ok), None);
+        let mut no_intent = g[..4].to_vec();
+        no_intent.push(uncertain_line());
+        assert!(broken_with(no_intent).is_some());
+        let mut after_commit = g.clone();
+        after_commit.push(uncertain_line());
+        assert!(broken_with(after_commit).is_some());
+    }
+
+    /// An intent comes after the group's end and before its outcome.
+    /// Kills `||` -> `&&` in the `publish-intent` arm.
+    #[test]
+    fn an_intent_out_of_order_is_a_fault() {
+        let g = good();
+        let mut before_end = g[..3].to_vec();
+        before_end.push(g[4].clone());
+        before_end.push(g[3].clone());
+        assert!(broken_with(before_end).is_some());
+        let mut after_commit = g.clone();
+        after_commit.push(g[4].clone());
+        assert!(broken_with(after_commit).is_some());
+    }
+
+    /// Another job's lines (also those that mention our id as a prefix) are
+    /// never this job's: they do not make it known, do not count as its
+    /// records (a start after them is fine), and a foreign `job` line that
+    /// carries our id in a `job` pair is skipped. Kills the `&&` -> `||` in
+    /// `JobRecords::take`, the `mine("id")` guard -> `true` and the
+    /// `"job" => {}` arm deletion in `take_kind`.
+    #[test]
+    fn another_jobs_lines_are_not_this_jobs() {
+        let foreign_job = write_line(
+            &Line::new("job")
+                .pair("id", "10-10")
+                .pair("time", "1")
+                .pair("action", "a")
+                .pair("status", "done")
+                .pair("sandbox", "yes"),
+        );
+        let r = read(std::slice::from_ref(&foreign_job)).unwrap();
+        assert!(!r.known && r.broken.is_none(), "{:?}", r.broken);
+        let with_pair = write_line(
+            &Line::new("job")
+                .pair("id", "10-10")
+                .pair("time", "1")
+                .pair("action", "a")
+                .pair("status", "done")
+                .pair("sandbox", "yes")
+                .pair("job", J),
+        );
+        let r = read(&[with_pair]).unwrap();
+        assert!(!r.known && r.broken.is_none(), "{:?}", r.broken);
+        // Foreign records before our start.
+        let mut l: Vec<String> = good()
+            .iter()
+            .map(|x| x.replace("job=10-1", "job=10-10"))
+            .collect();
+        l.push(format!("job-start\tjob={J}\n"));
+        l.extend(good());
+        let r = read(&l).unwrap();
+        assert!(r.known && r.started && r.broken.is_none(), "{:?}", r.broken);
+    }
+
+    fn recovery_intent(info_rel: usize, date: &str, source: &str) -> String {
+        write_line(
+            &Line::new("recovery-intent")
+                .pair("op", "00000000000000cc")
+                .pair("job", J)
+                .pair("group", "00000000000000aa")
+                .pair("source", source)
+                .pair("target", "/t/a")
+                .pair("info_rel", &info_rel.to_string())
+                .pair("source_parent_dev", "1")
+                .pair("source_parent_ino", "2")
+                .pair("target_parent_dev", "1")
+                .pair("target_parent_ino", "3")
+                .pair("wrapper_dev", "1")
+                .pair("wrapper_ino", "2")
+                .pair("mount", "1")
+                .pair("deletion_date", date),
+        )
+    }
+
+    /// The recovery intent's checks: the Trash offset inside the source
+    /// (equal to its length is inside), the deletion date's shape, and a
+    /// group committed with its durability confirmed. Kills `>` -> `==` /
+    /// `>=` (info_rel), `||` -> `&&` (date and committed-and-synced).
+    #[test]
+    fn a_recovery_intent_is_checked() {
+        let date = "2026-10-29T10:11:12";
+        let mut ok = good();
+        ok.push(recovery_intent(4, date, "/o/a"));
+        assert_eq!(broken_with(ok), None);
+        let mut past = good();
+        past.push(recovery_intent(5, date, "/o/a"));
+        assert!(broken_with(past).is_some());
+        for bad in [
+            "2026-10-29T10:11:1",
+            "2026-10-29T10:11:1x",
+            "2026-10-29 10:11:12",
+        ] {
+            let mut l = good();
+            l.push(recovery_intent(4, bad, "/o/a"));
+            assert!(broken_with(l).is_some(), "{bad}");
+        }
+        let mut unsynced: Vec<String> = good();
+        unsynced[5] = unsynced[5].replace("durability=synced", "durability=unconfirmed");
+        unsynced.push(recovery_intent(4, date, "/o/a"));
+        assert!(broken_with(unsynced).is_some());
+    }
+
+    /// A child is one plain, non-empty name. Kills the first `||` -> `&&`
+    /// of the name check in `JobRecords::child`.
+    #[test]
+    fn a_child_name_must_be_one_plain_component() {
+        for (rel, ok) in [
+            ("a.md", true),
+            ("", false),
+            (".", false),
+            ("..", false),
+            ("a/b", false),
+        ] {
+            let mut l = good();
+            l[1] = l[1].replace("rel=a.md", &format!("rel={rel}"));
+            // The group's name bytes follow the new name (the second
+            // child is 5 decoded bytes), so only the name is at fault.
+            l[3] = l[3].replace("bytes=9", &format!("bytes={}", 5 + rel.len()));
+            let b = broken_with(l);
+            assert_eq!(b.is_none(), ok, "{rel:?}: {b:?}");
+        }
+    }
+
+    #[test]
+    fn a_cut_job_line_is_a_proper_prefix_only() {
+        let job = "1790000000-1-deadbeef";
+        assert!(is_job_id_prefix(b"job\tid=1790", job));
+        assert!(is_job_id_prefix(b"job\tid=1790\n", job));
+        assert!(is_job_id_prefix(b"job\tid=", job));
+        assert!(!is_job_id_prefix(format!("job\tid={job}").as_bytes(), job));
+        assert!(!is_job_id_prefix(b"job\tid=zz", job));
+        assert!(!is_job_id_prefix(b"job\tid=17x", job));
+        assert!(!is_job_id_prefix(b"child\tid=1790", job));
+    }
+
+    /// A reader that hands out scripted results from `fill_buf`.
+    struct Script {
+        steps: Vec<io::Result<&'static [u8]>>,
+        cur: &'static [u8],
+    }
+    impl io::Read for Script {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            unreachable!()
+        }
+    }
+    impl BufRead for Script {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.cur.is_empty() && !self.steps.is_empty() {
+                self.cur = self.steps.remove(0)?;
+            }
+            Ok(self.cur)
+        }
+        fn consume(&mut self, n: usize) {
+            self.cur = &self.cur[n..];
+        }
+    }
+
+    /// An interrupted read is retried, any other error is returned.
+    #[test]
+    fn the_line_reader_retries_interrupts_and_returns_other_errors() {
+        let mut rd = Script {
+            steps: vec![Err(io::ErrorKind::Interrupted.into()), Ok(b"ab\n")],
+            cur: b"",
+        };
+        let mut buf = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut rd, &mut buf).unwrap(),
+            Got::Line {
+                content: 2,
+                ended: true
+            }
+        ));
+        let mut rd = Script {
+            steps: vec![Err(io::ErrorKind::PermissionDenied.into()), Ok(b"ab\n")],
+            cur: b"",
+        };
+        let e = read_line_bounded(&mut rd, &mut buf).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Writes a history of `total` bytes after its header: filler lines of
+    /// another job, then (at the end) `tail`.
+    fn big_history(p: &Path, total: u64, tail: &str, first_line_tail: &str) {
+        let mut w = io::BufWriter::new(File::create(p).unwrap());
+        let header = manifest::header(MAGIC, VERSION);
+        w.write_all(header.as_bytes()).unwrap();
+        let mut left = total - tail.len() as u64 - first_line_tail.len() as u64;
+        w.write_all(first_line_tail.as_bytes()).unwrap();
+        // 1 KiB lines of a foreign job that do not mention ours.
+        while left > 0 {
+            let n = left.min(1024) as usize;
+            let mut line = vec![b'f'; n];
+            line[n - 1] = b'\n';
+            w.write_all(&line).unwrap();
+            left -= n as u64;
+        }
+        w.write_all(tail.as_bytes()).unwrap();
+        w.flush().unwrap();
+    }
+
+    fn our_records_without_start() -> String {
+        good().concat()
+    }
+
+    /// Exactly the window after the header is read whole (no `job-start`
+    /// needed); one byte more is a truncated read that must prove the job
+    /// from its start. Kills `>` -> `>=` in `scan_file`.
+    #[test]
+    fn the_window_boundary_is_exact() {
+        let t = Tmp::new("scan-window");
+        let p = t.0.join("h");
+        let header_len = manifest::header(MAGIC, VERSION).len() as u64;
+        let tail = our_records_without_start();
+        big_history(&p, HISTORY_TAIL_WINDOW, &tail, "");
+        let f = File::open(&p).unwrap();
+        assert_eq!(
+            f.metadata().unwrap().len(),
+            header_len + HISTORY_TAIL_WINDOW
+        );
+        let r = scan_file(&f, &JobId(J.into())).unwrap();
+        assert!(r.known && r.broken.is_none(), "{:?}", r.broken);
+        big_history(&p, HISTORY_TAIL_WINDOW + 1, &tail, "");
+        let f = File::open(&p).unwrap();
+        let e = scan_file(&f, &JobId(J.into())).unwrap_err();
+        assert_eq!(e.to_string(), WINDOW_REFUSAL);
+    }
+
+    /// A window that starts inside a line drops that partial line: here
+    /// the cut part still names our job, and read as a record it would
+    /// break the job. Kills `==` -> `!=` on the byte count in `scan_file`.
+    #[test]
+    fn a_line_cut_by_the_window_start_is_dropped() {
+        let t = Tmp::new("scan-cut");
+        let p = t.0.join("h");
+        let start = format!("job-start\tjob={J}\n");
+        let tail = format!("{start}{}", our_records_without_start());
+        let cut = format!("zzzzzzzz\tjob={J}\tjunk=1\n");
+        // The window starts 3 bytes into this line, whose rest names the
+        // job; filler of another job and then our records follow it.
+        let mut w = io::BufWriter::new(File::create(&p).unwrap());
+        w.write_all(manifest::header(MAGIC, VERSION).as_bytes())
+            .unwrap();
+        w.write_all(cut.as_bytes()).unwrap();
+        let mut left = HISTORY_TAIL_WINDOW as usize - (cut.len() - 3) - tail.len();
+        while left > 0 {
+            let n = left.min(1024);
+            let mut line = vec![b'f'; n];
+            line[n - 1] = b'\n';
+            w.write_all(&line).unwrap();
+            left -= n;
+        }
+        w.write_all(tail.as_bytes()).unwrap();
+        w.flush().unwrap();
+        drop(w);
+        let f = File::open(&p).unwrap();
+        let size = f.metadata().unwrap().len();
+        let window_start = size - HISTORY_TAIL_WINDOW;
+        let mut b = [0u8; 1];
+        f.read_at(&mut b, window_start - 1).unwrap();
+        assert_ne!(
+            b[0], b'\n',
+            "the fixture must start the window inside a line"
+        );
+        let r = scan_file(&f, &JobId(J.into())).unwrap();
+        assert!(r.known && r.started && r.broken.is_none(), "{:?}", r.broken);
+    }
+
+    /// Undo of a job whose history or state folder is missing or cannot be
+    /// opened: "unknown job" only for a folder or file that is not there;
+    /// any other error is returned as it is. Kills the `NotFound` guards
+    /// -> `true` / `false` and `==` -> `!=` in `undo`.
+    #[test]
+    fn undo_tells_a_missing_history_from_one_it_cannot_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("undo-open");
+        t.env(|| {
+            let job = new_job_id();
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            assert_eq!(e.to_string(), "unknown job");
+            let dir = history_dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let e = undo(&job).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            assert_eq!(e.to_string(), "unknown job");
+            if running_as_root() {
+                return;
+            }
+            fs::write(dir.join(HISTORY), manifest::header(MAGIC, VERSION)).unwrap();
+            fs::set_permissions(dir.join(HISTORY), fs::Permissions::from_mode(0o000)).unwrap();
+            let e = undo(&job).unwrap_err();
+            fs::set_permissions(dir.join(HISTORY), fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+            let e = undo(&job).unwrap_err();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        });
+    }
+
+    /// The init lock file is made when it is missing. Kills `O_RDWR |
+    /// O_CREAT` -> `&` at the undo's lock open.
+    #[test]
+    fn undo_makes_a_missing_init_lock() {
+        let t = Tmp::new("undo-lock");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            fs::remove_file(history_dir().unwrap().join(INIT_LOCK)).unwrap();
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, std::slice::from_ref(&f)), "{r:?}");
+            assert!(!w.exists());
+        });
+    }
+
+    /// The undo's records are written: each group's closing record and the
+    /// final `undo` line with the moved / other counts. Kills
+    /// `HistLog::close` -> `Ok(())` and `-` -> `+` on the `other` count.
+    #[test]
+    fn undo_records_each_close_and_the_counts() {
+        let t = Tmp::new("undo-records");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            publish(&t, &mut rec, "a", &[("x.md", "1")]);
+            let b = publish(&t, &mut rec, "b", &[("x.md", "2")]);
+            assert!(rec.finish(true).undoable);
+            fs::write(b[0].parent().unwrap().join("extra"), "x").unwrap();
+            let r = undo(&job).unwrap();
+            assert_eq!(r.groups.len(), 2);
+            let h = history();
+            let kinds: Vec<&str> = h.lines().map(|l| l.split('\t').next().unwrap()).collect();
+            assert!(kinds.contains(&R_MOVED), "{kinds:?}");
+            let last = h.lines().last().unwrap();
+            assert!(last.starts_with("undo\t"), "{last}");
+            assert!(last.contains("\tmoved=1\tother=1"), "{last}");
+        });
+    }
+
+    /// A group an earlier undo ended as kept (its move was refused after
+    /// the intent was written) is tried again by the next undo, not
+    /// reported from the old record. Kills the `!matches!(o, Kept)` guard
+    /// -> `true` in `undo`.
+    #[test]
+    fn a_kept_group_is_retried_by_the_next_undo() {
+        let t = Tmp::new("undo-retry");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            {
+                let _f = fault(|p| (p == Point::Rename).then_some(libc::EPERM));
+                let r = undo(&job).unwrap();
+                assert!(!kept(&r).is_empty(), "{r:?}");
+            }
+            assert!(w.is_dir());
+            assert!(
+                history()
+                    .lines()
+                    .any(|l| l.starts_with(&format!("{R_KEPT}\t"))),
+                "the first undo left no closed intent: {}",
+                history()
+            );
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, std::slice::from_ref(&f)), "{r:?}");
+        });
+    }
+
+    /// Recovery never touches a foreign file at our info's name: content
+    /// that is not ours (not a prefix of ours, not neutral) stays as it
+    /// is, and the fresh undo takes another name.
+    #[test]
+    fn undo_recovery_leaves_a_foreign_info_alone() {
+        let t = Tmp::new("t8-rec-foreign");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info").join("a.trashinfo");
+            fs::write(&info, "someone else's note\n").unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(fs::read(&info).unwrap(), b"someone else's note\n");
+        });
+    }
+
+    /// Runs `undo` on a thread and fails the test if it does not return in
+    /// time (a blocked open on a planted FIFO).
+    fn undo_within(job: &JobId, before: impl FnOnce() + Send + 'static) -> bool {
+        let job = job.clone();
+        crate::sys::tests::within(60, move || {
+            before();
+            undo(&job).is_ok()
+        })
+    }
+
+    /// A FIFO planted where the Trash's `info` folder was is refused, not
+    /// waited on. Kills `O_RDONLY | O_DIRECTORY` -> `&` in `recover`.
+    #[test]
+    fn undo_recovery_does_not_wait_on_a_fifo_in_place_of_info() {
+        let t = Tmp::new("t8-rec-fifo-info");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::AfterMove);
+            let info = t.trash().join("info");
+            fs::rename(&info, t.0.join("info-aside")).unwrap();
+            crate::sys::tests::mkfifo(&info);
+            undo_within(&job, || {});
+        });
+    }
+
+    /// A FIFO swapped in for the moved group (between the move and its
+    /// check) is not opened for reading. Kills `O_RDONLY | O_DIRECTORY` ->
+    /// `&` in `after_move`. The fault hook is per thread, so it is set on
+    /// the thread that runs the undo.
+    #[test]
+    fn undo_does_not_wait_on_a_fifo_swapped_into_the_trash() {
+        let t = Tmp::new("t8-fifo-after");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            let moved = t.trash().join("files/a");
+            let aside = t.0.join("aside");
+            crate::sys::tests::within(60, move || {
+                let _f = fault(move |p| {
+                    if p == Point::AfterMove {
+                        fs::rename(&moved, &aside).unwrap();
+                        crate::sys::tests::mkfifo(&moved);
+                    }
+                    None
+                });
+                let _ = undo(&job);
+            });
+        });
+    }
+
+    /// A FIFO in place of the published folder is not opened for reading
+    /// either: the group is kept. Kills `O_RDONLY | O_DIRECTORY` -> `&` in
+    /// `undo_group`.
+    #[test]
+    fn undo_does_not_wait_on_a_fifo_in_place_of_the_published_folder() {
+        let t = Tmp::new("t8-fifo-place");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            fs::rename(&w, t.0.join("aside")).unwrap();
+            crate::sys::tests::mkfifo(&w);
+            assert!(undo_within(&job, || {}));
+        });
+    }
+
+    /// The group end must agree with the begin's declared count and with the
+    /// children actually seen, each on its own. Kills `||` -> `&&` in the
+    /// `group-end` arm.
+    #[test]
+    fn a_group_end_must_match_the_declared_and_the_seen_children() {
+        // Fewer children seen than declared and ended (name bytes agree).
+        let mut seen_less = good();
+        seen_less.remove(2);
+        seen_less[2] = seen_less[2].replace("bytes=9", "bytes=4");
+        assert!(broken_with(seen_less).is_some());
+        // The end agrees with the children seen but not with the begin.
+        let mut declared_more = good();
+        declared_more[0] = declared_more[0].replace("children=2", "children=3");
+        assert!(broken_with(declared_more).is_some());
+    }
+
+    /// A commit whose place could not be proved is counted: the job is not
+    /// undoable (and the record says `undo=no`). Kills `+=` -> `*=` on
+    /// `uncertain`.
+    #[test]
+    fn an_uncertain_place_refuses_undo() {
+        let t = Tmp::new("rec-uncertain");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            let p = try_publish(&t, &mut rec, "a", &[("x.md", "1")], &mut |_, _| Ok(())).unwrap();
+            let Outcome::PublishedUnknown { location, .. } = unknown("/in/a") else {
+                unreachable!()
+            };
+            rec.group(&p.group, &location, &Durability::Synced);
+            let r = rec.finish(true);
+            assert!(!r.undoable);
+            assert!(
+                history()
+                    .lines()
+                    .any(|l| l.starts_with("publish-uncertain\t"))
+            );
+            assert!(history().lines().last().unwrap().ends_with("\tundo=no"));
+        });
+    }
+
+    /// An empty file at our info name, with no closed (detached) info of
+    /// ours beside it, is ours cut short at its creation: recovery closes
+    /// it, so the name is free again. Kills `&&` -> `||` in the empty-file
+    /// test of `trash::recover`.
+    #[test]
+    fn undo_recovery_closes_our_own_empty_info() {
+        let t = Tmp::new("t8-rec-own-empty");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info");
+            fs::write(info.join("a.trashinfo"), "").unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            // The move took the name "a": the empty file had been closed
+            // (renamed away), not left to block it.
+            assert!(pairs(&t).iter().any(|(b, _)| b == "a"), "{:?}", pairs(&t));
+        });
+    }
 }

@@ -800,7 +800,13 @@ fn local_fs(fd: RawFd) -> bool {
     // f_type's width differs between targets; magics fit 32 bits.
     #[allow(clippy::unnecessary_cast)]
     let magic = st.f_type as u32;
-    !REMOTE_FS.contains(&magic)
+    !remote_magic(magic)
+}
+
+/// Whether a `statfs` magic is one of [`REMOTE_FS`] (apart from
+/// `local_fs` so the table can be tested without a remote mount).
+fn remote_magic(magic: u32) -> bool {
+    REMOTE_FS.contains(&magic)
 }
 
 /// A Trash's `files` and `info` folders, with the paths they were opened
@@ -2472,5 +2478,263 @@ pub(crate) mod tests {
         assert_eq!(UndoReason::parse("MoveRefused", None), None);
         assert_eq!(UndoReason::parse("Changed", Some(1)), None);
         assert_eq!(UndoReason::parse("Nope", None), None);
+    }
+
+    // ---- mutation pass 3 (T16a-2) ----
+
+    /// The mountinfo line bound is 64 KiB (the derivation at the constant);
+    /// no boundary test can see it, so it is pinned. Kills `*` -> `+`.
+    #[test]
+    fn the_mountinfo_line_bound_is_64_kib() {
+        assert_eq!(MOUNTINFO_LINE_MAX, 65_536);
+    }
+
+    /// The neutral text over the first `k` bytes of our info, and nothing
+    /// else, is ours still. Kills both `==` -> `!=` of `partly_neutral`.
+    #[test]
+    fn partly_neutral_accepts_exactly_a_neutral_prefix_over_our_text() {
+        let ours = trashinfo(b"/some/place/x", "2026-10-27T10:00:00").unwrap();
+        let n = neutral(OP);
+        for k in 1..=n.len() {
+            let mut b = n[..k].to_vec();
+            b.extend_from_slice(&ours[k.min(ours.len())..]);
+            assert!(partly_neutral(&b, &ours, OP), "k={k}");
+            // One byte of the tail changed: someone else's.
+            if k < ours.len() {
+                let mut other = b.clone();
+                *other.last_mut().unwrap() ^= 1;
+                assert!(!partly_neutral(&other, &ours, OP), "k={k} tail");
+            }
+            // One byte of the neutral part changed.
+            let mut other = b.clone();
+            other[0] ^= 1;
+            assert!(!partly_neutral(&other, &ours, OP), "k={k} head");
+            // A length that fits no k.
+            let mut longer = b.clone();
+            longer.push(b'x');
+            assert!(!partly_neutral(&longer, &ours, OP), "k={k} length");
+        }
+        assert!(!partly_neutral(&ours, &ours, OP));
+        assert!(!partly_neutral(b"", &ours, OP));
+    }
+
+    /// `pwrite_all` returns the error of a write that fails (here: a
+    /// descriptor open for reading). Kills `<` -> `==` on the result (the
+    /// error would be counted as progress and reported as success).
+    #[test]
+    fn pwrite_all_reports_a_failed_write() {
+        let d = Dir::new("pwrite");
+        fs::write(d.0.join("f"), "x").unwrap();
+        let f = fs::File::open(d.0.join("f")).unwrap();
+        let e = pwrite_all(f.as_raw_fd(), b"abc").unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EBADF));
+        let w = fs::OpenOptions::new()
+            .write(true)
+            .open(d.0.join("f"))
+            .unwrap();
+        pwrite_all(w.as_raw_fd(), b"abc").unwrap();
+        assert_eq!(fs::read(d.0.join("f")).unwrap(), b"abc");
+    }
+
+    /// A reserved info whose file has more than we wrote (read back as
+    /// equal over our length) is refused: the length is checked too. Kills
+    /// `||` -> `&&` in `reserve`.
+    #[test]
+    fn reserve_refuses_a_file_longer_than_what_was_written() {
+        let d = Dir::new("reserve-long");
+        let info = d.fd("");
+        let bytes = trashinfo(b"/x", "2026-10-27T10:00:00").unwrap();
+        let path = d.0.join("x.trashinfo");
+        let len = bytes.len();
+        let _f = fault(move |p| {
+            if p == Point::InfoWrite {
+                fs::write(&path, vec![b'Z'; 4 * len]).unwrap();
+            }
+            None
+        });
+        let Err((_, Some(_))) = reserve(info.as_raw_fd(), c("x.trashinfo"), OP, &bytes) else {
+            panic!("a longer file was accepted");
+        };
+    }
+
+    /// The reopened descriptor is a path descriptor with close-on-exec.
+    /// Kills `|` -> `&` in both places of `open_no_symlinks`' flags.
+    #[test]
+    fn open_no_symlinks_keeps_the_path_flag_and_close_on_exec() {
+        let d = Dir::new("opath");
+        let fd = open_no_symlinks(&c(d.0.to_str().unwrap()), libc::O_PATH).unwrap();
+        // SAFETY: fd is open.
+        let fl = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(fl & libc::O_PATH, 0);
+        // SAFETY: fd is open.
+        let fdfl = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(fdfl & libc::FD_CLOEXEC, 0);
+    }
+
+    /// The remote filesystems' magics are refused, the usual local ones
+    /// are not; and a real local folder is local.
+    #[test]
+    fn remote_filesystem_magics_are_refused() {
+        for m in REMOTE_FS {
+            assert!(remote_magic(*m), "{m:#x}");
+        }
+        for local in [0xEF53, 0x0102_1994, 0x9123_683E, 0x5846_5342, 0x2FC1_2FC1] {
+            assert!(!remote_magic(local), "{local:#x}");
+        }
+        let d = Dir::new("local");
+        assert!(local_fs(d.fd("").as_raw_fd()));
+    }
+
+    /// A Trash folder name that is a FIFO is refused at once; the open
+    /// must not wait for a writer. Kills `O_RDONLY | O_DIRECTORY` -> `&`
+    /// in `private_dir`. Bounded wait on a thread; a blocked reader is
+    /// freed by opening the write end.
+    #[test]
+    fn a_fifo_in_place_of_a_trash_folder_is_refused_without_waiting() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let d = Dir::new("fifo");
+        let fifo = d.0.join("files");
+        let cp = c(fifo.to_str().unwrap());
+        // SAFETY: cp is NUL-terminated.
+        assert_eq!(unsafe { libc::mkfifo(cp.as_ptr(), 0o700) }, 0);
+        let root = d.fd("");
+        let uid = euid();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(private_dir(root.as_raw_fd(), c"files", uid).is_err());
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(20));
+        if got.is_err() {
+            let _ = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+        }
+        assert_eq!(got, Ok(true));
+    }
+
+    /// `\ooo` is octal, three digits.
+    #[test]
+    fn unescape_decodes_octal_escapes() {
+        assert_eq!(unescape(b"a\\040b"), b"a b");
+        assert_eq!(unescape(b"\\134x"), b"\\x");
+        assert_eq!(unescape(b"\\377!"), [0xff, b'!']);
+        assert_eq!(unescape(b"\\0408"), b" 8");
+    }
+
+    /// The shared `.Trash` of a volume that is a FIFO is refused at once
+    /// and the per-user folder is used. Kills `O_RDONLY | O_DIRECTORY` ->
+    /// `&` in `volume_trash_at`.
+    #[test]
+    fn a_fifo_named_dot_trash_is_not_waited_on() {
+        let d = Dir::new("vol-fifo");
+        crate::sys::tests::mkfifo(&d.0.join(".Trash"));
+        let path = d.0.clone();
+        let ok = crate::sys::tests::within(60, move || {
+            let top = open_dir_follow(path.as_os_str().as_bytes()).unwrap();
+            volume_trash_at(top.as_raw_fd(), &path, euid()).is_ok()
+        });
+        assert!(ok);
+        assert!(d.0.join(format!(".Trash-{}", euid())).is_dir());
+    }
+
+    /// A mount point that is a FIFO is refused, not opened for reading.
+    /// Kills `O_RDONLY | O_DIRECTORY` -> `&` in `volume_trash`.
+    #[test]
+    fn a_fifo_as_mount_point_is_not_waited_on() {
+        let d = Dir::new("mnt-fifo");
+        let fifo = d.0.join("mnt");
+        crate::sys::tests::mkfifo(&fifo);
+        let failed = crate::sys::tests::within(60, move || {
+            TOPDIR.with_borrow_mut(|t| *t = Some(fifo));
+            let r = volume_trash((1, 1)).is_err();
+            TOPDIR.with_borrow_mut(|t| *t = None);
+            r
+        });
+        assert!(failed);
+    }
+
+    /// A Trash whose `files` or `info` folder is another mount than the
+    /// source (a second tmpfs in a user and mount namespace) is refused
+    /// with `EXDEV`; one on the source's mount is not. Kills `||` -> `&&`
+    /// in `trash_for` (the survivor the T8 re-review recorded). Runs the
+    /// same test as a helper under `unshare -Urm`; skipped where user
+    /// namespaces are not available.
+    #[test]
+    fn trash_for_refuses_a_trash_folder_on_another_mount() {
+        const NAME: &str = "trash::tests::trash_for_refuses_a_trash_folder_on_another_mount";
+        if let Some(root) = std::env::var_os("INACIRCLE_SECOND_MOUNT") {
+            second_mount_cases(Path::new(&root));
+            println!("ran second mount helper");
+            return;
+        }
+        let usable = std::process::Command::new("unshare")
+            .args(["-Urm", "true"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !usable {
+            eprintln!("skipped: no user and mount namespaces here");
+            return;
+        }
+        let d = Dir::new("second-mount");
+        let out = std::process::Command::new("unshare")
+            .arg("-Urm")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env("INACIRCLE_SECOND_MOUNT", &d.0)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ran second"),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Inside the namespace: a home Trash with `files` (then `info`) on a
+    /// tmpfs of its own, and a control without a mount.
+    fn second_mount_cases(root: &Path) {
+        for which in ["none", "files", "info"] {
+            let base = root.join(which);
+            let trash = base.join("data/Trash");
+            for sub in ["files", "info", "src"] {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(if sub == "src" {
+                        base.join(sub)
+                    } else {
+                        trash.join(sub)
+                    })
+                    .unwrap();
+            }
+            if which != "none" {
+                let target = c(trash.join(which).to_str().unwrap());
+                // SAFETY: all arguments are NUL-terminated strings.
+                let r = unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        target.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        c"mode=0700".as_ptr().cast(),
+                    )
+                };
+                assert_eq!(r, 0, "mount: {}", io::Error::last_os_error());
+            }
+            let data = base.join("data");
+            let src = open_dir_follow(base.join("src").as_os_str().as_bytes()).unwrap();
+            let r = with_env(&[("XDG_DATA_HOME", Some(data.to_str().unwrap()))], || {
+                trash_for(src.as_raw_fd()).map(|_| ())
+            });
+            match (which, r) {
+                ("none", Ok(())) => {}
+                (w, Err(e)) if w != "none" => {
+                    assert_eq!(e.raw_os_error(), Some(libc::EXDEV), "{w}: {e}");
+                }
+                (w, r) => panic!("{w}: {r:?}"),
+            }
+        }
     }
 }

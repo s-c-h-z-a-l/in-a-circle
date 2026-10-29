@@ -212,7 +212,10 @@ fn io_errors_fail_per_input() {
     let fails = lines(&out, "fail");
     assert_eq!(fails.len(), 2);
     assert_eq!(fails[0][1], missing.to_str().unwrap());
-    assert!(!fails[0][2].is_empty());
+    // The real cause, not the "too large" copy of the bounded read. Kills
+    // the `InvalidData` guard -> `true` in `process`.
+    assert!(fails[0][2].contains("No such file"), "{:?}", fails[0]);
+    assert!(fails[1][2].contains("not a regular file"), "{:?}", fails[1]);
     assert_eq!(lines(&out, "done").len(), 1);
 }
 
