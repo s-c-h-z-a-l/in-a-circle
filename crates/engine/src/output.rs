@@ -25,6 +25,15 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// folder's fd and only while its name is still the directory made here:
 /// a renamed folder still gets its own work dir removed, and a look-alike
 /// at the old path is left alone.
+///
+/// Limit (T7a, D-28): no fd of the work dir is held between its making and
+/// the drop (one fd per live step is not worth it), so its `(dev, ino)` is
+/// checked on a fresh open. Fooling that takes a same-user process that
+/// removes the 0700 folder, whose name has 64 random bits, and recreates
+/// that very name on the freed inode number: what is then emptied is a
+/// folder the same user made in a private folder of ours, in the unpublished
+/// work area. Staging and the registry are the same (see `unlink_own`,
+/// `StateDir::unlink_if`).
 pub struct WorkDir {
     pub path: PathBuf,
     parent: Fd,

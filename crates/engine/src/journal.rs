@@ -271,6 +271,14 @@ impl StateDir {
     /// Unlinks `name` if it is still the inode `id` (never another file
     /// that took its place). The check and the unlink are two steps: a
     /// same-user swap in between is the remaining window.
+    ///
+    /// Limit (T7a, D-28): where no fd of the object is held to the call,
+    /// `(dev, ino)` does not prove identity against reuse: the inode of a
+    /// removed file can be given to a new one. That needs the same user to
+    /// remove our file and create another under the same name in the
+    /// private 0700 state folder; the names are ours (registry entries by
+    /// job id, temporaries by 64 random bits), and the worst result is one
+    /// of our own bookkeeping files removed. `remove_own` holds the fd.
     pub(crate) fn unlink_if(&self, name: &str, id: (u64, u64)) -> io::Result<()> {
         let c = c_name(name.as_bytes())?;
         if ident(&stat_at(self.raw(), &c)?) != id {
