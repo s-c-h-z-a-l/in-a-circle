@@ -1600,6 +1600,35 @@ pub(crate) mod tests {
         })
     }
 
+    /// Samples every `PERIOD` until a process running exactly each of the
+    /// `argvs` has been seen (not necessarily at the same moment), then
+    /// creates `marker` for the fixture to proceed on and returns true; false
+    /// if `cap` passes first. The wait is on the condition, not on a fixed
+    /// window, so a loaded machine only makes it longer, up to `cap`.
+    pub(crate) fn seen_all_running(
+        argvs: Vec<Vec<String>>,
+        marker: std::path::PathBuf,
+        cap: Duration,
+    ) -> std::thread::JoinHandle<bool> {
+        /// As for `seen_running`.
+        const PERIOD: Duration = Duration::from_millis(10);
+        std::thread::spawn(move || {
+            let mut pending = argvs;
+            let end = Instant::now() + cap;
+            while Instant::now() < end {
+                pending.retain(|a| {
+                    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+                    procs_running(&a).is_empty()
+                });
+                if pending.is_empty() {
+                    return std::fs::write(&marker, b"").is_ok();
+                }
+                std::thread::sleep(PERIOD);
+            }
+            false
+        })
+    }
+
     /// A manifest's descendants: one holds the stdout pipe, writes an
     /// early action line at once and would write a late one after the
     /// leader's exit (a margin after it, by which the engine has seen the

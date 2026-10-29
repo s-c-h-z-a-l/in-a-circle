@@ -257,6 +257,9 @@ impl CancelToken {
                 return Err(io::Error::from_raw_os_error(r));
             }
             let fd = libc::signalfd(-1, &set, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC);
+            // mutants: the failing `signalfd` branch needs an fd/memory exhaustion
+            // or a stale errno to reach; it restores the mask and returns the error,
+            // so the token is not installed (fail closed).
             if fd < 0 {
                 let e = io::Error::last_os_error();
                 libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
@@ -282,6 +285,9 @@ impl CancelToken {
                 self.cancelled.set(true);
                 continue;
             }
+            // mutants: EINTR from read(2) on a signalfd is not reachable here: no
+            // handler, the cancel signals are blocked. A changed branch only skips or
+            // repeats a read; a cancel is still seen by the next poll (fail closed).
             if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
@@ -1252,6 +1258,8 @@ pub(crate) fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
 /// Whether our child `pid` has exited, observed without reaping it (the
 /// fallback for kernels without pidfd).
 pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
+    #[cfg(test)]
+    tests::PROBES.set(tests::PROBES.get() + 1);
     // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
@@ -1283,9 +1291,18 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
                 if r > 0 {
                     return true;
                 }
+                // mutants: not killable by a test. No signal handler is
+                // installed and SIGTERM/SIGINT are blocked, so poll does not
+                // see EINTR; the `==` -> `!=` mutant on the EINTR test would
+                // only matter then (an early `false`). Every caller of
+                // `wait_exited` (the supervisor, catalog.rs twice) treats
+                // `false` as "not gone" and fails closed: no security gap.
                 if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
+                // mutants: the `r < 0` fallback needs a poll error other than EINTR on a
+                // valid pidfd; none can be provoked. It asks `waitid` instead (no verdict
+                // is guessed), so a changed condition cannot open a gap.
                 if r < 0 {
                     return exited_unreaped(pid);
                 }
@@ -1341,7 +1358,10 @@ pub(crate) fn reap_group(pgid: libc::pid_t, until: Instant) -> io::Result<bool> 
         // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         #[cfg(test)]
-        let injected = tests::WAITID_ERRNO.get();
+        let injected = {
+            tests::PROBES.set(tests::PROBES.get() + 1);
+            tests::WAITID_ERRNO.get()
+        };
         #[cfg(not(test))]
         let injected: Option<i32> = None;
         let r = match injected {
@@ -1564,6 +1584,8 @@ impl<'a> Supervisor<'a> {
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
             if r < 0 {
+                // mutants: as for `drain`'s poll: no handler is installed and the cancel
+                // signals are blocked, so EINTR does not come; early exit fails closed.
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
@@ -1767,9 +1789,22 @@ impl<'a> Supervisor<'a> {
                 })
                 .collect();
             let left = until.saturating_duration_since(Instant::now());
+            // The deadline holds while data keeps arriving, not only when
+            // the pipes go quiet: poll alone returns at once as long as a
+            // writer never stops, so the clock is checked on every pass. In
+            // practice no writer is left (the group is reaped, the sandbox
+            // forbids what could keep one), but "a hard deadline on every
+            // wait, data pipe reads included" must not rest on that.
+            if left.is_zero() {
+                return false;
+            }
             let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+            // mutants: unreachable in a test: EINTR needs a signal handler or an
+            // unblocked signal, and none is installed (SIGTERM/SIGINT are blocked by
+            // the cancel token, nothing else handles signals). A poll that failed
+            // early would end the drain with `false`: the caller fails closed.
             if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
@@ -1942,6 +1977,12 @@ pub(crate) mod tests {
     thread_local! {
         /// The errno `reap_group` gets from its `waitid`, on this thread.
         pub(crate) static WAITID_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+        /// How many times `exited_unreaped` and `reap_group` called
+        /// `waitid` on this thread: a count of probes does not shrink with
+        /// load the way a CPU-time budget does (a slow machine probes less,
+        /// never more), so a bound on it holds on a busy machine and still
+        /// catches a nap that stays at zero.
+        pub(crate) static PROBES: Cell<u32> = const { Cell::new(0) };
     }
 
     /// Starts `sh -c script` as the leader of its own group and waits for
@@ -2570,7 +2611,7 @@ pub(crate) mod tests {
     /// by its exact command line (the positive control).
     #[test]
     fn an_unreadable_child_list_still_kills_the_group() {
-        use crate::catalog::tests::{procs_with, seen_running};
+        use crate::catalog::tests::{procs_with, seen_all_running};
         use crate::sandbox::tests::abi_or_skip;
         if abi_or_skip("an_unreadable_child_list_still_kills_the_group", 0).is_none() {
             return;
@@ -2580,34 +2621,70 @@ pub(crate) mod tests {
         fs::write(&input, "a\n").unwrap();
         let token = format!("36.{}{}", std::process::id(), line!());
         let hop_token = format!("hop{}{}", std::process::id(), line!());
+        let up = t.0.join("up");
         // Each link lives 50 ms before it forks the next and exits, long
-        // enough for the sampler to see one; the pid still moves on.
-        let hop = "exec >&- 2>&-; hop() { sleep 0.05; ( hop ) & exit 0; }; hop";
+        // enough for the sampler to see one; the pid still moves on. The
+        // chain is bounded (200 links, about 10 s) so it cannot outlive a
+        // harness that was killed.
+        let hop = "exec >&- 2>&-; hop() { [ $1 -lt 200 ] || exit 0; sleep 0.05; ( hop $(($1+1)) ) & exit 0; }; hop 0";
+        // The leader holds the `skip` line back until the sampler has seen
+        // both (it creates `up`), bounded to 1000 x 10 ms: the kill then
+        // always meets a running lingerer and a running chain, however long
+        // the sandbox and bash take to start on a loaded machine.
+        // `$` is escaped for the leader's own double quotes, so the chain's
+        // command line is exactly `hop`.
+        let hop_quoted = hop.replace('$', "\\$");
         let script = format!(
             "sleep {token} &\n\
-             bash -c \"{hop}\" {hop_token} &\n\
-             sleep 0.3\n\
-             read -r in < \"$6\"; printf \"skip\\t%s\\tx\\n\" \"$in\""
+             bash -c \"{hop_quoted}\" {hop_token} &\n\
+             n=0; while [ ! -e {up} ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done\n\
+             read -r in < \"$6\"; printf \"skip\\t%s\\tx\\n\" \"$in\"",
+            up = up.display()
         );
         let bin = t.0.join("lingers");
         install_script(&bin, &format!("exec /bin/bash -c '{script}' bash \"$@\""));
         let mut action = script_action(&t, "unused", "exit 1", "md");
         action.bin = bin;
-        let span = Duration::from_millis(250);
-        let sleeper = seen_running(&["sleep", &token], span);
-        let chain = seen_running(&["bash", "-c", hop, &hop_token], span);
+        // The sampler's own bound: the longest the whole start may take.
+        let seen = seen_all_running(
+            vec![
+                vec!["sleep".to_owned(), token.clone()],
+                vec![
+                    "bash".to_owned(),
+                    "-c".to_owned(),
+                    hop.to_owned(),
+                    hop_token.clone(),
+                ],
+            ],
+            up.clone(),
+            Duration::from_secs(20),
+        );
         let tok = CancelToken::install().unwrap();
         WAITID_ERRNO.set(Some(libc::EINVAL));
-        let mut seen = Seen::default();
-        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        let mut seen_obs = Seen::default();
+        run(
+            &[&action],
+            std::slice::from_ref(&input),
+            &mut seen_obs,
+            &tok,
+        );
         WAITID_ERRNO.set(None);
-        assert!(sleeper.join().unwrap(), "the lingering one never ran");
-        assert!(chain.join().unwrap(), "the chain never ran");
-        // Give a hop that escaped the kill time to show itself.
-        std::thread::sleep(Duration::from_millis(100));
-        let mut left = procs_with(&token);
-        left.extend(procs_with(&hop_token));
-        assert!(left.is_empty(), "survived the run: {left:?}");
+        assert!(seen.join().unwrap(), "the lingerer or the chain never ran");
+        // A killed process stays in /proc until the kernel has torn it down,
+        // which takes longer on a loaded machine; one that escaped the kill
+        // never goes (the lingerer lives 36 s, the chain about 10 s). So wait,
+        // bounded to 5 s, for 3 empty samples in a row 50 ms apart: the
+        // spacing is the 50 ms a link lives, so a hop that escaped shows in
+        // at least one of them.
+        let until = Instant::now() + Duration::from_secs(5);
+        let (mut quiet, mut left) = (0, Vec::new());
+        while quiet < 3 && Instant::now() < until {
+            left = procs_with(&token);
+            left.extend(procs_with(&hop_token));
+            quiet = if left.is_empty() { quiet + 1 } else { 0 };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(quiet >= 3, "survived the run: {left:?}");
     }
 
     /// A child list that cannot be read (an injected `waitid` error)
@@ -3020,24 +3097,14 @@ pub(crate) mod tests {
     // ---- Mutation pass 2 (D-39): tests for cleanup, supervision and the
     // ---- cancel token.
 
-    /// Thread CPU time in nanoseconds.
-    fn thread_cpu_ns() -> u128 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: ts is a valid out-pointer.
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-        ts.tv_sec as u128 * 1_000_000_000 + ts.tv_nsec as u128
-    }
-
-    /// How long a probing wait runs, and the CPU it may burn meanwhile.
-    /// The nap doubles up to `GROUP_PROBE_MAX`, so a few dozen wakeups cost
-    /// well under a millisecond in all; a nap stuck at zero spins the whole
-    /// wait (about `PROBE_WAIT` of CPU). Half the wait separates the two by
-    /// a wide margin even on a loaded machine.
+    /// How long a probing wait runs, and how many probes it may make. The
+    /// nap doubles from 1 ms up to `GROUP_PROBE_MAX` (50 ms), so 400 ms is
+    /// about 14 probes at the very most (6 doubling steps, then one per
+    /// 50 ms); oversleeping on a loaded machine only lowers it. A nap stuck
+    /// at zero probes thousands of times, an additive nap about 28 times:
+    /// 20 separates both from the real code with a margin, whatever the load.
     const PROBE_WAIT: Duration = Duration::from_millis(400);
-    const PROBE_CPU_MAX_NS: u128 = 200_000_000;
+    const PROBES_MAX: u32 = 20;
 
     fn blocked(sig: libc::c_int) -> bool {
         // SAFETY: with a null `set`, pthread_sigmask only reads the current
@@ -3054,11 +3121,13 @@ pub(crate) mod tests {
     /// and deliverable again after.
     #[test]
     fn dropping_the_token_restores_the_signal_mask() {
-        assert!(!blocked(libc::SIGTERM) && !blocked(libc::SIGINT));
+        // The mask is inherited through exec: a parent that blocks these
+        // signals is not this test's failure, so compare with the start.
+        let before = (blocked(libc::SIGTERM), blocked(libc::SIGINT));
         let tok = CancelToken::install().unwrap();
         assert!(blocked(libc::SIGTERM) && blocked(libc::SIGINT));
         drop(tok);
-        assert!(!blocked(libc::SIGTERM) && !blocked(libc::SIGINT));
+        assert_eq!((blocked(libc::SIGTERM), blocked(libc::SIGINT)), before);
     }
 
     /// The raw fd is the signalfd: silent until a cancel signal is
@@ -3221,17 +3290,16 @@ pub(crate) mod tests {
         quick.wait().unwrap();
 
         let mut slow = spawn_sh("sleep 30");
-        let (c0, t0) = (thread_cpu_ns(), Instant::now());
+        PROBES.set(0);
+        let t0 = Instant::now();
         assert!(!wait_exited(
             slow.id() as libc::pid_t,
             None,
             t0 + PROBE_WAIT
         ));
         assert!(t0.elapsed() >= PROBE_WAIT, "returned before the deadline");
-        assert!(
-            thread_cpu_ns() - c0 < PROBE_CPU_MAX_NS,
-            "the wait spun on the CPU"
-        );
+        let probes = PROBES.get();
+        assert!(probes <= PROBES_MAX, "the wait spun: {probes} probes");
         slow.kill().unwrap();
         slow.wait().unwrap();
     }
@@ -3241,16 +3309,30 @@ pub(crate) mod tests {
     #[test]
     fn reap_group_waits_for_a_running_member_without_spinning() {
         let (pid, c) = leader("sleep 30 & exit 0");
-        let (c0, t0) = (thread_cpu_ns(), Instant::now());
+        PROBES.set(0);
+        let t0 = Instant::now();
         let r = reap_group(pid, t0 + PROBE_WAIT);
         assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert!(t0.elapsed() >= PROBE_WAIT);
-        assert!(thread_cpu_ns() - c0 < PROBE_CPU_MAX_NS, "the reap spun");
+        let probes = PROBES.get();
+        assert!(probes <= PROBES_MAX, "the reap spun: {probes} probes");
         // The member still runs: end the group (reap_group took the leader).
         drop(c);
         // SAFETY: the group id stays ours while a member of it exists.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
         reap_group(pid, Instant::now() + Duration::from_secs(5)).unwrap();
+    }
+
+    /// Whether process group `pgid` holds an exited, unreaped member
+    /// (`waitid(P_PGID, WNOWAIT)` sees it; the leader is already reaped).
+    fn member_exited_unreaped(pgid: libc::pid_t) -> bool {
+        // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG | libc::__WALL;
+        // SAFETY: info is a valid out-pointer; WNOWAIT reaps nothing.
+        let r = unsafe { libc::waitid(libc::P_PGID, pgid as libc::id_t, &mut info, flags) };
+        // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
+        r == 0 && unsafe { info.si_pid() } != 0
     }
 
     /// Only a member that was running at our kill counts as alive: one that
@@ -3264,10 +3346,21 @@ pub(crate) mod tests {
             "sh -c 'sleep 0.1; exit 9' & exit 0",
             "sh -c 'sleep 0.1; kill -TERM $$' & exit 0",
         ] {
-            let (pid, c) = leader(script);
-            // Long enough for the member to have ended on its own.
-            std::thread::sleep(Duration::from_millis(600));
-            assert!(!kill_and_reap(pid, c).unwrap(), "{script}");
+            let (pid, mut c) = leader(script);
+            // The member must have ended on its own before the kill: wait
+            // (bounded) until the group holds an exited member besides the
+            // leader, which is reaped first so it cannot answer for it. A
+            // fixed sleep would break on a loaded machine.
+            c.wait().unwrap();
+            let until = Instant::now() + Duration::from_secs(30);
+            while !member_exited_unreaped(pid) {
+                assert!(Instant::now() < until, "{script}: the member never ended");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // SAFETY: the zombie member keeps the group id ours.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let r = reap_group(pid, Instant::now() + Duration::from_secs(5));
+            assert!(!r.unwrap(), "{script}");
         }
     }
 
@@ -3336,6 +3429,51 @@ pub(crate) mod tests {
         assert!(sup.tail.ends_with(&[b'b'; 100]));
         assert!(sup.tail[..STDERR_TAIL - 100].iter().all(|&b| b == b'a'));
         sup.child.wait().unwrap();
+    }
+
+    /// `drain` gives up at its deadline while writers never stop (three of
+    /// them, so the pipe is hardly ever empty and poll returns ready, EOF
+    /// never comes): it returns false at `until`,
+    /// not when the writer ends. The writer is bounded to 10 s (`timeout`)
+    /// so a broken `drain` fails the test instead of hanging it; the group
+    /// is killed at the end.
+    #[test]
+    fn drain_gives_up_at_the_deadline_while_data_keeps_arriving() {
+        let t = Tmp::new("drain-flood");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over(
+            "exec >&-; timeout 10 yes >&2 & timeout 10 yes >&2 & exec timeout 10 yes >&2",
+            &step,
+            &t,
+            &tok,
+        );
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let t0 = Instant::now();
+        let given_up = !sup.drain(&mut sink, t0 + Duration::from_millis(300));
+        let took = t0.elapsed();
+        stop(&mut sup);
+        assert!(given_up, "drain ran on to EOF past its deadline");
+        // 5 s: far past the deadline, far short of the writer's 10 s.
+        assert!(took < Duration::from_secs(5), "drain took {took:?}");
+    }
+
+    /// A deadline that has passed ends `drain` with false even though the
+    /// pipes are ready and would reach EOF at once: data waiting is not a
+    /// reason to go on past it. Deterministic, unlike the flood above (which
+    /// shows the wall-clock effect, but with a writer that may fall behind).
+    #[test]
+    fn drain_does_not_read_on_after_its_deadline() {
+        let t = Tmp::new("drain-late");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over("exec >&-; echo data >&2", &step, &t, &tok);
+        // Exited: the data is in the pipe and EOF follows it.
+        sup.child.wait().unwrap();
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(!sup.drain(&mut sink, past));
+        assert!(sup.tail.is_empty(), "read past the deadline");
     }
 
     fn done_event(t: &Tmp, rel: &str) -> Vec<u8> {

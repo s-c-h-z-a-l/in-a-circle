@@ -652,6 +652,13 @@ mod tests {
 
     // ---- Mutation pass 2 (D-39): the program, run by a small BPF
     // ---- interpreter, on both architectures.
+    //
+    // Limit: the interpreter follows the kernel's classic-BPF semantics (LE
+    // loads, jt/jf, unknown opcodes panic), but it is our own reading of
+    // them. Only x86_64 also gets a real kernel trial; on aarch64 there is
+    // none until the ARM CI/VM exists (U-01), so for that arch these tests
+    // are the only check of the program, and cover just the blocks written
+    // below (ioctl, fcntl), not every policy row.
 
     /// Runs `filter(arch)` on a syscall: the verdict, and the indices of the
     /// instructions it went through.
@@ -677,6 +684,10 @@ mod tests {
             } else if code == BPF_RET | BPF_K {
                 return (ins.k, seen);
             } else if code & 0x07 == BPF_JMP {
+                // BPF_X (bit 0x08) would compare with the X register, which
+                // this interpreter does not model: the program must never
+                // use it, or a jump would be read as K and pass wrongly.
+                assert_eq!(code & 0x08, 0, "BPF_X jump at {pc}: not modelled");
                 let hit = match code & 0xf0 {
                     BPF_JEQ => a == ins.k,
                     BPF_JGE => a >= ins.k,

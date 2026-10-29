@@ -1,4 +1,11 @@
 //! The supervisor loop against misbehaving fake actions.
+//!
+//! Every wait loop in a fixture script is bounded (3000 x 10 ms = 30 s, or
+//! 45 s of `$SECONDS` for the free-running writer): actions run in their own
+//! process group, so a harness that is killed from outside (CI timeout,
+//! Ctrl-C, the memory cap) cannot reach them, and an unbounded loop would
+//! live on as an orphan. 30 s is far past what a loaded machine needs for
+//! one handshake; a fixture that hits the bound exits 1 and fails its test.
 
 mod common;
 
@@ -54,7 +61,7 @@ fn background_descendant_fails_the_action_and_is_killed() {
         &format!(
             "work=$4; in=$(head -n1 \"$6\")\n\
              {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
-             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
+             n=0; until [ \"$(cat \"$in\")\" = ack ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
@@ -968,10 +975,10 @@ fn descendant_writer_outlives_leader() {
              mkfifo \"$work/bar\"\n\
              bash -c 'exec 7>>\"$1/0/a.md\" <\"$1/bar\"; printf \"warn\\t%s\\tup\\n\" \"$2\"\n\
              sleep \"$0\" & while read -r _; do :; done; sleep 0.1\n\
-             while :; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
+             while [ $SECONDS -lt 45 ]; do printf late >&7; printf \"warn\\t%s\\tlate\\n\" \"$2\"; done' \
              {token} \"$work\" \"$in\" &\n\
              exec 5>\"$work/bar\"\n\
-             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
+             n=0; until [ \"$(cat \"$in\")\" = ack ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              printf leader > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
@@ -1036,7 +1043,7 @@ fn descendant_cannot_escape_group() {
              unshare --user sleep {token}; u=$?\n\
              printf 'warn\\t%s\\tsetsid:%s pidns:%s userns:%s\\n' \"$in\" $s $p $u\n\
              {{ printf 'warn\\t%s\\tbg up\\n' \"$in\"; exec sleep {token}; }} &\n\
-             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done"
+             n=0; until [ \"$(cat \"$in\")\" = ack ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done"
         ),
     );
     let act = action(&bin, "md");
@@ -1088,7 +1095,7 @@ fn descendant_reaped_on_cancel() {
         &format!(
             "work=$4\n\
              bash -c 'trap \"\" TERM; {{ : > \"$1/g\"; exec sleep \"$0\"; }} & : > \"$1/up\"; exec sleep \"$0\"' {token} \"$work\" &\n\
-             while [ ! -e \"$work/up\" ] || [ ! -e \"$work/g\" ]; do sleep 0.01; done\n\
+             n=0; while [ ! -e \"$work/up\" ] || [ ! -e \"$work/g\" ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              printf 'progress\\t0.1\\n'\n\
              sleep {token}"
         ),
@@ -1125,7 +1132,7 @@ fn descendant_fork_chain_is_caught() {
         &format!(
             "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
              bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; exec >&- 2>&-; hop() {{ ( hop ) & exit 0; }}; hop' {token} \"$in\" &\n\
-             until [ \"$(cat \"$in\")\" = ack ]; do sleep 0.01; done\n\
+             n=0; until [ \"$(cat \"$in\")\" = ack ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""
         ),
@@ -1226,7 +1233,7 @@ fn violation_keeps_its_reason_over_a_surviving_descendant() {
         &format!(
             "work=$4; in=$(head -n1 \"$6\")\n\
              (trap '' TERM; : > \"$work/up\"; exec sleep {token}) &\n\
-             while [ ! -e \"$work/up\" ]; do sleep 0.01; done\n\
+             n=0; while [ ! -e \"$work/up\" ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              printf 'warn\\t%s\\tbg up\\n' \"$in\"\n\
              printf 'bogus\\n'\n\
              sleep {token}"
