@@ -2078,15 +2078,29 @@ pub(crate) mod tests {
         // Positive control: it is non-dumpable, so its environ (a
         // ptrace-checked file) is closed to us, as all of it is to a
         // foreign reader under hidepid.
-        let hidden = fs::read_dir("/proc")
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                fs::read(e.path().join("cmdline"))
-                    .is_ok_and(|c| String::from_utf8_lossy(&c).contains(&token))
-            })
-            .map(|e| fs::File::open(e.path().join("environ")).map(drop))
-            .collect::<Vec<_>>();
+        // Only the exec'd process counts (argv[0] is the binary): before
+        // its exec the forked `sh` carries the token in its cmdline too,
+        // and is readable. Waited for by condition: 5 s is far above a
+        // fork+exec even on a loaded slow machine, and a miss fails the
+        // assert below with an empty list.
+        use std::os::unix::ffi::OsStrExt;
+        let argv0 = bin.as_os_str().as_bytes().to_owned();
+        let until = Instant::now() + Duration::from_secs(5);
+        let hidden = loop {
+            let found = fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    fs::read(e.path().join("cmdline"))
+                        .is_ok_and(|c| c.split(|&b| b == 0).next() == Some(&argv0[..]))
+                })
+                .map(|e| fs::File::open(e.path().join("environ")).map(drop))
+                .collect::<Vec<_>>();
+            if !found.is_empty() || Instant::now() >= until {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
         assert!(
             matches!(&hidden[..], [Err(e)] if e.raw_os_error() == Some(libc::EACCES)),
             "{hidden:?}"

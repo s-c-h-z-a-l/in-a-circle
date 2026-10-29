@@ -1044,9 +1044,9 @@ fn trash_for(src: RawFd) -> io::Result<(TrashDir, u64)> {
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => volume_trash(dom)?,
         r => r?,
     };
-    // The `||` -> `&&` mutant of this check is a known survivor: telling
-    // the two apart needs a second mount, which a plain test cannot make
-    // (TODO: a userns test; see the T8 re-review).
+    // Telling the two folders apart needs a second mount: the
+    // `trash_for_refuses_a_trash_folder_on_another_mount` test makes one
+    // in a user and mount namespace and kills the `||` -> `&&` mutant.
     if domain(t.files.as_raw_fd())? != dom || domain(t.info.as_raw_fd())?.0 != dom.0 {
         return Err(io::Error::from_raw_os_error(libc::EXDEV));
     }
@@ -2673,6 +2673,12 @@ pub(crate) mod tests {
             .status()
             .is_ok_and(|s| s.success());
         if !usable {
+            // A safety test must not pass by skipping where the kernel
+            // controls are required (CI sets this).
+            assert!(
+                std::env::var_os("INACIRCLE_REQUIRE_KERNEL_CONTROLS").is_none_or(|v| v != "1"),
+                "INACIRCLE_REQUIRE_KERNEL_CONTROLS=1 but no user and mount namespaces"
+            );
             eprintln!("skipped: no user and mount namespaces here");
             return;
         }
