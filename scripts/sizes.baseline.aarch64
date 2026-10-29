@@ -1,4 +1,6 @@
-# aarch64 baseline, refreshed at the end of the hardening branch. Not
+# aarch64 baseline, refreshed at the end of the hardening branch (it
+# is the size of c84f4ad, not of the branch tip; it is refreshed again
+# from the final commit). Not
 # measured on this machine but on the native GitHub arm64 runner
 # (ubuntu-26.04-arm), CI run 40835264396, job "Native (ubuntu-26.04-arm)"
 # step "Binary sizes", commit c84f4ad (plan-hardening, after Task 16a),
