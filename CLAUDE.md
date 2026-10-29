@@ -228,6 +228,13 @@ Test behavior, not lines. Coverage is a signal, never a target.
   report absolute overruns even outside the reference timing gate.
 - The closing verification runs the suite with
   `INACIRCLE_REQUIRE_LANDLOCK=1`.
+- Tests never touch the user's home. Cargo runs every test binary through
+  `scripts/test-runner.sh` (`.cargo/config.toml`): HOME and the XDG dirs
+  point into a honeypot, and the run fails if anything lands there or the
+  real state or download folder changes. A spawned `inacircle` gets its
+  paths from `isolate()` (`bins/inacircle/tests/isolate`); an engine test
+  sets the environment only through `xdg::tests::with_env`, which points
+  every user path it was not given at a place nothing can be made in.
 - CI (`.github/workflows/ci.yml`) is a safety net, not the authority: the
   final word is the local run.
 - Measure line coverage per crate with `cargo llvm-cov` at the end of each

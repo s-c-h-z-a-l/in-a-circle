@@ -26,6 +26,7 @@ jobs:
         run: |
           python3 -m unittest scripts/tests/test_public_hygiene.py -v
           python3 -m unittest scripts/tests/test_wheel_measure.py -v
+          python3 -m unittest scripts/tests/test_test_runner.py -v
           scripts/check-public-hygiene.sh
 
       - name: Qualify Landlock and isolated seccomp installation
@@ -97,7 +98,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --no-fail-fast and `!cancelled()`: every gate runs and reports even
-      # after one failed; the job still fails if any did.
+      # after one failed; the job still fails if any did. Every test binary
+      # runs through scripts/test-runner.sh, which fails it if a test wrote
+      # to the default home.
       - name: Test
         if: ${{ !cancelled() }}
         run: cargo test --workspace --no-fail-fast
