@@ -650,13 +650,13 @@ mod tests {
         assert_eq!(Arch::Aarch64.audit(), 0xc000_00b7);
     }
 
-    // ---- Mutation pass 2 (D-39): the program, run by a small BPF
+    // ---- Mutation pass 2: the program, run by a small BPF
     // ---- interpreter, on both architectures.
     //
     // Limit: the interpreter follows the kernel's classic-BPF semantics (LE
     // loads, jt/jf, unknown opcodes panic), but it is our own reading of
     // them. Only x86_64 also gets a real kernel trial; on aarch64 there is
-    // none until the ARM CI/VM exists (U-01), so for that arch these tests
+    // none until an ARM CI runner or VM is available, so for that arch these tests
     // are the only check of the program. The table test at the end runs
     // every policy row through the whole program; the block tests above it
     // go deeper into the argument blocks.

@@ -61,8 +61,8 @@ const OLD_VERSION: u32 = 0;
 const HISTORY: &str = "history";
 /// Taken (`flock`) by whoever creates or archives the history.
 const INIT_LOCK: &str = "history.lock";
-/// The longest header line read: the proposed `history_header_bytes`
-/// (256 B, `parameters.json`, not frozen; T9 fixes the reader's limits).
+/// The longest header line read: the proposed header limit
+/// (256 B).
 /// The real header is 20 bytes; a longer first line is not a header.
 const HEADER_MAX: usize = 256;
 /// Archive names tried (`history.v0`, `history.v0.1`, ...): one per
@@ -72,45 +72,45 @@ const ARCHIVE_ATTEMPTS: u32 = 8;
 /// Fresh random temp names tried: a 64-bit random name only clashes with a
 /// planted or leftover file; past a few the folder is not ours to use.
 const TEMP_ATTEMPTS: u32 = 4;
-/// `registry_jobfile_bytes` (G0-P): a registry entry is one `job` line of
+/// A registry entry is one `job` line of
 /// about 200 bytes; 4096 is 20x. A bigger file is not skipped: whether a
 /// job runs is then unknown, so the listing is an error (and the writer
 /// keeps its own line under this, see [`REGISTRY_ACTION_MAX`]).
 const REGISTRY_ENTRY_MAX: usize = 4096;
-/// `registry_listing_jobs` (G0-P): at most this many directory entries are
+/// At most this many directory entries are
 /// examined per listing (hidden temp names and bad ones count). Real use
 /// is one to a few concurrent supervisors; 128 is far past that. More is
 /// an error, never a shorter list; the dead entries among the first 128
 /// are removed before the error, so a pile left by crashes heals itself.
 const REGISTRY_ENTRIES_MAX: usize = 128;
-/// `registry_fields` (G0-P): a `job` line has 7 pairs; 16 is 2x.
+/// A `job` line has 7 pairs; 16 is 2x.
 const REGISTRY_FIELDS_MAX: usize = 16;
 /// The action name in a registry line is cut to this many bytes: the line
 /// has to stay under [`REGISTRY_ENTRY_MAX`] or the job would be unlistable.
 /// The fixed fields take about 200 B and the escape at most doubles a
 /// name, so 512 B gives under 1.3 KB; it is a display name only.
 const REGISTRY_ACTION_MAX: usize = 512;
-/// `history_line_bytes` (G0-P): the longest record is the recovery intent
+/// The longest record is the recovery intent
 /// ([`RECOVERY_INTENT_MAX_BYTES`], 32 KiB); the real longest line is 219 B.
 /// A longer line is never ours; one that names the job refuses its undo.
 const HISTORY_LINE_BYTES: usize = 32_768;
-/// `history_fields_per_record` (G0-P): the widest real record has about 20
+/// The widest real record has about 20
 /// fields (columns after the kind); counted on the bytes before parsing.
 const HISTORY_FIELDS: usize = 32;
-/// `history_outputs_per_job` (G0-P): the engine accepts at most 1024
+/// The engine accepts at most 1024
 /// outputs from one action run (`exec::MAX_OUTPUTS`).
 const HISTORY_OUTPUTS: usize = 1024;
-/// `history_dirs_per_job` (G0-P): at most one wrapper directory per output.
+/// At most one wrapper directory per output.
 const HISTORY_DIRS: usize = 1024;
-/// `history_path_bytes` (G0-P): Linux `PATH_MAX`, the bound the Trash code
+/// Linux `PATH_MAX`, the bound the Trash code
 /// already works with. Decoded bytes of one path.
 const HISTORY_PATH_BYTES: usize = 4096;
-/// `history_path_bytes_per_job` (G0-P): the decoded path bytes one job's
-/// records keep. 1 MiB measured (T9 preflight) at 4.56 MB PSS for `undo`
+/// The decoded path bytes one job's
+/// records keep. 1 MiB measured at 4.56 MB PSS for `undo`
 /// of a job at the limit; twice that is 6.4 MB, over the 5,000,000 B
 /// budget, so the limit is load-bearing.
 const HISTORY_PATH_BYTES_PER_JOB: usize = 1_048_576;
-/// Intents one job's records keep (no G0-P row; derived): one per group
+/// Intents one job's records keep (derived): one per group
 /// ([`HISTORY_DIRS`]) plus three lost name races per group on average
 /// (a race is rare: the name was free when stat'ed). A kept intent costs
 /// ~40 B beside its path bytes (a `Vec` and its allocation), so 3072 more
@@ -118,11 +118,11 @@ const HISTORY_PATH_BYTES_PER_JOB: usize = 1_048_576;
 /// under the 5 MB budget. An empty target costs no path bytes, so without
 /// this count ~80 k of them fit in the window. Past it: refused.
 const HISTORY_INTENTS: usize = 4 * HISTORY_DIRS;
-/// `history_tail_window_bytes` (G0-P): `undo` looks at the last 8 MiB of
+/// `undo` looks at the last 8 MiB of
 /// the history only (an I/O window, read in [`HISTORY_READ_CHUNK`] pieces,
 /// never held). A job not provably inside it is refused before a move.
 const HISTORY_TAIL_WINDOW: u64 = 8 * 1024 * 1024;
-/// `history_read_chunk_bytes` (G0-P): the history reader's buffer.
+/// The history reader's buffer.
 const HISTORY_READ_CHUNK: usize = 1024;
 /// Running-job files are rewritten at most this often.
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
@@ -312,7 +312,7 @@ impl StateDir {
     /// that took its place). The check and the unlink are two steps: a
     /// same-user swap in between is the remaining window.
     ///
-    /// Limit (T7a, D-28): where no fd of the object is held to the call,
+    /// Limit: where no fd of the object is held to the call,
     /// `(dev, ino)` does not prove identity against reuse: the inode of a
     /// removed file can be given to a new one. That needs the same user to
     /// remove our file and create another under the same name in the
@@ -1505,7 +1505,7 @@ pub fn list_running() -> io::Result<Vec<(JobId, String, u32, f32)>> {
     let Some(path) = jobs_dir() else {
         return Ok(Vec::new());
     };
-    // Listed through the folder's own descriptor (D-28), never by path.
+    // Listed through the folder's own descriptor, never by path.
     let dir = match StateDir::open(&path) {
         Ok(d) => d,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2172,7 +2172,7 @@ impl JobRecords {
                 if g.closed() {
                     return Err("a duplicate commit");
                 }
-                // D-24(b): the place is the committed name, which must be
+                // the place is the committed name, which must be
                 // one of the intents.
                 if !g.intents.contains(&actual) {
                     return Err("a commit at a place no intent named");
@@ -2650,7 +2650,7 @@ fn old_or_unknown(dir: &StateDir, job: &JobId) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "unknown job")
 }
 
-/// D-25: where a group without its commit record is, if anywhere: an
+/// where a group without its commit record is, if anywhere: an
 /// intent's target that holds the wrapper itself (same device and inode,
 /// never through a symlink). A lookalike at a target is not it.
 fn recovered_place(g: &GroupRec) -> Option<PathBuf> {
@@ -3110,7 +3110,7 @@ mod tests {
         });
     }
 
-    /// The baseline T6 fixed in private is what the history holds, field
+    /// The baseline fixed in private is what the history holds, field
     /// for field: read back, it equals the group (no restat, no digest).
     #[test]
     fn recorded_baseline_equals_the_published_group() {
@@ -3145,7 +3145,7 @@ mod tests {
         });
     }
 
-    /// D-24(b): a name taken at the rename re-runs the intent for the same
+    /// a name taken at the rename re-runs the intent for the same
     /// group and operation; only the committed name is the group's place,
     /// and the other name's folder is not touched by undo.
     #[test]
@@ -3200,7 +3200,7 @@ mod tests {
         });
     }
 
-    /// D-25: after a crash between the rename and the commit record, an
+    /// after a crash between the rename and the commit record, an
     /// intent's target is the group's only if it holds the wrapper (same
     /// device and inode); a lookalike there is not. Either way the job is
     /// refused and nothing is removed.
@@ -4117,7 +4117,7 @@ mod tests {
 
     // ---- undo ----
 
-    // ---- undo into the Trash (T8) ----
+    // ---- undo into the Trash ----
 
     /// A normal group goes to the test's own Trash whole: its bytes are
     /// readable there, and `info/<name>.trashinfo` names where it was.
@@ -6043,7 +6043,7 @@ mod tests {
         assert!(all_moved(&undo(&job).unwrap(), &files));
     }
 
-    /// T16 A-I1: without `$XDG_RUNTIME_DIR` a running job is not in the
+    /// without `$XDG_RUNTIME_DIR` a running job is not in the
     /// registry; the history's `job-start` owner still refuses its undo.
     #[test]
     fn undo_refuses_a_running_job_without_a_runtime_dir() {
@@ -6051,7 +6051,7 @@ mod tests {
         without_runtime_dir(&t, || running_without_registry_is_refused(&t));
     }
 
-    /// T16 A-I1: a registry write that fails (a jobs folder this user
+    /// a registry write that fails (a jobs folder this user
     /// cannot write) is dropped silently; undo still refuses.
     #[test]
     fn undo_refuses_a_running_job_whose_registry_write_failed() {
@@ -6179,7 +6179,7 @@ mod tests {
         }
     }
 
-    /// T16 A-m2: another job's line cut off without its newline (a short
+    /// another job's line cut off without its newline (a short
     /// write whose newline failed too) between this job's intent and its
     /// commit does not swallow the commit: the job undoes, the cut job is
     /// refused.
@@ -6501,7 +6501,7 @@ mod tests {
         println!("ran helper");
     }
 
-    // ---- bounded reads (T9) ----
+    // ---- bounded reads ----
 
     const SJ: &str = "1790000000-1-deadbeef";
 
@@ -6944,7 +6944,7 @@ mod tests {
         });
     }
 
-    /// T16 A-m3: with a symlinked jobs folder (live or dangling) undo,
+    /// with a symlinked jobs folder (live or dangling) undo,
     /// `jobs` and `cancel` (both `list_running`) refuse: whether a job runs
     /// is unknown, never "none". Nothing moves.
     #[test]
@@ -7497,7 +7497,7 @@ mod tests {
         });
     }
 
-    // ---- mutation pass 3 (T16a-2): survivors of the journal's mutants ----
+    // ---- mutation pass 3: survivors of the journal's mutants ----
 
     /// Pins the three budget constants of this file that no boundary test
     /// can see (the boundary tests compare against the constant itself).

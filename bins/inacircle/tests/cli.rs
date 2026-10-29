@@ -685,7 +685,7 @@ fn catalog_caches(e: &Env) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// `text.txt-to-md` is `lossy=yes` everywhere the catalog is seen (T10, spec
+/// `text.txt-to-md` is `lossy=yes` everywhere the catalog is seen (spec
 /// 5): the shipped manifest, the cache, and so the planner (no lossless
 /// intermediate) and the notice. A cache written by the old binary (said
 /// `lossy=no`) cannot stay active: its stamp (size, mtime) is the old
@@ -831,7 +831,7 @@ fn two_step_route_end_to_end() {
     assert_eq!(fs::read_to_string(&out).unwrap(), "text\n+\n");
 }
 
-/// THP (D-29): `inacircle` runs with transparent huge pages disabled
+/// THP: `inacircle` runs with transparent huge pages disabled
 /// (`THP_enabled: 0`, so a small heap is not backed by a 2 MiB page). The
 /// action child gets the default back; that half is tested in the
 /// engine's sandbox tests, where the child can read `/proc`.
@@ -1381,9 +1381,9 @@ fn undo_moves_a_multi_output_folder_whole() {
 /// its own): peak RSS (`VmHWM`) <= 5 000 000 B. RSS counts shared pages
 /// whole, so RSS >= PSS and this is stricter than the budget. A debug
 /// build is not the shipped artifact: its 15 MB binary's code pages
-/// (kernel fault-around) dominate its RSS (after T7: 5048-5140 kB here,
+/// (kernel fault-around) dominate its RSS (5048-5140 kB here,
 /// 5428 kB on ARM CI, with the heap, RssAnon ~850 kB, unchanged; release
-/// ~3.9 MB, D-27), so there the number is printed, not judged, unless
+/// ~3.9 MB), so there the number is printed, not judged, unless
 /// `INACIRCLE_RSS_GATE` is set (CI), which makes a non-release build a
 /// failure.
 #[test]

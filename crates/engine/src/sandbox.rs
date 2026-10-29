@@ -576,7 +576,7 @@ fn cap_set(query: impl Fn(libc::c_ulong) -> libc::c_int) -> io::Result<u64> {
 /// Two sets are recorded but not refused on their own:
 /// - The bounding set only limits what an execve could gain; a normal
 ///   user's is full and grants nothing.
-/// - The inheritable set (decision D-16): systemd's user manager hands
+/// - The inheritable set: systemd's user manager hands
 ///   CAP_WAKE_ALARM to every process of a session, so refusing it would
 ///   refuse every normal desktop. A child can gain a capability from it
 ///   only through a file's inheritable capabilities at execve, and the
@@ -854,7 +854,7 @@ pub unsafe fn apply_in_child(ruleset: RawFd, limits: &Limits) -> io::Result<()> 
         check(libc::setrlimit(libc::RLIMIT_DATA, &data).into())?;
         check(libc::setrlimit(libc::RLIMIT_CORE, &core).into())?;
         check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).into())?;
-        // `inacircle` disables transparent huge pages for itself (D-29) and
+        // `inacircle` disables transparent huge pages for itself and
         // the flag is inherited across fork and exec; actions keep the
         // system default, so clear it here. Runs before the seccomp filter
         // is installed, so the filter needs no rule for it. The result is
@@ -963,7 +963,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// T16 A-m4: when the supervisor is killed with `SIGKILL`, the leader it
+    /// when the supervisor is killed with `SIGKILL`, the leader it
     /// spawned with `die_with_parent` dies too; without it (the negative
     /// control) the leader lives on.
     #[test]
@@ -1179,7 +1179,7 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&o.stderr).into_owned()
     }
 
-    /// The sandboxed child gets the system THP default back (D-29): the
+    /// The sandboxed child gets the system THP default back: the
     /// parent disables THP, `apply_in_child` clears it, and `/proc` is
     /// readable here to see it.
     #[test]
@@ -2899,7 +2899,7 @@ pub(crate) mod tests {
     /// The real snapshot of this (unprivileged) test process: one uid,
     /// one gid, no permitted/effective/ambient capability, and it passes.
     /// A nonzero bounding set (every normal process has one) and an
-    /// inheritable set (D-16: systemd gives CAP_WAKE_ALARM to a session)
+    /// inheritable set (systemd gives CAP_WAKE_ALARM to a session)
     /// do not matter.
     #[test]
     fn this_normal_user_passes_the_privilege_check() {
@@ -2925,7 +2925,7 @@ pub(crate) mod tests {
             ..ok
         })
         .unwrap();
-        // Positive (D-16): an inheritable set alone gives nothing under
+        // Positive: an inheritable set alone gives nothing under
         // no_new_privs with no ambient capability.
         validate_privilege(&PrivilegeSnapshot {
             cap_inheritable: 1 << CAP_WAKE_ALARM,

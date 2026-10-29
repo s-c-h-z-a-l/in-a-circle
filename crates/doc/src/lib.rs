@@ -110,13 +110,13 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The shipped budgets (G0-P rows `document_input_bytes`,
+    /// The shipped budgets (`document_input_bytes`,
     /// `document_nodes`, `document_owned_text_bytes`,
     /// `document_output_bytes`).
     pub const DEFAULT: Limits = Limits {
         // 8 MiB: 12.9x the largest real text measured (pcre2.txt, 652 KB).
         input_bytes: 8 * 1024 * 1024,
-        // 2^19 (raised from 2^17 on the T10 preflight): the densest real
+        // 2^19 (raised from 2^17 after measuring real inputs): the densest real
         // text measured is 15.9 B/node (oui.txt), so 2^17 nodes ended at
         // ~2 MiB of input; 2^19 reaches ~8 MiB at 16 B/node for ~100-200 MB
         // peak, a fifth of the sandbox's >= 1 GiB RLIMIT_DATA net.

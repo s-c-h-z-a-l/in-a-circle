@@ -107,7 +107,7 @@ menu. Release binary against the fake compositor (this cloud VM), one file,
 8 runs: median 320 µs, max 358 µs (budget 1 ms). The niri numbers come
 from the user's manual test and are not recorded here yet.
 
-#### Startup paint moved, not removed (hardening T12)
+#### Startup paint moved, not removed (hardening branch)
 
 The second shm buffer is no longer painted before the first commit (the
 wheel it would show is replaced at once by the pointer or the drag).
@@ -126,7 +126,7 @@ its pages and does a full paint there. Both points stay well under their
 285 µs on a path without a list (the buffer is painted after the commit,
 outside the window). The hover maximum (about 100 µs, the full paint of a
 just-released stale buffer in the first events after a swap) is unchanged
-within noise; it is not a T12 result.
+within noise; it is not a result of that change.
 
 Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
 same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind

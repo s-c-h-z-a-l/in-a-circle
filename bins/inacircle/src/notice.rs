@@ -34,8 +34,8 @@ const WAKE_EVENTS: usize = 64;
 /// taken as broken (a flood of signals about other notifications).
 const SPENT_WAKES: u32 = 4;
 /// A call once the run is over. `notification_rpc_deadline`
-/// (parameters.g0p.json): one RPC gets 500 ms, the figure the D-Bus crate's
-/// own per-call wait has; the preflight put a working fake server's reply
+/// (`docs/resource-limits.md`): one RPC gets 500 ms, the figure the D-Bus crate's
+/// own per-call wait has; measurement put a working fake server's reply
 /// in the microseconds, so this only bounds a server that stopped.
 const CALL_WAIT: Duration = Duration::from_millis(500);
 /// The whole open (connect, authenticate, `Hello`, capabilities, owner,

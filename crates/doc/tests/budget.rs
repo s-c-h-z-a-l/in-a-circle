@@ -399,9 +399,9 @@ fn display_names_the_budget() {
     );
 }
 
-/// The shipped values are the G0-P rows.
+/// The shipped values are the documented rows.
 #[test]
-fn default_limits_are_the_g0p_rows() {
+fn default_limits_are_the_documented_rows() {
     let d = Limits::DEFAULT;
     assert_eq!(d.input_bytes, 8_388_608);
     assert_eq!(d.nodes, 524_288);

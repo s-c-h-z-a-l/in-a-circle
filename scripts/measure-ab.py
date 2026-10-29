@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A/A and A/B-B/A startup series inside a running niri session (T13).
+"""A/A and A/B-B/A startup series inside a running niri session.
 
 Run it ON the machine whose niri it measures, only with the owner's explicit
 go-ahead: it spawns the wheel through `niri msg action spawn` and sends

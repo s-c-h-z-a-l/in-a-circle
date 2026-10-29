@@ -4,7 +4,7 @@
 //! Three kinds of evidence, each with a positive control in this binary,
 //! so a broken fixture cannot pass:
 //! - An evaluator runs both architectures' filters, on any host, on every
-//!   syscall number and on argument cases, against `POLICY` below (the T0
+//!   syscall number and on argument cases, against `POLICY` below (the syscall
 //!   inventory, written independently of the implementation).
 //! - Real-kernel probes on the native architecture: every denied syscall
 //!   is first made without the sandbox (it must reach the kernel and not
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// ---- the policy under test (T0 inventory) ----
+// ---- the policy under test (syscall inventory) ----
 
 /// The verdict a syscall gets: a fixed one, or one that depends on its
 /// arguments (checked by the argument tests).
@@ -46,7 +46,7 @@ use V::*;
 /// from the other architecture), verdict.
 type Row = (&'static str, Option<u32>, Option<u32>, V);
 
-/// Every syscall of the T0 inventory, grouped as there. Numbers: libc
+/// Every syscall of the syscall inventory, grouped as there. Numbers: libc
 /// 0.2.191 GNU LP64 tables (`x86_64/not_x32.rs`, `aarch64/mod.rs`); the
 /// ones libc lacks (setxattrat, removexattrat, file_setattr, io_pgetevents,
 /// open_tree_attr, statmount, listmount; fchmodat2 on aarch64) from the Linux 7.1 UAPI `asm/unistd_64.h` and

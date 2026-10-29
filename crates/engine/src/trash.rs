@@ -27,7 +27,7 @@
 //! [`RESOLVE_ATTEMPTS`] times) to a symlink-free path. Otherwise the place
 //! is `None` with an anchor, and the bytes are kept. Later renames by other
 //! programs are not followed. The exact steps are in
-//! `undo-protocol.md` of the hardening plan.
+//! the undo protocol notes kept with the hardening plan (not in this tree).
 
 use crate::output::{
     AnchorHint, CheckPoint, ChildBaseline, DirectoryId, Durability, FileId, GroupId,
@@ -48,26 +48,22 @@ use std::path::{Path, PathBuf};
 
 /// Trash names tried per group (`<leaf>`, `<leaf>.2` … `<leaf>.64`): a
 /// finite budget against earlier trashed items of the same name, not a
-/// probability estimate. Past it the group is kept (`NameTaken`). G0-P
-/// `trash_name_attempts` (D-34): 64, not 8, because with 8 the ninth undo
+/// probability estimate. Past it the group is kept (`NameTaken`). 64, not 8, because with 8 the ninth undo
 /// of an output with the same name would be refused; 63 taken names plus
-/// the free one cost ~18 us (T9 preflight, `names-cost.txt`: 17.7 us
+/// the free one cost ~18 us (measured: 17.7 us
 /// median on tmpfs, 18.1 us on btrfs), far under the action-start budget.
 pub const TRASH_NAME_ATTEMPTS: u32 = 64;
 /// The largest `.trashinfo` written or read back: a 4096-byte path
 /// percent-encoded is at most 12288 B, plus 52 B of header and date
 /// (12340 B). Past it no info is written and the group is kept
-/// (`TooLong`). Proposed `trashinfo_max_bytes` (parameters.json; finalised
-/// at G0-P).
+/// (`TooLong`). See `docs/resource-limits.md`.
 pub const TRASHINFO_MAX_BYTES: usize = 16384;
 /// The largest recovery-intent record: two `%XX`-encoded paths of at most
 /// 4096 raw bytes (12288 B each) plus at most 32 scalar fields of at most
 /// 64 + 32 B (28672 B in all). Past it nothing is written or moved
-/// (`TooLong`). Proposed `recovery_intent_max_bytes` (parameters.json;
-/// finalised at G0-P).
+/// (`TooLong`). See `docs/resource-limits.md`.
 pub const RECOVERY_INTENT_MAX_BYTES: usize = 32768;
-/// fd→path attempts (D-05, `undo-protocol.md`; proposed 4, finalised at
-/// G0-P): each is one `readlink` and one `openat2`. A renamer racing every
+/// fd→path attempts: each is one `readlink` and one `openat2`. A renamer racing every
 /// attempt wins; the place is then `None` (bytes kept, anchor reported),
 /// never guessed. Four tolerates a few ordinary renames during the undo.
 pub const RESOLVE_ATTEMPTS: u32 = 4;
@@ -2485,7 +2481,7 @@ pub(crate) mod tests {
         assert_eq!(UndoReason::parse("Nope", None), None);
     }
 
-    // ---- mutation pass 3 (T16a-2) ----
+    // ---- mutation pass 3 ----
 
     /// The mountinfo line bound is 64 KiB (the derivation at the constant);
     /// no boundary test can see it, so it is pinned. Kills `*` -> `+`.
@@ -2662,7 +2658,7 @@ pub(crate) mod tests {
     /// A Trash whose `files` or `info` folder is another mount than the
     /// source (a second tmpfs in a user and mount namespace) is refused
     /// with `EXDEV`; one on the source's mount is not. Kills `||` -> `&&`
-    /// in `trash_for` (the survivor the T8 re-review recorded). Runs the
+    /// in `trash_for` (a mutant an earlier review found surviving). Runs the
     /// same test as a helper under `unshare -Urm`; skipped where user
     /// namespaces are not available.
     #[test]

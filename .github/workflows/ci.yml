@@ -22,6 +22,11 @@ jobs:
       - name: Capability probe self-tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_sandbox_env.py' -v
 
+      - name: Public hygiene (no internal labels in tracked files)
+        run: |
+          python3 -m unittest scripts/tests/test_public_hygiene.py -v
+          scripts/check-public-hygiene.sh
+
       - name: Qualify Landlock and isolated seccomp installation
         run: python3 scripts/check-sandbox-env.py --min-landlock-abi 6 --output sandbox-qualification.json
 
@@ -96,7 +101,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --workspace --no-fail-fast
 
-      # D-10: the Trash undo's tests on the runner's disk filesystem. Their
+      # The Trash undo's tests on the runner's disk filesystem. Their
       # fixtures live in the temp dir, and the runners' /tmp is a tmpfs, so
       # TMPDIR points at the runner's temp folder on its root disk. The step
       # names that filesystem, fails unless it is ext4 (GNU stat:
@@ -116,7 +121,7 @@ jobs:
           cargo test -p inacircle --test cli -- undo 2>&1 | tee undo-cli.log
           grep -Eq "test result: ok. [1-9][0-9]* passed" undo-cli.log
 
-      # D-27: the RSS budget guard measures the shipped (release) binary.
+      # The RSS budget guard measures the shipped (release) binary.
       # The step fails unless exactly that test ran and passed (a filter
       # that matches nothing would otherwise pass silently), and the test
       # itself fails under INACIRCLE_RSS_GATE if it did not measure a

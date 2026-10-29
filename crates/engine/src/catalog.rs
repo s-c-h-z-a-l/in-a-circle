@@ -34,7 +34,7 @@ const DEADLINE: Duration = Duration::from_secs(2);
 const REFRESH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: usize = 64 * 1024;
 
-// Cache limits (G0-P rows `cache_*`). The cache is ours and rebuildable,
+// Cache limits (`cache_*`). The cache is ours and rebuildable,
 // so a cache past any of them is no cache: it is rejected loudly and
 // rebuilt, never half-used. The real cache is about 0.4 KB for three
 // records; the limits leave 1.6x to 100x room over the largest shape the
@@ -58,7 +58,7 @@ const CACHE_TOTAL_FIELDS: usize = 12_288;
 /// `cache_line_bytes`: a 4096 B path escaped twice is 8 KiB plus ~200 B
 /// of other fields; 32 KiB is 3.9x.
 const CACHE_LINE_BYTES: usize = 32_768;
-// Manifest limits (G0-P rows `manifest_*`), applied to the captured text
+// Manifest limits (`manifest_*`), applied to the captured text
 // (already <= `MAX_OUTPUT`) before `manifest::parse` allocates per record.
 /// `manifest_records`: a real manifest has 8 action lines; 256 is 32x.
 const MANIFEST_RECORDS: usize = 256;
@@ -430,10 +430,10 @@ fn dirs_from(over: Option<std::ffi::OsString>, data_home: Option<PathBuf>) -> Ve
     dirs
 }
 
-/// Entries examined per action folder, on the wheel's path too (no G0-P
-/// row; derived): 4x `CACHE_BINS`, room for the binaries plus unrelated
+/// Entries examined per action folder, on the wheel's path too (not a
+/// table row; derived): 4x `CACHE_BINS`, room for the binaries plus unrelated
 /// files beside them. Each entry costs one `stat`, ~0.3 us (a name lookup
-/// measured at 17.7 us for 64, T9 preflight `names-cost.txt`), so a full
+/// measured at 17.7 us for 64, measured while bounding the scan), so a full
 /// folder is ~0.15 ms. A folder with more is no action folder we know
 /// (a wrong `INACIRCLE_ACTIONS_DIR`, a broken install): the scan stops at
 /// entry 513 and the folder is refused whole, loudly, rather than used in
@@ -2276,7 +2276,7 @@ pub(crate) mod tests {
         assert_eq!(missing_tools(&act), ["no-such-tool-inacircle"]);
     }
 
-    // ---- bounded cache and manifest (T9) ----
+    // ---- bounded cache and manifest ----
 
     const HDR: &str = "inacircle-catalog 0\n";
 

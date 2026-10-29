@@ -209,7 +209,7 @@ pub fn read_file_bounded(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
     read_bounded_hint(f, max_bytes, len)
 }
 
-/// The `--inputs-from` limits (parameters G0-P rows `input_*`).
+/// The `--inputs-from` limits (see `docs/resource-limits.md`).
 /// `input_list_bytes`: 1024 paths at ~1 KiB; past it the list is refused.
 pub const INPUT_LIST_BYTES: usize = 1_048_576;
 /// `input_count`: one output per input at least and an action takes at

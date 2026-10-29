@@ -11,7 +11,7 @@ Attempt record, one JSON object per line:
    "value": int (non-negative; required for valid, null otherwise), "note": str?,
    "build": str? (A/B build label; summarize --build selects one, never pools)}
 
-Acceptance helpers (T13a): kib_to_bytes, marker_attempts (a `measure wheel`
+Acceptance helpers: kib_to_bytes, marker_attempts (a `measure wheel`
 line to attempts), memory_gate (every sample against 5,000,000 B) and
 idle_gate (idle properties kept apart). Verdicts are PASS, FAIL or
 INCOMPLETE; missing or zero evidence is never a PASS.

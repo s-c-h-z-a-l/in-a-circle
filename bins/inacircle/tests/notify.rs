@@ -431,7 +431,7 @@ fn final_notice_after_a_run() {
     assert_eq!(n.len(), 1);
     assert_eq!((n[0].replaces, n[0].summary.as_str()), (0, "a.md"));
     // `text.txt-to-md` is `lossy=yes`, but this text lost nothing: no
-    // formatting line (D-35).
+    // formatting line.
     assert!(plain_body(&n[0].body), "{}", n[0].body);
     assert_eq!(n[0].actions, ["undo", "Undo"]);
     // The close ended the Undo window at once.
@@ -1283,7 +1283,7 @@ fn wheel_cmd(e: &Env, bus: Option<&str>) -> Command {
 
 /// How long a test waits before it fails: a hung wheel must fail the test.
 const PATIENCE: Duration = Duration::from_secs(10);
-/// The proposed `ui_startup_deadline` (parameters.g0p.json).
+/// The proposed `ui_startup_deadline` (`docs/resource-limits.md`).
 const STARTUP: Duration = Duration::from_millis(2000);
 /// Esc, as the wheel reads it.
 const KEY_ESC: u32 = 1;

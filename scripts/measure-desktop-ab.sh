@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# T13b: the A/A and A/B-B/A startup series on the user's own niri desktop.
+# The A/A and A/B-B/A startup series on the user's own niri desktop.
 #
-#   scripts/measure-desktop-t13b.sh --i-am-present <A-bin-dir> <B-bin-dir> <out-dir>
+#   scripts/measure-desktop-ab.sh --i-am-present <A-bin-dir> <B-bin-dir> <out-dir>
 #
 # INJECTS INPUT (Escape via wtype) and opens the wheel ~600 times in the
 # running session: run it only when the owner sits at the machine, has
@@ -10,7 +10,8 @@
 # Plan: two independent A/A series, then two A/B-B/A runs, each until both
 # builds have 50 valid observations (cap 100 attempts per build and run).
 # A-bin-dir/B-bin-dir hold `inacircle` (and `inacircle-text`) of the A build
-# (~/inacircle-teszt/A-169163b) and the candidate release. Raw results:
+# (a build of the baseline commit) and the candidate release. Never a
+# directory of the installed binaries. Raw results:
 # <out-dir>/{attempts.jsonl,runs.json,environment.json,wheel-*.log}; then
 # summarize per series with scripts/summarize-ab.py <out-dir> and compare A against B.
 set -euo pipefail

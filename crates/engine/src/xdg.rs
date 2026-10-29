@@ -83,7 +83,7 @@ pub fn runtime_dir() -> Option<PathBuf> {
     abs_env("XDG_RUNTIME_DIR")
 }
 
-/// The longest `user-dirs.dirs` read (G0-P row `user_dirs_bytes`, D-34): xdg-user-dirs
+/// The longest `user-dirs.dirs` read (`docs/resource-limits.md`, `user_dirs_bytes`): xdg-user-dirs
 /// writes about eight short lines (under 0.5 KiB); eight keys with a 4096 B
 /// path each plus quotes stay under 34 KiB, so 64 KiB is about twice the
 /// worst real shape. A longer file is no user-dirs file we know: the
@@ -93,7 +93,7 @@ const USER_DIRS_MAX_BYTES: usize = 64 * 1024;
 /// The file's text, opened without blocking, only a regular file (checked
 /// on the open fd), read at most `USER_DIRS_MAX_BYTES`. A symlink at its
 /// name is followed: unlike the engine's own state files, this is the
-/// user's config, which dotfile managers link (D-34). `None` for anything
+/// user's config, which dotfile managers link. `None` for anything
 /// else (the caller falls back).
 fn read_user_dirs(path: &std::path::Path) -> Option<String> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -268,7 +268,7 @@ pub(crate) mod tests {
     }
 
     /// `user-dirs.dirs` is read bounded; a symlink at its own name is followed
-    /// to a regular file (D-34); a FIFO or directory, at the name or behind
+    /// to a regular file; a FIFO or directory, at the name or behind
     /// a link, falls back to `~/Downloads`.
     #[test]
     fn user_dirs_read_is_bounded_typed_and_followed() {
@@ -307,7 +307,7 @@ pub(crate) mod tests {
         std::fs::write(&f, pad(USER_DIRS_MAX_BYTES + 1)).unwrap();
         assert_eq!(get(), tmp.join("Downloads"));
         // A symlink at the name is followed (a dotfile manager's link to
-        // the user's own config, D-34).
+        // the user's own config).
         let real = tmp.join("real");
         std::fs::write(&real, want).unwrap();
         std::fs::remove_file(&f).unwrap();

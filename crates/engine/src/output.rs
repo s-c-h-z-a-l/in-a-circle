@@ -26,7 +26,7 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// a renamed folder still gets its own work dir removed, and a look-alike
 /// at the old path is left alone.
 ///
-/// Limit (T7a, D-28): no fd of the work dir is held between its making and
+/// Limit: no fd of the work dir is held between its making and
 /// the drop (one fd per live step is not worth it), so its `(dev, ino)` is
 /// checked on a fresh open. Fooling that takes a same-user process that
 /// removes the 0700 folder, whose name has 64 random bits, and recreates
@@ -723,8 +723,8 @@ pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedF
 /// budget). Any value works; this one only sets the syscall count.
 const COPY_CHUNK: usize = 64 * 1024;
 /// The largest TXT/Markdown output published (which must also be valid
-/// UTF-8): `document_output_bytes` (32 MiB) of the hardening parameters,
-/// proposed, finalised at G0-P/T10 (D-23/D-24 accepted it provisionally). A text
+/// UTF-8): `document_output_bytes` (32 MiB, see
+/// `docs/resource-limits.md`). A text
 /// output past it is refused before it is copied, so a runaway converter
 /// cannot fill the user's folder with a text nobody can open.
 const TEXT_OUTPUT_MAX: u64 = 32 << 20;
@@ -732,7 +732,7 @@ const TEXT_OUTPUT_MAX: u64 = 32 << 20;
 const WRAPPER: &CStr = c"w";
 
 /// The process's umask, read once. Published outputs follow it like `cp`
-/// and file managers do (D-23). It is read from `/proc/self/status`
+/// and file managers do. It is read from `/proc/self/status`
 /// (`Umask:`, Linux 4.7+), which changes nothing. Only without that line
 /// is it read by `umask(0)` and an immediate restore: that briefly zeroes
 /// the mask for the whole process, which is safe here because the engine
@@ -837,7 +837,7 @@ fn sync(fd: RawFd, p: Point) -> io::Result<()> {
 /// `unlinkat(dir, name, flags)` only while `name` is still `id`: what we
 /// made, never a look-alike put in its place. Errors are ignored.
 ///
-/// Limit (D-28): the identity is `(dev, ino)`, checked by name. Where the
+/// Limit: the identity is `(dev, ino)`, checked by name. Where the
 /// object's own fd is held until this call (the staging folder, the private
 /// wrapper, the work dir, which `WorkDir::drop` also reopens and checks),
 /// its inode cannot be freed and its number reused, so only a same-user
@@ -1681,7 +1681,7 @@ pub(crate) mod tests {
         assert!(upper.exists() && short.exists());
     }
 
-    /// T16 A-m1: a published group renamed to our name and a day old is
+    /// a published group renamed to our name and a day old is
     /// not ours: its outputs survive, whatever its mode. Only the 0700 dir
     /// of our shape goes.
     #[test]
@@ -3318,7 +3318,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- Mutation pass 2 (D-39).
+    // ---- Mutation pass 2.
 
     /// The identity folds seconds and nanoseconds of both times into
     /// nanoseconds, and keeps device, inode and size.

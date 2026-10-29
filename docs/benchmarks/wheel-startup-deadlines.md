@@ -41,7 +41,9 @@ exit 0.18 ms. The 2 s ceiling is 400 times the normal start.
 | open in 3 steps of 140 ms (420 ms) | notice shown |
 | open in 3 steps of 200 ms (600 ms) | given up: one 500 ms frame, not per step |
 
-Release build, fake compositor, with the change: main to the wheel's
+Release build, fake compositor, with the change (measured at `86a9b4a`,
+before the startup paint moved; for the current numbers see `wheel.md` and
+`hardening-performance.md`): main to the wheel's
 commit 604-620 us CPU (budget 1 ms), PSS at stage 2 with a 1024-file drop
 2.56 MB (budget 5 MB), `inacircle` 1,076,736 B (+6.9 kB over the previous
 commit; budget 1.5 MB).
@@ -52,7 +54,7 @@ measurement): before the hardening: p50 17 us, p95 35-39 us, max 123-156 us;
 this commit: p50 17-18 us, p95 35-38 us, max 129-169 us. The typical event
 is far inside the 100 us budget; the max is the first one or two repaints
 after a stage change (about 140 us) and exceeds it in both builds. That
-overrun predates the hardening and is handled in T12/T13, not here.
+overrun predates the hardening and is handled by the startup-paint work in `wheel.md`, not here.
 
 ## Verdict
 

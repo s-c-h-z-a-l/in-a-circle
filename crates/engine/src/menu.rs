@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(ids(route(&cat, "a/x", "b/y")), Some(vec!["c".into()]));
     }
 
-    /// The shipped text actions (T10): `text.txt-to-md` is lossy, so plain
+    /// The shipped text actions: `text.txt-to-md` is lossy, so plain
     /// text reaches a Markdown-only target by no two-step route, while the
     /// direct lossy step itself is still planned.
     #[test]

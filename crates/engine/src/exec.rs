@@ -3113,7 +3113,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Mutation pass 2 (D-39): tests for cleanup, supervision and the
+    // ---- Mutation pass 2: tests for cleanup, supervision and the
     // ---- cancel token.
 
     /// How long a probing wait runs, and how many probes it may make. The

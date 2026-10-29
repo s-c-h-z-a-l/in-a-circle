@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use action::{Command, Events, Invocation, parse_args};
 use doc::{LimitError, Limits, Loss, ReadError};
 
-/// The structure budgets of one conversion (G0-P rows `document_*`, see
+/// The structure budgets of one conversion (`document_*` budgets, see
 /// [`Limits::DEFAULT`] for the values and their reasons). The input is read
 /// at most `input_bytes` (+1 to detect more); past any budget the input
 /// fails (`fail`, nothing staged) and the batch goes on. The sandbox's
@@ -66,7 +66,7 @@ fn input_too_large() -> String {
     )
 }
 
-/// The `fail` reason of a budget error (rejection copies of the G0-P rows).
+/// The `fail` reason of a budget error (copies of the shipped budgets).
 fn limit_reason(e: LimitError) -> String {
     match e {
         LimitError::Exceeded("input") => input_too_large(),

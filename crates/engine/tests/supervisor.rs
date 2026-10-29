@@ -1578,7 +1578,7 @@ fn publication_baseline_reaches_the_observer_unchanged() {
     let [(group, location, durability)] = &obs.groups[..] else {
         panic!("{:?}", obs.groups)
     };
-    // The final modes follow the umask (D-23), set before the baseline.
+    // The final modes follow the umask, set before the baseline.
     let umask = std::fs::read_to_string("/proc/self/status")
         .unwrap()
         .lines()

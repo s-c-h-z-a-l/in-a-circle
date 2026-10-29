@@ -280,7 +280,7 @@ MARKER = (
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
-    """T13a: byte conversion, markers, memory and idle gates."""
+    """Byte conversion, markers, memory and idle gates."""
 
     setUp = WheelMeasureTests.setUp
 

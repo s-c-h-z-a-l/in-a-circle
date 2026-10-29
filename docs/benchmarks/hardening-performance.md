@@ -180,11 +180,11 @@ stripped release at each area's last commit, is in
 | Item | State |
 |---|---|
 | Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; a run on the real niri decides |
-| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: needs the reference desktop with a user present (`scripts/measure-desktop-t13b.sh --i-am-present`) |
+| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: needs the reference desktop with a user present (`scripts/measure-desktop-ab.sh --i-am-present`) |
 | X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
 | ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; the cold condition has not been run |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
-| U-01: choice-to-action entry with real clicks | OPEN: needs a real pointer session |
+| Choice-to-action entry with real clicks | OPEN: needs a real pointer session |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
 | Native ARM CI / own ARM VM | Native CI green on `c84f4ad` (run 40835264396). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
 | Engine/supervisor and Undo-window memory phases | OPEN: not yet measured (headless, to be run after the last code change) |
