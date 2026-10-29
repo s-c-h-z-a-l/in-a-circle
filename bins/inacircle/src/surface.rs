@@ -250,7 +250,9 @@ impl Shm {
         // SAFETY: the range is buffer i inside our own POOL-byte mapping
         // (i < 2); MADV_POPULATE_WRITE only faults pages in, it neither
         // changes their contents nor the mapping. A kernel without it
-        // (before 5.14) says EINVAL and the touch below does the same work.
+        // (before 5.14) says EINVAL and the touch below does the same work. Any
+        // other failure (ENOMEM) takes the same path: the stores fault the
+        // pages exactly as painting would, so it is no worse than no touch.
         let r = unsafe {
             libc::madvise(
                 self.ptr.add(i * FRAME).cast(),
@@ -1949,6 +1951,14 @@ mod tests {
     /// not before that commit, and its bytes do not change.
     #[test]
     fn the_second_buffer_is_populated_in_the_wait_before_the_swap() {
+        // With shmem THP "always" painting buffer 0 can fault one huge page
+        // that also covers buffer 1, so "fresh" is not observable.
+        if std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/shmem_enabled")
+            .is_ok_and(|t| t.contains("[always]"))
+        {
+            eprintln!("skipped: shmem THP is [always]");
+            return;
+        }
         let (mut s, _server) = render_surface();
         let mut m = Machine::with_menus(two_lit, empty_targets);
         m.wheel()

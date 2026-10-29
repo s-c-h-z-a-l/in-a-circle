@@ -171,7 +171,8 @@ observations.
 - Measured later with fault counters: the same change moved buffer 1's
   first touch (225 minor faults, about 0.9 ms of CPU on the ThinkCentre)
   from the startup into the early list → level 1 point, which then
-  measured 1.4-2.1 ms there. Buffer 1 is now faulted in while the wheel
+  measured 1.44 ms p50 on the fake compositor and 1.6 ms p50 / 2.1 ms max
+  by hand on niri there. Buffer 1 is now faulted in while the wheel
   waits after its first commit; on the fake compositor list → level 1 is
   back to 531 / 537 / 538 µs (p50 / p95 / max, 50 runs) on the
   ThinkCentre, with main → commit unchanged
