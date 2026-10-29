@@ -436,7 +436,7 @@ class AbRunnerTests(unittest.TestCase):
         saved = (ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S)
         ab.subprocess.run, ab.time.sleep = fake_run, lambda s: None
         ab.pids = lambda exe: []  # the wheel never appears
-        ab.residency = lambda exe: (0, 0)
+        ab.residency = lambda exe, cold=False: (0, 0)
         ab.MAP_DEADLINE_S = 0.0
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -494,11 +494,55 @@ class AbRunnerTests(unittest.TestCase):
             stranger = subprocess.Popen([str(d / "other" / "inacircle"), *tail])
             try:
                 time.sleep(0.2)
-                self.assertEqual(self.ab.pids(build.exe), [ours.pid])
+                import os as _os
+                seen = self.ab.pids(build.exe)
+                why = (f"tail={tail} probe={probe.returncode} ours={ours.pid} "
+                       f"ours_rc={ours.poll()} sleep={shutil.which('sleep')} "
+                       f"real={_os.path.realpath(shutil.which('sleep'))}")
+                if _os.path.exists(f"/proc/{ours.pid}/exe"):
+                    why += f" exe={_os.readlink(f'/proc/{ours.pid}/exe')}"
+                self.assertEqual(seen, [ours.pid], why)
             finally:
                 for p in (ours, stranger):
                     p.kill()
                     p.wait()
+
+    def test_cold_evicts_the_file_and_warm_reads_it_whole(self):
+        import os
+        # On a disk file system: tmpfs pages cannot be evicted. Written back
+        # first, because only clean pages are dropped.
+        with tempfile.TemporaryDirectory(dir=Path.home()) as d:
+            fstype = subprocess.run(["stat", "-f", "-c", "%T", d], capture_output=True,
+                                    text=True).stdout.strip()
+            if fstype in ("tmpfs", "ramfs"):
+                self.skipTest("home is on " + fstype)
+            f = Path(d) / "blob"
+            with open(f, "wb") as fh:
+                fh.write(os.urandom(64 * 4096))
+                fh.flush()
+                os.fsync(fh.fileno())
+            warm, pages = self.ab.residency(str(f))
+            self.assertEqual((warm, pages), (64, 64))
+            cold, _ = self.ab.residency(str(f), cold=True)
+            # A clean file's pages are droppable; allow a few the kernel keeps.
+            self.assertLessEqual(cold, 3)
+
+    def test_an_attempt_that_is_not_cold_is_invalid(self):
+        import types
+        ab = self.ab
+        saved = (ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S)
+        ab.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ab.time.sleep, ab.pids = (lambda s: None), (lambda exe: [])
+        ab.residency = lambda exe, cold=False: (90, 100)  # 90% resident
+        ab.MAP_DEADLINE_S = 0.0
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                build = ab.Build("B", d, d)
+                row = ab.attempt(build, "ab1", 1, cold=True)
+        finally:
+            ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S = saved
+        self.assertTrue(row["cold"])
+        self.assertIn("not cold", row["failure"])
 
     def test_pids_keeps_only_our_own_executable(self):
         import types
@@ -525,7 +569,7 @@ class AbRunnerTests(unittest.TestCase):
                  ab.shutil.which)
         ab.subprocess.run, ab.time.sleep = fake_run, lambda s: None
         ab.pids = lambda exe: []  # the wheel never appears: every attempt fails
-        ab.residency = lambda exe: (0, 0)
+        ab.residency = lambda exe, cold=False: (0, 0)
         ab.shutil.which = lambda name: None
         ab.MAP_DEADLINE_S = 0.0
         try:

@@ -60,10 +60,23 @@ spec.loader.exec_module(mw)
 libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
 
-def residency(path):
-    """(resident pages, pages) of the file after reading it whole; None on error."""
+def evict(path):
+    """Drop the file's clean page-cache pages (needs no privilege)."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
+
+
+def residency(path, cold=False):
+    """(resident pages, pages) of the file; None on error. Warm (default): the
+    file is read whole first. Cold: its pages are evicted first and not read."""
     with open(path, "rb") as f:
-        f.read()
+        if cold:
+            evict(path)
+        else:
+            f.read()
         size = os.fstat(f.fileno()).st_size
         pages = (size + mmap.PAGESIZE - 1) // mmap.PAGESIZE
         vec = (ctypes.c_ubyte * pages)()
@@ -140,12 +153,19 @@ def wheel_mapped(exe):
         time.sleep(POLL_S)
 
 
-def attempt(build, series, index):
+def attempt(build, series, index, cold=False):
     row = {"build": build.label, "series": series, "attempt": index,
-           "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
-    row["resident_pages"], row["executable_pages"] = residency(build.exe)
+           "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+           "cold": cold}
+    row["resident_pages"], row["executable_pages"] = residency(build.exe, cold)
     offset = build.log.stat().st_size
     failure = None
+    # Cold means the binary really is out of the page cache; a few pages may
+    # stay (shared with nothing running, but the kernel may keep some), so
+    # more than 5% resident invalidates the attempt rather than passing as cold.
+    if cold and (row["resident_pages"] is None
+                 or row["resident_pages"] > row["executable_pages"] * 0.05):
+        failure = f"not cold: {row['resident_pages']}/{row['executable_pages']} pages resident"
     try:
         sp = subprocess.run(["niri", "msg", "action", "spawn", "--", "sh", "-c", build.launch()],
                             capture_output=True, text=True, timeout=CMD_TIMEOUT_S)
@@ -196,6 +216,7 @@ def all_metrics_valid(row):
 
 
 def to_ledger(row, condition):
+    condition = COLD_CONDITION if row.get("cold") else condition
     note = (f"attempt {row['attempt']} {row['utc']} resident "
             f"{row['resident_pages']}/{row['executable_pages']}")
     return mw.marker_attempts(row["marker"], condition=condition, series=row["series"],
@@ -232,13 +253,14 @@ def environment(args, builds):
         "plan": args.plan, "valid_target": args.valid,
         "roles": {"a": args.label_a, "b": args.label_b if args.b_bin else None},
         "launcher": "niri msg action spawn -- sh -c <INACIRCLE_MEASURE=1 ... exec exe 2>>log>",
-        "condition": CONDITION,
+        "condition": COLD_CONDITION if args.cold else CONDITION,
         "waits_s": {"settle": SETTLE_S, "exit_deadline": EXIT_DEADLINE_S, "pause": PAUSE_S,
                     "series_pause": SERIES_PAUSE_S},
     }
 
 
 CONDITION = "startup-plain-warm-niri-spawn"
+COLD_CONDITION = "startup-plain-cold-niri-spawn"
 
 # Consecutive attempts without a full set of valid metrics after which the
 # run stops. Each attempt holds a full-screen, keyboard-grabbing overlay for
@@ -276,6 +298,8 @@ def main():
     ap.add_argument("--plan", default="aa,aa,ab,ab")
     ap.add_argument("--valid", type=int, default=50)
     ap.add_argument("--cap-factor", type=int, default=2)
+    ap.add_argument("--cold", action="store_true",
+                    help="evict the binary's page cache (posix_fadvise DONTNEED) before every attempt")
     args = ap.parse_args()
     steps = args.plan.split(",")
     if "ab" in steps and not args.b_bin:
@@ -298,7 +322,7 @@ def main():
 
     def run(build, series, pair=None):
         counters[(series, build.label)] = counters.get((series, build.label), 0) + 1
-        row = attempt(build, series, counters[(series, build.label)])
+        row = attempt(build, series, counters[(series, build.label)], args.cold)
         row["pair"] = pair
         rows.append(row)
         for rec in to_ledger(row, CONDITION):
