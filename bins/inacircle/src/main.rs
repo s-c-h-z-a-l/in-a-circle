@@ -27,7 +27,8 @@
 //! `restored <path|-> <reason>`, `recovery-kept <path|-> <reason> <errno|->`
 //! or `uncertain <op> <reason> <last path seen|->` (never a made-up place),
 //! then `warning <text>` lines. It exits 0 when every group went to the
-//! Trash or was provably kept in place, else 1.
+//! Trash or was kept in a place the line names (`kept <path>`), else 1
+//! (`kept - <reason>`: not found where it was saved).
 //!
 //! `--notify` adds desktop notifications: "running" with Cancel after a
 //! second, the result with Undo at the end. The stdout lines are written
@@ -685,9 +686,14 @@ fn cmd_undo(args: &[OsString]) -> u8 {
                     }
                     GroupOutcome::Kept {
                         location, reason, ..
-                    } => Line::new("kept")
-                        .bare(&place(&location.path_at_check))
-                        .bare(reason.name()),
+                    } => {
+                        // Kept with no place (`-`): nothing proves it is
+                        // still where it was saved, so it needs a look.
+                        attention |= location.path_at_check.is_none();
+                        Line::new("kept")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                    }
                     GroupOutcome::Restored {
                         location, reason, ..
                     } => {

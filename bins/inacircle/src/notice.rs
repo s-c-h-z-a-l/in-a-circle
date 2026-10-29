@@ -361,7 +361,7 @@ fn counted(items: impl Iterator<Item = String>) -> Vec<String> {
 /// The notification after an Undo click: the summary says what happened as
 /// a whole, never more than happened. `Undone` (body `Moved to Trash`) only
 /// when every group went to the Trash; `Nothing undone` only when every
-/// group was provably kept in place; `Partially undone` when some moved and
+/// group was kept (one not found where it was saved says so in its line); `Partially undone` when some moved and
 /// the rest is known; `Undo uncertain` whenever a group's place or metadata
 /// could not be proved; `Undo incomplete` otherwise (a group moved and came
 /// back, or stays in Trash after a failed way back). The body counts the

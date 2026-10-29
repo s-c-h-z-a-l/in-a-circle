@@ -379,6 +379,21 @@ fn undo_without_a_safe_trash_keeps_the_outputs() {
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+/// A group whose folder is gone from where it was saved is kept, but not
+/// provably in place: the line has no path and the exit is 1.
+#[test]
+fn undo_of_a_group_not_found_exits_1() {
+    let e = Env::new("undo-missing");
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
+    fs::rename(e.files().join("a"), e.root.join("a-moved")).unwrap();
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(1), "{}{}", u.stdout, u.stderr);
+    assert!(u.stdout.contains("kept\t-\tMissing"), "{}", u.stdout);
+    assert!(e.root.join("a-moved/a.md").exists());
+}
+
 #[test]
 fn review_focus_names() {
     let e = Env::new("names");

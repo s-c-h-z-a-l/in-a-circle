@@ -379,8 +379,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   undoes the job and replaces the result with what happened, per input
   group: `Undone` / `Moved to Trash` when every group went to the Trash;
   `Partially undone` with the counts (`2 moved to Trash, 1 kept because it
-  changed`); `Nothing undone` only when every group was provably kept in
-  place; `Undo uncertain` when a group's place or metadata could not be
+  changed`); `Nothing undone` only when every group was kept (one not found
+  where it was saved says so in its line; the CLI exits 1 for it); `Undo uncertain` when a group's place or metadata could not be
   proved (never shown as a success); `Undo incomplete` otherwise (a group
   moved and came back, or stays in the Trash). Places that need attention
   and warnings follow, each line escaped and bounded; `Undo failed` with
@@ -748,7 +748,7 @@ inacircle cancel <job-id>
   `recovery-kept <path|-> <reason> <errno|->` or
   `uncertain <op> <reason> <last path seen|->` (a hint, not a proved
   place), then `warning <text>` lines; exit 0 when every group went to the
-  Trash or was kept in place, else 1.
+  Trash or was kept at a place its line names, else 1.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
 - `--notify` adds the desktop notifications of [Feedback](#feedback). All

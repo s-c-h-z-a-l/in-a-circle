@@ -1511,6 +1511,10 @@ pub(crate) fn undo_group(g: &Group, log: &mut dyn Log, warn: &mut Vec<String>) -
     let info = match reserve(info_dir, info_name(&base), op, &bytes) {
         Ok(i) => i,
         Err((e, held)) => {
+            // EEXIST here is a race: `choose_name` saw both names free a
+            // moment ago. The group is kept (the user can undo again, the
+            // job stays open); no second candidate is tried, so a name
+            // fought over by another writer never loops.
             let r = if e == libc::EEXIST {
                 UndoReason::NameTaken
             } else {

@@ -2613,6 +2613,15 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .iter()
         .filter(|o| matches!(o, GroupOutcome::MovedToTrash { .. }))
         .count();
+    // Nothing undone (every group kept, e.g. no safe Trash today): no
+    // closing record, so the user can try again once the cause is fixed.
+    if res
+        .groups
+        .iter()
+        .all(|o| matches!(o, GroupOutcome::Kept { .. }))
+    {
+        return Ok(res);
+    }
     let l = Line::new("undo")
         .pair("job", &job.0)
         .pair("time", &unix_secs().to_string())
@@ -4680,11 +4689,7 @@ mod tests {
             assert_eq!(fs::read(&detached_at).unwrap(), n.as_bytes());
             // The move took the free name: the half-neutral file was not
             // put back at it.
-            assert!(
-                pairs(&t).iter().any(|(b, _)| b == "a"),
-                "{:?}",
-                pairs(&t)
-            );
+            assert!(pairs(&t).iter().any(|(b, _)| b == "a"), "{:?}", pairs(&t));
         });
     }
 
@@ -4700,7 +4705,11 @@ mod tests {
             let op = intent_op();
             let detached_at = info.join(format!(".{op}.inacircle-detached"));
             fs::rename(info.join("a.trashinfo"), &detached_at).unwrap();
-            fs::write(&detached_at, format!("inacircle-detached-trashinfo op={op}\n")).unwrap();
+            fs::write(
+                &detached_at,
+                format!("inacircle-detached-trashinfo op={op}\n"),
+            )
+            .unwrap();
             fs::write(info.join("a.trashinfo"), "").unwrap();
             let r = undo(&job).unwrap();
             assert!(
@@ -4724,10 +4733,7 @@ mod tests {
             let info = t.trash().join("info");
             fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
             let r = undo(&job).unwrap();
-            assert!(
-                matches!(one(&r), GroupOutcome::Uncertain { .. }),
-                "{r:?}"
-            );
+            assert!(matches!(one(&r), GroupOutcome::Uncertain { .. }), "{r:?}");
             assert_eq!(
                 fs::metadata(&info).unwrap().permissions().mode() & 0o777,
                 0o755,
@@ -4791,6 +4797,25 @@ mod tests {
                 panic!("{r:?}")
             };
             assert!(locations[0].path_at_check.is_none(), "{r:?}");
+        });
+    }
+
+    /// An undo that moved nothing (every group kept) leaves the job open:
+    /// once the cause is gone, a second undo runs.
+    #[test]
+    fn undo_that_moved_nothing_can_be_retried() {
+        let t = Tmp::new("t8-retry");
+        t.env(|| {
+            let (job, _, f) = single(&t, "a");
+            let real = t.0.join("real-trash");
+            fs::create_dir(&real).unwrap();
+            symlink(&real, t.trash()).unwrap();
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = Some(t.0.clone()));
+            assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::NoTrash]);
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = None);
+            fs::remove_file(t.trash()).unwrap();
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &[f]), "{r:?}");
         });
     }
 
