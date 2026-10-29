@@ -6278,6 +6278,125 @@ mod tests {
         );
     }
 
+    /// `Block::text` buffers up to exactly `CHUNK` bytes and writes a larger
+    /// piece whole; seen by what has reached the file. At the edges: a
+    /// piece that fills the buffer exactly stays buffered; one byte more
+    /// flushes it first; a piece of exactly `CHUNK` is buffered, one of
+    /// `CHUNK + 1` is written at once (after what was buffered).
+    #[test]
+    fn block_text_edges_at_the_chunk_size() {
+        let t = Tmp::new("blk");
+        let p = t.0.join("b");
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+            .unwrap();
+        let on_disk = || fs::metadata(&p).unwrap().len() as usize;
+        let mut b = Block {
+            f: &mut f,
+            buf: Vec::new(),
+        };
+        let head = "h".repeat(CHUNK - 1);
+        b.text(&head).unwrap();
+        b.text("a").unwrap(); // CHUNK in all: still buffered
+        assert_eq!(on_disk(), 0, "a full buffer is not yet written");
+        b.text("b").unwrap(); // CHUNK + 1: the buffer goes first
+        assert_eq!(on_disk(), CHUNK);
+        assert_eq!(b.buf, b"b");
+        b.flush().unwrap();
+        assert_eq!(on_disk(), CHUNK + 1);
+        let exact = "e".repeat(CHUNK);
+        b.text(&exact).unwrap(); // exactly CHUNK on an empty buffer
+        assert_eq!(on_disk(), CHUNK + 1, "a piece of CHUNK is buffered");
+        b.text("x").unwrap();
+        assert_eq!(on_disk(), 2 * CHUNK + 1);
+        b.flush().unwrap();
+        let big = "g".repeat(CHUNK + 1);
+        b.text(&big).unwrap(); // larger than CHUNK: written at once
+        assert_eq!(on_disk(), 3 * CHUNK + 3);
+        assert!(b.buf.is_empty());
+        let body = fs::read(&p).unwrap();
+        assert!(body.starts_with(head.as_bytes()));
+        assert_eq!(&body[CHUNK - 1..CHUNK + 1], b"ab");
+    }
+
+    /// `end_line` adds a newline only to a non-empty file whose last byte is
+    /// not one.
+    #[test]
+    fn end_line_terminates_only_a_cut_off_line() {
+        let t = Tmp::new("endl");
+        let lock = File::create(t.0.join("lock")).unwrap();
+        for (before, after) in [
+            ("", ""),
+            ("\n", "\n"),
+            ("a\n", "a\n"),
+            ("x", "x\n"),
+            ("a\nbc", "a\nbc\n"),
+        ] {
+            let p = t.0.join("h");
+            fs::write(&p, before).unwrap();
+            let mut f = OpenOptions::new().read(true).append(true).open(&p).unwrap();
+            end_line(&mut f, &lock).unwrap();
+            assert_eq!(fs::read_to_string(&p).unwrap(), after, "{before:?}");
+        }
+    }
+
+    /// A write that takes only part of the bytes (here a pipe with room for
+    /// 10 of 4106) is a `WriteZero` error naming both counts; a write that
+    /// fits is `Ok`.
+    #[test]
+    fn write_whole_reports_a_short_write() {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0 as RawFd; 2];
+        // SAFETY: fds has room for two descriptors.
+        assert_eq!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK) },
+            0
+        );
+        // SAFETY: both fds were just made and are owned here.
+        let (_rd, mut wr) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+        // Two pages of room, 10 bytes of them left; the write is larger
+        // than PIPE_BUF (4096), so it is not atomic, and its tail (10 bytes) fits
+        // the free room of the last page: the kernel takes exactly that.
+        // SAFETY: plain fcntl on our own pipe.
+        let sz = unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, 8192) };
+        assert_eq!(sz, 8192, "the pipe size could not be set");
+        write_whole(&mut wr, &vec![b'x'; 8192 - 10]).unwrap();
+        let e = write_whole(&mut wr, &[b'y'; 4106]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WriteZero);
+        assert!(
+            e.to_string().contains("short write (10 of 4106 bytes)"),
+            "{e}"
+        );
+    }
+
+    /// The state folder and its files are opened close-on-exec, and a file
+    /// non-blocking (the type is checked after), never through a symlink.
+    #[test]
+    fn state_files_are_cloexec_nonblocking_and_not_followed() {
+        let t = Tmp::new("flags");
+        let flags = |f: &File| {
+            // SAFETY: plain fcntl queries on an open fd.
+            let fd = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFD) };
+            let fl = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFL) };
+            (fd & libc::FD_CLOEXEC != 0, fl & libc::O_NONBLOCK != 0)
+        };
+        let dir = StateDir::create(&t.0.join("state")).unwrap();
+        // SAFETY: as above.
+        let d = unsafe { libc::fcntl(dir.raw(), libc::F_GETFD) };
+        assert!(d & libc::FD_CLOEXEC != 0, "the folder fd leaks to a child");
+        let f = dir
+            .open_file("f", libc::O_RDWR | libc::O_CREAT, 0o600)
+            .unwrap();
+        assert_eq!(flags(&f), (true, true));
+        symlink(t.0.join("state/f"), t.0.join("state/link")).unwrap();
+        assert!(dir.open_file("link", libc::O_RDWR, 0).is_err());
+        // The folder itself is not entered through a link at its last part.
+        symlink(t.0.join("state"), t.0.join("dlink")).unwrap();
+        assert!(StateDir::open(&t.0.join("dlink")).is_err());
+    }
+
     /// The window's reader never goes past the size the scan began with,
     /// whatever the file grows to meanwhile.
     #[test]
