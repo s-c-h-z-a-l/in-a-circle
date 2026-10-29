@@ -26,8 +26,8 @@
 //! then `openat2(RESOLVE_NO_SYMLINKS)` and an identity check, at most
 //! [`RESOLVE_ATTEMPTS`] times) to a symlink-free path. Otherwise the place
 //! is `None` with an anchor, and the bytes are kept. Later renames by other
-//! programs are not followed. The exact steps are in
-//! the undo protocol notes kept with the hardening plan (not in this tree).
+//! programs are not followed: the object has no stable name once another
+//! program moves it, and chasing it would risk acting on the wrong file.
 
 use crate::output::{
     AnchorHint, CheckPoint, ChildBaseline, DirectoryId, Durability, FileId, GroupId,
