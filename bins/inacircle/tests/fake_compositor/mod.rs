@@ -54,6 +54,9 @@ pub struct Script {
     /// The `done` of the `sync` the client sends after destroying its layer
     /// surface (its orderly teardown).
     pub teardown_ack: Delay,
+    /// Before that answer, a `done` on another callback (the one of the
+    /// startup `sync`), which is not the answer to the teardown's `sync`.
+    pub teardown_decoy: bool,
 }
 
 impl Default for Script {
@@ -61,6 +64,7 @@ impl Default for Script {
         Script {
             configure: Delay::Now,
             teardown_ack: Delay::Now,
+            teardown_decoy: false,
         }
     }
 }
@@ -122,6 +126,8 @@ pub struct Compositor {
     destroyed_at: Option<Instant>,
     /// When the fake sent the teardown's `done`.
     acked_at: Option<Instant>,
+    /// The callback of the startup `sync` (0 before it).
+    startup_cb: u32,
     /// When the fake saw the client hang up (`hangs_up`).
     left_at: Option<Instant>,
     /// Every request to the layer surface so far: opcodes, in order.
@@ -175,6 +181,7 @@ impl Compositor {
             serial: 100,
             destroyed_at: None,
             acked_at: None,
+            startup_cb: 0,
             left_at: None,
             layer_log: Vec::new(),
         }
@@ -303,10 +310,14 @@ impl Compositor {
             (1, op::wl_display::SYNC) if self.destroyed_at.is_some() => {
                 // The teardown's round trip.
                 let cb = r.word(0);
+                if self.script.teardown_decoy && self.startup_cb != 0 {
+                    self.send(self.startup_cb, op::wl_callback::DONE, &0u32.to_ne_bytes());
+                }
                 self.later(self.script.teardown_ack, Timer::Ack(cb));
             }
             (1, op::wl_display::SYNC) => {
                 let cb = r.word(0);
+                self.startup_cb = cb;
                 for (i, (name, ver)) in GLOBALS.iter().enumerate() {
                     let mut a = (i as u32 + 1).to_ne_bytes().to_vec();
                     a.extend(wstr(name));
@@ -483,6 +494,14 @@ impl Compositor {
     /// Whether the client has closed its end by now (a read, no waiting).
     pub fn eof(&mut self) -> bool {
         !self.service()
+    }
+
+    /// How long after the fake sent the teardown's `done` the client left;
+    /// `None` if the fake never sent it.
+    pub fn since_ack(&self) -> Option<Duration> {
+        self.acked_at
+            .zip(self.left_at)
+            .map(|(a, l)| l.duration_since(a))
     }
 
     /// Whether the fake sent the teardown's `done` before the client left.

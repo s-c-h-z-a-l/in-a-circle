@@ -1394,3 +1394,48 @@ fn startup_alarm_backstop_kills_a_stuck_startup_after_five_seconds() {
     let st = stopped_wheel_after("alarm5", 6);
     assert_eq!(st.signal(), Some(libc::SIGALRM), "{st:?}");
 }
+
+/// The close waits for the answer to its own `sync`, not for any callback's
+/// `done`: a `done` on another callback leaves it waiting until its
+/// deadline (the fake never answers the `sync`). Kills `&&` -> `||` in the
+/// callback handler. Only a lower bound is asserted, which load can only
+/// help.
+#[test]
+fn startup_teardown_ignores_a_done_on_another_callback() {
+    let root = Root::new("startup-td-decoy");
+    let script = Script {
+        teardown_ack: Delay::Never,
+        teardown_decoy: true,
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(!c.teardown_acked());
+    let held = c.since_destroy().expect("destroyed");
+    // The client's own deadline is counted from before its layer destroy
+    // was sent, so allow the flush in between.
+    assert!(held >= TEARDOWN - Duration::from_millis(100), "{held:?}");
+}
+
+/// The answer to the close's own `sync` ends the wait at once: the client
+/// does not sit out its deadline. Kills `!=` -> `==` (the answer never
+/// recognised). The bound is half the deadline: the deadline itself is the
+/// failure being detected.
+#[test]
+fn startup_teardown_leaves_when_its_sync_is_answered() {
+    let root = Root::new("startup-td-prompt");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    let after = c.since_ack().expect("the fake answered");
+    assert!(after < TEARDOWN / 2, "{after:?}");
+}
