@@ -306,8 +306,23 @@ fn oversized_message_is_refused() {
 
 #[test]
 fn real_daemon_roundtrip() {
+    // The daemon's own home and runtime dir: a session daemon makes
+    // `$XDG_RUNTIME_DIR/dbus-1/services`, never in the user's.
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let home = Dir(std::env::temp_dir().join(format!("dbus-real-daemon-{}", std::process::id())));
+    let runtime = home.0.join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
     let child = Command::new("dbus-daemon")
         .args(["--session", "--print-address", "--nofork"])
+        .env("HOME", &home.0)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_DATA_HOME", home.0.join("data"))
+        .env("XDG_CONFIG_HOME", home.0.join("config"))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn();

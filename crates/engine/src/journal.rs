@@ -2912,21 +2912,26 @@ mod tests {
                 N.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = fs::remove_dir_all(&p);
-            for d in ["state", "run", "out", "data"] {
+            for d in ["state", "run", "out", "data", "home", "config", "cache"] {
                 fs::create_dir_all(p.join(d)).unwrap();
             }
             Tmp(p)
         }
+        /// Every user path inside the test's folder: its history, registry,
+        /// Trash, and the download folder a read-only source falls back to
+        /// (`home/Downloads`, no `user-dirs.dirs` in `config`).
         fn env<R>(&self, f: impl FnOnce() -> R) -> R {
-            let s = self.0.join("state");
-            let r = self.0.join("run");
-            let d = self.0.join("data");
+            let p = |d: &str| self.0.join(d).into_os_string().into_string().unwrap();
+            let (s, r, d) = (p("state"), p("run"), p("data"));
+            let (h, c, k) = (p("home"), p("config"), p("cache"));
             with_env(
                 &[
-                    ("XDG_STATE_HOME", Some(s.to_str().unwrap())),
-                    ("XDG_RUNTIME_DIR", Some(r.to_str().unwrap())),
-                    // Each test's own Trash, never the user's.
-                    ("XDG_DATA_HOME", Some(d.to_str().unwrap())),
+                    ("XDG_STATE_HOME", Some(&s)),
+                    ("XDG_RUNTIME_DIR", Some(&r)),
+                    ("XDG_DATA_HOME", Some(&d)),
+                    ("HOME", Some(&h)),
+                    ("XDG_CONFIG_HOME", Some(&c)),
+                    ("XDG_CACHE_HOME", Some(&k)),
                 ],
                 f,
             )
@@ -2942,6 +2947,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Joins every thread before any result is judged: one that panics
+    /// must not leave the others running after the test's environment is
+    /// restored (they would resolve the outer home).
+    fn join_all<T>(hs: Vec<std::thread::JoinHandle<T>>) -> Vec<T> {
+        let all: Vec<_> = hs.into_iter().map(|h| h.join()).collect();
+        all.into_iter()
+            .map(|r| r.unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
     }
 
     fn history_path() -> PathBuf {
@@ -3779,8 +3794,8 @@ mod tests {
                         })
                     })
                     .collect();
-                for h in hs {
-                    assert!(h.join().unwrap());
+                for ok in join_all(hs) {
+                    assert!(ok);
                 }
                 let text = history();
                 let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
@@ -6407,9 +6422,7 @@ mod tests {
                     }
                 })
             };
-            let (a, b) = (work(1), work(2));
-            a.join().unwrap();
-            b.join().unwrap();
+            join_all(vec![work(1), work(2)]);
             let text = history();
             let (v, lines) = manifest::parse(&text, MAGIC).unwrap();
             assert_eq!(v, 1);
@@ -6427,15 +6440,14 @@ mod tests {
         t.env(|| {
             let job = JobId("10-1".into());
             job_of(&t, &job, &[("a", "d")]);
-            let results: Vec<_> = (0..4)
-                .map(|_| {
-                    let j = job.clone();
-                    std::thread::spawn(move || undo(&j))
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect();
+            let results = join_all(
+                (0..4)
+                    .map(|_| {
+                        let j = job.clone();
+                        std::thread::spawn(move || undo(&j))
+                    })
+                    .collect(),
+            );
             let ok = results.iter().filter(|r| r.is_ok()).count();
             let dup = results
                 .iter()

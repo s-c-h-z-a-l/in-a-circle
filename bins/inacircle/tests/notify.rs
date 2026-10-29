@@ -4,6 +4,8 @@
 
 #[path = "../../../crates/dbus/tests/common/mod.rs"]
 mod fake;
+mod isolate;
+use isolate::isolate;
 
 use std::ffi::OsStr;
 use std::fs;
@@ -91,15 +93,9 @@ impl Env {
     /// `inacircle` with the bus at `bus` (none: no bus variable at all).
     fn cmd<S: AsRef<OsStr>>(&self, bus: Option<&str>, args: &[S]) -> Command {
         let mut c = Command::new(BIN);
-        c.args(args)
+        isolate(&mut c, &self.root)
+            .args(args)
             .env("INACIRCLE_ACTIONS_DIR", self.root.join("actions"))
-            .env("XDG_CACHE_HOME", self.root.join("cache"))
-            .env("XDG_STATE_HOME", self.root.join("state"))
-            .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("XDG_DATA_HOME", self.root.join("home/.local/share"))
-            .env("HOME", self.root.join("home"))
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("INACIRCLE_UNDO_WAIT_MS")
             .current_dir(self.files())
             .stdin(Stdio::null())

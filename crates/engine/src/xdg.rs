@@ -149,8 +149,34 @@ pub(crate) mod tests {
     /// Tests that touch the environment take this lock and restore it.
     static ENV: Mutex<()> = Mutex::new(());
 
+    /// Every variable a path of the user's is resolved from (state, config
+    /// with `user-dirs.dirs`, cache, Trash, runtime, the download
+    /// fallback through `HOME`).
+    pub(crate) const USER_PATH_VARS: [&str; 6] = [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    ];
+
+    /// What a variable of [`USER_PATH_VARS`] a test did not name points
+    /// at: absolute (so no default applies) and under `/proc`, where
+    /// nothing can be created, so a path the test forgot fails there
+    /// instead of reaching the user's home.
+    pub(crate) const NOWHERE: &str = "/proc/inacircle-test-nowhere";
+
+    /// The one way an engine test sets the environment: `vars` as given,
+    /// every other variable of [`USER_PATH_VARS`] at [`NOWHERE`], all
+    /// restored afterwards (also on a panic).
     pub(crate) fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
         let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let unnamed = USER_PATH_VARS
+            .iter()
+            .filter(|k| !vars.iter().any(|(n, _)| n == *k))
+            .map(|k| (*k, Some(NOWHERE)));
+        let vars: Vec<(&str, Option<&str>)> = vars.iter().copied().chain(unnamed).collect();
         let saved: Vec<_> = vars
             .iter()
             .map(|(k, _)| (*k, std::env::var_os(k)))
@@ -159,7 +185,7 @@ pub(crate) mod tests {
         // test that mutates or depends on the environment holds ENV, so no
         // code observes a half-changed environment.
         unsafe {
-            for (k, v) in vars {
+            for (k, v) in &vars {
                 match v {
                     Some(v) => std::env::set_var(k, v),
                     None => std::env::remove_var(k),

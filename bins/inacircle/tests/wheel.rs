@@ -8,8 +8,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod fake_compositor;
+mod isolate;
 
 use fake_compositor::{Compositor, Delay, KEYBOARD, POINTER, Script, source_writes};
+use isolate::isolate;
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
 
@@ -23,12 +25,12 @@ fn runtime_dir(name: &str) -> PathBuf {
 
 fn wheel(rt: &Path) -> (Option<i32>, String, String, Duration) {
     let t = Instant::now();
-    let out = Command::new(BIN)
+    // Never the developer's session bus (`isolate`): a failed start
+    // notifies.
+    let out = isolate(&mut Command::new(BIN), rt)
         .env("XDG_RUNTIME_DIR", rt)
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("WAYLAND_SOCKET")
-        // Never the developer's session bus: a failed start notifies.
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .output()
         .unwrap();
     (
@@ -101,9 +103,9 @@ fn alarm_works_even_if_the_parent_disabled_sigalrm() {
     // A compositor that accepts and never answers.
     let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
     let mut cmd = Command::new(BIN);
-    cmd.env("XDG_RUNTIME_DIR", &rt)
+    isolate(&mut cmd, &rt)
+        .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // SAFETY: the closure runs in the forked child before exec and calls
@@ -154,10 +156,9 @@ fn bad_lock(name: &str, plant: impl FnOnce(&Path), limit: Duration) {
     let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
     listener.set_nonblocking(true).unwrap();
     let t = Instant::now();
-    let mut child = Command::new(BIN)
+    let mut child = isolate(&mut Command::new(BIN), &rt)
         .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -230,16 +231,11 @@ impl Root {
         // compositor (the A/B hover measurement); never set in the suite.
         let bin = std::env::var("INACIRCLE_TEST_BIN").unwrap_or_else(|_| BIN.to_owned());
         let mut c = Command::new(bin);
-        c.env("XDG_RUNTIME_DIR", self.0.join("runtime"))
+        // Never the developer's session bus; the fallback `<runtime>/bus`
+        // does not exist here.
+        isolate(&mut c, &self.0)
             .env("WAYLAND_DISPLAY", "wayland-0")
-            .env("XDG_CACHE_HOME", self.0.join("cache"))
-            .env("XDG_STATE_HOME", self.0.join("state"))
-            .env("XDG_DATA_HOME", self.0.join("home/.local/share"))
-            .env("HOME", self.0.join("home"))
             .env("INACIRCLE_ACTIONS_DIR", self.0.join("actions"))
-            // Never the developer's session bus; the fallback
-            // `<runtime>/bus` does not exist here.
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .stdin(std::process::Stdio::null());
         c
     }
@@ -1503,10 +1499,9 @@ fn stopped_wheel_after(name: &str, secs: u64) -> std::process::ExitStatus {
     let rt = runtime_dir(name);
     // A compositor that accepts and never answers.
     let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
-    let mut child = Command::new(BIN)
+    let mut child = isolate(&mut Command::new(BIN), &rt)
         .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

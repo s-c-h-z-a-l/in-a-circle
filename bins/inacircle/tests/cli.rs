@@ -6,6 +6,9 @@
 //! When a test ends without panicking, no `.inacircle-*` work dir may be
 //! left anywhere under its root.
 
+mod isolate;
+
+use isolate::isolate;
 use manifest::{Line, parse_line};
 use std::ffi::OsStr;
 use std::fs;
@@ -153,14 +156,9 @@ impl Env {
 
     fn cmd<S: AsRef<OsStr>>(&self, args: &[S]) -> Command {
         let mut c = Command::new(BIN);
-        c.args(args)
+        isolate(&mut c, &self.root)
+            .args(args)
             .env("INACIRCLE_ACTIONS_DIR", self.root.join("actions"))
-            .env("XDG_CACHE_HOME", self.root.join("cache"))
-            .env("XDG_STATE_HOME", self.root.join("state"))
-            .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("XDG_DATA_HOME", self.root.join("home/.local/share"))
-            .env("HOME", self.root.join("home"))
             .current_dir(self.files())
             .stdin(Stdio::null());
         c
