@@ -243,10 +243,10 @@ class WheelMeasureTests(unittest.TestCase):
         self.assertTrue(row["comparable"])
 
     def test_failures_are_bounded_and_the_rest_counted(self):
-        n = self.m.FAILURES_KEPT + 7
+        n = 57  # pinned: 50 kept (see FAILURES_KEPT), 7 dropped
         rows = [attempt(None, "timeout") for _ in range(n)] + [attempt(1)]
         g = group(self.m.summarize(rows))
-        self.assertEqual(len(g["failures"]), self.m.FAILURES_KEPT)
+        self.assertEqual(len(g["failures"]), 50)
         self.assertEqual(g["failures_dropped"], 7)
         self.assertEqual(g["non_valid"]["timeout"], n)  # the counts stay exact
 
