@@ -1453,6 +1453,7 @@ struct OpenRec {
     source: Vec<u8>,
     target: Vec<u8>,
     info_rel: usize,
+    source_parent: (u64, u64),
     target_parent: (u64, u64),
     date: String,
 }
@@ -1995,6 +1996,7 @@ impl JobRecords {
                     return Err("a bad deletion date");
                 }
                 let op = hex_id(v[0])?;
+                let source_parent = (num(v[6])?, num(v[7])?);
                 let target_parent = (num(v[8])?, num(v[9])?);
                 let g = self.group(v[2], None)?;
                 if g.commit.is_none() || !g.synced {
@@ -2011,6 +2013,7 @@ impl JobRecords {
                     source,
                     target,
                     info_rel,
+                    source_parent,
                     target_parent,
                     date: date.to_owned(),
                 });
@@ -2592,6 +2595,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
                     source: &o.source,
                     target: &o.target,
                     info_rel: o.info_rel,
+                    source_parent: o.source_parent,
                     target_parent: o.target_parent,
                     date: &o.date,
                 };
@@ -4638,6 +4642,155 @@ mod tests {
             assert_eq!(fs::read_to_string(files.join("a/theirs")).unwrap(), "x");
             assert!(!w.exists());
             assert_eq!(pairs(&t), Vec::<(String, String)>::new());
+        });
+    }
+
+    /// The op id of the (only) recovery intent in the history.
+    fn intent_op() -> String {
+        history()
+            .lines()
+            .find_map(|l| l.strip_prefix("recovery-intent\top="))
+            .map(|r| r[..16].to_owned())
+            .unwrap()
+    }
+
+    /// After a crash before the move, our info was being neutralised and
+    /// is cut short (the neutral text over its first bytes) under the
+    /// detached name: it is still ours, so it is finished there, never put
+    /// back at the `.trashinfo` name as if foreign.
+    #[test]
+    fn undo_recovery_finishes_a_half_neutralised_info() {
+        let t = Tmp::new("t8-rec-half");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info");
+            let op = intent_op();
+            let detached_at = info.join(format!(".{op}.inacircle-detached"));
+            fs::rename(info.join("a.trashinfo"), &detached_at).unwrap();
+            let n = format!("inacircle-detached-trashinfo op={op}\n");
+            let mut f = OpenOptions::new().write(true).open(&detached_at).unwrap();
+            std::io::Write::write_all(&mut f, &n.as_bytes()[..12]).unwrap();
+            drop(f);
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(fs::read(&detached_at).unwrap(), n.as_bytes());
+            // The move took the free name: the half-neutral file was not
+            // put back at it.
+            assert!(
+                pairs(&t).iter().any(|(b, _)| b == "a"),
+                "{:?}",
+                pairs(&t)
+            );
+        });
+    }
+
+    /// An empty file at our info name, after our info was closed under the
+    /// detached name, is someone else's: never neutralised.
+    #[test]
+    fn undo_recovery_leaves_an_empty_foreign_info_alone() {
+        let t = Tmp::new("t8-rec-empty");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::BeforeMove);
+            let info = t.trash().join("info");
+            let op = intent_op();
+            let detached_at = info.join(format!(".{op}.inacircle-detached"));
+            fs::rename(info.join("a.trashinfo"), &detached_at).unwrap();
+            fs::write(&detached_at, format!("inacircle-detached-trashinfo op={op}\n")).unwrap();
+            fs::write(info.join("a.trashinfo"), "").unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                "{r:?}"
+            );
+            assert_eq!(fs::read(info.join("a.trashinfo")).unwrap(), b"");
+        });
+    }
+
+    /// After a crash past the move, the Trash's `info` folder is open to
+    /// others: recovery does not trust it (it checks it as the move did),
+    /// and reports the group's place as uncertain instead of resuming.
+    #[test]
+    fn undo_recovery_refuses_an_info_folder_that_is_not_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("t8-rec-info-mode");
+        t.env(|| {
+            let (job, _, _) = single(&t, "a");
+            crash_at(&job, Point::AfterMove);
+            let info = t.trash().join("info");
+            fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+            let r = undo(&job).unwrap();
+            assert!(
+                matches!(one(&r), GroupOutcome::Uncertain { .. }),
+                "{r:?}"
+            );
+            assert_eq!(
+                fs::metadata(&info).unwrap().permissions().mode() & 0o777,
+                0o755,
+                "never chmod-ed"
+            );
+        });
+    }
+
+    /// After a crash past the move, the group in the Trash no longer
+    /// matches (so it is to go back), and the source folder is a different
+    /// one at the same path: it is not restored into the look-alike.
+    #[test]
+    fn undo_recovery_does_not_restore_into_a_replaced_source_folder() {
+        let t = Tmp::new("t8-rec-src");
+        t.env(|| {
+            let (job, w, _) = single(&t, "a");
+            crash_at(&job, Point::AfterMove);
+            fs::write(t.trash().join("files/a/extra"), "x").unwrap();
+            let parent = w.parent().unwrap().to_owned();
+            fs::rename(&parent, t.0.join("out-away")).unwrap();
+            fs::create_dir(&parent).unwrap();
+            let _ = undo(&job).unwrap();
+            assert!(!w.exists(), "restored into a look-alike folder");
+            assert_eq!(trashed(&t), ["a"]);
+        });
+    }
+
+    /// A restore that succeeded but whose place cannot be shown (the
+    /// folder moved away and the path cannot be resolved) is `Uncertain`,
+    /// never a `Restored` without a path.
+    #[test]
+    fn undo_restored_without_a_provable_place_is_uncertain() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let t = Tmp::new("t8-rest-none");
+        t.env(|| {
+            let (job, w, f) = single(&t, "a");
+            let (w2, kept) = (w.clone(), t.0.join("user-a"));
+            let (parent, away) = (w.parent().unwrap().to_owned(), t.0.join("out-away"));
+            let name = f.file_name().unwrap().to_owned();
+            let armed = Rc::new(Cell::new(false));
+            let a2 = armed.clone();
+            let _f = fault(move |p| {
+                match p {
+                    Point::BeforeMove => {
+                        fs::rename(&w2, &kept).unwrap();
+                        fs::create_dir(&w2).unwrap();
+                        fs::write(w2.join(&name), "data").unwrap();
+                    }
+                    Point::Restore => {
+                        fs::rename(&parent, &away).unwrap();
+                        a2.set(true);
+                    }
+                    Point::Resolve if a2.get() => return Some(libc::EIO),
+                    _ => {}
+                }
+                None
+            });
+            let r = undo(&job).unwrap();
+            let GroupOutcome::Uncertain { locations, .. } = one(&r) else {
+                panic!("{r:?}")
+            };
+            assert!(locations[0].path_at_check.is_none(), "{r:?}");
         });
     }
 

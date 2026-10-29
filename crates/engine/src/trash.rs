@@ -419,6 +419,18 @@ fn neutral(op: OperationId) -> Vec<u8> {
     format!("inacircle-detached-trashinfo op={:016x}\n", op.0).into_bytes()
 }
 
+/// Whether `b` is what our info holds while being neutralised: the
+/// neutral text written over the first `k` bytes of the authentic one
+/// (`pwrite` cut short, or whole but before the `ftruncate`). Such a file
+/// is still ours: it never pairs with data and is never put back.
+fn partly_neutral(b: &[u8], ours: &[u8], op: OperationId) -> bool {
+    let n = neutral(op);
+    (1..=n.len()).any(|k| {
+        let tail = ours.get(k..).unwrap_or_default();
+        b.len() == k + tail.len() && b[..k] == n[..k] && b[k..] == *tail
+    })
+}
+
 /// The first of [`TRASH_NAME_ATTEMPTS`] names free in both `files` and
 /// `info`.
 pub(crate) fn choose_name(files: RawFd, info: RawFd, leaf: &[u8]) -> Option<CString> {
@@ -847,7 +859,7 @@ fn home_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
     at(Point::Home)?;
     let data = xdg::data_home()?;
     #[cfg(test)]
-    if !data.starts_with(std::env::temp_dir()) {
+    if !under_test_root(&data) {
         return Err(io::Error::other(NOT_A_TEST_TRASH));
     }
     // Its nearest existing ancestor tells the domain before anything is
@@ -941,7 +953,11 @@ pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Resu
     let shared = open_at(top, c".Trash", libc::O_RDONLY | libc::O_DIRECTORY, 0).ok();
     if let Some(s) = shared
         && fstat(s.as_raw_fd()).is_ok_and(|st| {
-            st.st_mode & libc::S_IFMT == libc::S_IFDIR && st.st_mode & libc::S_ISVTX != 0
+            // Sticky, and made by the administrator (or by us): another
+            // user's `.Trash` could rename our `$uid` folder away.
+            st.st_mode & libc::S_IFMT == libc::S_IFDIR
+                && st.st_mode & libc::S_ISVTX != 0
+                && (st.st_uid == 0 || st.st_uid == uid)
         })
     {
         let u = CString::new(uid.to_string()).expect("digits");
@@ -961,6 +977,33 @@ pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Resu
 /// (fail closed: a test never makes or fills a real Trash).
 #[cfg(test)]
 const NOT_A_TEST_TRASH: &str = "a test reached a Trash outside its own folder";
+
+/// Whether `p` (resolved through symlinks, as `open_dir_follow` will
+/// resolve it) is under the test's own temp folder. Its nearest existing
+/// ancestor is resolved, so a link planted below `/tmp` to a real data
+/// home is caught where a lexical `starts_with` is not. (Integration
+/// tests link the engine without `cfg(test)`: there the guard is the
+/// fixtures' own `XDG_DATA_HOME` under their root, by discipline.)
+#[cfg(test)]
+fn under_test_root(p: &Path) -> bool {
+    let Ok(root) = fs::canonicalize(std::env::temp_dir()) else {
+        return false;
+    };
+    let mut probe = p;
+    loop {
+        match fs::canonicalize(probe) {
+            Ok(real) => {
+                let tail = p.strip_prefix(probe).unwrap_or(Path::new(""));
+                return real.join(tail).starts_with(&root);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match probe.parent() {
+                Some(up) => probe = up,
+                None => return false,
+            },
+            Err(_) => return false,
+        }
+    }
+}
 
 /// The volume Trash of mount `dom.0`.
 fn volume_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
@@ -1265,11 +1308,22 @@ fn after_move(mut m: Moved, log: &mut dyn Log, warn: &mut Vec<String>) -> GroupO
                 op,
                 CheckPoint::PostRestore,
             );
-            let o = GroupOutcome::Restored {
-                group: g.group,
-                location,
-                reason,
-                durability,
+            // Restored, but nowhere it can be shown to be: as for the
+            // commit, the typed outcome says so (`None` only in Uncertain).
+            let o = if location.path_at_check.is_none() {
+                GroupOutcome::Uncertain {
+                    group: g.group,
+                    op,
+                    locations: vec![location],
+                    reason: UndoReason::AncestorChanged,
+                }
+            } else {
+                GroupOutcome::Restored {
+                    group: g.group,
+                    location,
+                    reason,
+                    durability,
+                }
             };
             let o = match m.info.take() {
                 Some(i) => closed(&m, &i, o, warn),
@@ -1490,6 +1544,7 @@ pub(crate) struct Open<'a> {
     pub source: &'a [u8],
     pub target: &'a [u8],
     pub info_rel: usize,
+    pub source_parent: (u64, u64),
     pub target_parent: (u64, u64),
     pub date: &'a str,
 }
@@ -1534,26 +1589,31 @@ pub(crate) fn recover(
     let files = open_dir_follow(files_path.as_os_str().as_bytes())
         .ok()
         .filter(|f| fstat(f.as_raw_fd()).is_ok_and(|st| ident(&st) == o.target_parent));
-    let info_dir = open_dir_follow(trash_root.as_os_str().as_bytes())
-        .ok()
-        .and_then(|r| {
-            open_at(
-                r.as_raw_fd(),
-                c"info",
-                libc::O_RDONLY | libc::O_DIRECTORY,
-                0,
-            )
-            .ok()
-        });
+    // `info` is reached through the verified `files` (its `..` is the
+    // Trash root that really holds it), never by its own path, and must be
+    // a private folder of ours like the one the move made.
+    let info_dir = files.as_ref().and_then(|f| {
+        let fd = open_at(
+            f.as_raw_fd(),
+            c"../info",
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        )
+        .ok()?;
+        private_ok(&fstat(fd.as_raw_fd()).ok()?, euid()).then_some(fd)
+    });
     let (Ok(cbase), Some(rel)) = (c_name(base.as_bytes()), o.source.get(o.info_rel..)) else {
         return Some(end(log, op, uncertain_at(g, op, &target), warn));
     };
     let ours = trashinfo(rel, o.date).unwrap_or_default();
     let name = info_name(&cbase);
     let detached = detached_name(op);
+    // The source folder is the one the intent recorded, not whatever now
+    // stands at its path: a restore never goes into a look-alike.
     let src = source.parent().and_then(|p| {
         open_dir_follow(p.as_os_str().as_bytes())
             .ok()
+            .filter(|fd| fstat(fd.as_raw_fd()).is_ok_and(|st| ident(&st) == o.source_parent))
             .map(|fd| (fd, p.to_owned()))
     });
     let Ok(leaf) = c_name(source.file_name().unwrap_or_default().as_bytes()) else {
@@ -1620,8 +1680,13 @@ pub(crate) fn recover(
     // Ours: authentic, neutral, or cut short while being written (a
     // prefix of the authentic bytes, empty included: we made the name
     // with O_EXCL).
+    // An empty file counts only when no detached info shows our info was
+    // ever closed: after that, an empty file at the name is someone else's.
+    let detached_exists = stat_at(info_dir, &detached).is_ok();
     if let Some((fd, b)) = read_info(info_dir, &name)
-        && (ours.starts_with(&b) || b == neutral(op))
+        && ((ours.starts_with(&b) && !(b.is_empty() && detached_exists))
+            || b == neutral(op)
+            || partly_neutral(&b, &ours, op))
         && let Ok(st) = fstat(fd.as_raw_fd())
     {
         let i = Info {
@@ -1637,7 +1702,7 @@ pub(crate) fn recover(
         }
     }
     if let Some((fd, b)) = read_info(info_dir, &detached) {
-        if b == ours {
+        if b == ours || partly_neutral(&b, &ours, op) {
             let i = Info {
                 id: fstat(fd.as_raw_fd()).map_or((0, 0), |st| ident(&st)),
                 fd,
@@ -2134,6 +2199,38 @@ pub(crate) mod tests {
             home_trash(dom).err().expect("a Trash outside the test")
         });
         assert_eq!(e.to_string(), NOT_A_TEST_TRASH);
+    }
+
+    /// The test guard resolves symlinks: a link below the temp folder to
+    /// somewhere else is outside it (a lexical prefix check passes it).
+    #[test]
+    fn the_test_guard_resolves_links() {
+        let d = Dir::new("guard-link");
+        symlink("/proc", d.0.join("out")).unwrap();
+        let dom = domain(d.fd("").as_raw_fd()).unwrap();
+        let data = d.0.join("out/inacircle-never");
+        let e = with_env(&[("XDG_DATA_HOME", Some(data.to_str().unwrap()))], || {
+            home_trash(dom).err().expect("a Trash outside the test")
+        });
+        assert_eq!(e.to_string(), NOT_A_TEST_TRASH);
+        assert!(under_test_root(&d.0.join("inside/not/yet")));
+    }
+
+    /// A shared `.Trash` that is sticky but belongs to another user is
+    /// passed over (its owner could rename our `$uid` folder away): the
+    /// `$uid` folder is never made in it. Ownership is checked against the
+    /// `uid` given, so a `.Trash` of ours is "another user's" for `uid+1`.
+    #[test]
+    fn a_shared_trash_of_another_owner_is_not_used() {
+        if euid() == 0 {
+            return; // root owns every .Trash it makes
+        }
+        let other = euid() + 1;
+        let d = Dir::new("volume-foreign");
+        fs::create_dir(d.0.join(".Trash")).unwrap();
+        fs::set_permissions(d.0.join(".Trash"), fs::Permissions::from_mode(0o1777)).unwrap();
+        let _ = volume_trash_at(d.fd("").as_raw_fd(), &d.0, other);
+        assert!(!d.0.join(format!(".Trash/{other}")).exists());
     }
 
     #[test]
