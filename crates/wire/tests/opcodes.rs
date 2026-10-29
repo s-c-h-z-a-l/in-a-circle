@@ -132,7 +132,7 @@ fn opcodes_match_the_protocol_xmls() {
     }
     // Every interface with a vendored XML is listed in full, so a missing
     // constant is caught here rather than written by hand later.
-    for iface in Iface::ALL {
+    for iface in Iface::ALL.iter().copied() {
         let Some(i) = xml.get(iface.name()) else {
             continue;
         };
@@ -160,7 +160,7 @@ fn every_op_interface_resolves_under_its_iface_name() {
 #[test]
 fn fd_carrying_events_match_the_protocol_xmls() {
     let xml = protocols();
-    for iface in Iface::ALL {
+    for iface in Iface::ALL.iter().copied() {
         let Some(i) = xml.get(iface.name()) else {
             continue;
         };

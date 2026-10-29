@@ -1,8 +1,22 @@
 //! Interfaces and opcodes. `tests/opcodes.rs` checks every opcode, and
 //! which events carry fds, against the protocol XMLs in `tests/data/`.
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Iface {
+/// The enum and [`Iface::ALL`] come from one list, so they cannot drift:
+/// a variant added anywhere is in `ALL` at the position it is written.
+macro_rules! ifaces {
+    ($($v:ident),* $(,)?) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum Iface {
+            $($v),*
+        }
+
+        impl Iface {
+            pub const ALL: &'static [Iface] = &[$(Iface::$v),*];
+        }
+    };
+}
+
+ifaces! {
     Display,
     Registry,
     Callback,
@@ -32,35 +46,6 @@ pub enum Iface {
 }
 
 impl Iface {
-    pub const ALL: [Iface; 26] = [
-        Iface::Display,
-        Iface::Registry,
-        Iface::Callback,
-        Iface::Compositor,
-        Iface::Surface,
-        Iface::Region,
-        Iface::Shm,
-        Iface::ShmPool,
-        Iface::Buffer,
-        Iface::Seat,
-        Iface::Pointer,
-        Iface::Keyboard,
-        Iface::Subcompositor,
-        Iface::Subsurface,
-        Iface::DataDeviceManager,
-        Iface::DataDevice,
-        Iface::DataOffer,
-        Iface::Viewporter,
-        Iface::Viewport,
-        Iface::Presentation,
-        Iface::PresentationFeedback,
-        Iface::PrimaryManager,
-        Iface::PrimaryDevice,
-        Iface::PrimaryOffer,
-        Iface::LayerShell,
-        Iface::LayerSurface,
-    ];
-
     /// The interface name in the protocol XML (and in `wl_registry.global`).
     pub const fn name(self) -> &'static str {
         match self {
@@ -229,10 +214,9 @@ ops! {
 mod tests {
     use super::Iface;
 
-    /// Every variant has a slot in `Iface::ALL`, in order, once. The match
-    /// has no wildcard: a new variant does not compile until it is placed
-    /// here, and the loop then fails until it is in `ALL` (which the
-    /// opcode and fd tests, and the server-id table, walk).
+    /// `Iface::ALL` is generated from the enum's own list; this pins the
+    /// order (the server-id table depends on it). The match has no wildcard:
+    /// a new variant does not compile until it gets a slot here.
     #[test]
     fn all_lists_every_interface_once_in_order() {
         fn slot(i: Iface) -> usize {
