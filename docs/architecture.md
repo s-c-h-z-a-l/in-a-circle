@@ -369,8 +369,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   where it was saved; Undo unavailable.`, and the Undo button is left out.
   Undo is offered only when the history holds every group of the run
   complete, durable and synced; otherwise the recording warning (`history
-  not written: …; undo unavailable`, `… not confirmed on disk; undo
-  unavailable`) is a body line instead. Cancelled: `Cancelled`,
+  not written: …; nothing was published; undo unavailable` when the error
+  came before any output, `history not written: …; <n> output folder(s)
+  kept; undo unavailable` when <n> were published before it, `… not
+  confirmed on disk; undo unavailable`) is a body line instead, and the
+  same text is the CLI's stderr warning. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. An output whose lossy action reported a
   loss (a `warn` for an input that has an output) starts the body with
   `Formatting was lost.`; a run that lost nothing does not say it. A run
@@ -747,8 +750,8 @@ No daemon:
   directory (os error 20)` is replaced, after an `lstat` confirms a real
   symlink, by "the folder `<path>` is a symbolic link and is refused on
   purpose", with the same error kind, also for a dangling link; the
-  history warning reads `history not written: …`, so nothing is published
-  and nothing is offered for Undo; a cache folder that is a link means no
+  history warning reads `history not written: …; nothing was published`,
+  so nothing is published and nothing is offered for Undo; a cache folder that is a link means no
   cache is read or written, and a jobs folder that is a link means the
   running job is not registered; both print one line on stderr saying
   why). Its parents may be symlinks, and so may

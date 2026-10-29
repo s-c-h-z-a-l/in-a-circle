@@ -855,6 +855,9 @@ pub struct Recorder {
     /// The group whose intent is written and whose commit is not (yet):
     /// its identity, not a copy of its children (up to 1024 of them).
     pending: Option<Pending>,
+    /// Committed groups: visible output folders, whatever the history
+    /// says of them (what a history error leaves behind).
+    committed: usize,
     /// Committed groups not synced to disk.
     unconfirmed: usize,
     /// Committed groups whose place could not be proved.
@@ -926,6 +929,7 @@ impl Recorder {
             action: action.to_owned(),
             tally: Tally::default(),
             pending: None,
+            committed: 0,
             unconfirmed: 0,
             uncertain: 0,
             unprepared: 0,
@@ -1031,6 +1035,7 @@ impl Recorder {
             Some(p) if p.group == group.group && p.op == group.op => self.pending = None,
             _ => self.unprepared += 1,
         }
+        self.committed += 1;
         if let Durability::Unconfirmed(_) = d {
             self.unconfirmed += 1;
         }
@@ -1106,7 +1111,12 @@ impl Recorder {
             ));
         }
         if let Some(why) = &self.failed {
-            warning.push(format!("history not written: {why}; outputs kept"));
+            // Say what is on disk: a history error refuses every later
+            // publication, so only the groups committed before it remain.
+            warning.push(match self.committed {
+                0 => format!("history not written: {why}; nothing was published"),
+                n => format!("history not written: {why}; {n} output folder(s) kept"),
+            });
         }
         if marker_unproven {
             warning.push("the history could not be made durable".to_owned());
@@ -3467,6 +3477,8 @@ mod tests {
                     assert!(!r.undoable);
                     let w = r.warning.unwrap();
                     assert!(w.contains("history not written"), "{w}");
+                    // The one group published before the error is named.
+                    assert!(w.contains("; 1 output folder(s) kept"), "{w}");
                     assert!(w.contains("undo unavailable"), "{w}");
                     if case == "commit_fsync_fails" {
                         // The withdrawal was tried synced, and failed too.
@@ -3513,7 +3525,11 @@ mod tests {
                     assert!(names.is_empty(), "{names:?}");
                     let r = rec.finish(true);
                     assert!(!r.undoable);
-                    assert!(r.warning.unwrap().contains("history not written"));
+                    let w = r.warning.unwrap();
+                    assert!(w.contains("history not written"), "{w}");
+                    // Not "outputs kept": nothing was published.
+                    assert!(w.contains("; nothing was published"), "{w}");
+                    assert!(!w.contains("kept"), "{w}");
                 }
                 c => panic!("unknown case {c}"),
             }
@@ -6936,6 +6952,8 @@ mod tests {
             let w = done.warning.unwrap();
             assert!(w.contains("history not written"), "{w}");
             assert!(w.contains("symbolic link"), "{w}");
+            assert!(w.contains("; nothing was published"), "{w}");
+            assert!(!w.contains("kept"), "{w}");
             assert!(fs::read_dir(t.out()).unwrap().next().is_none());
             assert_eq!(fs::read_dir(&real).unwrap().count(), 0, "written through");
         });

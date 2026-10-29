@@ -1646,6 +1646,9 @@ fn unwritable_history_refuses_publication_and_warns_once() {
         .filter(|l| l.contains("history not written"))
         .count();
     assert_eq!(warns, 1, "{}", o.stderr);
+    // The warning says what happened: nothing was published, not "kept".
+    assert!(o.stderr.contains("; nothing was published"), "{}", o.stderr);
+    assert!(!o.stderr.contains("kept"), "{}", o.stderr);
 }
 
 /// A history of the previous format is archived on the first run, never

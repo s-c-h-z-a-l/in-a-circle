@@ -1011,12 +1011,14 @@ mod tests {
     fn recording_warning_is_shown_once() {
         let mut s = summary(&[done("/d/a.txt", "/d/a/a.md")]);
         s.set_counts((1, 0, 0, 0));
-        s.warning = Some("history not written: disk full; undo unavailable".into());
+        s.warning = Some(
+            "history not written: disk full; 1 output folder(s) kept; undo unavailable".into(),
+        );
         let (summary, body) = final_text(&s, false);
         assert_eq!(summary, "a.md");
         assert_eq!(
             lines(&body),
-            ["history not written: disk full; undo unavailable"]
+            ["history not written: disk full; 1 output folder(s) kept; undo unavailable"]
         );
         s.set_counts((1, 0, 0, 1));
         let (_, body) = final_text(&s, false);

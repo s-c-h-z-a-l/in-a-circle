@@ -1230,6 +1230,17 @@ fn history_failure_after_the_commit_keeps_the_output_without_undo() {
     let last = n.last().unwrap();
     assert_eq!(last.summary, "b.md");
     assert!(last.body.contains("history not written"), "{}", last.body);
+    // The output published before the error is said to be kept.
+    assert!(
+        last.body.contains("; 1 output folder(s) kept"),
+        "{}",
+        last.body
+    );
+    assert!(
+        r.stderr.contains("; 1 output folder(s) kept"),
+        "{}",
+        r.stderr
+    );
     assert!(last.body.contains("undo unavailable"), "{}", last.body);
     assert!(last.actions.is_empty(), "{:?}", last.actions);
     // The cut record is no commit: nothing in the history grants an undo.
@@ -1265,6 +1276,13 @@ fn unwritable_history_offers_no_undo_and_says_why() {
     let last = n.last().unwrap();
     assert!(last.actions.is_empty(), "{:?}", last.actions);
     assert!(last.body.contains("history not written"), "{}", last.body);
+    // Nothing was published: the notice must not say outputs were kept.
+    assert!(
+        last.body.contains("; nothing was published"),
+        "{}",
+        last.body
+    );
+    assert!(!last.body.contains("kept"), "{}", last.body);
     assert!(!e.files().join("a").exists());
     assert!(e.files().join("a.txt").exists());
     assert_eq!(r.code, Some(1), "{}{}", r.stdout, r.stderr);
