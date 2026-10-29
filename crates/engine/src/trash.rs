@@ -817,14 +817,43 @@ pub(crate) struct TrashDir {
     top: Option<PathBuf>,
 }
 
-/// A private Trash folder: a directory of this user with mode 0700, never
-/// a symlink. A wrong one is refused, never `chmod`ed or `chown`ed.
-pub(crate) fn private_ok(st: &libc::stat, uid: u32) -> bool {
-    st.st_mode & libc::S_IFMT == libc::S_IFDIR && st.st_uid == uid && st.st_mode & 0o7777 == 0o700
+/// The rule an existing Trash folder (the Trash root, `files`, `info`)
+/// must meet. Both need a directory of this user, never a symlink; a
+/// folder we make is always 0700. A wrong one is refused, never `chmod`ed
+/// or `chown`ed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rule {
+    /// The home Trash: no group or other write bit, no setuid or setgid.
+    /// KDE's KIO makes it 0755, GIO 0700; a foreign writer is what could
+    /// swap or plant entries, and reading is already fenced by the home.
+    Home,
+    /// A volume Trash (`$topdir/.Trash-$uid`, `$topdir/.Trash/$uid`):
+    /// exactly 0700, as no private home folder stands around it.
+    Volume,
 }
 
-/// Opens (making it if missing, mode 0700) and checks `name` in `at`.
-fn private_dir(at: RawFd, name: &CStr, uid: u32) -> io::Result<OwnedFd> {
+/// Why `st` is not an acceptable Trash folder of `uid` under `rule`.
+pub(crate) fn folder_ok(st: &libc::stat, uid: u32, rule: Rule) -> Result<(), &'static str> {
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err("is not a directory");
+    }
+    if st.st_uid != uid {
+        return Err("is owned by another user");
+    }
+    let mode = st.st_mode & 0o7777;
+    match rule {
+        Rule::Volume if mode != 0o700 => Err("is not mode 0700"),
+        Rule::Home if mode & 0o022 != 0 => Err("is writable by group or others"),
+        Rule::Home if mode & (libc::S_ISUID | libc::S_ISGID) != 0 => {
+            Err("has the setuid or setgid bit")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Opens (making it if missing, mode 0700) and checks `name` in `at`;
+/// `path` names it in the refusal.
+fn private_dir(at: RawFd, name: &CStr, path: &Path, uid: u32, rule: Rule) -> io::Result<OwnedFd> {
     // SAFETY: name is NUL-terminated; at is an open directory.
     if unsafe { libc::mkdirat(at, name.as_ptr(), 0o700) } != 0 {
         let e = io::Error::last_os_error();
@@ -833,22 +862,29 @@ fn private_dir(at: RawFd, name: &CStr, uid: u32) -> io::Result<OwnedFd> {
         }
     }
     let fd = open_at(at, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
-    if !private_ok(&fstat(fd.as_raw_fd())?, uid) {
+    if let Err(why) = folder_ok(&fstat(fd.as_raw_fd())?, uid, rule) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "a Trash folder that is not private",
+            format!("the Trash folder {} {why}", path.display()),
         ));
     }
     Ok(fd)
 }
 
 /// `files` and `info` inside the Trash folder `root`.
-fn trash_in(root: RawFd, path: &Path, uid: u32, top: Option<&Path>) -> io::Result<TrashDir> {
+fn trash_in(
+    root: RawFd,
+    path: &Path,
+    uid: u32,
+    top: Option<&Path>,
+    rule: Rule,
+) -> io::Result<TrashDir> {
+    let (files_path, info_path) = (path.join("files"), path.join("info"));
     Ok(TrashDir {
-        files: private_dir(root, c"files", uid)?,
-        info: private_dir(root, c"info", uid)?,
-        files_path: path.join("files"),
-        info_path: path.join("info"),
+        files: private_dir(root, c"files", &files_path, uid, rule)?,
+        info: private_dir(root, c"info", &info_path, uid, rule)?,
+        files_path,
+        info_path,
         top: top.map(Path::to_owned),
     })
 }
@@ -887,8 +923,9 @@ fn home_trash(dom: (u64, u64)) -> io::Result<TrashDir> {
     if domain(d.as_raw_fd())? != dom {
         return Err(io::Error::from_raw_os_error(libc::EXDEV));
     }
-    let t = private_dir(d.as_raw_fd(), c"Trash", euid())?;
-    trash_in(t.as_raw_fd(), &data.join("Trash"), euid(), None)
+    let path = data.join("Trash");
+    let t = private_dir(d.as_raw_fd(), c"Trash", &path, euid(), Rule::Home)?;
+    trash_in(t.as_raw_fd(), &path, euid(), None, Rule::Home)
 }
 
 /// `\ooo` escapes of a mountinfo field undone.
@@ -949,8 +986,8 @@ fn mount_point(mnt: u64) -> io::Result<PathBuf> {
 
 /// The volume Trash under `top`: `$topdir/.Trash/$uid` if `.Trash` is a
 /// real directory with the sticky bit (never a symlink), else
-/// `$topdir/.Trash-$uid`. Each private folder is checked as in
-/// [`private_ok`].
+/// `$topdir/.Trash-$uid`. Each folder is checked as in [`folder_ok`]
+/// under [`Rule::Volume`].
 pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Result<TrashDir> {
     let shared = open_at(top, c".Trash", libc::O_RDONLY | libc::O_DIRECTORY, 0).ok();
     if let Some(s) = shared
@@ -964,15 +1001,22 @@ pub(crate) fn volume_trash_at(top: RawFd, top_path: &Path, uid: u32) -> io::Resu
     {
         let u = CString::new(uid.to_string()).expect("digits");
         let path = top_path.join(".Trash").join(uid.to_string());
-        if let Ok(t) = private_dir(s.as_raw_fd(), &u, uid)
-            .and_then(|d| trash_in(d.as_raw_fd(), &path, uid, Some(top_path)))
+        if let Ok(t) = private_dir(s.as_raw_fd(), &u, &path, uid, Rule::Volume)
+            .and_then(|d| trash_in(d.as_raw_fd(), &path, uid, Some(top_path), Rule::Volume))
         {
             return Ok(t);
         }
     }
     let name = format!(".Trash-{uid}");
-    let d = private_dir(top, &CString::new(name.clone()).expect("no NUL"), uid)?;
-    trash_in(d.as_raw_fd(), &top_path.join(name), uid, Some(top_path))
+    let path = top_path.join(&name);
+    let d = private_dir(
+        top,
+        &CString::new(name).expect("no NUL"),
+        &path,
+        uid,
+        Rule::Volume,
+    )?;
+    trash_in(d.as_raw_fd(), &path, uid, Some(top_path), Rule::Volume)
 }
 
 /// Under test, a Trash outside the test's own temp folder is refused
@@ -1461,8 +1505,12 @@ pub(crate) fn undo_group(g: &Group, log: &mut dyn Log, warn: &mut Vec<String>) -
     let Resolved::At(src_dir) = resolve(src.as_raw_fd()) else {
         return kept(src_loc, UndoReason::AncestorChanged);
     };
-    let Ok((trash, mount)) = trash_for(src.as_raw_fd()) else {
-        return kept(src_loc, UndoReason::NoTrash);
+    let (trash, mount) = match trash_for(src.as_raw_fd()) {
+        Ok(t) => t,
+        Err(e) => {
+            warn.push(format!("no usable Trash for {}: {e}", place.display()));
+            return kept(src_loc, UndoReason::NoTrash);
+        }
     };
     let source = src_dir.join(leaf);
     let sb = source.as_os_str().as_bytes();
@@ -1602,7 +1650,13 @@ pub(crate) fn recover(
         .filter(|f| fstat(f.as_raw_fd()).is_ok_and(|st| ident(&st) == o.target_parent));
     // `info` is reached through the verified `files` (its `..` is the
     // Trash root that really holds it), never by its own path, and must be
-    // a private folder of ours like the one the move made.
+    // a Trash folder of ours under the rule the move used (`Path=` is
+    // absolute, `info_rel` 0, only in the home Trash).
+    let rule = if o.info_rel == 0 {
+        Rule::Home
+    } else {
+        Rule::Volume
+    };
     let info_dir = files.as_ref().and_then(|f| {
         let fd = open_at(
             f.as_raw_fd(),
@@ -1611,7 +1665,9 @@ pub(crate) fn recover(
             0,
         )
         .ok()?;
-        private_ok(&fstat(fd.as_raw_fd()).ok()?, euid()).then_some(fd)
+        folder_ok(&fstat(fd.as_raw_fd()).ok()?, euid(), rule)
+            .is_ok()
+            .then_some(fd)
     });
     let (Ok(cbase), Some(rel)) = (c_name(base.as_bytes()), o.source.get(o.info_rel..)) else {
         return Some(end(log, op, uncertain_at(g, op, &target), warn));
@@ -2101,23 +2157,62 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn private_ok_checks_type_owner_and_mode() {
+    fn folder_ok_checks_type_owner_and_mode() {
+        use Rule::{Home, Volume};
         // SAFETY: zeroed stat is a valid value.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        st.st_mode = libc::S_IFDIR | 0o700;
         st.st_uid = 1000;
-        assert!(private_ok(&st, 1000));
-        assert!(!private_ok(&st, 1001), "another owner");
-        st.st_mode = libc::S_IFDIR | 0o755;
-        assert!(!private_ok(&st, 1000), "not private");
-        st.st_mode = libc::S_IFDIR | 0o1700;
-        assert!(!private_ok(&st, 1000), "sticky private folder");
-        st.st_mode = libc::S_IFLNK | 0o700;
-        assert!(!private_ok(&st, 1000), "a symlink");
+        let check = |st: &libc::stat, mode: libc::mode_t, rule| {
+            let mut st = *st;
+            st.st_mode = mode;
+            folder_ok(&st, 1000, rule)
+        };
+        let dir = libc::S_IFDIR;
+        for rule in [Home, Volume] {
+            assert_eq!(check(&st, dir | 0o700, rule), Ok(()), "{rule:?}");
+            assert_eq!(
+                check(&st, libc::S_IFLNK | 0o700, rule),
+                Err("is not a directory")
+            );
+            let mut other = st;
+            other.st_mode = dir | 0o700;
+            assert_eq!(
+                folder_ok(&other, 1001, rule),
+                Err("is owned by another user")
+            );
+        }
+        // Volume: exactly 0700.
+        for m in [0o755, 0o750, 0o1700, 0o600] {
+            assert_eq!(
+                check(&st, dir | m, Volume),
+                Err("is not mode 0700"),
+                "{m:o}"
+            );
+        }
+        // Home: anything without group/other write and setuid/setgid.
+        for m in [0o755, 0o750, 0o711, 0o500, 0o1755] {
+            assert_eq!(check(&st, dir | m, Home), Ok(()), "{m:o}");
+        }
+        for m in [0o775, 0o757, 0o722, 0o720, 0o702] {
+            assert_eq!(
+                check(&st, dir | m, Home),
+                Err("is writable by group or others"),
+                "{m:o}"
+            );
+        }
+        for m in [0o4755, 0o2755, 0o2700] {
+            assert_eq!(
+                check(&st, dir | m, Home),
+                Err("has the setuid or setgid bit"),
+                "{m:o}"
+            );
+        }
     }
 
-    /// The home Trash is made private when missing; a symlinked `Trash`
-    /// or a `files` folder open to others is refused and left as it is.
+    /// The home Trash is made 0700 when missing; an existing one of ours
+    /// that only others cannot write (KIO's 0755) is used; a symlinked
+    /// `Trash` or a folder others can write is refused, named in the
+    /// error, and left as it is.
     #[test]
     fn home_trash_is_private_and_never_followed() {
         let d = Dir::new("home");
@@ -2131,14 +2226,26 @@ pub(crate) mod tests {
                 let m = fs::metadata(data.join(p)).unwrap().permissions().mode();
                 assert_eq!(m & 0o777, 0o700, "{p}");
             }
-            fs::set_permissions(data.join("Trash/files"), fs::Permissions::from_mode(0o755))
-                .unwrap();
-            assert!(home_trash(dom).is_err());
-            let m = fs::metadata(data.join("Trash/files"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(m & 0o777, 0o755, "never chmod-ed");
+            for p in ["Trash", "Trash/files", "Trash/info"] {
+                fs::set_permissions(data.join(p), fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let t = home_trash(dom).unwrap_or_else(|e| panic!("0755: {e}"));
+            assert_eq!(t.info_path, data.join("Trash/info"));
+            for (p, m) in [
+                ("Trash", 0o775),
+                ("Trash/files", 0o757),
+                ("Trash/info", 0o775),
+                ("Trash/files", 0o2755),
+            ] {
+                fs::set_permissions(data.join(p), fs::Permissions::from_mode(m)).unwrap();
+                let e = home_trash(dom).err().unwrap_or_else(|| panic!("{p} {m:o}"));
+                let want = data.join(p).display().to_string();
+                assert!(e.to_string().contains(&want), "{p} {m:o}: {e}");
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+                let got = fs::metadata(data.join(p)).unwrap().permissions().mode();
+                assert_eq!(got & 0o7777, m, "never chmod-ed");
+                fs::set_permissions(data.join(p), fs::Permissions::from_mode(0o755)).unwrap();
+            }
             fs::rename(data.join("Trash"), data.join("Real")).unwrap();
             symlink(data.join("Real"), data.join("Trash")).unwrap();
             assert!(home_trash(dom).is_err());
@@ -2194,6 +2301,19 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(volume_trash_at(d.fd("").as_raw_fd(), &d.0, uid).is_err());
+
+        // A volume keeps the strict rule where the home Trash is lenient:
+        // a 0755 `files` (KIO's home mode) refuses.
+        let d = Dir::new("volume-files");
+        let vt = d.0.join(format!(".Trash-{uid}"));
+        fs::create_dir(&vt).unwrap();
+        fs::set_permissions(&vt, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(vt.join("files")).unwrap();
+        fs::set_permissions(vt.join("files"), fs::Permissions::from_mode(0o755)).unwrap();
+        let e = volume_trash_at(d.fd("").as_raw_fd(), &d.0, uid)
+            .err()
+            .expect("0755 files refused");
+        assert!(e.to_string().contains("is not mode 0700"), "{e}");
     }
 
     /// A test never reaches a real Trash: without its own volume topdir,
@@ -2602,7 +2722,16 @@ pub(crate) mod tests {
         let uid = euid();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(private_dir(root.as_raw_fd(), c"files", uid).is_err());
+            let _ = tx.send(
+                private_dir(
+                    root.as_raw_fd(),
+                    c"files",
+                    Path::new("files"),
+                    uid,
+                    Rule::Home,
+                )
+                .is_err(),
+            );
         });
         let got = rx.recv_timeout(std::time::Duration::from_secs(20));
         if got.is_err() {

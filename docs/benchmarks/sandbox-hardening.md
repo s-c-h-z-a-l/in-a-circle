@@ -99,7 +99,10 @@ own fixtures only (uid 1000, no capabilities). A check followed by an
   written, the group is not published.
 - Undo never deletes. It moves each input's group into the freedesktop.org
   Trash by one no-replace `rename` on the same filesystem (home Trash, else
-  the volume's), after a synced recovery intent. A changed, missing or extra
+  the volume's), after a synced recovery intent. Every Trash folder is this
+  user's directory, never a symlink; the home Trash's may not be writable by
+  group or others (KIO's 0755 passes), a volume Trash's must be 0700; ours
+  are made 0700. A changed, missing or extra
   child, an unsafe Trash, a remote filesystem, `EXDEV` or any doubt keeps
   the whole group where it is. A group moved and then found different is
   moved back; if its way back is taken it stays in the Trash and the result

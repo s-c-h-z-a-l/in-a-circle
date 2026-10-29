@@ -468,9 +468,14 @@ In the engine, in one place:
    `renameat2(RENAME_NOREPLACE)`: the home Trash
    (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
    the volume's (`$topdir/.Trash/$uid` under a sticky `.Trash` that root or this user owns, else
-   `$topdir/.Trash-$uid`); every Trash folder is opened without following
-   a symlink and must be this user's with mode 0700 (refused otherwise,
-   never `chmod`ed); a remote filesystem or no safe Trash keeps the group.
+   `$topdir/.Trash-$uid`); every Trash folder (the root, `files`,
+   `info`) is opened without following a symlink and must be a directory
+   of this user. A folder we make is 0700. An existing home Trash folder
+   is accepted when neither group nor others can write it and it has no
+   setuid/setgid bit (KDE's KIO makes it 0755); a volume Trash folder must
+   be exactly 0700. Recovery re-checks `info` under the same rule. A
+   folder failing its rule is refused, never `chmod`ed, and the warning
+   names it and why; a remote filesystem or no safe Trash keeps the group.
    Nothing is copied across filesystems (`EXDEV` keeps it). Before the
    move the wrapper and every child must match their private baseline
    (device, inode, size, mtime, ctime, type, owner, mode, link count; the

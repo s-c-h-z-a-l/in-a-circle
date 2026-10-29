@@ -5042,25 +5042,78 @@ mod tests {
     }
 
     /// After a crash past the move, the Trash's `info` folder is open to
-    /// others: recovery does not trust it (it checks it as the move did),
-    /// and reports the group's place as uncertain instead of resuming.
+    /// others' writes: recovery does not trust it (it checks it as the
+    /// move did), and reports the group's place as uncertain instead of
+    /// resuming.
     #[test]
     fn undo_recovery_refuses_an_info_folder_that_is_not_private() {
         use std::os::unix::fs::PermissionsExt;
-        let t = Tmp::new("t8-rec-info-mode");
+        for mode in [0o775, 0o757] {
+            let t = Tmp::new("t8-rec-info-mode");
+            t.env(|| {
+                let (job, _, _) = single(&t, "a");
+                crash_at(&job, Point::AfterMove);
+                let info = t.trash().join("info");
+                fs::set_permissions(&info, fs::Permissions::from_mode(mode)).unwrap();
+                let r = undo(&job).unwrap();
+                assert!(matches!(one(&r), GroupOutcome::Uncertain { .. }), "{r:?}");
+                assert_eq!(
+                    fs::metadata(&info).unwrap().permissions().mode() & 0o777,
+                    mode,
+                    "never chmod-ed"
+                );
+            });
+        }
+    }
+
+    /// The home Trash as KDE's KIO makes it (0755 root, `files`, `info`):
+    /// ours and writable only by us, so an undo uses it as it is (moves
+    /// the group, writes its `.trashinfo`, chmods nothing), and an undo
+    /// interrupted past the move is recovered through the same rule.
+    #[test]
+    fn undo_uses_a_home_trash_of_mode_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let kio = |t: &Tmp| {
+            for p in ["", "files", "info"] {
+                let d = t.trash().join(p);
+                fs::create_dir_all(&d).unwrap();
+                fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        };
+        let modes = |t: &Tmp| {
+            ["", "files", "info"].map(|p| {
+                fs::metadata(t.trash().join(p))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777
+            })
+        };
+        let t = Tmp::new("t8-kio");
         t.env(|| {
-            let (job, _, _) = single(&t, "a");
-            crash_at(&job, Point::AfterMove);
-            let info = t.trash().join("info");
-            fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+            kio(&t);
+            let (job, w, f) = single(&t, "a");
             let r = undo(&job).unwrap();
-            assert!(matches!(one(&r), GroupOutcome::Uncertain { .. }), "{r:?}");
-            assert_eq!(
-                fs::metadata(&info).unwrap().permissions().mode() & 0o777,
-                0o755,
-                "never chmod-ed"
-            );
+            assert!(all_moved(&r, &[f]), "{r:?}");
+            assert_eq!(pairs(&t), [("a".to_owned(), url(&w))]);
+            assert_eq!(modes(&t), [0o755; 3], "never chmod-ed");
         });
+        for at in [Point::AfterMove, Point::Commit] {
+            let t = Tmp::new("t8-kio-crash");
+            t.env(|| {
+                kio(&t);
+                let (job, w, f) = single(&t, "a");
+                crash_at(&job, at);
+                let r = undo(&job).unwrap();
+                assert!(
+                    matches!(one(&r), GroupOutcome::MovedToTrash { .. }),
+                    "{at:?}: {r:?}"
+                );
+                assert!(!f.exists());
+                assert_eq!(pairs(&t), [("a".to_owned(), url(&w))], "{at:?}");
+                assert_eq!(modes(&t), [0o755; 3], "{at:?}");
+            });
+        }
     }
 
     /// After a crash past the move, the group in the Trash no longer
@@ -5194,8 +5247,9 @@ mod tests {
         });
     }
 
-    /// No safe Trash: a symlinked `Trash`, or a `files` folder open to
-    /// others; refused before anything is written, nothing chmod-ed.
+    /// No safe Trash: a symlinked `Trash`, or a `files` folder the group
+    /// can write; refused before anything is written, nothing chmod-ed,
+    /// the reason named in a warning.
     #[test]
     fn undo_refuses_an_unsafe_trash() {
         use std::os::unix::fs::PermissionsExt;
@@ -5216,14 +5270,20 @@ mod tests {
             let (job, _, g) = single(&t, "b");
             fs::create_dir_all(t.trash().join("files")).unwrap();
             fs::set_permissions(t.trash(), fs::Permissions::from_mode(0o700)).unwrap();
-            fs::set_permissions(t.trash().join("files"), fs::Permissions::from_mode(0o755))
+            fs::set_permissions(t.trash().join("files"), fs::Permissions::from_mode(0o775))
                 .unwrap();
-            assert_eq!(kept(&undo(&job).unwrap()), [UndoReason::NoTrash]);
+            let r = undo(&job).unwrap();
+            assert_eq!(kept(&r), [UndoReason::NoTrash]);
+            let why = format!(
+                "{} is writable by group or others",
+                t.trash().join("files").display()
+            );
+            assert!(r.warnings.iter().any(|w| w.contains(&why)), "{r:?}");
             let m = fs::metadata(t.trash().join("files"))
                 .unwrap()
                 .permissions()
                 .mode();
-            assert_eq!(m & 0o777, 0o755);
+            assert_eq!(m & 0o777, 0o775);
             assert!(f.exists() && g.exists());
         });
     }
