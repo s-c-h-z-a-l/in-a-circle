@@ -3016,4 +3016,485 @@ pub(crate) mod tests {
             );
         }
     }
+
+    // ---- Mutation pass 2 (D-39): tests for cleanup, supervision and the
+    // ---- cancel token.
+
+    /// Thread CPU time in nanoseconds.
+    fn thread_cpu_ns() -> u128 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: ts is a valid out-pointer.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        ts.tv_sec as u128 * 1_000_000_000 + ts.tv_nsec as u128
+    }
+
+    /// How long a probing wait runs, and the CPU it may burn meanwhile.
+    /// The nap doubles up to `GROUP_PROBE_MAX`, so a few dozen wakeups cost
+    /// well under a millisecond in all; a nap stuck at zero spins the whole
+    /// wait (about `PROBE_WAIT` of CPU). Half the wait separates the two by
+    /// a wide margin even on a loaded machine.
+    const PROBE_WAIT: Duration = Duration::from_millis(400);
+    const PROBE_CPU_MAX_NS: u128 = 200_000_000;
+
+    fn blocked(sig: libc::c_int) -> bool {
+        // SAFETY: with a null `set`, pthread_sigmask only reads the current
+        // mask into `cur`, a valid out-pointer.
+        unsafe {
+            let mut cur: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut cur);
+            libc::sigismember(&cur, sig) == 1
+        }
+    }
+
+    /// Dropping the token puts the thread's signal mask back: SIGTERM and
+    /// SIGINT are blocked while it lives (so only the signalfd sees them)
+    /// and deliverable again after.
+    #[test]
+    fn dropping_the_token_restores_the_signal_mask() {
+        assert!(!blocked(libc::SIGTERM) && !blocked(libc::SIGINT));
+        let tok = CancelToken::install().unwrap();
+        assert!(blocked(libc::SIGTERM) && blocked(libc::SIGINT));
+        drop(tok);
+        assert!(!blocked(libc::SIGTERM) && !blocked(libc::SIGINT));
+    }
+
+    /// The raw fd is the signalfd: silent until a cancel signal is
+    /// pending, readable once one is, so a caller can poll it.
+    #[test]
+    fn the_token_fd_becomes_readable_on_a_cancel_signal() {
+        let tok = CancelToken::install().unwrap();
+        let readable = || {
+            let mut p = libc::pollfd {
+                fd: tok.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: p is one valid pollfd.
+            unsafe { libc::poll(&mut p, 1, 0) };
+            p.revents & libc::POLLIN != 0
+        };
+        assert!(!readable());
+        // SAFETY: raise signals this thread, which blocks SIGTERM now.
+        unsafe { libc::raise(libc::SIGTERM) };
+        assert!(readable());
+        assert!(tok.is_cancelled());
+    }
+
+    /// A reader that plays back a script of results (popped from the
+    /// back), then data forever.
+    struct Script(Vec<io::Result<usize>>);
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop() {
+                Some(Ok(n)) => {
+                    buf[..n].fill(b'x');
+                    Ok(n)
+                }
+                Some(Err(e)) => Err(e),
+                None => {
+                    buf.fill(b'x');
+                    Ok(buf.len())
+                }
+            }
+        }
+    }
+
+    /// `read_quota` reads the whole quota from a flood (a smaller one only
+    /// adds wakeups, a larger one delays the cancel) and stops within one
+    /// buffer of it.
+    #[test]
+    fn read_quota_takes_the_whole_quota_from_a_flood() {
+        let mut total = 0;
+        let (open, full) = read_quota(&mut Script(Vec::new()), |b| total += b.len());
+        assert!(open && full);
+        // 64 KiB spelled out: the constant under test must not be its own
+        // oracle.
+        assert!((65_536..65_536 + 8192).contains(&total), "{total}");
+    }
+
+    /// An interrupted read is retried, WouldBlock leaves the pipe open for
+    /// the next wakeup, and any other error closes it (fail closed: a
+    /// broken pipe is never polled again as if healthy).
+    #[test]
+    fn read_quota_handles_interrupts_would_block_and_errors() {
+        let ek = |k| Err(io::Error::from(k));
+        let mut got = 0;
+        let r = read_quota(
+            &mut Script(vec![
+                ek(io::ErrorKind::WouldBlock),
+                Ok(5),
+                ek(io::ErrorKind::Interrupted),
+            ]),
+            |b| got += b.len(),
+        );
+        assert_eq!((r, got), ((true, false), 5), "interrupt, data, would-block");
+        let r = read_quota(&mut Script(vec![ek(io::ErrorKind::BrokenPipe)]), |_| {});
+        assert_eq!(r, (false, false));
+        let r = read_quota(&mut Script(vec![Ok(0)]), |_| {});
+        assert_eq!(r, (false, false));
+    }
+
+    /// A status that is neither an exit nor a signal (a stop) reads as exit
+    /// -1; exits and signals keep their numbers.
+    #[test]
+    fn end_from_status_keeps_codes_and_maps_a_stop_to_minus_one() {
+        assert_eq!(End::from(ExitStatus::from_raw(3 << 8)), End::Exit(3));
+        assert_eq!(
+            End::from(ExitStatus::from_raw(libc::SIGKILL)),
+            End::Signal(libc::SIGKILL)
+        );
+        // WIFSTOPPED (0x137f): neither exited nor signaled.
+        assert_eq!(End::from(ExitStatus::from_raw(0x137f)), End::Exit(-1));
+    }
+
+    /// `set_nonblocking` sets O_NONBLOCK and keeps it when called again
+    /// (it must not toggle).
+    #[test]
+    fn set_nonblocking_is_idempotent() {
+        let mut fds = [0 as RawFd; 2];
+        // SAFETY: fds holds two ints, as pipe2 writes.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: F_GETFL on an open fd.
+        let nb = |fd| unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+        assert!(!nb(fds[0]));
+        set_nonblocking(fds[0]);
+        assert!(nb(fds[0]));
+        set_nonblocking(fds[0]);
+        assert!(nb(fds[0]));
+        // SAFETY: both fds are ours.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    fn spawn_sh(script: &str) -> Child {
+        Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    /// The fallback exit probe (no pidfd): false while the child runs,
+    /// true once it has exited, still unreaped; false for a pid that is not
+    /// our child.
+    #[test]
+    fn exited_unreaped_tells_running_from_exited_without_reaping() {
+        let mut running = spawn_sh("sleep 30");
+        let pid = running.id() as libc::pid_t;
+        assert!(!exited_unreaped(pid));
+        // SAFETY: our own unreaped child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let until = Instant::now() + Duration::from_secs(5);
+        while !exited_unreaped(pid) {
+            assert!(
+                Instant::now() < until,
+                "a killed child never showed as exited"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(exited_unreaped(pid), "the probe must not reap");
+        assert!(running.try_wait().unwrap().is_some(), "still reapable once");
+        // Not our child: waitid fails (ECHILD), which reads as not exited.
+        assert!(!exited_unreaped(1));
+    }
+
+    /// Without a pidfd `wait_exited` polls `waitid`: it sees an exit, gives
+    /// up at the deadline for a child that runs on, and does not spin while
+    /// it waits.
+    #[test]
+    fn wait_exited_without_a_pidfd_waits_and_gives_up_cheaply() {
+        let mut quick = spawn_sh("exit 0");
+        let t0 = Instant::now();
+        assert!(wait_exited(
+            quick.id() as libc::pid_t,
+            None,
+            t0 + Duration::from_secs(5)
+        ));
+        quick.wait().unwrap();
+
+        let mut slow = spawn_sh("sleep 30");
+        let (c0, t0) = (thread_cpu_ns(), Instant::now());
+        assert!(!wait_exited(
+            slow.id() as libc::pid_t,
+            None,
+            t0 + PROBE_WAIT
+        ));
+        assert!(t0.elapsed() >= PROBE_WAIT, "returned before the deadline");
+        assert!(
+            thread_cpu_ns() - c0 < PROBE_CPU_MAX_NS,
+            "the wait spun on the CPU"
+        );
+        slow.kill().unwrap();
+        slow.wait().unwrap();
+    }
+
+    /// `reap_group` sleeps between probes of a member that still runs: it
+    /// gives up at the deadline without spinning.
+    #[test]
+    fn reap_group_waits_for_a_running_member_without_spinning() {
+        let (pid, c) = leader("sleep 30 & exit 0");
+        let (c0, t0) = (thread_cpu_ns(), Instant::now());
+        let r = reap_group(pid, t0 + PROBE_WAIT);
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(t0.elapsed() >= PROBE_WAIT);
+        assert!(thread_cpu_ns() - c0 < PROBE_CPU_MAX_NS, "the reap spun");
+        // The member still runs: end the group (reap_group took the leader).
+        drop(c);
+        // SAFETY: the group id stays ours while a member of it exists.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        reap_group(pid, Instant::now() + Duration::from_secs(5)).unwrap();
+    }
+
+    /// Only a member that was running at our kill counts as alive: one that
+    /// ended by itself before it (a zombie of ours once its leader is gone)
+    /// does not, whether it exited with 0, exited with the number 9 (the
+    /// number of SIGKILL), or died of its own SIGTERM.
+    #[test]
+    fn reap_group_counts_only_members_running_at_the_kill() {
+        for script in [
+            "sleep 0.1 & exit 0",
+            "sh -c 'sleep 0.1; exit 9' & exit 0",
+            "sh -c 'sleep 0.1; kill -TERM $$' & exit 0",
+        ] {
+            let (pid, c) = leader(script);
+            // Long enough for the member to have ended on its own.
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(!kill_and_reap(pid, c).unwrap(), "{script}");
+        }
+    }
+
+    fn step_over(t: &Tmp) -> StepIn {
+        StepIn {
+            paths: vec![t.0.join("in.txt")],
+            origin: vec![0],
+            intermediate: false,
+        }
+    }
+
+    /// A supervisor over `script`, for driving its parts directly.
+    fn sup_over<'a>(
+        script: &str,
+        step: &'a StepIn,
+        t: &'a Tmp,
+        tok: &'a CancelToken,
+    ) -> Supervisor<'a> {
+        become_subreaper().unwrap();
+        Supervisor::new(spawn_sh(script), step, &t.0, &t.0, tok, 0)
+    }
+
+    /// Ends and reaps a test supervisor's child group.
+    fn stop(sup: &mut Supervisor) {
+        sup.signal(libc::SIGKILL);
+        sup.child.wait().unwrap();
+    }
+
+    /// A line of exactly `MAX_LINE` bytes (no newline yet) is pending; one
+    /// byte more is a violation.
+    #[test]
+    fn feed_limits_a_line_to_max_line() {
+        let t = Tmp::new("feed");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.feed(&vec![b'x'; MAX_LINE], &mut sink);
+        assert_eq!(sup.violation, None);
+        sup.feed(b"x", &mut sink);
+        assert_eq!(sup.violation.as_deref(), Some("event line too long"));
+        stop(&mut sup);
+    }
+
+    /// The stderr tail keeps exactly the last `STDERR_TAIL` bytes, and
+    /// `drain` reads both pipes to EOF.
+    #[test]
+    fn stderr_tail_keeps_the_last_bytes_and_drain_reaches_eof() {
+        let t = Tmp::new("tail");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        // stdout is closed at once while stderr carries 200 KB, more than
+        // one `READ_QUOTA` and than a pipe holds: `drain` must go on for
+        // stderr after stdout is done.
+        let mut sup = sup_over(
+            "exec >&-; head -c 200000 /dev/zero | tr '\\0' a >&2; head -c 100 /dev/zero | tr '\\0' b >&2",
+            &step,
+            &t,
+            &tok,
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        assert!(sup.drain(&mut sink, until));
+        assert!(sup.stdout.is_none() && sup.stderr.is_none());
+        assert_eq!(sup.tail.len(), STDERR_TAIL);
+        assert!(sup.tail.ends_with(&[b'b'; 100]));
+        assert!(sup.tail[..STDERR_TAIL - 100].iter().all(|&b| b == b'a'));
+        sup.child.wait().unwrap();
+    }
+
+    fn done_event(t: &Tmp, rel: &str) -> Vec<u8> {
+        fs::create_dir_all(t.0.join(rel).parent().unwrap()).unwrap();
+        fs::write(t.0.join(rel), "x").unwrap();
+        format!("done\t{}\t{rel}", t.0.join("in.txt").display()).into_bytes()
+    }
+
+    /// Output paths: a second `done` for the same path is a violation, a
+    /// different path is not; the byte total may reach `MAX_OUTPUT_BYTES`
+    /// exactly and not exceed it.
+    #[test]
+    fn done_events_are_checked_for_duplicates_and_the_byte_cap() {
+        let t = Tmp::new("done");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let (a, b) = (done_event(&t, "0/a.md"), done_event(&t, "0/b.md"));
+        // The same path twice while it is the only one recorded.
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.handle_line(&a, &mut sink);
+        sup.handle_line(&a, &mut sink);
+        let v = sup.violation.clone().unwrap();
+        assert!(v.starts_with("duplicate output"), "{v}");
+        assert_eq!(sup.outputs.len(), 1);
+        stop(&mut sup);
+        // A different path is no duplicate.
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.handle_line(&a, &mut sink);
+        sup.handle_line(&b, &mut sink);
+        assert_eq!(sup.violation, None);
+        assert_eq!(sup.outputs.len(), 2);
+        stop(&mut sup);
+
+        // The path "0/a.md" is 6 bytes: at the cap exactly is accepted, one
+        // byte over is refused.
+        for (used, ok) in [(MAX_OUTPUT_BYTES - 6, true), (MAX_OUTPUT_BYTES - 5, false)] {
+            let mut sup = sup_over("sleep 30", &step, &t, &tok);
+            sup.output_bytes = used;
+            sup.handle_line(&a, &mut sink);
+            assert_eq!(sup.violation.is_none(), ok, "used {used}");
+            stop(&mut sup);
+        }
+    }
+
+    /// A violation is recorded once (the first stays), never while
+    /// cancelled, and ends the group with SIGTERM.
+    #[test]
+    fn violate_keeps_the_first_reason_and_ignores_a_cancelled_run() {
+        let t = Tmp::new("violate");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.violate("first".to_owned());
+        sup.violate("second".to_owned());
+        assert_eq!(sup.violation.as_deref(), Some("first"));
+        assert!(sup.term_at.is_some());
+        stop(&mut sup);
+
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.cancelled = true;
+        sup.violate("late".to_owned());
+        sup.violate_by(Some(0), "late".to_owned(), None);
+        assert_eq!(sup.violation, None);
+        assert!(sup.offender.is_none() && sup.term_at.is_none());
+        stop(&mut sup);
+    }
+
+    /// A cancel seen by either the token or the observer, at the child's
+    /// exit, fails the input as cancelled and places nothing.
+    #[test]
+    fn finish_honours_a_cancel_from_the_token_or_the_observer() {
+        for from_observer in [true, false] {
+            let t = Tmp::new("finish-cancel");
+            let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+            let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+            let mut sink = Sink::new(&mut seen, &inputs);
+            let sup = sup_over("exit 0", &step, &t, &tok);
+            if from_observer {
+                sink.cancelled = true;
+            } else {
+                // SAFETY: raise signals this thread, which blocks SIGTERM.
+                unsafe { libc::raise(libc::SIGTERM) };
+            }
+            assert!(sup.finish(&mut sink).is_none());
+            drop(sink);
+            assert_eq!(
+                seen.0,
+                [Outcome::Failed {
+                    input: step.paths[0].clone(),
+                    reason: "cancelled".to_owned()
+                }],
+                "observer: {from_observer}"
+            );
+            tok.is_cancelled();
+        }
+    }
+
+    /// The default `group` callback reports the published wrapper folder to
+    /// `dir`.
+    #[test]
+    fn the_default_group_callback_reports_the_wrapper_folder() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("the_default_group_callback_reports_the_wrapper_folder", 0).is_none() {
+            return;
+        }
+        #[derive(Default)]
+        struct Dirs(Seen, Vec<PathBuf>);
+        impl Observer for Dirs {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, p: &Path) {
+                self.1.push(p.to_owned());
+            }
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+        }
+        let t = Tmp::new("group-default");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Dirs::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(
+            matches!(seen.0.0[..], [Outcome::Done { .. }]),
+            "{:?}",
+            seen.0.0
+        );
+        assert_eq!(seen.1, [docs.join("a")]);
+    }
+
+    /// Progress is `(base + span * (step + f) / steps) / total`: the second
+    /// step of two, halfway, in a group of two after one input.
+    #[test]
+    fn sink_progress_scales_by_steps_group_and_total() {
+        #[derive(Default)]
+        struct P(Vec<(usize, usize, f32)>);
+        impl Observer for P {
+            fn event(&mut self, _: &Outcome) {}
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, d: usize, t: usize, f: f32) {
+                self.0.push((d, t, f));
+            }
+        }
+        let inputs: Vec<PathBuf> = (0..4).map(|i| PathBuf::from(format!("/in/{i}"))).collect();
+        let mut obs = P::default();
+        let mut sink = Sink::new(&mut obs, &inputs);
+        sink.base = 1;
+        sink.span = 2;
+        sink.steps = 2;
+        sink.step = 1;
+        sink.progress(0.5);
+        drop(sink);
+        // within = (1 + 0.5) / 2 = 0.75; frac = (1 + 2 * 0.75) / 4 = 0.625.
+        assert_eq!(obs.0, [(0, 4, 0.625)]);
+    }
 }

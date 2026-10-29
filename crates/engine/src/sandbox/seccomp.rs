@@ -649,4 +649,120 @@ mod tests {
         assert_eq!(Arch::X86_64.audit(), 0xc000_003e);
         assert_eq!(Arch::Aarch64.audit(), 0xc000_00b7);
     }
+
+    // ---- Mutation pass 2 (D-39): the program, run by a small BPF
+    // ---- interpreter, on both architectures.
+
+    /// Runs `filter(arch)` on a syscall: the verdict, and the indices of the
+    /// instructions it went through.
+    fn run_filter(arch: Arch, nr: u32, args: [u64; 6]) -> (u32, Vec<usize>) {
+        // struct seccomp_data: nr, arch, instruction_pointer, args[6].
+        let mut data = [0u8; 64];
+        data[0..4].copy_from_slice(&nr.to_le_bytes());
+        data[4..8].copy_from_slice(&arch.audit().to_le_bytes());
+        for (i, a) in args.iter().enumerate() {
+            data[16 + 8 * i..24 + 8 * i].copy_from_slice(&a.to_le_bytes());
+        }
+        let prog = filter(arch);
+        let (mut pc, mut a, mut seen) = (0usize, 0u32, Vec::new());
+        loop {
+            let ins = prog[pc];
+            seen.push(pc);
+            let code = u32::from(ins.code);
+            if code == BPF_LD | BPF_W | BPF_ABS {
+                let o = ins.k as usize;
+                a = u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
+            } else if code == BPF_ALU | BPF_AND | BPF_K {
+                a &= ins.k;
+            } else if code == BPF_RET | BPF_K {
+                return (ins.k, seen);
+            } else if code & 0x07 == BPF_JMP {
+                let hit = match code & 0xf0 {
+                    BPF_JEQ => a == ins.k,
+                    BPF_JGE => a >= ins.k,
+                    BPF_JGT => a > ins.k,
+                    BPF_JSET => a & ins.k != 0,
+                    op => panic!("unknown jump {op:#x}"),
+                };
+                pc += 1 + usize::from(if hit { ins.jt } else { ins.jf });
+                continue;
+            } else {
+                panic!("unknown instruction {code:#x} at {pc}");
+            }
+            pc += 1;
+        }
+    }
+
+    fn nr_of(rule: fn(&Rule) -> bool, arch: Arch) -> u32 {
+        let s = POLICY.iter().find(|s| rule(&s.rule)).unwrap();
+        nr_on(s, arch).unwrap()
+    }
+
+    const ARCHES: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
+
+    fn eperm() -> u32 {
+        errno(libc::EPERM)
+    }
+
+    /// Nothing is dead filler: every instruction is one the program uses
+    /// (an unused slot would be the zero instruction the table starts from),
+    /// so the blocks are packed as the layout says.
+    #[test]
+    fn the_program_has_no_unused_slots() {
+        for arch in ARCHES {
+            for (i, ins) in filter(arch).iter().enumerate() {
+                assert_ne!(ins.code, 0, "{arch:?}: slot {i} is unused");
+            }
+        }
+    }
+
+    /// The ioctl block: an allowed command is allowed and a denied one gets
+    /// EPERM, each decided inside the block (the verdict is the block's own
+    /// return, not another block's code reached by a stray jump).
+    #[test]
+    fn ioctl_commands_are_decided_inside_their_own_block() {
+        for arch in ARCHES {
+            let (nr, l) = (nr_of(|r| matches!(r, Rule::Ioctl), arch), layout(arch));
+            for cmd in IOCTL_ALLOWED {
+                let (v, seen) = run_filter(arch, nr, [0, u64::from(cmd), 0, 0, 0, 0]);
+                assert_eq!(v, SECCOMP_RET_ALLOW, "{arch:?} {cmd:#x}");
+                assert!(
+                    seen.iter().all(|&i| i < l.fcntl),
+                    "{arch:?} {cmd:#x}: {seen:?}"
+                );
+            }
+            // TIOCSTI (0x5412) injects terminal input; the upper half of the
+            // argument is not part of the command.
+            for cmd in [0x5412u64, 0, 0x1_0000_0000 | 0x5412] {
+                let (v, seen) = run_filter(arch, nr, [0, cmd, 0, 0, 0, 0]);
+                assert_eq!(v, eperm(), "{arch:?} {cmd:#x}");
+                assert!(
+                    seen.iter().all(|&i| i < l.fcntl),
+                    "{arch:?} {cmd:#x}: {seen:?}"
+                );
+            }
+        }
+    }
+
+    /// The fcntl block: the denied commands and `F_SETFL` with `O_ASYNC` get
+    /// EPERM; other commands and `F_SETFL` without it are allowed.
+    #[test]
+    fn fcntl_denied_commands_and_o_async_get_eperm() {
+        for arch in ARCHES {
+            let nr = nr_of(|r| matches!(r, Rule::Fcntl), arch);
+            let call =
+                |cmd: u32, arg: u64| run_filter(arch, nr, [0, u64::from(cmd), arg, 0, 0, 0]).0;
+            for cmd in FCNTL_DENIED {
+                assert_eq!(call(cmd, 0), eperm(), "{arch:?} {cmd}");
+            }
+            assert_eq!(call(F_SETFL, u64::from(O_ASYNC)), eperm(), "{arch:?}");
+            assert_eq!(
+                call(F_SETFL, u64::from(O_ASYNC | 0o4000)),
+                eperm(),
+                "{arch:?}"
+            );
+            assert_eq!(call(F_SETFL, 0o4000), SECCOMP_RET_ALLOW, "{arch:?}");
+            assert_eq!(call(3, 0), SECCOMP_RET_ALLOW, "{arch:?} F_GETFL");
+        }
+    }
 }

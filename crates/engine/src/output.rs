@@ -3214,4 +3214,107 @@ pub(crate) mod tests {
             "own work dir left behind"
         );
     }
+
+    // ---- Mutation pass 2 (D-39).
+
+    /// The identity folds seconds and nanoseconds of both times into
+    /// nanoseconds, and keeps device, inode and size.
+    #[test]
+    fn file_id_from_stat_folds_seconds_and_nanoseconds() {
+        // SAFETY: an all-zero libc::stat is valid.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        st.st_dev = 7;
+        st.st_ino = 8;
+        st.st_size = 9;
+        st.st_mtime = 3;
+        st.st_mtime_nsec = 5;
+        st.st_ctime = 11;
+        st.st_ctime_nsec = 13;
+        assert_eq!(
+            FileId::from_stat(&st),
+            FileId {
+                dev: 7,
+                ino: 8,
+                size: 9,
+                mtime_ns: 3_000_000_005,
+                ctime_ns: 11_000_000_013,
+            }
+        );
+    }
+
+    /// A staging file that cannot be created for a reason other than a
+    /// name clash fails at once with that reason, instead of walking
+    /// through every conflict number and reporting a clash that never was.
+    #[test]
+    fn a_staging_error_other_than_a_clash_is_reported_as_it_is() {
+        if uid() == 0 {
+            eprintln!("skipped: root ignores directory permissions");
+            return;
+        }
+        let (t, root, target) = pub_fixture("pub-stage-eacces");
+        produced(&root, "0/a.md", b"a");
+        let tgt = target.clone();
+        let r = with_fault(
+            move |pt| {
+                if pt == Point::Open {
+                    // The staging wrapper is the only folder without
+                    // subfolders under the target: make it unwritable.
+                    for staging in fs::read_dir(&tgt).unwrap().flatten() {
+                        for w in fs::read_dir(staging.path()).unwrap().flatten() {
+                            fs::set_permissions(w.path(), fs::Permissions::from_mode(0o500))
+                                .unwrap();
+                        }
+                    }
+                }
+                None
+            },
+            || publish(&root, &["0/a.md"], &target, "a", "md"),
+        );
+        // Let the cleanup and the test's own removal work.
+        for staging in fs::read_dir(&target).unwrap().flatten() {
+            for w in fs::read_dir(staging.path()).unwrap().flatten() {
+                let _ = fs::set_permissions(w.path(), fs::Permissions::from_mode(0o700));
+            }
+        }
+        let e = r.expect_err("an unwritable staging wrapper must fail");
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        drop(t);
+    }
+
+    /// A leaf name whose existence cannot be told (the target stops being
+    /// searchable) is an error: the publication goes no further, in
+    /// particular never reaches the rename.
+    #[test]
+    fn an_unreadable_target_stops_before_the_commit() {
+        if uid() == 0 {
+            eprintln!("skipped: root ignores directory permissions");
+            return;
+        }
+        let (_t, root, target) = pub_fixture("pub-stat-eacces");
+        produced(&root, "0/a.md", b"a");
+        let (tgt, seen) = (
+            target.clone(),
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        );
+        let log = seen.clone();
+        let r = with_fault(
+            move |pt| {
+                log.borrow_mut().push(pt);
+                if pt == Point::SyncStaging {
+                    fs::set_permissions(&tgt, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                None
+            },
+            || publish(&root, &["0/a.md"], &target, "a", "md"),
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let e = r.expect_err("a target that cannot be searched must fail");
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        assert!(
+            !seen.borrow().contains(&Point::BeforeRename),
+            "reached the rename: {:?}",
+            seen.borrow()
+        );
+        assert!(!target.join("a").exists());
+    }
 }
