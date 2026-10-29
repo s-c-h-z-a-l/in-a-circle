@@ -1778,6 +1778,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// The manifest's output limit is exact: `MAX_OUTPUT` bytes are read
+    /// whole, one more is refused (deterministically: the binary is broken,
+    /// a retry will not help).
+    #[test]
+    fn manifest_output_limit_is_exact() {
+        use std::os::unix::process::CommandExt;
+        let run = |n: usize| {
+            let mut c = Command::new("/bin/head")
+                .process_group(0)
+                .args(["-c", &n.to_string(), "/dev/zero"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            collect(&mut c, Instant::now() + Duration::from_secs(20))
+        };
+        crate::exec::become_subreaper().unwrap();
+        assert_eq!(run(MAX_OUTPUT).ok().map(|o| o.len()), Some(MAX_OUTPUT));
+        assert!(matches!(
+            run(MAX_OUTPUT + 1),
+            Err(Fail::Deterministic(m)) if m == "manifest larger than 64 KB"
+        ));
+    }
+
     /// A manifest that outlives its deadline and has a descendant fails as
     /// "timed out", the cause, not as "left processes behind", its
     /// consequence.
