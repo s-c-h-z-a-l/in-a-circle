@@ -98,7 +98,10 @@ def pids(exe):
 class Build:
     def __init__(self, label, bindir, out):
         self.label = label
-        self.exe = str(Path(bindir).resolve() / "inacircle")
+        # The real path of the file: /proc/<pid>/exe always names the target
+        # of a symlink, so a symlinked `inacircle` in the bin dir would never
+        # match its own process otherwise (and the launch uses the same path).
+        self.exe = str((Path(bindir) / "inacircle").resolve())
         self.root = Path(out).resolve() / f"state-{label}"
         self.log = Path(out).resolve() / f"wheel-{label}.log"
         for sub in ("actions", "cache", "state", "config", "home"):
@@ -283,6 +286,8 @@ def main():
     a = Build(args.label_a, args.a_bin, out)
     b = Build(args.label_b, args.b_bin, out) if args.b_bin else None
     builds = [x for x in (a, b) if x]
+    if b and a.exe == b.exe:
+        sys.exit(f"A and B resolve to the same file {a.exe}; their processes cannot be told apart")
     for x in builds:
         if pids(x.exe):
             sys.exit(f"{x.exe} is already running; refusing to start")

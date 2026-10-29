@@ -465,6 +465,29 @@ class AbRunnerTests(unittest.TestCase):
         self.assertIn(r"a\.b\+c", pattern)
         self.assertIn(r"\(x\)", pattern)
 
+    def test_symlinked_binary_is_recognised_as_our_own_child(self):
+        import os, shutil
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d).resolve()
+            (d / "real").mkdir()
+            (d / "bin").mkdir()
+            (d / "other").mkdir()
+            shutil.copy2(shutil.which("sleep"), d / "real" / "inacircle")
+            os.symlink(d / "real" / "inacircle", d / "bin" / "inacircle")
+            shutil.copy2(shutil.which("sleep"), d / "other" / "inacircle")
+            build = self.ab.Build("A", d / "bin", d / "out")
+            self.assertEqual(build.exe, str(d / "real" / "inacircle"))
+            ours = subprocess.Popen([build.exe, "30"])
+            stranger = subprocess.Popen([str(d / "other" / "inacircle"), "30"])
+            try:
+                import time
+                time.sleep(0.2)
+                self.assertEqual(self.ab.pids(build.exe), [ours.pid])
+            finally:
+                for p in (ours, stranger):
+                    p.kill()
+                    p.wait()
+
     def test_pids_keeps_only_our_own_executable(self):
         import types
         ab = self.ab
