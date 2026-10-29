@@ -1797,3 +1797,152 @@ fn startup_notice_open_past_the_aggregate_frame_is_given_up() {
     assert_eq!(f.unavailable(), 1, "{}", f.stderr);
     assert!(f.notices.is_empty());
 }
+
+/// The engine memory ceiling (docs/benchmarks/acceptance.md): 5 MB PSS as
+/// a maximum over every observation, not a percentile.
+const PSS_CEILING_BYTES: u64 = 5_000_000;
+
+/// External sampling cadence for the memory phases. A `smaps_rollup` read
+/// takes well under a millisecond and the phases last from tens of
+/// milliseconds to seconds, so 2 ms puts dozens of samples in the shortest
+/// phase; PSS has no kernel-kept peak, so what is reported is the sampled
+/// maximum, not a proof of every transient.
+const SAMPLE_EVERY: Duration = Duration::from_millis(2);
+
+/// (PSS, RSS) of `pid` in bytes, from `smaps_rollup` (kB are KiB), or
+/// `None` once the process is gone.
+fn pss_rss(pid: u32) -> Option<(u64, u64)> {
+    let t = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
+    let field = |name: &str| -> Option<u64> {
+        let l = t.lines().find(|l| l.starts_with(name))?;
+        Some(l.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024)
+    };
+    Some((field("Pss:")?, field("Rss:")?))
+}
+
+/// Runs `args` under `--notify` with a server that never answers (so the
+/// Undo window runs out), sampling the supervisor's PSS and RSS from
+/// outside every `SAMPLE_EVERY`. Prints the sampled maximum per phase (the
+/// phase changes at each notification the server gets) and fails when any
+/// observation is above the ceiling or a phase has too few samples.
+fn memory_phases(name: &str, e: &Env, args: &[&OsStr], phases_wanted: usize) {
+    let (fake, rx) = server(|_, _| {});
+    let mut c = e.cmd(Some(&bus_of(&fake)), args);
+    c.env("INACIRCLE_UNDO_WAIT_MS", "1000")
+        .env("INACIRCLE_MEASURE", "1");
+    let samples = Arc::new(Mutex::new(Vec::<(Instant, u64, u64)>::new()));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s2, stop2) = (samples.clone(), stop.clone());
+    let r = run_then(c, &Arc::new(Mutex::new(String::new())), move |pid| {
+        std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some((p, r)) = pss_rss(pid) {
+                    s2.lock().unwrap().push((Instant::now(), p, r));
+                }
+                std::thread::sleep(SAMPLE_EVERY);
+            }
+        });
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    fake.join();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    let notices: Vec<Got> = rx.try_iter().collect();
+    let samples = samples.lock().unwrap().clone();
+    // Phase k: after the k-th notice event and before the next one.
+    let mut worst = 0;
+    let mut seen_phases = 0;
+    for k in 0..=notices.len() {
+        let from = if k == 0 {
+            None
+        } else {
+            Some(notices[k - 1].at)
+        };
+        let to = notices.get(k).map(|g| g.at);
+        let inside: Vec<_> = samples
+            .iter()
+            .filter(|(t, _, _)| from.is_none_or(|f| *t >= f) && to.is_none_or(|e| *t < e))
+            .collect();
+        let label = match k {
+            0 => "run, before any notice".to_string(),
+            k => format!("after notice {k} ({:?})", notices[k - 1].summary),
+        };
+        let pmax = inside.iter().map(|s| s.1).max().unwrap_or(0);
+        let rmax = inside.iter().map(|s| s.2).max().unwrap_or(0);
+        eprintln!(
+            "MEMORY {name}: {label}: samples={} max_pss_B={pmax} max_rss_B={rmax}",
+            inside.len()
+        );
+        if inside.len() >= 5 {
+            seen_phases += 1;
+        }
+        worst = worst.max(pmax);
+    }
+    // The kernel's own peak RSS of the process (`VmHWM`, kB are KiB), printed
+    // by the measurement switch before the notices at the end. RSS is never
+    // below PSS, so the peak bounds every transient of the supervisor up to
+    // that point, which the sampling cannot see.
+    let hwm = r
+        .stderr
+        .lines()
+        .find_map(|l| l.split("vm_hwm=").nth(1))
+        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+        .map(|kib| kib * 1024)
+        .unwrap_or_else(|| panic!("{name}: no vm_hwm in {}", r.stderr));
+    eprintln!(
+        "MEMORY {name}: total samples={} worst_pss_B={worst} vm_hwm_B={hwm} cadence={SAMPLE_EVERY:?}",
+        samples.len()
+    );
+    assert!(
+        hwm > 0 && hwm <= PSS_CEILING_BYTES,
+        "{name}: peak RSS {hwm} B outside 1..={PSS_CEILING_BYTES} B"
+    );
+    assert!(worst > 0, "{name}: no PSS observation: incomplete evidence");
+    assert!(
+        worst <= PSS_CEILING_BYTES,
+        "{name}: {worst} B exceeds {PSS_CEILING_BYTES} B"
+    );
+    assert!(
+        seen_phases >= phases_wanted,
+        "{name}: only {seen_phases} phases with 5 or more samples, wanted {phases_wanted}"
+    );
+}
+
+#[test]
+fn supervisor_memory_stays_within_the_ceiling_in_every_phase() {
+    // One input: conversion, the final notice, the Undo window.
+    let e = Env::new("mem-one");
+    e.file("a.txt", "hello\n");
+    memory_phases(
+        "one input",
+        &e,
+        &["run", "--notify", "markdown", "a.txt"].map(OsStr::new),
+        1,
+    );
+
+    // 1024 inputs in one run.
+    let e = Env::new("mem-many");
+    let names: Vec<String> = (0..1024).map(|i| format!("f{i:04}.txt")).collect();
+    for n in &names {
+        e.file(n, "hello\n");
+    }
+    let mut args: Vec<&OsStr> = ["run", "--notify", "markdown"].map(OsStr::new).to_vec();
+    args.extend(names.iter().map(OsStr::new));
+    memory_phases("1024 inputs", &e, &args, 2);
+
+    // A run that outlasts RUNNING_AFTER: the running notice with Cancel
+    // is up while the action works, then the final notice and the window.
+    let e = Env::new("mem-running");
+    let a = e.test_input("a.test", &["sleep_ms=2500", "events=done"]);
+    memory_phases(
+        "running notice",
+        &e,
+        &[
+            OsStr::new("run"),
+            OsStr::new("--notify"),
+            OsStr::new("--action"),
+            OsStr::new("test.script"),
+            a.as_os_str(),
+        ],
+        3,
+    );
+}
