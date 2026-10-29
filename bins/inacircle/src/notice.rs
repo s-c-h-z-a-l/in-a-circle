@@ -161,6 +161,9 @@ impl Summary {
                     let op = format!("{:016x}", location.anchor.op.0);
                     self.unknown.push((name_of(input), why, op));
                 }
+                // Deduplicated here only among the first KEEP_PROBLEMS
+                // inputs (a bounded scan, not O(n^2)); the real count is
+                // the per-input one that `set_counts` puts over this.
                 self.unknown_count += 1;
             }
             Outcome::Warned { input, .. } => {

@@ -811,6 +811,10 @@ fn make_private_dir(dir: RawFd, name: &CStr) -> io::Result<(Fd, (u64, u64))> {
     let made_st = stat_at(At { dir, name });
     let made = made_st.as_ref().map(ident).map_err(|_| ());
     let opened = (|| {
+        // If the folder just made cannot be stat-ed, `made` is an error,
+        // the mode below lacks setgid, and the identity check after the
+        // open refuses the folder: the loss of setgid never outlives a
+        // folder that is used.
         // Setgid is inherited from a setgid target and kept (the group of
         // everything made below follows it); the permission bits are
         // private regardless of the umask.
