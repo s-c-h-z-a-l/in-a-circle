@@ -472,36 +472,23 @@ class AbRunnerTests(unittest.TestCase):
             (d / "real").mkdir()
             (d / "bin").mkdir()
             (d / "other").mkdir()
-            shutil.copy2(shutil.which("sleep"), d / "real" / "inacircle")
+            # A shell, not `sleep`: a multi-call coreutils (the Rust one on
+            # newer Ubuntu) picks its program from argv[0] and exits at once
+            # when copied under another name. A shell ignores its own name,
+            # and the trailing `:` stops it from exec-ing the sleep itself.
+            sh = shutil.which("sh")
+            shutil.copy2(sh, d / "real" / "inacircle")
             os.symlink(d / "real" / "inacircle", d / "bin" / "inacircle")
-            shutil.copy2(shutil.which("sleep"), d / "other" / "inacircle")
+            shutil.copy2(sh, d / "other" / "inacircle")
             build = self.ab.Build("A", d / "bin", d / "out")
             self.assertEqual(build.exe, str(d / "real" / "inacircle"))
-            # A multi-call coreutils (the Rust one on newer Ubuntu) picks the
-            # program from argv[0] and exits at once as `inacircle`; it takes
-            # the program name as the first argument instead. The command
-            # line still starts with the executable's path, as pids() needs.
-            import time
-            tail = ["30"]
-            probe = subprocess.Popen([build.exe, *tail], stderr=subprocess.DEVNULL)
-            time.sleep(0.2)
-            if probe.poll() is not None:
-                tail = ["sleep", "30"]
-            else:
-                probe.kill()
-                probe.wait()
+            tail = ["-c", "sleep 30; :"]
             ours = subprocess.Popen([build.exe, *tail])
             stranger = subprocess.Popen([str(d / "other" / "inacircle"), *tail])
             try:
+                import time
                 time.sleep(0.2)
-                import os as _os
-                seen = self.ab.pids(build.exe)
-                why = (f"tail={tail} probe={probe.returncode} ours={ours.pid} "
-                       f"ours_rc={ours.poll()} sleep={shutil.which('sleep')} "
-                       f"real={_os.path.realpath(shutil.which('sleep'))}")
-                if _os.path.exists(f"/proc/{ours.pid}/exe"):
-                    why += f" exe={_os.readlink(f'/proc/{ours.pid}/exe')}"
-                self.assertEqual(seen, [ours.pid], why)
+                self.assertEqual(self.ab.pids(build.exe), [ours.pid])
             finally:
                 for p in (ours, stranger):
                     p.kill()
