@@ -29,38 +29,75 @@ number is a result only where its row says so.
   PSS 0 into `invalid`, and a functional failure into `invalid` rows with
   its reason.
 - **Builds.** A = `169163b` (instrumentation only, before the hardening hot
-  path changes), sha256 `692a0e5d...27c7`. B = the hardening release, source
-  `b696450`; the binary (sha256 `530de180...1019`, series label
-  `B-c901291`) was built from `c901291`, whose only difference from
-  `b696450` is tests and scripts. Same profile (fat LTO, `panic=abort`, stripped) and the
-  same `INACIRCLE_MEASURE` instrumentation, which is a runtime switch.
+  path changes), sha256 `692a0e5d...27c7`. B = the final hardening code,
+  commit `420a714`, sha256 `9a1ac05a...98c5` (built twice from the same
+  tree, identical). Shipped source is unchanged after `420a714`; later
+  commits touch tests, scripts and docs. Same profile (fat LTO,
+  `panic=abort`, stripped) and the same `INACIRCLE_MEASURE` instrumentation,
+  which is a runtime switch. An earlier run on a previous candidate
+  (source `b696450`) gave the same startup numbers within noise (B p95 1966
+  and 1979 us against 1977 and 1957 us now).
 
-## Memory (release, fake compositor, this machine)
+## Memory (release, fake compositor, reference desktop)
 
-The large-drop test keeps all four stage-2 observations (two runs of one
-file, two of 1024 files) and each must pass the 5,000,000 B gate. Three
-invocations, 12 observations, PSS sampled once after stage 2 (a sampled
-value, not a transient peak):
+Every observation is gated at 5,000,000 B as a maximum (PSS from
+`smaps_rollup`, KiB times 1024). PSS has no kernel-kept peak, so the
+numbers below are **sampled maxima** unless a row says otherwise.
+
+**Wheel (stage 2 after a drop).** `a_large_drop_stays_within_the_memory_budget`,
+3 invocations, 12 observations, PSS sampled once after stage 2:
 
 | Workload | N | Max PSS | Gate |
 |---|---|---|---|
-| 1 file, stage 2 | 6 | 3,064,832 B | PASS |
-| 1024 files, stage 2 | 6 | 3,219,456 B | PASS |
+| 1 file, stage 2 | 6 | 3,053,568 B | PASS |
+| 1024 files, stage 2 | 6 | 3,204,096 B | PASS |
 
-Anonymous memory grows by about 156 kB between the two (188 to 344 kB).
-Not covered by this table: engine/supervisor phases of a running action and
-the Undo window (an evidence gap, as in acceptance.md).
+Anonymous memory is about 190 kB for one file and 344 kB for 1024.
+
+**Supervisor (the same process after the choice) with the notifications and
+the Undo window.** `supervisor_memory_stays_within_the_ceiling_in_every_phase`
+runs `inacircle run --notify` against a scripted notification server on a
+private socket, with the Undo window set to 1 s and no click. A thread
+outside the process reads its `smaps_rollup` every 2 ms from spawn to exit;
+a phase ends at each notification the server receives. As an upper bound
+that does not depend on the sampling, the run's own `VmHWM` (the kernel's
+peak RSS, never below PSS) is printed before the notices and gated at the
+same 5,000,000 B. Three invocations, same code:
+
+| Workload | Phase | Samples | Max PSS | Max RSS |
+|---|---|---|---|---|
+| 1 input | conversion, before the final notice | 2 | 1,265,664 B | 3,727,360 B |
+| 1 input | final notice and Undo window | 483-484 | 1,340,416 B | 3,801,088 B |
+| 1024 inputs | conversion | 26 | 2,219,008 B | 4,624,384 B |
+| 1024 inputs | final notice and Undo window | 477-483 | 2,219,008 B | 4,624,384 B |
+| 1 input, 2.5 s action | action running | 484-485 | 1,227,776 B | 3,633,152 B |
+| same | "running" notice with Cancel up | 723-725 | 1,301,504 B | 3,706,880 B |
+| same | final notice and Undo window | 483 | 1,301,504 B | 3,706,880 B |
+
+All PASS. The run's own peak (`VmHWM`) is at most 4,624,384 B (1024
+inputs), 375,616 B under the ceiling: the RSS bound is tighter than the PSS
+numbers, and a bigger batch would meet it first. The conversion of one
+input is over in about 5 ms, so only two samples fall into it; the
+`VmHWM` figure covers that phase. The action children (`inacircle-text`,
+the test action) are separate processes and are not part of the 5 MB
+ceiling. Not covered: the wheel and the supervisor in one session on a real
+compositor (the two halves are measured separately, wheel above,
+supervisor here).
 
 ## Idle (fake compositor)
 
 `a_stationary_wheel_wakes_for_nothing_and_leaves_no_engine`: with a seat
 (pointer and keyboard) and the pointer inside, the wheel took **0 context
-switches in a 2 s window** (5 of 5 runs), had no child process, reported
-`idle_wakeups=0`, and was gone after close. The window sits after the
-startup waits: a wheel without a seat device legitimately wakes once at
-the 2 s startup deadline (found while writing the test). Protocol events
-and deadline expiry are named, not counted as polling. This covers a
-stationary wheel; the Undo window's end is not observed here.
+switches in a 2 s window**, had no child process, reported
+`idle_wakeups=0`, and was gone after close; 5 of 5 runs on the final
+code. The window sits after the startup waits: a wheel without a seat device
+legitimately wakes once at the 2 s startup deadline (found while writing
+the test). Protocol events and deadline expiry are named, not counted as
+polling. After the last run no `inacircle` process existed. The supervisor's
+Undo window is a timed wait on the notification connection and the
+cancel signal (see the supervisor section of the architecture); the memory
+runs above sampled it for a full second and it stayed under the ceiling,
+but a separate wakeup count of the window is not made.
 
 ## ThinkCentre (stock kernel, untuned)
 
@@ -71,34 +108,60 @@ output. The series ran inside a second niri (winit backend) started under
 the session niri: a real niri with one 1280x960 output, but the compositor
 side (configure, frame pacing: wall time ~1.5 s) is not representative.
 The CPU intervals are the wheel's own; wall times are reported, not
-interpreted. Condition: `startup-plain-warm` (executable pages resident,
-warm private cache). A cold condition was not run.
+interpreted.
 
-Startup CPU, main to first commit, microseconds (all attempts valid, 0
-failures; N = 50 valid of 50 attempts per row):
+Startup CPU, main to first commit, microseconds, final code. Every row is
+50 valid of 50 attempts (0 failures). Warm = executable pages resident
+(read whole, checked with `mincore`):
 
-| Series | Build | p50 | p95 | max |
-|---|---|---|---|---|
-| aa1 | A | 3268 | 3628 | 3658 |
-| aa2 | A | 3085 | 3428 | 3474 |
-| ab1 | A | 3327 | 3561 | 3772 |
-| ab1 | B | 1896 | 1966 | 1979 |
-| ab2 | A | 3080 | 3646 | 3808 |
-| ab2 | B | 1890 | 1979 | 1996 |
+| Condition | Series | Build | p50 | p95 | max |
+|---|---|---|---|---|---|
+| warm | aa1 | A | 3300 | 3461 | 3536 |
+| warm | aa2 | A | 3274 | 3497 | 3561 |
+| warm | ab1 | A | 3309 | 3497 | 3621 |
+| warm | ab1 | B | 1897 | 1977 | 1984 |
+| warm | ab2 | A | 3198 | 3398 | 3425 |
+| warm | ab2 | B | 1893 | 1957 | 1978 |
+| cold | aa1 | A | 3243 | 3457 | 3574 |
+| cold | ab1 | A | 3236 | 3475 | 3507 |
+| cold | ab1 | B | 1886 | 1944 | 1963 |
+| cold | ab2 | A | 3241 | 3461 | 3571 |
+| cold | ab2 | B | 1886 | 1961 | 1963 |
 
-- A/A p95 spread 5.5% (3628 vs 3428); the A/B effect is B **-45% / -46%**
-  p95, reproduced in two independent alternating runs, far outside the A/A
-  spread. aa2 drifts upward (first-half p50 2763, second-half 3302 us);
-  the other series do not, and the drift is far below the A/B effect.
-- `wheel_cpu_us` p95: B -8.9% / -10.3% against A. Process PSS p95 at plain
-  startup: A 2.74 MB, B 1.82 MB (both under 5,000,000 B).
+The alternating runs are AB, BA, AB, ... until both builds have 50 valid
+observations.
+
+- Warm: B is **-43.5% / -42.4%** p95 against A in two independent
+  alternating runs; the A/A p95 difference is +1.0% (3461 vs 3497). The
+  earlier candidate run had -44.8% / -45.7% and an A/A spread of 5.5%; this
+  one is quieter, and the first-half/second-half p50 trend is within 5% in
+  every warm series (the largest, ab1 A, is a fall from 3399 to 3245 us). `wheel_cpu_us` p95 B -9.0% / -7.0%. Process PSS p95: A
+  2.74 MB, B 1.86 MB (under 5,000,000 B). No regression.
+- B against the earlier candidate run: p95 1977 / 1957 now, 1966 / 1979
+  before. The small startup changes of the last fixes (an earlier flush,
+  one comparison per event, one alarm at close) are not measurable.
+- Cold: the binary's page cache was dropped before **every** attempt with
+  `posix_fadvise(DONTNEED)` (no privilege; `scripts/measure-ab.py --cold`),
+  from a binary on the disk file system (the `/tmp` of this machine is a
+  tmpfs, where eviction does nothing), and `mincore` had to show at most 5%
+  of its pages resident (all 250 attempts showed 0). "Cold" therefore means
+  the engine binary only: the C library, the loader and the compositor's
+  pages stay cached, and the page cache of the whole machine was not dropped
+  (that needs root). B is **-44.1% / -43.3%** p95 against A cold, the
+  cold and warm effects agree to within two percentage points (the second
+  half of cold ab1 B runs 9% below its first half, 1898 to 1725 us, which
+  does not change the p95). The first-touch cost of a cold binary
+  does not show in the CPU interval (page-fault waits are not CPU) and the
+  wall time is dominated by the nested compositor, so this condition says the
+  CPU is unchanged, not that a cold start is as fast in wall time. One cold A/A
+  series, not two.
+- ThinkCentre absolute CPU (about 2-3.6 ms) is outside the reference gate
+  by policy ([acceptance.md](acceptance.md), Plan-7 interpretation); only
+  the environment-matched regression applies, and there is none.
 - Hypothesis, not measured: the improvement comes from the commit-first
   change (no obsolete full paint before the first commit; the second buffer
   is painted after the first flush). There is no phase breakdown that
   isolates it. Total wheel CPU moves less than the commit interval.
-- ThinkCentre absolute CPU (about 2-3.6 ms) is outside the reference gate
-  by policy ([acceptance.md](acceptance.md), Plan-7 interpretation); only
-  the environment-matched regression applies, and there is none.
 
 ## Hover maximum (open budget question)
 
@@ -163,17 +226,19 @@ mapped, observer `INACIRCLE_MEASURE=1` (a runtime switch in the shipped
 binary), workload and counts as in each table, executable pages checked
 resident with `mincore`, no global cache drop, PSS from `smaps_rollup` in
 KiB times 1024. Executable hashes: A `692a0e5d...27c7`, B
-`530de180...1019`. The A and B binaries were built with the pinned
+`9a1ac05a...98c5`. The A and B binaries were built with the pinned
 toolchain on the reference machine. The results of the two machines are
 never pooled.
 
 ## Binary size
 
-The hardening grew `inacircle` from 900,352 B to 1,082,216 B (+181,864 B;
-`.text` +150,192 B). The per-area account, measured by rebuilding the
-stripped release at each area's last commit, is in
+The hardening grew `inacircle` from 900,352 B to 1,103,168 B on the final code (`.text`
+839,112 B; +202,816 B and +167,248 B over Plan 7). The per-area account up
+to `c84f4ad` (1,082,216 B), measured by rebuilding the stripped release at each
+area's last commit, is in
 [binary-size.md](binary-size.md#hardening-growth-since-plan-7). The limit of
-1.5 MB holds with 490,648 B to spare.
+1.5 MB holds with 469,696 B to spare. The native arm64 runner builds the same
+code to 987,912 B.
 
 ## Open
 
@@ -182,17 +247,21 @@ stripped release at each area's last commit, is in
 | Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; a run on the real niri decides |
 | Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: needs the reference desktop with a user present (`scripts/measure-desktop-ab.sh --i-am-present`) |
 | X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
-| ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; the cold condition has not been run |
+| ThinkCentre early-list, drop, choice, hover workloads | OPEN: only the plain startup ran (warm and cold); cold means the engine binary only, not a dropped machine-wide cache |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
 | Choice-to-action entry with real clicks | OPEN: needs a real pointer session |
 | Separate counters for protocol events without input and for deadline wakes | OPEN: only premature empty polls (`idle_wakeups`) and inputs (`events`) are counted |
 | SHM first-touch / page-fault cost apart from render CPU | OPEN: not measured |
 | Presentation-time marker | OPEN: not implemented in the product; not shown to be available on every target compositor |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
-| Native ARM CI / own ARM VM | Native CI green on `c84f4ad` (run 40835264396). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
-| Engine/supervisor and Undo-window memory phases | OPEN: not yet measured (headless, to be run after the last code change) |
+| Native ARM CI / own ARM VM | Native CI green on `431d8df` (run 40895881758; shipped code equal to `420a714`). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
+| Engine/supervisor and Undo-window memory phases | Measured headless on the final code, all under 5,000,000 B (table above). Not covered: the wheel and supervisor in one session on a real compositor, and a wakeup count of the Undo window |
 
-Reproduce: copy two release directories and the two scripts to the target,
+Reproduce: copy two release directories and the scripts to the target,
 inside a niri session run
-`scripts/measure-ab.py --out DIR --a-bin A --b-bin B --plan aa,aa,ab,ab`,
-then `scripts/summarize-ab.py DIR`.
+`scripts/measure-ab.py --out DIR --a-bin A --b-bin B --plan aa,aa,ab,ab`
+(add `--cold` with the binaries on a disk file system for the cold
+condition), then `scripts/summarize-ab.py DIR --a LABEL --b LABEL`. The
+memory phases: `cargo test --release -p inacircle --test notify
+supervisor_memory -- --nocapture`; the wheel's: `--test wheel a_large_drop`
+and `a_stationary_wheel`.

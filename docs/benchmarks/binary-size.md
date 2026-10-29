@@ -159,9 +159,15 @@ plain message for a symlinked state, cache or jobs folder) and the
 baselines are refreshed once more from the final commit. A release build
 of the tip after those messages measures `inacircle` 1,093,584 B (`.text`
 830,968 B), 11,368 B above `c84f4ad`, still 479,280 B under the limit; the
-cause of that growth has not been analysed yet. The aarch64 baseline is measured on the native arm64 runner, not here: on
-`c84f4ad` it is 987,880 B (`.text` 688,292 B), +131,080 B over the earlier
-baseline taken after the sandbox gate (856,800 B). It has no per-area
+cause of that growth has not been analysed yet. The final code commit
+`420a714` measures `inacircle` 1,103,168 B (`.text` 839,112 B) locally, +20,952 B
+over `c84f4ad` and 469,696 B under the limit; both baselines were refreshed
+on it (the later commits add the undo owner check and clearer refusal
+messages), and the per-area account of that last growth was not made. The
+aarch64 baseline is measured on the native arm64 runner, not here: on
+`c84f4ad` it was 987,880 B (`.text` 688,292 B), +131,080 B over the earlier
+baseline taken after the sandbox gate (856,800 B); on the final code it is
+987,912 B (`.text` 702,692 B). It has no per-area
 account; the x86_64 areas above are the guide. Both baselines are
 refreshed in `scripts/` with their provenance.
 

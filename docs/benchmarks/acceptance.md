@@ -168,10 +168,10 @@ documented evidence.
 The hardening branch ([sandbox-hardening.md](sandbox-hardening.md),
 [hardening-performance.md](hardening-performance.md)) was measured under
 this policy. Its status is stated gate by gate there: the ThinkCentre
-startup A/B and the memory and idle gates have results; the reference
-desktop A/A and A/B, the hover maximum (open: it exceeds 100 us on the fake
-compositor in the A build too), choice-to-action with real clicks, the
-engine and Undo-window memory phases and the cold condition are open; the
-X280 gate is open because the machine is unavailable. None of them is
-recorded as a pass, and the Plan 7 overrun and the historic ~30 s
+startup A/B (warm and cold, engine binary only), the supervisor and
+Undo-window memory phases, and the memory and idle gates have results on the
+final code; the reference desktop A/A and A/B, the hover maximum (open: it
+exceeds 100 us on the fake compositor in the A build too), and
+choice-to-action with real clicks are open; the X280 gate is open because the
+machine is unavailable. None of the open ones is recorded as a pass, and the Plan 7 overrun and the historic ~30 s
 automatic-close anomaly stay as they were.
