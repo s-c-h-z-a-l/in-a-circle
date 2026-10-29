@@ -691,8 +691,12 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     let pidfd = exec::pidfd_open(pid);
     let Some(stdout) = child.stdout.take() else {
         kill_group(child);
-        if exec::wait_exited(pid, pidfd.as_ref(), Instant::now() + exec::GROUP_GONE) {
+        let until = Instant::now() + exec::GROUP_GONE;
+        if exec::wait_exited(pid, pidfd.as_ref(), until) {
             let _ = child.wait();
+            // Its killed members came back to us (subreaper): reaped too,
+            // not left as zombies. The verdict is the same either way.
+            let _ = exec::reap_group(pid, until);
         }
         return Err(t("no stdout"));
     };
@@ -769,7 +773,14 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     // A descendant alive at the leader's exit rejects the manifest: its
     // output is not finished. The kernel's child list tells
     // (`exec::reap_group`); unreadable, or not empty in time: rejected.
-    if !matches!(exec::reap_group(pid, until), Ok(false)) {
+    let left_behind = !matches!(exec::reap_group(pid, until), Ok(false));
+    // The reason the run itself failed (timed out, too large, unreadable)
+    // is the cause; the descendants that outlived it are its consequence.
+    // Either way nothing is accepted.
+    if let Err(e) = result {
+        return Err(e);
+    }
+    if left_behind {
         return Err(t("left processes behind"));
     }
     while open {
@@ -791,14 +802,10 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
         match read_some(fd, &mut out) {
             Ok(true) => {}
             Ok(false) => open = false,
-            Err(e) => {
-                result = result.and(Err(e));
-                break;
-            }
+            Err(e) => return Err(e),
         }
     }
     drop(stdout);
-    result?;
     match status {
         Ok(s) if s.success() => Ok(out),
         Ok(s) => Err(Fail::Transient(format!("exited with {s}"))),
@@ -1737,6 +1744,83 @@ pub(crate) mod tests {
         let token = format!("53.{}{}", std::process::id(), line!());
         let (seen, _) = hang_with_descendant(&f, &token, false);
         assert!(!seen, "a descendant was seen where none runs");
+    }
+
+    /// A plain child in its own group (as the sandboxed one is by `setsid`)
+    /// running `body` under bash, once `ready` exists; for `collect`.
+    fn spawn_plain(f: &Fix, body: &str) -> (std::process::Child, PathBuf) {
+        use std::os::unix::process::CommandExt;
+        let ready = f.dir("plain").join("ready");
+        crate::exec::become_subreaper().unwrap();
+        let child = Command::new("/bin/bash")
+            .process_group(0)
+            .arg("-c")
+            .arg(body)
+            .arg("bash")
+            .arg(&ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        (child, ready)
+    }
+
+    /// Waits (bounded by `cap`) for `ready` to exist: the fixture's
+    /// descendant is running, so the deadline given to `collect` after it
+    /// cannot expire before the fixture is in place, however loaded the
+    /// machine is.
+    fn wait_for(ready: &Path, cap: Duration) {
+        let end = Instant::now() + cap;
+        while !ready.exists() {
+            assert!(Instant::now() < end, "the fixture never got ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A manifest that outlives its deadline and has a descendant fails as
+    /// "timed out", the cause, not as "left processes behind", its
+    /// consequence.
+    #[test]
+    fn manifest_timeout_with_a_descendant_says_timed_out() {
+        let f = Fix::new("mf-timeout-reason");
+        let token = format!("55.{}{}", std::process::id(), line!());
+        let body = format!("sleep {token} & touch \"$1\"; exec sleep 60");
+        let (mut child, ready) = spawn_plain(&f, &body);
+        wait_for(&ready, Duration::from_secs(20));
+        let r = collect(&mut child, Instant::now() + Duration::from_millis(200));
+        assert!(
+            matches!(&r, Err(Fail::Transient(m)) if m == "timed out"),
+            "{:?}",
+            r.err().map(|e| match e {
+                Fail::Transient(m) | Fail::Deterministic(m) => m,
+            })
+        );
+        assert!(procs_with(&token).is_empty());
+    }
+
+    /// The early "no stdout" exit also reaps the killed members, so none
+    /// stays a zombie of ours until the process ends.
+    #[test]
+    fn manifest_without_stdout_reaps_its_members() {
+        let f = Fix::new("mf-nostdout");
+        let token = format!("56.{}{}", std::process::id(), line!());
+        let body = format!("sleep {token} & touch \"$1\"; exec sleep 60");
+        let (mut child, ready) = spawn_plain(&f, &body);
+        wait_for(&ready, Duration::from_secs(20));
+        let pgid = child.id() as libc::pid_t;
+        drop(child.stdout.take());
+        let r = collect(&mut child, Instant::now() + Duration::from_secs(5));
+        assert!(matches!(&r, Err(Fail::Transient(m)) if m == "no stdout"));
+        // A member left unreaped would show up as a child of the group
+        // within moments of its reparenting; none may, for a bounded look.
+        let end = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < end {
+            // SAFETY: waitpid with WNOHANG and a null status is plain.
+            let w = unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) };
+            assert!(w <= 0, "an unreaped member {w}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// A child list that cannot be read (an injected `waitid` error)

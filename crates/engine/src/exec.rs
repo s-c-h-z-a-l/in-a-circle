@@ -1822,15 +1822,16 @@ impl<'a> Supervisor<'a> {
         true
     }
 
-    /// After the leader's exit: reaps it, asks the kernel's child list
-    /// whether any other process of the group still runs (then every
-    /// unsettled input of this process fails, nothing is placed, and the
-    /// group is killed while that member, our unreaped child, keeps its id
-    /// ours), reaps every member until none is left, and only then reads
-    /// the rest of the pipes, to EOF. EOF is the kernel's word that no write end is open
-    /// anywhere, so no writer is left, whatever pids were reused. Then it
-    /// settles every input without a result. Nothing is accepted unless all
-    /// of this finishes within `GROUP_GONE`.
+    /// Kills the whole group first (the unreaped leader keeps `pid` the
+    /// group id ours, so the kill reaches nothing else), waits for the
+    /// leader's exit and reaps it, then asks the kernel's child list
+    /// whether any other process of the group was still there (then every
+    /// unsettled input of this process fails and nothing is placed),
+    /// reaps every member until none is left, and only then reads the rest
+    /// of the pipes, to EOF. EOF is the kernel's word that no write end is
+    /// open anywhere, so no writer is left, whatever pids were reused. Then
+    /// it settles every input without a result. Nothing is accepted unless
+    /// all of this finishes within `GROUP_GONE`.
     fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
         // A cancel that came in the same wake as the exit still counts.
         if self.cancel.is_cancelled() || sink.cancelled {
