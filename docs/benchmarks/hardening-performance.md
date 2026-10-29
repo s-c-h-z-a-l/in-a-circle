@@ -31,8 +31,11 @@ number is a result only where its row says so.
 - **Builds.** A = `169163b` (instrumentation only, before the hardening hot
   path changes), sha256 `692a0e5d...27c7`. B = the final hardening code,
   commit `420a714`, sha256 `9a1ac05a...98c5` (built twice from the same
-  tree, identical). Shipped source is unchanged after `420a714`; later
-  commits touch tests, scripts and docs. Same profile (fat LTO,
+  tree, identical), measured as `020de94` (that commit adds tests and
+  scripts only). The second-buffer first-touch move produced the final
+  build, `903eab4`, `inacircle` sha256 `8e85ff83...`; the later commits
+  change tests, docs and the Undo/Trash ownership check, not the wheel's
+  hot path. The sections below name the build of each series. Same profile (fat LTO,
   `panic=abort`, stripped) and the same `INACIRCLE_MEASURE` instrumentation,
   which is a runtime switch. An earlier run on a previous candidate
   (source `b696450`) gave the same startup numbers within noise (B p95 1966
@@ -178,31 +181,140 @@ observations.
   ThinkCentre, with main → commit unchanged
   ([wheel.md](wheel.md#the-second-buffers-first-touch-moved-into-the-wait)).
 
-## Hover maximum (open budget question)
+## Hover maximum (closed on the reference)
 
 The gate is a per-event wall maximum of 100 us on the reference
-environment ([acceptance.md](acceptance.md)). On the fake compositor on
-this machine (release builds, 10 alternating runs of one stage-2 session,
-122 hover events per run), the
-median of the per-run maxima is:
+environment ([acceptance.md](acceptance.md)). On the fake compositor (release
+builds, 10 alternating runs of one stage-2 session, 122 hover events per
+run) the median of the per-run maxima was 102 / 105 / 109 us for A,
+`86a9b4a` and B (ranges 85-186 us), in the A build too: the first events
+after a stage swap cost 85-110 us there, then about 20 us. That pattern
+comes from the fake compositor's delivery, not from the hardening.
 
-| Build | p50 | p95 (median of runs) | max (median of runs; range) |
+On the real compositor (below) the maximum is **36 us** (`020de94`) and
+**28 us** (`903eab4`) per event over 60 sessions each, p95 29 us. The gate
+holds on the reference; the question is closed. On the slow machines the
+maximum is reported, not gated: 74 us (ThinkCentre) and 114 us (X280, see
+there).
+
+## Real sessions on the reference desktop (niri, 2026-10-29)
+
+Reference desktop (inventory below), real niri on DP-1, a user present, the
+measurement keybind running the shipped binary. Method: `scripts/measure-desktop-ab.sh
+--i-am-present` (the harness above, two `aa` and two `ab` series, 50 valid
+of 50 attempts in every row; A = `169163b`), then 60 real choices by
+pointer click on 60 prepared files (`INACIRCLE_MEASURE=1`; each wheel is
+one stage-2 session with a conversion; every conversion succeeded and
+produced its output folder in the second session; in the first, the
+history directory of the real account was not writable, so the 60
+conversions reported a failure after the action had started. The entry
+timing does not depend on it).
+
+Startup CPU, main to first commit, p95 in microseconds (p50 in brackets):
+
+| Session | A/A (aa1, aa2) | A in AB/BA | B in AB/BA | B against A | A/A spread | PSS p95 A -> B |
+|---|---|---|---|---|---|---|
+| B = `020de94` | 853, 855 | 891, 852 | 511 (467), 511 (465) | -42.6% / -40.0% | +0.2% | 2.73 -> 1.92 MB / 2.73 -> 2.14 MB |
+| B = `903eab4` (final) | 886, 898 | 897, 893 | 544 (490), 565 (488) | -39.4% / -36.7% | +1.4% | 2.73 -> 1.92 MB (both runs) |
+
+B is 37-43% below A in every run and in both sessions; wall time and the
+trend between the halves of every series are unchanged. B's p95 is 6-11%
+higher in the second session than in the first (511 -> 544 / 565 us). The
+code does not explain it: an alternating fake-compositor run of the two
+builds showed no change (main -> commit about 399 us in both), the new
+fault markers run only under `INACIRCLE_MEASURE` (about 1 us), and A itself
+moved +0-1% between sessions. It is recorded as the spread between
+sessions, below the 1 ms budget and the 15% threshold. A direct
+`020de94` against `903eab4` session in one sitting was not run.
+
+Real clicks (60 choices each; CPU, p95 in microseconds):
+
+| Point | `020de94` | `903eab4` (final) |
+|---|---|---|
+| choice -> action entry | 553 (p50 508, max 788) | 594 |
+| early list -> level 1 | 455 | 225 (minor faults 16-18) |
+| main -> commit | 449 | 442 |
+| drop -> stage 2 | 179 | 176 |
+| hover, maximum per event | 36 (p95 29) | 28 |
+| PSS maximum | 3.04 MB | 3.04 MB |
+| idle wakeups | 0 | 0 |
+
+The choice -> action budget (<= 1 ms) holds with margin (p95 553 / 594 us).
+Early list -> level 1 halves with the first-touch move. Closed: reference
+desktop A/A and A/B-B/A, choice-to-action with real clicks, hover maximum
+on the reference.
+
+## Manual series on the slow machines (2026-10-29)
+
+Ten wheels by hand on a real output of each machine, power state as in the
+published Plan 7 series (ThinkCentre: `balance_performance`; X280: AC,
+`balanced`, `balance_performance`), the same fixtures; microseconds of CPU,
+p50 / max of ten (n is small: a signal, not a p95). Plan 7 = the published
+numbers of that series.
+
+ThinkCentre (kernel 7.2.11-arch1-1, real monitor attached for this run):
+
+| Point | Plan 7 | `020de94` | `903eab4` (final) |
 |---|---|---|---|
-| A (`169163b`, before the hardening) | 17 us | 37 us | 102 us (90-122) |
-| `86a9b4a` (before the render change) | 18 us | 37 us | 105 us (95-158) |
-| B (this branch, with the render change) | 17 us | 37 us | 109 us (85-186) |
+| startup (main -> commit) | 1671 / 4144 | 984 / 1718 | 1025 / 1896 |
+| early list -> level 1 | 656 / 1006 | 1617 / 2090 | **632 / 892** |
+| drop -> stage 2 | n/a | 512 / 560 | 514 / 564 |
+| hover, maximum per event | n/a | 99 | 74 |
+| choice -> action entry | not measured | 2239 / 2811 | 2176 / 2727 |
+| PSS maximum | n/a | 3126 kB | 3099 kB |
+| idle wakeups | n/a | 0 | 0 |
 
-The maximum is in the first events after a stage swap (about 85-110 us
-for the first two, then about 20 us). With a 20 ms pause between a buffer
-release and the next event (a diagnostic variant of the same harness) the
-medians of the per-run maxima fall to 43 / 45 / 48 us for A / `86a9b4a` /
-B, but single runs still reach 138 / 113 / 169 us. So the maximum is at or
-above 100 us in the **A build too**: not a hardening regression, but the
-100 us per-event maximum is not shown to hold, and whether the delivery
-pattern of the fake compositor or the real compositor decides it is
-**open: a run on the real niri decides it**. Until then the gate is open,
-not passed, and the integration proposal has to state the outcome. (The
-harness and its raw files are not part of the repository.)
+The first manual series found a regression: list -> level 1 rose from 656
+to 1617 us, because moving the first paint after the first commit had
+pushed the second buffer's first touch (225 minor faults, about 0.9 ms
+here) into that interval. The first-touch move
+([wheel.md](wheel.md#the-second-buffers-first-touch-moved-into-the-wait))
+brings it to 632 / 892, below Plan 7. Startup is 41% lower than Plan 7 at
+the median.
+
+X280 (ThinkPad, Plasma, kernel 7.2.11-1-cachyos). Plasma started a cached
+launcher, so the first series of the final session ran the **Plan 7
+binary** on the new fixtures by accident; the first ten lines of that log
+reproduce the published Plan 7 numbers exactly (1485 / 1709 ...). Its
+remaining nine runs are the same-day Plan 7 control. The launcher was then
+corrected and the final binary measured (the first step of the B run checks
+which binary the launcher starts):
+
+| Point | Plan 7 (published) | Plan 7 control, same day | `903eab4` (final) |
+|---|---|---|---|
+| startup (main -> commit) | 1485 / 1709 | 1585 / 2228 | 881 / 1203 |
+| early list -> level 1 | n/a | 313 / 1134 | 389 / 1077 |
+| drop -> stage 2 | n/a | 792 / 847 | 783 / 848 |
+| hover, maximum per event | n/a | 170 | **114** |
+| choice -> action entry | not measured | n/a | 3623 / 5024 |
+| PSS maximum | n/a | 2811 kB | 3101 kB |
+| idle wakeups | n/a | 0 | 0 |
+
+Startup is 44% / 46% below the same-day control. **Hover: one event of
+114 us on the X280**, above 100 us. The X280 is outside the reference gate
+by policy (and the Plan 7 control was 170 us), so this is reported, not a
+failure of the reference gate. Early list -> level 1 is equal to the control
+within the spread of ten runs (the X280 does not show the ThinkCentre
+regression because the fault cost is small there). The X280 p95 series
+(50 valid per build) was not run.
+
+Plasma: the Undo button of the notification, pressed 3 s after a job on the
+X280, moved the group into the existing KIO-created Trash (mode 0755 on
+that machine; GIO creates 0700) with its `.trashinfo`; a name collision in
+the Trash became `name (4).2` with no overwrite. Restore from Dolphin put
+the group back at its original place and removed the `.trashinfo`. This
+needed the ownership rule for an existing home Trash (own, not a symlink,
+not group/other writable; a new one is created 0700; a volume Trash stays
+strict). Closed: Plasma Undo into a 0755 home Trash and restore from
+Dolphin.
+
+Reproduce: the keybind runs a wrapper that starts the binary under test
+with `INACIRCLE_MEASURE=1`, appending its measure lines to a log; ten
+wheels with the fixtures of the earlier series, then read the
+`inacircle: measure` lines (`main_to_commit_cpu_us`, `list_to_level1_cpu_us`,
+`drop_to_stage2_cpu_us`, `hover_us_max`, `pss_kb`, `idle_wakeups`,
+`action_entry_observed_*`). Desktop: `scripts/measure-desktop-ab.sh
+--i-am-present`.
 
 ## Machines (inventory of 2026-10-29)
 
@@ -231,8 +343,9 @@ kernel and power state below were read again.
 Native CI runners: Ubuntu 26.04 (kernel 7.0.0-1017-azure), x86_64 and
 aarch64, Landlock ABI 8, rustc 1.98.1. Own ARM guest: aarch64, kernel
 7.0.0-38-generic, ext4, ABI 8, QEMU TCG emulation. X280 (ThinkPad, CachyOS,
-Plasma): **not available**, so no fresh inventory exists; its earlier
-qualification (kernel 7.2.11-1-cachyos, ABI 10) is history. Physical ARM:
+Plasma): measured by hand on 2026-10-29 (above), on AC with the
+`balanced` profile; no full inventory was taken, and its earlier
+qualification (kernel 7.2.11-1-cachyos, ABI 10) stands. Physical ARM:
 none.
 
 Method items common to the series: launcher `niri msg action spawn -- sh
@@ -247,30 +360,31 @@ never pooled.
 
 ## Binary size
 
-The hardening grew `inacircle` from 900,352 B to 1,103,168 B on the final code (`.text`
-839,112 B; +202,816 B and +167,248 B over Plan 7). The per-area account up
+The hardening grew `inacircle` from 900,352 B to 1,105,536 B on the final build (`.text`
+841,176 B; +205,184 B and +169,312 B over Plan 7). The per-area account up
 to `c84f4ad` (1,082,216 B), measured by rebuilding the stripped release at each
 area's last commit, is in
 [binary-size.md](binary-size.md#hardening-growth-since-plan-7). The limit of
-1.5 MB holds with 469,696 B to spare. The native arm64 runner builds the same
-code to 987,912 B.
+1.5 MB holds with 467,328 B to spare. The native arm64 runner (run 40955927479, `70e9984`)
+builds the same code to 987,912 B (`.text` 704,420 B).
 
 ## Open
 
+Closed by the real-session measurements above: hover maximum on the
+reference, reference desktop A/A and A/B-B/A, choice-to-action with real
+clicks, early list / drop on the ThinkCentre and X280 (manual series), X280
+manual series, Plasma Undo into a 0755 Trash and restore. Still open:
+
 | Item | State |
 |---|---|
-| Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; a run on the real niri decides |
-| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: needs the reference desktop with a user present (`scripts/measure-desktop-ab.sh --i-am-present`) |
-| X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
-| ThinkCentre early-list, drop, choice, hover workloads | OPEN: only the plain startup ran (warm and cold); cold means the engine binary only, not a dropped machine-wide cache |
-| ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
-| Choice-to-action entry with real clicks | OPEN: needs a real pointer session |
+| Physical ARM desktop performance | OPEN; ARM results are emulated (VM) or from a CI runner, functional only |
+| X280 p95 series | OPEN: only the manual 10-run series exist (one hover event of 114 us); 50 valid per build not run. Not a pass, not a baseline reset |
+| Direct `020de94` against `903eab4` desktop session | OPEN: the +6-11% between sessions is explained by an alternating fake-compositor run, not by a same-sitting session |
+| Cold start beyond the engine binary | OPEN: "cold" means the engine binary's page cache only, not a machine-wide cache drop (needs root) |
 | Separate counters for protocol events without input and for deadline wakes | OPEN: only premature empty polls (`idle_wakeups`) and inputs (`events`) are counted |
-| SHM first-touch / page-fault cost apart from render CPU | OPEN: not measured |
 | Presentation-time marker | OPEN: not implemented in the product; not shown to be available on every target compositor |
-| Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
-| Native ARM CI / own ARM VM | Native CI green on `431d8df` (run 40895881758; shipped code equal to `420a714`). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
-| Engine/supervisor and Undo-window memory phases | Measured headless on the final code, all under 5,000,000 B (table above). Not covered: the wheel and supervisor in one session on a real compositor, and a wakeup count of the Undo window |
+| Wheel and supervisor in one session on a real compositor; wakeup count of the Undo window | OPEN: the memory phases were measured headless (table above) |
+| Native ARM CI / own ARM VM | Native CI green on `70e9984` (run 40955927479). Own ARM VM hardening suite 31/31 on `020de94` (emulated, functional only) |
 
 Reproduce: copy two release directories and the scripts to the target,
 inside a niri session run

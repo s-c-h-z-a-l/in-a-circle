@@ -170,8 +170,10 @@ The hardening branch ([sandbox-hardening.md](sandbox-hardening.md),
 this policy. Its status is stated gate by gate there: the ThinkCentre
 startup A/B (warm and cold, engine binary only), the supervisor and
 Undo-window memory phases, and the memory and idle gates have results on the
-final code; the reference desktop A/A and A/B, the hover maximum (open: it
-exceeds 100 us on the fake compositor in the A build too), and
-choice-to-action with real clicks are open; the X280 gate is open because the
-machine is unavailable. None of the open ones is recorded as a pass, and the Plan 7 overrun and the historic ~30 s
+final code; the reference desktop A/A and A/B-B/A, the hover maximum on the
+reference (36 / 28 us on the real niri; it exceeded 100 us only on the fake
+compositor, in the A build too), choice-to-action with real clicks, the
+X280 manual series (hover maximum 114 us once, outside the reference
+gate) and Plasma Undo and restore are closed there. Open: physical ARM and
+the X280 p95 series. None of the open ones is recorded as a pass, and the Plan 7 overrun and the historic ~30 s
 automatic-close anomaly stay as they were.
