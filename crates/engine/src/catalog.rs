@@ -1417,16 +1417,19 @@ pub(crate) mod tests {
 
     /// Runs `f` with stderr (fd 2) redirected to a file; returns what was
     /// written to it meanwhile.
-    fn stderr_of(root: &Path, f: impl FnOnce()) -> String {
+    pub(crate) fn stderr_of(root: &Path, f: impl FnOnce()) -> String {
         use std::os::fd::AsRawFd;
         let file = root.join("stderr");
         let out = std::fs::File::create(&file).unwrap();
-        // SAFETY: dup/dup2 on open fds; fd 2 is restored before return.
+        // SAFETY: dup on the always-open fd 2; `saved` is checked below.
         let saved = unsafe { libc::dup(2) };
         assert!(saved >= 0);
+        // SAFETY: both fds are open; fd 2 is restored right after `f`.
         assert_eq!(unsafe { libc::dup2(out.as_raw_fd(), 2) }, 2);
         f();
+        // SAFETY: `saved` is the open copy made above.
         assert_eq!(unsafe { libc::dup2(saved, 2) }, 2);
+        // SAFETY: `saved` is open and not used after this.
         unsafe { libc::close(saved) };
         std::fs::read_to_string(file).unwrap()
     }

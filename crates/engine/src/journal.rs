@@ -191,8 +191,11 @@ impl std::error::Error for LinkRefused {}
 /// any other `ENOTDIR` keeps the system's message), say so in plain words.
 /// The error kind is kept, so callers that match on it see no change.
 pub(crate) fn explain_link(path: &Path, e: io::Error) -> io::Error {
-    let linked = matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
-        && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let linked = matches!(
+        e.raw_os_error(),
+        // EEXIST: `mkdir -p` over a dangling link.
+        Some(libc::ENOTDIR | libc::ELOOP | libc::EEXIST)
+    ) && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
     if !linked {
         return e;
     }
@@ -212,7 +215,8 @@ impl StateDir {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(path)?;
+            .create(path)
+            .map_err(|e| explain_link(path, e))?;
         StateDir::open(path)
     }
 
@@ -1133,10 +1137,25 @@ pub struct Running {
 
 impl Running {
     /// Registers the job; without `$XDG_RUNTIME_DIR` (or on any I/O error)
-    /// the registry is skipped silently.
+    /// the registry is skipped silently. A jobs folder that is a symlink is
+    /// refused on purpose (the job still runs, unregistered): one line on
+    /// stderr says why.
     pub fn start(job: &JobId, action: &str, inputs: usize) -> Running {
+        let dir = jobs_dir().and_then(|d| match StateDir::create(&d) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                if e.get_ref().is_some_and(|i| i.is::<LinkRefused>()) {
+                    // Straight to fd 2 (not `eprintln!`), so a test can capture it.
+                    let _ = io::Write::write_fmt(
+                        &mut io::stderr(),
+                        format_args!("inacircle: running job not registered: {e}.\n"),
+                    );
+                }
+                None
+            }
+        });
         let mut r = Running {
-            dir: jobs_dir().and_then(|d| StateDir::create(&d).ok()),
+            dir,
             written: None,
             job: job.0.clone(),
             action: action.to_owned(),
@@ -6529,6 +6548,33 @@ mod tests {
         fs::write(&file, "x").unwrap();
         let e = StateDir::open(&file).err().unwrap();
         assert!(!e.to_string().contains("symbolic link"), "{e}");
+    }
+
+    /// A jobs folder that is a symlink (live or dangling) is refused on
+    /// purpose, and one line on stderr says why; the job runs unregistered.
+    /// Before the fix the registry was dropped without a word.
+    #[test]
+    fn a_symlinked_jobs_folder_is_refused_with_a_plain_message() {
+        let t = Tmp::new("jobslink");
+        t.env(|| {
+            let job = JobId("10-9".into());
+            let base = jobs_dir().unwrap();
+            fs::create_dir_all(base.parent().unwrap()).unwrap();
+            let real = t.0.join("real-jobs");
+            fs::create_dir_all(&real).unwrap();
+            for target in [real.clone(), t.0.join("gone")] {
+                let _ = fs::remove_file(&base);
+                symlink(&target, &base).unwrap();
+                let mut r = None;
+                let err = crate::catalog::tests::stderr_of(&t.0, || {
+                    r = Some(Running::start(&job, "a", 1));
+                });
+                assert!(err.contains("symbolic link"), "{err}");
+                assert!(err.contains("refused on purpose"), "{err}");
+                assert!(r.unwrap().dir.is_none());
+                assert_eq!(fs::read_dir(&real).unwrap().count(), 0, "written through");
+            }
+        });
     }
 
     /// The window's reader never goes past the size the scan began with,

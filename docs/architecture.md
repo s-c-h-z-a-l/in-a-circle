@@ -722,10 +722,12 @@ No daemon:
   `O_NOFOLLOW | O_DIRECTORY`; the operating system's bare `Not a
   directory (os error 20)` is replaced, after an `lstat` confirms a real
   symlink, by "the folder `<path>` is a symbolic link and is refused on
-  purpose", with the same error kind; the history warning reads `history
-  not written: …`, so nothing is published and nothing is offered for
-  Undo; a cache folder that is a link means no cache is read or written,
-  and one line on stderr says why). Its parents may be symlinks, and so may
+  purpose", with the same error kind, also for a dangling link; the
+  history warning reads `history not written: …`, so nothing is published
+  and nothing is offered for Undo; a cache folder that is a link means no
+  cache is read or written, and a jobs folder that is a link means the
+  running job is not registered; both print one line on stderr saying
+  why). Its parents may be symlinks, and so may
   `user-dirs.dirs`, which is the user's own configuration. To keep a
   state folder elsewhere, make its parent the link or bind-mount it;
 - running jobs: each supervisor registers itself in
