@@ -1613,3 +1613,112 @@ fn publication_baseline_reaches_the_observer_unchanged() {
         obs.ran.outcomes
     );
 }
+
+/// Plays a supervisor for `a_killed_supervisor_takes_its_leader_with_it`
+/// (only with `INACIRCLE_PDEATH_BIN` and `INACIRCLE_PDEATH_IN` set): runs
+/// the action on the input and prints `child <pid>` on the leader's first
+/// event. Its fixture leader would otherwise stay up for its 60 s.
+#[test]
+fn helper_pdeath_run() {
+    use std::io::Write;
+    struct Say(common::Ran);
+    impl Observer for Say {
+        fn event(&mut self, o: &Outcome) {
+            self.0.event(o);
+        }
+        fn dir(&mut self, path: &std::path::Path) {
+            self.0.dir(path);
+        }
+        fn progress(&mut self, d: usize, t: usize, f: f32) {
+            self.0.progress(d, t, f);
+        }
+        fn started(&mut self, pid: u32) {
+            let mut out = std::io::stdout();
+            // On a line of its own: libtest has printed `test <name> ... `.
+            writeln!(out, "\nchild {pid}").unwrap();
+            out.flush().unwrap();
+        }
+    }
+    let (Some(bin), Some(input)) = (
+        std::env::var_os("INACIRCLE_PDEATH_BIN"),
+        std::env::var_os("INACIRCLE_PDEATH_IN"),
+    ) else {
+        return;
+    };
+    let act = action(std::path::Path::new(&bin), "md");
+    let mut obs = Say(common::Ran::default());
+    run_with(&[&act], &[std::path::PathBuf::from(input)], &mut obs);
+}
+
+/// Whether `pid` has ended (gone, or a zombie, reaped if it is ours)
+/// within `wait`, checked every 20 ms.
+fn ends_within(pid: libc::pid_t, wait: Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: WNOHANG never blocks; a pid that is not our child gives
+        // ECHILD and changes nothing.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| {
+                s.rsplit_once(')')
+                    .map(|(_, r)| r.trim_start().chars().next())
+            });
+        if !matches!(state, Some(Some(c)) if c != 'Z') {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `run_step` wires `die_with_parent`: when the supervisor is killed with
+/// `SIGKILL` while an action runs, its leader dies too. The fixture's
+/// leader is `exec sleep 60`, so the leader's end is that process's end,
+/// and the 60 s bound is the most an unwired leader outlives the test
+/// (it is killed by hand then).
+#[test]
+fn a_killed_supervisor_takes_its_leader_with_it() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    let t = Tmp::new("pdeath");
+    let a = t.input("a.txt", "a\n");
+    let bin = t.script(
+        "pdeath",
+        "in=$(head -n1 \"$6\"); printf 'warn\\t%s\\tup\\n' \"$in\"\n\
+         exec sleep 60",
+    );
+    let mut sup = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "helper_pdeath_run",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("INACIRCLE_PDEATH_BIN", &bin)
+        .env("INACIRCLE_PDEATH_IN", &a)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let rd = std::io::BufReader::new(sup.stdout.take().unwrap());
+    let pid: libc::pid_t = rd
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|l| l.strip_prefix("child ").map(|p| p.parse().unwrap()))
+        .expect("the helper names the leader");
+    sup.kill().unwrap();
+    sup.wait().unwrap();
+    // A kill-on-death is immediate; 10 s is slack for a loaded machine.
+    let ended = ends_within(pid, Duration::from_secs(10));
+    if !ended {
+        // SAFETY: kill has no memory preconditions; the pid is the sleep
+        // just seen alive.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(ends_within(pid, Duration::from_secs(10)));
+    }
+    assert!(ended, "the leader outlived its supervisor");
+}

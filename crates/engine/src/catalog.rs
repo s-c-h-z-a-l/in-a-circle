@@ -1192,6 +1192,90 @@ pub(crate) mod tests {
         std::fs::rename(&tmp, path).unwrap();
     }
 
+    /// Plays a supervisor for `a_killed_supervisor_takes_its_manifest_probe_with_it`
+    /// (only with `INACIRCLE_PDEATH_BIN` set): starts the manifest probe
+    /// with [`spawn_manifest`], prints `child <pid>`, then waits for it
+    /// (killed first, or at most its 60 s).
+    #[test]
+    fn helper_manifest_pdeath() {
+        use std::io::Write;
+        let Some(bin) = std::env::var_os("INACIRCLE_PDEATH_BIN") else {
+            return;
+        };
+        let mut c = spawn_manifest(Path::new(&bin))
+            .ok()
+            .expect("sandboxed spawn");
+        let mut out = std::io::stdout();
+        // On a line of its own: libtest has printed `test <name> ... `.
+        writeln!(out, "\nchild {}", c.id()).unwrap();
+        out.flush().unwrap();
+        let _ = c.wait();
+    }
+
+    /// `spawn_manifest` wires `die_with_parent`: when the process that
+    /// started the probe is killed with `SIGKILL`, the probe (here
+    /// `exec sleep 60`, so its leader is that process) dies too.
+    #[test]
+    fn a_killed_supervisor_takes_its_manifest_probe_with_it() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let fix = Fix::new("pdeath");
+        let bin = fix.root.join("probe");
+        script(&bin, "exec sleep 60");
+        let mut sup = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "catalog::tests::helper_manifest_pdeath",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("INACIRCLE_PDEATH_BIN", &bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let rd = std::io::BufReader::new(sup.stdout.take().unwrap());
+        let pid: libc::pid_t = rd
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|l| l.strip_prefix("child ").map(|p| p.parse().unwrap()))
+            .expect("the helper names the probe");
+        sup.kill().unwrap();
+        sup.wait().unwrap();
+        // Whether `pid` has ended (gone, or a zombie), polled every 20 ms
+        // for at most 10 s: a kill-on-death is immediate, the rest is
+        // slack for a loaded machine.
+        let ended = |wait: std::time::Duration| {
+            let until = Instant::now() + wait;
+            loop {
+                // SAFETY: WNOHANG never blocks; not our child: ECHILD.
+                unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+                let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|s| {
+                        s.rsplit_once(')')
+                            .map(|(_, r)| r.trim_start().chars().next())
+                    });
+                if !matches!(state, Some(Some(c)) if c != 'Z') {
+                    return true;
+                }
+                if Instant::now() >= until {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let died = ended(std::time::Duration::from_secs(10));
+        if !died {
+            // SAFETY: kill has no memory preconditions; the pid is the
+            // sleep just seen alive.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            assert!(ended(std::time::Duration::from_secs(10)));
+        }
+        assert!(died, "the probe outlived its supervisor");
+    }
+
     /// Sets the mtime by path (no writable fd on an executable, see `script`).
     fn set_mtime(path: &Path, t: std::time::SystemTime) {
         let d = t.duration_since(std::time::UNIX_EPOCH).unwrap();
