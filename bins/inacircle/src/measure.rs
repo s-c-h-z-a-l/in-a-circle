@@ -62,6 +62,25 @@ pub struct Meter {
     level1_us: Option<i64>,
     /// The same pair at the choice (absolute, like the run's marks).
     choice_at: Option<(i64, i64)>,
+    /// Minor page faults at the start, at the first commit, at the early
+    /// list's arrival and at level 1's commit (-1: unreadable). A first
+    /// touch of a fresh shm buffer is 225 of them, so they show where it
+    /// lands.
+    flt0: i64,
+    commit_flt: Option<i64>,
+    list_flt: Option<i64>,
+    level1_flt: Option<i64>,
+}
+
+/// The process's minor page faults so far, -1 if unreadable.
+pub fn minflt() -> i64 {
+    // SAFETY: rusage is plain integers, so all-zero is a valid value.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage writes one rusage into `ru`, which outlives it.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+        return -1;
+    }
+    ru.ru_minflt as i64
 }
 
 /// A CPU reading relative to the start, or -1 (never taken) if either
@@ -104,6 +123,10 @@ impl Meter {
             list_at: None,
             level1_us: None,
             choice_at: None,
+            flt0: minflt(),
+            commit_flt: None,
+            list_flt: None,
+            level1_flt: None,
         }
     }
 
@@ -112,6 +135,7 @@ impl Meter {
     pub fn committed(&mut self, cpu_us: i64, now: Instant) {
         if self.commit.is_none() {
             self.commit = Some((since(cpu_us, self.cpu0_us), now.duration_since(self.wall0)));
+            self.commit_flt = Some(minflt());
         }
     }
 
@@ -170,9 +194,11 @@ impl Meter {
     }
 
     /// The early list (read at `enter`) is in; the first one counts.
-    pub fn listed(&mut self, cpu_us: i64, mono_us: i64) {
+    /// `flt`: the minor faults at the same arrival.
+    pub fn listed(&mut self, cpu_us: i64, mono_us: i64, flt: i64) {
         if self.list_at.is_none() {
             self.list_at = pair(cpu_us, mono_us);
+            self.list_flt = Some(flt);
         }
     }
 
@@ -191,6 +217,7 @@ impl Meter {
     pub fn swapped(&mut self, cpu_us: i64) {
         if let (Some((l, _)), None, None) = (self.list_at, self.level1_us, self.drop_at) {
             self.level1_us = Some(cpu_us - l);
+            self.level1_flt = Some(minflt());
         }
         if let (Some((d, _)), None) = (self.drop_at, self.stage2_us) {
             self.stage2_us = Some(cpu_us - d);
@@ -293,6 +320,25 @@ impl Meter {
                 line += &format!(" {name}_abs_cpu_us={c} {name}_abs_wall_us={w}");
             }
         }
+        // Fault deltas: present only when both readings were taken.
+        let delta = |a: Option<i64>, b: Option<i64>| match (a, b) {
+            (Some(a), Some(b)) if a >= 0 && b >= 0 => Some(b - a),
+            _ => None,
+        };
+        for (name, d) in [
+            (
+                "main_to_commit_minflt",
+                delta(Some(self.flt0), self.commit_flt),
+            ),
+            (
+                "list_to_level1_minflt",
+                delta(self.list_flt, self.level1_flt),
+            ),
+        ] {
+            if let Some(d) = d {
+                line += &format!(" {name}={d}");
+            }
+        }
         line += &format!(" pss_kb={} vm_hwm_kb={vm_hwm_kb}", self.pss_kb);
         line
     }
@@ -393,8 +439,13 @@ mod tests {
         let t0 = Instant::now();
         let mut m = Meter::new(0, 0, t0);
         m.swapped(500); // no list yet: nothing
-        m.listed(1_000, 7_000);
-        m.listed(1_100, 7_100);
+        // A list whose faults were unreadable reports no fault delta.
+        let mut unread = Meter::new(0, 0, t0);
+        unread.listed(1_000, 7_000, -1);
+        unread.swapped(1_400);
+        assert_eq!(field(&unread.report(0, -1), "list_to_level1_minflt"), None);
+        m.listed(1_000, 7_000, minflt());
+        m.listed(1_100, 7_100, minflt());
         m.swapped(1_400);
         m.swapped(1_900);
         m.dropped(2_000, 8_000);
@@ -402,6 +453,8 @@ mod tests {
         let r = m.report(0, -1);
         assert!(r.contains("list_to_level1_cpu_us=400"), "{r}");
         assert!(r.contains("drop_to_stage2_cpu_us=300"), "{r}");
+        let flt: i64 = field(&r, "list_to_level1_minflt").unwrap().parse().unwrap();
+        assert!(flt >= 0, "{r}");
         // List and drop each keep their own CPU and wall pair.
         assert_eq!(field(&r, "list_abs_cpu_us"), Some("1000"), "{r}");
         assert_eq!(field(&r, "list_abs_wall_us"), Some("7000"), "{r}");
@@ -427,6 +480,8 @@ mod tests {
             "hover_us_p50",
             "hover_us_p95",
             "hover_us_max",
+            "main_to_commit_minflt",
+            "list_to_level1_minflt",
         ] {
             assert_eq!(field(&r, key), None, "{key} in {r}");
         }

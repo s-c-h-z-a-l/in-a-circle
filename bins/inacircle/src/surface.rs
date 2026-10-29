@@ -403,6 +403,8 @@ struct Surface {
     input_cpu: i64,
     /// `CLOCK_MONOTONIC` at the same arrival, in µs (-1 if unreadable).
     input_mono: i64,
+    /// Minor page faults at the same arrival (-1 if unreadable).
+    input_flt: i64,
 }
 
 impl Surface {
@@ -517,6 +519,7 @@ impl Surface {
             meter: None,
             input_cpu: 0,
             input_mono: -1,
+            input_flt: -1,
         }
     }
 
@@ -981,6 +984,7 @@ impl Surface {
             if self.meter.is_some() && (list || matches!(i, Input::Drop)) {
                 self.input_cpu = crate::cpu_us(libc::RUSAGE_SELF);
                 self.input_mono = crate::monotonic_us().unwrap_or(-1);
+                self.input_flt = crate::measure::minflt();
             }
             let was_ready = m.early_ready();
             let fxs = m.on_at(self.started.elapsed(), i);
@@ -990,7 +994,7 @@ impl Surface {
                 && m.early_ready()
                 && let Some(meter) = &mut self.meter
             {
-                meter.listed(self.input_cpu, self.input_mono);
+                meter.listed(self.input_cpu, self.input_mono, self.input_flt);
             }
             for fx in fxs {
                 if let Some(end) = self.apply(fx, m)? {
