@@ -219,13 +219,51 @@ fn md_nul_replacement_is_charged() {
     let m = min_ok(1000, |b| {
         md::read_limited(input, lim(|l| l.text_bytes = b)).is_ok()
     });
-    assert!(m >= 12, "{m}");
+    // Exactly the three charges above: 12 + 13 + 12.
+    assert_eq!(m, 37);
     exceeded(
         md::read_limited(input, lim(|l| l.text_bytes = 11)),
         "owned text",
     );
     // Without NULs the same length costs less.
     assert!(md::read_limited(b"aaaa", lim(|l| l.text_bytes = 11)).is_ok());
+}
+
+/// A code span's copy is charged by its length (the block's line content
+/// and the copy: 2 bytes per code byte) on top of the run index, not more,
+/// not less.
+#[test]
+fn md_code_span_is_charged_per_byte() {
+    let need = |input: &str| {
+        let ok = |b: usize| md::read_limited(input.as_bytes(), lim(|l| l.text_bytes = b)).is_ok();
+        let m = min_ok(1 << 20, ok);
+        assert!(ok(m) && !ok(m - 1));
+        m
+    };
+    // "`abc`": the line "`abc`\n" (6), the index of its two runs (2 x 8,
+    // see the next test), the code copy (3).
+    assert_eq!(need("`abc`"), 6 + 16 + 3);
+    assert_eq!(need("`abcd`"), 7 + 16 + 4);
+    assert_eq!(need("`abcdef`") - need("`abc`"), 6);
+}
+
+/// The index of backtick runs a code span search builds is charged 8 bytes
+/// a run, before it is built, and only once: three unmatched runs cost 24
+/// over the same text without backticks.
+#[test]
+fn md_backtick_run_index_is_charged_per_run() {
+    let need = |input: &str| {
+        let ok = |b: usize| md::read_limited(input.as_bytes(), lim(|l| l.text_bytes = b)).is_ok();
+        let m = min_ok(1 << 20, ok);
+        assert!(ok(m) && !ok(m - 1));
+        m
+    };
+    assert_eq!(need("`a ``b ```c") - need("xa xxb xxxc"), 3 * 8);
+    // Two more runs, two more charges (no span matches in either).
+    assert_eq!(
+        need("`a ``b ```c ````d `````e") - need("xa xxb xxxc xxxxd xxxxxe"),
+        5 * 8
+    );
 }
 
 // ---- output ----
@@ -388,4 +426,35 @@ fn hostile_shapes_stop_at_the_default_budget() {
         md::read_limited(quotes.as_bytes(), Limits::DEFAULT),
         "nodes",
     );
+}
+
+/// A fenced code block in the output is charged what it writes: the budget
+/// that equals the output passes, one byte less does not (the up-front
+/// room check never refuses what fits). Info string, empty body, a longer
+/// fence and a tilde fence included.
+#[test]
+fn md_fenced_code_output_budget_is_exact() {
+    for input in [
+        "```\nabc\n```",
+        "```rs\nabc\n```",
+        "````\na ``` b\n````",
+        "```\n```",
+        "~~~\na\n~~~",
+    ] {
+        let (d, _) = md::read(input.as_bytes()).map(|d| (d, ())).unwrap();
+        let (text, _) = md::write_limited(&d, ALL).unwrap();
+        let n = text.len();
+        assert!(
+            md::write_limited(&d, lim(|l| l.output_bytes = n)).is_ok(),
+            "{input:?}: {n} must fit"
+        );
+        assert!(
+            matches!(
+                md::write_limited(&d, lim(|l| l.output_bytes = n - 1)),
+                Err(LimitError::Exceeded("output"))
+            ),
+            "{input:?}: {} must not",
+            n - 1
+        );
+    }
 }

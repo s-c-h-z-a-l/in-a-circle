@@ -709,6 +709,30 @@ mod tests {
     fn doc(blocks: Vec<Block>) -> Document {
         Document { blocks }
     }
+    /// `decoded_len` is the exact length `unescape`/`decode` produce:
+    /// plain bytes 1, an escaped punctuation 1 (only when escapes count), a
+    /// known reference its decoded bytes, an unknown `&...` 1 per byte.
+    #[test]
+    fn decoded_len_matches_the_decoded_text() {
+        for (s, with_escapes, want) in [
+            ("", true, 0),
+            ("abc", true, 3),
+            ("\\*", true, 1),
+            ("\\*", false, 2),
+            ("\\a", true, 2),
+            ("a\\", true, 2),
+            ("&amp;", false, 1),
+            ("&nGt;", false, 6),
+            ("&nope;", false, 6),
+            ("a&b", false, 3),
+            ("&", false, 1),
+            ("x&amp;y&lt;", false, 4),
+            ("\\&amp;", true, 5),
+        ] {
+            assert_eq!(decoded_len(s, with_escapes), want, "{s:?} {with_escapes}");
+        }
+    }
+
     #[test]
     fn read_rejects_invalid_utf8() {
         assert_eq!(read(b"a\xffb"), Err(ReadError::NotText));
