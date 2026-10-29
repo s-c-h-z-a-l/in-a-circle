@@ -840,10 +840,24 @@ fn read_some(fd: RawFd, out: &mut Vec<u8>) -> Result<bool, Fail> {
 /// Anything else is no cache.
 fn read_cache(path: &Path) -> Option<Vec<Entry>> {
     let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
-    let file = crate::journal::StateDir::open(dir)
-        .ok()?
-        .open_file(name, libc::O_RDONLY, 0)
-        .ok()?;
+    let dir = match crate::journal::StateDir::open(dir) {
+        Ok(d) => d,
+        Err(e) => {
+            // A folder that is a symlink is refused on purpose: no cache is
+            // read or written. Say why once; any other failure is just no cache.
+            if e.get_ref()
+                .is_some_and(|i| i.is::<crate::journal::LinkRefused>())
+            {
+                // Straight to fd 2 (not `eprintln!`), so a test can capture it.
+                let _ = std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!("inacircle: no action catalog cache: {e}.\n"),
+                );
+            }
+            return None;
+        }
+    };
+    let file = dir.open_file(name, libc::O_RDONLY, 0).ok()?;
     // The size `fstat` shows is a pre-filter; the bytes read are the
     // authority (a file may grow while it is read): at most max + 1.
     if file.metadata().ok()?.len() > CACHE_BYTES as u64 {
@@ -1399,6 +1413,51 @@ pub(crate) mod tests {
         assert!(m.file_type().is_file());
         assert_eq!(m.mode() & 0o777, 0o600);
         assert!(read_cache(&cache).is_some());
+    }
+
+    /// Runs `f` with stderr (fd 2) redirected to a file; returns what was
+    /// written to it meanwhile.
+    fn stderr_of(root: &Path, f: impl FnOnce()) -> String {
+        use std::os::fd::AsRawFd;
+        let file = root.join("stderr");
+        let out = std::fs::File::create(&file).unwrap();
+        // SAFETY: dup/dup2 on open fds; fd 2 is restored before return.
+        let saved = unsafe { libc::dup(2) };
+        assert!(saved >= 0);
+        assert_eq!(unsafe { libc::dup2(out.as_raw_fd(), 2) }, 2);
+        f();
+        assert_eq!(unsafe { libc::dup2(saved, 2) }, 2);
+        unsafe { libc::close(saved) };
+        std::fs::read_to_string(file).unwrap()
+    }
+
+    /// A cache folder that is a symlink is refused on purpose: the user is
+    /// told in plain words, no cache is read or written through it, and the
+    /// catalog is still built.
+    #[test]
+    fn a_symlinked_cache_folder_is_refused_with_a_plain_message() {
+        use std::os::unix::fs::symlink;
+        let f = Fix::new("cachedirlink");
+        let d = f.dir("a");
+        manifest_script(&d.join("one"), &[act("x.a", "A")]);
+        let real = f.dir("real-cache");
+        std::fs::write(real.join("catalog"), CACHE_OK).unwrap();
+        let cache = f.cache();
+        std::fs::create_dir_all(cache.parent().unwrap().parent().unwrap()).unwrap();
+        symlink(&real, cache.parent().unwrap()).unwrap();
+        let mut c = None;
+        let err = stderr_of(&f.root, || {
+            c = Some(Catalog::load_from(&[(d, true)], &cache));
+        });
+        assert!(err.contains("symbolic link"), "{err}");
+        assert!(err.contains("refused on purpose"), "{err}");
+        assert_eq!(c.unwrap().actions.len(), 1);
+        // Nothing read from the target, nothing written into it.
+        assert_eq!(std::fs::read_dir(&real).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(real.join("catalog")).unwrap(),
+            CACHE_OK
+        );
     }
 
     /// A FIFO at the cache's name must not block the wheel's read (a full

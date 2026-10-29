@@ -719,10 +719,13 @@ No daemon:
   to that folder. The folder itself (`$XDG_STATE_HOME/inacircle`,
   `$XDG_RUNTIME_DIR/inacircle/jobs`, the catalog cache folder) must not be
   a symlink: that is refused on purpose (the folder is opened with
-  `O_NOFOLLOW | O_DIRECTORY`, and the operating system reports `Not a
-  directory (os error 20)`, which is all the reason the message carries;
-  the history warning reads `history not written: …`, so nothing is
-  published and nothing is offered for Undo; a cache folder that is a link means no cache is read or written). Its parents may be symlinks, and so may
+  `O_NOFOLLOW | O_DIRECTORY`; the operating system's bare `Not a
+  directory (os error 20)` is replaced, after an `lstat` confirms a real
+  symlink, by "the folder `<path>` is a symbolic link and is refused on
+  purpose", with the same error kind; the history warning reads `history
+  not written: …`, so nothing is published and nothing is offered for
+  Undo; a cache folder that is a link means no cache is read or written,
+  and one line on stderr says why). Its parents may be symlinks, and so may
   `user-dirs.dirs`, which is the user's own configuration. To keep a
   state folder elsewhere, make its parent the link or bind-mount it;
 - running jobs: each supervisor registers itself in

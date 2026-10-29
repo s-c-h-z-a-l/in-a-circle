@@ -174,6 +174,38 @@ pub(crate) struct StateDir {
     fd: OwnedFd,
 }
 
+/// The refusal of a state folder that is itself a symlink.
+#[derive(Debug)]
+pub(crate) struct LinkRefused(String);
+
+impl std::fmt::Display for LinkRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LinkRefused {}
+
+/// `O_NOFOLLOW | O_DIRECTORY` on a symlink fails with a bare `ENOTDIR`
+/// (or `ELOOP`). When `path` really is a symlink (confirmed by `lstat`;
+/// any other `ENOTDIR` keeps the system's message), say so in plain words.
+/// The error kind is kept, so callers that match on it see no change.
+pub(crate) fn explain_link(path: &Path, e: io::Error) -> io::Error {
+    let linked = matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+        && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if !linked {
+        return e;
+    }
+    io::Error::new(
+        e.kind(),
+        LinkRefused(format!(
+            "the folder {} is a symbolic link and is refused on purpose \
+             (state folders are never entered through a link; make its parent the link instead)",
+            path.display()
+        )),
+    )
+}
+
 impl StateDir {
     /// Creates what is missing (mode 0700), then opens and checks it.
     pub(crate) fn create(path: &Path) -> io::Result<StateDir> {
@@ -186,7 +218,8 @@ impl StateDir {
 
     pub(crate) fn open(path: &Path) -> io::Result<StateDir> {
         let c = c_name(path.as_os_str().as_bytes())?;
-        let fd = open_at(libc::AT_FDCWD, &c, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let fd = open_at(libc::AT_FDCWD, &c, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+            .map_err(|e| explain_link(path, e))?;
         let st = fstat(fd.as_raw_fd())?;
         if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
             return Err(io::Error::other("state folder is not a directory"));
@@ -6461,6 +6494,41 @@ mod tests {
         // The folder itself is not entered through a link at its last part.
         symlink(t.0.join("state"), t.0.join("dlink")).unwrap();
         assert!(StateDir::open(&t.0.join("dlink")).is_err());
+    }
+
+    /// A state folder that is itself a symlink is refused on purpose, and
+    /// the user is told so in plain words (not a bare "Not a directory"):
+    /// nothing is published, nothing is offered for Undo. The error kind is
+    /// the system's, so callers that match on it see no change. A plain
+    /// file at the name keeps the system's message.
+    #[test]
+    fn a_symlinked_state_folder_is_refused_with_a_plain_message() {
+        let t = Tmp::new("statelink");
+        t.env(|| {
+            let real = t.0.join("real-state");
+            fs::create_dir_all(&real).unwrap();
+            symlink(&real, history_dir().unwrap()).unwrap();
+            let e = StateDir::open(&history_dir().unwrap()).err().unwrap();
+            assert_eq!(e.kind(), io::ErrorKind::NotADirectory, "{e}");
+            assert!(e.to_string().contains("symbolic link"), "{e}");
+            assert!(e.to_string().contains("refused on purpose"), "{e}");
+
+            let mut rec = Recorder::open(&new_job_id(), "a");
+            let r = try_publish(&t, &mut rec, "a", &[("x.md", "mine")], &mut |_, _| Ok(()));
+            assert!(r.is_err(), "published through a refused history");
+            let done = rec.finish(true);
+            assert!(!done.undoable);
+            let w = done.warning.unwrap();
+            assert!(w.contains("history not written"), "{w}");
+            assert!(w.contains("symbolic link"), "{w}");
+            assert!(fs::read_dir(t.out()).unwrap().next().is_none());
+            assert_eq!(fs::read_dir(&real).unwrap().count(), 0, "written through");
+        });
+        // Only a real symlink gets the new words.
+        let file = t.0.join("plain-file");
+        fs::write(&file, "x").unwrap();
+        let e = StateDir::open(&file).err().unwrap();
+        assert!(!e.to_string().contains("symbolic link"), "{e}");
     }
 
     /// The window's reader never goes past the size the scan began with,
