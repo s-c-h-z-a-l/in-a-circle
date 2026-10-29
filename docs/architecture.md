@@ -171,6 +171,10 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
   paths are out of scope for v0.
 
+  An action may open with `progress<TAB>0.00` before any input work
+  (`inacircle-text run` always does), so a script that parses stdout must
+  not take the first `progress` line for the end of a run.
+
   stderr is free-form; on failure its last lines go into the message.
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
   the file's), 3 unsupported input. For a batch: 0 if at least one input
@@ -195,7 +199,11 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   violation the reason stays the violation. The engine is the child
   subreaper of what it starts, so the kernel's child list, not `/proc`,
   tells whether a member still runs; if it cannot be read, nothing is
-  accepted.
+  accepted. A member that was killed with `SIGKILL` before the leader
+  exited and that nobody waited for (the kernel's OOM killer, a hard
+  `RLIMIT_CPU`, `kill -9 $job; exit` in a script) also counts as left
+  behind: the engine cannot tell it from one its own kill caught, and
+  fails closed.
 
 ### Sandbox
 
@@ -235,6 +243,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   and the input fails: a Rust action (allocation-failure line, then
   `SIGABRT`) with `out of memory (limit N MiB)`, any other action with its
   own error or the signal. The numbers and why `DATA` and not `AS` are in [resource-limits.md](resource-limits.md).
+- **Compatibility limits.** The policy denies by name, so a converter that
+  needs a denied call fails with `EPERM`, `EACCES` or `ENOSYS`. Known
+  costs: the ioctl default-deny (for example `cp --reflink`'s `FICLONE`),
+  the scheduler, affinity and priority setters (OpenMP thread pinning,
+  `nice`), System V IPC and POSIX queues, and `F_ADD_SEALS`. The shipped
+  actions and the test fixtures run; converters from third parties have
+  **not** been tried. A new action that needs one of these calls needs a
+  decision, not a silent exception.
 - Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
   `RLIMIT_DATA` is per process, so each child of a forking action gets the
   cap again.
@@ -252,6 +268,13 @@ Every action runs sandboxed, set up in the child between `fork` and
   the bounding set does not count). Nothing is dropped instead. Otherwise
   every input fails with "sandbox unavailable: <why>", and the history
   records `sandbox=no`.
+- **Tested boundary, not proof.** The escape tests run under the same
+  seccomp policy and Landlock rules the product uses. On a host that
+  already refuses `unshare` to an unprivileged user (an AppArmor or
+  `max_user_namespaces` policy, or a PID namespace without a user
+  namespace), the `EPERM` is the host's, not the filter's; the filter's own
+  denial of namespaces is covered by the policy-table tests. What the
+  sandbox does not promise is in [sandbox-hardening.md](benchmarks/sandbox-hardening.md).
 
 ## Classifier
 
@@ -693,7 +716,15 @@ No daemon:
   exclusively under random names, never through a symlink, in a folder
   opened once and checked (a directory of this user, not writable by
   others: tightened if it is), and renamed or linked into place relative
-  to that folder;
+  to that folder. The folder itself (`$XDG_STATE_HOME/inacircle`,
+  `$XDG_RUNTIME_DIR/inacircle/jobs`, the catalog cache folder) must not be
+  a symlink: that is refused on purpose (the folder is opened with
+  `O_NOFOLLOW | O_DIRECTORY`, and the operating system reports `Not a
+  directory (os error 20)`, which is all the reason the message carries;
+  the history warning reads `history not written: …`, so nothing is
+  published and nothing is offered for Undo; a cache folder that is a link means no cache is read or written). Its parents may be symlinks, and so may
+  `user-dirs.dirs`, which is the user's own configuration. To keep a
+  state folder elsewhere, make its parent the link or bind-mount it;
 - running jobs: each supervisor registers itself in
   `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
   action, inputs, done, progress, start time) rewritten by rename at most
@@ -707,7 +738,17 @@ No daemon:
   or is not a regular file of this user). The dead entries among those
   examined, and our own temporary files untouched for a minute, are
   removed first (each only while its name is still the file just opened),
-  so a pile left by crashes heals;
+  so a pile left by crashes heals. An entry records its process by pid,
+  start time and boot id; one written by an older build has no identity
+  and is judged by the pid alone, so after pid reuse it looks alive until
+  removed by hand (delete the file in `$XDG_RUNTIME_DIR/inacircle/jobs/`;
+  that folder is tmpfs and empties at the next boot). Where no file
+  descriptor of an object is held across the check and the removal (a
+  registry entry, a step's work folder), `(device, inode)` cannot prove
+  identity against inode reuse. Fooling that takes a process of the same
+  user that removes our private 0700 object and recreates the same random
+  name on the freed inode; the worst result is one of our own bookkeeping
+  files or an unpublished work folder removed, never a published output;
 - the history is read in a window: the header by itself (256 bytes), then
   at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
   with at most 32 fields, a job with at most 1024 outputs and groups and

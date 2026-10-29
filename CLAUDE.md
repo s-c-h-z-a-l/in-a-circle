@@ -171,6 +171,13 @@ it's a bug.
 - Safety: single instance (`flock`), and a hard deadline on every wait,
   data pipe reads included. A full-screen overlay that hangs locks the
   user out of the desktop.
+- Actions: every action and manifest probe runs under the mandatory
+  sandbox (Landlock ABI >= 6 and seccomp, x86_64 and aarch64); there is
+  no weakened mode. An output group is published per input by one
+  no-replace rename, and Undo moves it to the freedesktop.org Trash; the
+  engine never deletes a published output. A new action that needs a call
+  the policy denies needs a decision, not an exception. Contract and
+  limits: `docs/architecture.md`, `docs/benchmarks/sandbox-hardening.md`.
 
 ## Conventions
 

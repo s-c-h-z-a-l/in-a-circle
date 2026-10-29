@@ -100,18 +100,94 @@ failures; N = 50 valid of 50 attempts per row):
   by policy ([acceptance.md](acceptance.md), Plan-7 interpretation); only
   the environment-matched regression applies, and there is none.
 
+## Hover maximum (open budget question)
+
+The gate is a per-event wall maximum of 100 us on the reference
+environment ([acceptance.md](acceptance.md)). On the fake compositor on
+this machine (release builds, 10 alternating runs of one stage-2 session,
+122 hover events per run), the
+median of the per-run maxima is:
+
+| Build | p50 | p95 (median of runs) | max (median of runs; range) |
+|---|---|---|---|
+| A (`169163b`, before the hardening) | 17 us | 37 us | 102 us (90-122) |
+| `86a9b4a` (before the render change) | 18 us | 37 us | 105 us (95-158) |
+| B (this branch, T12 render change) | 17 us | 37 us | 109 us (85-186) |
+
+The maximum is in the first events after a stage swap (about 85-110 us
+for the first two, then about 20 us). With a 20 ms pause between a buffer
+release and the next event (a diagnostic variant of the same harness) the
+medians of the per-run maxima fall to 43 / 45 / 48 us for A / `86a9b4a` /
+B, but single runs still reach 138 / 113 / 169 us. So the maximum is at or
+above 100 us in the **A build too**: not a hardening regression, but the
+100 us per-event maximum is not shown to hold, and whether the delivery
+pattern of the fake compositor or the real compositor decides it is
+**open: T13b, on the real niri, decides it**. Until then the gate is open,
+not passed, and the integration proposal has to state the outcome. (The
+harness and its raw files are not part of the repository.)
+
+## Machines (inventory of 2026-10-29)
+
+Read from the machines themselves, read-only. A missing value is missing,
+not estimated. Older inventories (the ThinkCentre and X280 in
+[wheel-portability.md](wheel-portability.md)) are history; the running
+kernel and power state below were read again.
+
+| | Reference desktop | ThinkCentre M910q (disposable) |
+|---|---|---|
+| CPU | AMD Ryzen 7 5700X, 8 cores / 16 threads (SMT on), one socket, family 25 model 33 stepping 2 | Intel Core i5-7500T, 4 cores / 4 threads, one socket |
+| Microcode | 0xa201213 | 0xf8 |
+| Cache | L1d 256 KiB, L1i 256 KiB, L2 4 MiB (8 inst.), L3 32 MiB | L1d 128 KiB, L2 1 MiB, L3 6 MiB |
+| Frequency | max 4665 MHz, min 562 MHz; `amd-pstate-epp` active, governor `performance`, EPP `performance`, policy 1742-4665 MHz; boost enabled | 800-3300 MHz; `intel_pstate` active, governor `powersave`, EPP `balance_performance`, turbo allowed |
+| RAM | 94 GiB visible (MemTotal 98,744,132 kB); owner-reported DDR4-3200 dual channel; speed and slots not read (needs root) | 7.6 GiB visible (8,008,172 kB); speed and slots not read (needs root) |
+| Board / firmware | ASUS ROG STRIX B550-F GAMING WIFI II, AMI BIOS 3621 (2025-01-13) | Lenovo 10MUS1P70L (ThinkCentre M910q), BIOS M1AKT59A (2023-10-27) |
+| OS / kernel | CachyOS, 7.2.9-1-cachyos, `PREEMPT_DYNAMIC` (`PREEMPT`), HZ 1000; `CONFIG_SCHED_BORE` is not in the running config, so the default EEVDF applies (scheduler debugfs not readable) | Arch Linux, 7.2.11-arch1-1, `PREEMPT_DYNAMIC`, HZ 1000, EEVDF |
+| Mitigations | **`mitigations=off`**, `split_lock_detect=off`, `nowatchdog`, `tsc=reliable clocksource=tsc`; spectre_v2, spec_store_bypass, spec_rstack_overflow, tsa and vmscape report "Vulnerable" | defaults: PTI, IBRS, MDS clear-buffers, retbleed IBRS, vmscape IBPB |
+| Security modules | capability, landlock, lockdown, yama, bpf; Landlock ABI 10 (qualified) | same list; Landlock ABI 10 (qualified earlier on 7.2.11) |
+| THP / swap | THP `madvise`; zram swap 8 GiB | THP `always`; 512 MiB swapfile |
+| Compositor | niri 26.04 (8ed0da4), Wayland; DP-1 5120x1440 at 240 Hz, scale 1, VRR supported but off | niri 26.04 (8ed0da4); **no monitor attached**, so the session niri has no output; the series ran in a nested niri (winit) with one 1280x960 output |
+| GPU | NVIDIA RTX 3080 Ti, driver 615.71.09 | not queried |
+| Storage | NVMe (Samsung MZVL21T0HCLR), Btrfs `compress=zstd:1`, `noatime`, `discard=async`, subvolumes `@` and `@home`; `/tmp` tmpfs (`huge=advise`) | SATA SSD (SanDisk SD7TB6S256G1001), Btrfs `compress=zstd:3`, `noatime`, `discard=async`; `/tmp` tmpfs |
+| Toolchain | rustc and cargo 1.98.1 (pinned by `rust-toolchain.toml`), release profile fat LTO, `codegen-units=1`, `panic=abort`, stripped | no `rustc` on its `PATH`; release binaries built on the reference machine and copied |
+
+Native CI runners: Ubuntu 26.04 (kernel 7.0.0-1017-azure), x86_64 and
+aarch64, Landlock ABI 8, rustc 1.98.1. Own ARM guest: aarch64, kernel
+7.0.0-38-generic, ext4, ABI 8, QEMU TCG emulation. X280 (ThinkPad, CachyOS,
+Plasma): **not available**, so no fresh inventory exists; its earlier
+qualification (kernel 7.2.11-1-cachyos, ABI 10) is history. Physical ARM:
+none.
+
+Method items common to the series: launcher `niri msg action spawn -- sh
+-c`, input fixture `wtype` Escape only after the layer surface is proved
+mapped, observer `INACIRCLE_MEASURE=1` (a runtime switch in the shipped
+binary), workload and counts as in each table, executable pages checked
+resident with `mincore`, no global cache drop, PSS from `smaps_rollup` in
+KiB times 1024. Executable hashes: A `692a0e5d...27c7`, B
+`530de180...1019`. The A and B binaries were built with the pinned
+toolchain on the reference machine. The results of the two machines are
+never pooled.
+
+## Binary size
+
+The hardening grew `inacircle` from 900,352 B to 1,082,216 B (+181,864 B;
+`.text` +150,192 B). The per-area account, measured by rebuilding the
+stripped release at each area's last commit, is in
+[binary-size.md](binary-size.md#hardening-growth-since-plan-7). The limit of
+1.5 MB holds with 490,648 B to spare.
+
 ## Open
 
 | Item | State |
 |---|---|
-| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice / hover | OPEN: T13b, owner present (`scripts/measure-desktop-t13b.sh`) |
+| Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; T13b on the real niri decides |
+| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: T13b, owner present (`scripts/measure-desktop-t13b.sh --i-am-present`) |
 | X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
-| ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran |
+| ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; cold is T13c |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
 | U-01: choice-to-action entry with real clicks | OPEN: needs a real pointer session (T13b) |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
-| Native ARM CI / own ARM VM | CI run 40654582001 green on `b696450`; `c901291`/`87153e4` CI not checked. Own ARM VM suite 31/31 (emulated, functional only) |
-| Engine/supervisor and Undo-window memory phases | OPEN (evidence gap) |
+| Native ARM CI / own ARM VM | Native CI green on `c84f4ad` (run 40835264396). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
+| Engine/supervisor and Undo-window memory phases | OPEN: T13c (headless, after the last code change) |
 
 Reproduce: copy two release directories and the two scripts to the target,
 inside a niri session run

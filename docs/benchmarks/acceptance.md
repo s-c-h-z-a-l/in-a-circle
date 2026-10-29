@@ -115,14 +115,13 @@ the thresholds. Threshold changes require a documented decision.
 ## Memory and idle evidence
 
 Linux `/proc/*/smaps_rollup` PSS and `VmHWM` values labelled `kB` are KiB.
-Multiply by 1024 before comparing PSS with 5,000,000 B. The release
-large-drop smoke assertion is currently ≤5120 KiB; that looser guard is
-not a substitute for the stated 5 MB acceptance ceiling. Report its
-actual observations, including both one-file and 1024-file stage-2 cases.
-The smoke currently retains the **minimum of two samples per workload**
-and asserts only the 1024-file minimum. It therefore does not establish
-maximum/peak acceptance. Preserve every underlying observation or use a
-separate harness that reports maxima when closing the memory gate.
+Multiply by 1024 before comparing PSS with 5,000,000 B. Since the
+hardening branch the release large-drop test keeps every observation (one
+file and 1024 files at stage 2, two runs each) and fails when **any**
+sample is above 5,000,000 B; a zero, a missing or too few samples is
+incomplete, never a pass. The same rule is in `scripts/measure-wheel.py`
+(`memory_gate`) for the series. The earlier debug-build guard of 5120 KiB
+is gone: the RSS guard in CI measures the shipped release binary.
 
 PSS has no kernel-maintained peak. Record which processes are covered,
 sampling points/cadence and workload (plain wheel, single input, large
@@ -163,3 +162,16 @@ follow-ups; none are represented as passing measurements. The safety and
 resource ceilings remain in force. Subsequent plans touching these paths
 must satisfy the applicable acceptance gates, with a closing review and
 documented evidence.
+
+## Hardening branch
+
+The hardening branch ([sandbox-hardening.md](sandbox-hardening.md),
+[hardening-performance.md](hardening-performance.md)) was measured under
+this policy. Its status is stated gate by gate there: the ThinkCentre
+startup A/B and the memory and idle gates have results; the reference
+desktop A/A and A/B, the hover maximum (open: it exceeds 100 us on the fake
+compositor in the A build too), choice-to-action with real clicks, the
+engine and Undo-window memory phases and the cold condition are open; the
+X280 gate is open because the machine is unavailable. None of them is
+recorded as a pass, and the Plan 7 overrun and the historic ~30 s
+automatic-close anomaly stay as they were.

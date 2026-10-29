@@ -29,6 +29,8 @@ historical evidence, not acceptance under the new method.
 | 13 | What does sandboxing `--manifest` cost? | Within budget: +~0.22 ms until `spawn` returns (p50 ~290 µs vs ~65 µs), +~0.16 ms until the output is read (p50 ~1.6 ms vs ~1.43 ms); paid once per new or changed binary, never on a cache hit. | [manifest-sandbox.md](manifest-sandbox.md) |
 | 14 | Does the same wheel work on ordinary niri and Plasma systems, and what changes its cost? | Manual conversion/Undo checks pass on both, without product changes. Startup CPU exceeds 1 ms; energy policy and two buffer paints explain much of the cost. Full specifications and auditable run data. | [wheel-portability.md](wheel-portability.md) |
 | 15 | Does reference startup pass the new ≥50-observation p95 gate? | Three complete 50-run series: CPU p95 851 / 860 / 849 µs, all below 1 ms. Failed/setup attempts retained; one automatic-close anomaly remains open. | [wheel-reference.md](wheel-reference.md) |
+| 16 | What does the hardening change about confinement and data safety, and what does it not claim? | Every action runs under a mandatory Landlock (ABI >= 6) and seccomp sandbox on x86_64 and aarch64; outputs are published atomically per input and Undo moves them to the Trash instead of deleting. Not claimed: perfect isolation, a memory quota for a process tree, third-party converters, content digests. | [sandbox-hardening.md](sandbox-hardening.md) |
+| 17 | What did the hardening cost, and which gates are still open? | ThinkCentre startup CPU p95 -45% (A/B, two runs); wheel PSS max 3.2 MB (gate 5 MB); stationary wheel 0 wakeups; `inacircle` +181,864 B, itemised. Open: hover maximum, desktop A/B, X280, cold, engine and Undo-window memory. | [hardening-performance.md](hardening-performance.md), [binary-size.md](binary-size.md#hardening-growth-since-plan-7) |
 
 ## Reference machine
 
@@ -40,8 +42,8 @@ not stock**, which matters for some results:
 | CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), owner-reported **all-core OC 4650 MHz @ 1.1 V**, `performance` governor; clock residency was not measured |
 | RAM | 96 GB DDR4-3200, dual channel |
 | GPU | NVIDIA RTX 3080 Ti Founders Edition, 12 GB; **`nvidia-open` kernel module 615.71.09**; power limit 280 W (stock 350 W), +75 MHz core, +500 MHz memory |
-| OS | CachyOS (Arch-based), kernel 7.2.9-cachyos: BORE/EEVDF scheduler, `PREEMPT_DYNAMIC`, packages built for x86-64-v3 |
-| Kernel flags | **`mitigations=off`**, `tsc=reliable clocksource=tsc`, `nowatchdog` |
+| OS | CachyOS (Arch-based), kernel 7.2.9-cachyos: EEVDF (`CONFIG_SCHED_BORE` is not in the running config, read 2026-10-29), `PREEMPT_DYNAMIC`, packages built for x86-64-v3 |
+| Kernel flags | **`mitigations=off`**, `split_lock_detect=off`, `tsc=reliable clocksource=tsc`, `nowatchdog` |
 | Compositor | niri 26.04 |
 | Display | MSI MPG491CX OLED, 5120x1440 @ 240 Hz, scale 1. VRR is on-demand: fixed 240 Hz on the desktop, variable only for fullscreen games |
 
