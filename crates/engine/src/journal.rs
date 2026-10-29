@@ -4744,7 +4744,7 @@ mod tests {
                 }
                 let b = fs::read(e.path()).unwrap();
                 assert!(
-                    !b.starts_with(b"inacircle-detached"),
+                    !b.starts_with(&n.as_bytes()[..12]),
                     "{:?}: {}",
                     e.path(),
                     String::from_utf8_lossy(&b)

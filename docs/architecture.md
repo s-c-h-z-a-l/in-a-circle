@@ -674,7 +674,8 @@ No daemon:
   `recovery-kept`, `recovery-uncertain` or `recovery-abort` (nothing
   moved), each with the proved place or `-`, the anchor and the reason;
   then `undo` (unless every group was kept: nothing moved, so no `undo`
-  record, and the CLI exits 1). An undo cut by a crash is resumed by the next one from
+  record; the CLI exits 0 when each was kept at a place its line names, 1
+  for `kept -`). An undo cut by a crash is resumed by the next one from
   these records: an intent without its ending is recovered by looking only
   at its target and our two info names (no Trash scan). Paths are
   byte-exact (`%XX` for bytes that are not printable ASCII, `%` and
