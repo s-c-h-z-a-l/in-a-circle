@@ -477,10 +477,22 @@ class AbRunnerTests(unittest.TestCase):
             shutil.copy2(shutil.which("sleep"), d / "other" / "inacircle")
             build = self.ab.Build("A", d / "bin", d / "out")
             self.assertEqual(build.exe, str(d / "real" / "inacircle"))
-            ours = subprocess.Popen([build.exe, "30"])
-            stranger = subprocess.Popen([str(d / "other" / "inacircle"), "30"])
+            # A multi-call coreutils (the Rust one on newer Ubuntu) picks the
+            # program from argv[0] and exits at once as `inacircle`; it takes
+            # the program name as the first argument instead. The command
+            # line still starts with the executable's path, as pids() needs.
+            import time
+            tail = ["30"]
+            probe = subprocess.Popen([build.exe, *tail], stderr=subprocess.DEVNULL)
+            time.sleep(0.2)
+            if probe.poll() is not None:
+                tail = ["sleep", "30"]
+            else:
+                probe.kill()
+                probe.wait()
+            ours = subprocess.Popen([build.exe, *tail])
+            stranger = subprocess.Popen([str(d / "other" / "inacircle"), *tail])
             try:
-                import time
                 time.sleep(0.2)
                 self.assertEqual(self.ab.pids(build.exe), [ours.pid])
             finally:
