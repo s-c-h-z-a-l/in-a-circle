@@ -447,8 +447,11 @@ In the engine, in one place:
 6. The temp dir is `.inacircle-<random>` inside the target folder, always
    removed at the end through the folder's fd (never by a path that may
    name something else by then); stale ones from a crash are cleaned by
-   the next run (our pattern only, older than a day). An output folder
-   never takes that pattern.
+   the next run: our pattern, owned by this user, older than a day, mode
+   0700 and holding only our own names (`w`, `step<k>`, `step<k>.inputs`,
+   at most four). A published group renamed to that pattern holds its
+   outputs' names and is never removed. An output folder never takes that
+   pattern.
 7. Undo never deletes. It moves each input's output group (the wrapper
    folder, whole) into the freedesktop.org Trash with one
    `renameat2(RENAME_NOREPLACE)`: the home Trash

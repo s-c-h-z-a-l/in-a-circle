@@ -307,8 +307,54 @@ fn is_our_name(name: &[u8]) -> bool {
             .is_some_and(is_lower_hex16)
 }
 
-/// Removes our own work and probe directories older than a day (left by a
-/// crash). Anything else in the folder is untouched, symlinks included.
+/// The most entries one of our directories holds: a work dir has
+/// `step<k>` and `step<k>.inputs` per step, and a route has at most two
+/// steps (`exec::run` refuses longer ones); a staging dir holds only
+/// [`WRAPPER`], a probe nothing.
+const OWN_ENTRIES_MAX: usize = 4;
+
+/// An entry name one of our directories can hold: [`WRAPPER`] (staging),
+/// `step<k>` or `step<k>.inputs` (work dir).
+fn is_own_entry(name: &[u8]) -> bool {
+    if name == WRAPPER.to_bytes() {
+        return true;
+    }
+    let Some(k) = name.strip_prefix(b"step") else {
+        return false;
+    };
+    let k = k.strip_suffix(b".inputs").unwrap_or(k);
+    !k.is_empty() && k.iter().all(u8::is_ascii_digit)
+}
+
+/// Whether a directory with our name also has our shape: permission bits
+/// 0700 (work, staging and probe dirs are made so; a staging dir may keep
+/// a parent's setgid bit; a published wrapper gets `0777 & !umask` on top)
+/// and at most [`OWN_ENTRIES_MAX`] entries, each
+/// one of [`is_own_entry`]. A published group renamed to our name (by
+/// hand, or a sync tool restoring hidden folders) has its outputs' names
+/// in it and is never removed.
+fn has_own_shape(path: &Path, meta: &fs::Metadata) -> bool {
+    if meta.mode() & 0o777 != 0o700 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    let mut n = 0;
+    for e in entries {
+        n += 1;
+        match e {
+            Ok(e) if n <= OWN_ENTRIES_MAX && is_own_entry(e.file_name().as_bytes()) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Removes our own work, staging and probe directories older than a day
+/// (left by a crash): our name, owned by this user, and our shape
+/// ([`has_own_shape`]). Anything else in the folder is untouched, symlinks
+/// included.
 pub fn clean_stale(target_dir: &Path) {
     let Ok(entries) = fs::read_dir(target_dir) else {
         return;
@@ -332,7 +378,7 @@ pub fn clean_stale(target_dir: &Path) {
             .is_some_and(|age| age > STALE_AFTER);
         // symlink_metadata: a symlink is not a dir here, and remove_tree
         // refuses to open one anyway.
-        if meta.is_dir() && meta.uid() == uid && old {
+        if meta.is_dir() && meta.uid() == uid && old && has_own_shape(&e.path(), &meta) {
             remove_tree(&e.path());
         }
     }
@@ -1614,7 +1660,13 @@ pub(crate) mod tests {
             fs::create_dir(d).unwrap();
         }
         fs::write(&plain_file, "x").unwrap();
-        fs::write(old.join("junk"), "x").unwrap();
+        // A crashed work dir's shape: 0700, a step folder and its list.
+        fs::create_dir(old.join("step1")).unwrap();
+        fs::write(old.join("step1").join("junk"), "x").unwrap();
+        fs::write(old.join("step1.inputs"), "x").unwrap();
+        for d in [&old, &old_probe] {
+            fs::set_permissions(d, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::write(mine.join("precious"), "x").unwrap();
         for p in [&old, &old_probe, &other, &plain_file, &mine, &upper, &short] {
             set_age(p, 2 * 24 * 3600);
@@ -1627,6 +1679,42 @@ pub(crate) mod tests {
         assert!(plain_file.exists());
         assert!(mine.join("precious").exists(), "user folder survives");
         assert!(upper.exists() && short.exists());
+    }
+
+    /// T16 A-m1: a published group renamed to our name and a day old is
+    /// not ours: its outputs survive, whatever its mode. Only the 0700 dir
+    /// of our shape goes.
+    #[test]
+    fn stale_cleanup_keeps_a_published_group_renamed_to_our_name() {
+        let t = Tmp::new("stale-published");
+        let (root, target) = (t.0.join("root"), t.0.join("target"));
+        fs::create_dir_all(root.join("0")).unwrap();
+        fs::create_dir(&target).unwrap();
+        file(&root.join("0"), "a.md", "a");
+        let p = publish(&root, &["0/a.md"], &target, "a", "md").unwrap();
+        let published = p.location.path_at_check.unwrap();
+        let renamed = target.join(".inacircle-00000000000000d4");
+        fs::rename(&published, &renamed).unwrap();
+        // Even at 0700 (a umask of 077): its content is not our shape.
+        fs::set_permissions(&renamed, fs::Permissions::from_mode(0o700)).unwrap();
+        // Our shape but not our mode: a user folder too.
+        let loose = target.join(".inacircle-00000000000000d5");
+        fs::create_dir(&loose).unwrap();
+        fs::create_dir(loose.join("step1")).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o755)).unwrap();
+        // Positive control: a crashed staging dir of ours.
+        let staging = target.join(".inacircle-00000000000000d6");
+        fs::create_dir(&staging).unwrap();
+        fs::create_dir(staging.join("w")).unwrap();
+        file(&staging.join("w"), "x.md", "x");
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).unwrap();
+        for d in [&renamed, &loose, &staging] {
+            set_age(d, 25 * 3600);
+        }
+        clean_stale(&target);
+        assert_eq!(fs::read(renamed.join("a.md")).unwrap(), b"a");
+        assert!(loose.join("step1").exists());
+        assert!(!staging.exists(), "our own stale staging goes");
     }
 
     #[test]
@@ -2222,10 +2310,12 @@ pub(crate) mod tests {
         for (name, age) in ages {
             let d = t.0.join(format!(".inacircle-{name}"));
             fs::create_dir(&d).unwrap();
+            fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
             set_age(&d, age);
         }
         let gone = t.0.join(".inacircle-0000000000000003");
         fs::create_dir(&gone).unwrap();
+        fs::set_permissions(&gone, fs::Permissions::from_mode(0o700)).unwrap();
         set_age(&gone, 25 * hour);
         clean_stale(&t.0);
         assert!(
