@@ -15,7 +15,7 @@
 # <out-dir>/{attempts.jsonl,runs.json,environment.json,wheel-*.log}; then
 # summarize per series with scripts/summarize-ab.py <out-dir> and compare A against B.
 set -euo pipefail
-[ "${1:-}" = --i-am-present ] || { sed -n '2,13p' "$0" >&2; exit 2; }
+[ "${1:-}" = --i-am-present ] || { sed -n '2,17p' "$0" >&2; exit 2; }
 A=${2:?A-bin-dir}; B=${3:?B-bin-dir}; OUT=${4:?out-dir}
 for d in "$A" "$B"; do [ -x "$d/inacircle" ] || { echo "no $d/inacircle" >&2; exit 1; }; done
 [ -z "$(ls -A "$OUT" 2>/dev/null)" ] || { echo "$OUT is not empty: raw data is never overwritten" >&2; exit 1; }
