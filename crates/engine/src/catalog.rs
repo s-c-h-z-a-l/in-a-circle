@@ -1636,6 +1636,16 @@ pub(crate) mod tests {
         })
     }
 
+    /// Shell that waits for `up` to exist, at most 1000 x 10 ms (10 s, past
+    /// the manifest deadline: a broken sampler ends the fixture, never
+    /// leaves it waiting for good).
+    fn hold_until(up: &Path) -> String {
+        format!(
+            "n=0; while [ ! -e '{}' ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done",
+            up.display()
+        )
+    }
+
     /// A manifest's descendants: one holds the stdout pipe, writes an
     /// early action line at once and would write a late one after the
     /// leader's exit (a margin after it, by which the engine has seen the
@@ -1657,20 +1667,28 @@ pub(crate) mod tests {
         let wait = format!("1.0{}{}", std::process::id(), line!());
         let line = |id: &str| act(id, "L").replace('\t', "\\t");
         let (early, lingers, late) = (line("x.early"), line("x.lingers"), line("x.late"));
+        let up = f.dir("marker").join("up");
         let body = format!(
             "{}\n\
              {{ printf '{lingers}\\n'; exec sleep {token} >&- 2>&-; }} &\n\
              {{ printf '{early}\\n'; sleep {wait}; printf '{late}\\n'; }} &\n\
-             sleep 0.3",
-            manifest_body("", &[act("x.a", "A")])
+             {hold}",
+            manifest_body("", &[act("x.a", "A")]),
+            hold = hold_until(&up)
         );
         bash_script(&d.join("one"), &body);
-        let span = Duration::from_millis(500);
-        let lingerer = seen_running(&["sleep", &token], span);
-        let writer = seen_running(&["sleep", &wait], span);
+        // The leader waits for the sampler to have seen both descendants,
+        // so the exit meets them however slow the machine is.
+        let seen = seen_all_running(
+            vec![
+                vec!["sleep".to_owned(), token.clone()],
+                vec!["sleep".to_owned(), wait.clone()],
+            ],
+            up,
+            Duration::from_secs(20),
+        );
         let c = Catalog::load_from(&[(d, true)], &f.cache());
-        assert!(lingerer.join().unwrap(), "the lingering one never ran");
-        assert!(writer.join().unwrap(), "the writer never ran");
+        assert!(seen.join().unwrap(), "a descendant never ran");
         for id in ["x.a", "x.early", "x.lingers", "x.late"] {
             assert!(c.get(id).is_none(), "{id} was taken");
         }
@@ -1710,7 +1728,10 @@ pub(crate) mod tests {
         };
         let pre = format!("{bg}sleep {token}");
         bash_script(&d.join("hang"), &manifest_body(&pre, &[act("x.a", "A")]));
-        let seen = seen_running(&["sleep", &dtoken], DEADLINE - Duration::from_millis(500));
+        // From before the run to a second past the kill (at DEADLINE): the
+        // descendant lives from its start to the kill, so however late it
+        // starts on a loaded machine, a sample falls in that time.
+        let seen = seen_running(&["sleep", &dtoken], DEADLINE + Duration::from_secs(1));
         let t = Instant::now();
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         assert!(
@@ -1872,12 +1893,18 @@ pub(crate) mod tests {
         let f = Fix::new("mf-waitid-kill");
         let d = f.dir("a");
         let token = format!("54.{}{}", std::process::id(), line!());
+        let up = f.dir("marker").join("up");
         let body = format!(
-            "{}\n{{ exec sleep {token} >&- 2>&-; }} &\nsleep 0.3",
-            manifest_body("", &[act("x.a", "A")])
+            "{}\n{{ exec sleep {token} >&- 2>&-; }} &\n{hold}",
+            manifest_body("", &[act("x.a", "A")]),
+            hold = hold_until(&up)
         );
         bash_script(&d.join("one"), &body);
-        let seen = seen_running(&["sleep", &token], Duration::from_millis(250));
+        let seen = seen_all_running(
+            vec![vec!["sleep".to_owned(), token.clone()]],
+            up,
+            Duration::from_secs(20),
+        );
         crate::exec::tests::WAITID_ERRNO.set(Some(libc::EINVAL));
         let c = Catalog::load_from(&[(d, true)], &f.cache());
         crate::exec::tests::WAITID_ERRNO.set(None);

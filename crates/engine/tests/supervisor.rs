@@ -1121,6 +1121,12 @@ fn descendant_reaped_on_cancel() {
 /// child is reparented to us before the link is a zombie, so reaping the
 /// links leads to the live one. The input fails, nothing is placed, no
 /// hop survives. The chain proves it ran by its first process's warning.
+///
+/// The chain is bounded (100 000 links, at the ~1-2 thousand forks a second
+/// a shell manages: one to two minutes), so a harness killed from outside
+/// in this test leaves an orphan that ends by itself, not one that burns a
+/// core for ever. The bound is far above what the test needs: the chain is
+/// killed within a fraction of a second of the ack.
 #[test]
 fn descendant_fork_chain_is_caught() {
     let t = Tmp::new("desc-hop");
@@ -1131,7 +1137,7 @@ fn descendant_fork_chain_is_caught() {
         "hop",
         &format!(
             "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"\n\
-             bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; exec >&- 2>&-; hop() {{ ( hop ) & exit 0; }}; hop' {token} \"$in\" &\n\
+             bash -c 'printf \"warn\\t%s\\thop\\n\" \"$1\"; exec >&- 2>&-; hop() {{ [ $1 -lt 100000 ] || exit 0; ( hop $(($1+1)) ) & exit 0; }}; hop 0' {token} \"$in\" &\n\
              n=0; until [ \"$(cat \"$in\")\" = ack ]; do n=$((n+1)); [ $n -le 3000 ] || exit 1; sleep 0.01; done\n\
              echo x > \"$work/0/a.md\"\n\
              printf 'done\\t%s\\t0/a.md\\n' \"$in\""

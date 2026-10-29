@@ -3435,8 +3435,11 @@ pub(crate) mod tests {
     /// `drain` gives up at its deadline while writers never stop (three of
     /// them, so the pipe is hardly ever empty and poll returns ready, EOF
     /// never comes): it returns false at `until`,
-    /// not when the writer ends. The writer is bounded to 10 s (`timeout`)
-    /// so a broken `drain` fails the test instead of hanging it; the group
+    /// not when the writer ends. The writer is bounded to 10 s (`timeout`),
+    /// so a broken `drain` ends the test by itself and fails its `took`
+    /// assert, rather than hanging it; the failing run is slow, not quick
+    /// (4 to 70 s were seen with the deadline check removed by hand, as the
+    /// reader then loops over the data until the writer stops). The group
     /// is killed at the end.
     #[test]
     fn drain_gives_up_at_the_deadline_while_data_keeps_arriving() {
