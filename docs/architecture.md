@@ -430,7 +430,7 @@ In the engine, in one place:
    folder, whole) into the freedesktop.org Trash with one
    `renameat2(RENAME_NOREPLACE)`: the home Trash
    (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
-   the volume's (`$topdir/.Trash/$uid` under a sticky `.Trash`, else
+   the volume's (`$topdir/.Trash/$uid` under a sticky `.Trash` that root or this user owns, else
    `$topdir/.Trash-$uid`); every Trash folder is opened without following
    a symlink and must be this user's with mode 0700 (refused otherwise,
    never `chmod`ed); a remote filesystem or no safe Trash keeps the group.
@@ -673,7 +673,8 @@ No daemon:
   `recovery-commit` (in the Trash), `recovery-restored`,
   `recovery-kept`, `recovery-uncertain` or `recovery-abort` (nothing
   moved), each with the proved place or `-`, the anchor and the reason;
-  then `undo`. An undo cut by a crash is resumed by the next one from
+  then `undo` (unless every group was kept: nothing moved, so no `undo`
+  record, and the CLI exits 1). An undo cut by a crash is resumed by the next one from
   these records: an intent without its ending is recovered by looking only
   at its target and our two info names (no Trash scan). Paths are
   byte-exact (`%XX` for bytes that are not printable ASCII, `%` and
