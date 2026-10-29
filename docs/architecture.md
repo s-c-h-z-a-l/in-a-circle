@@ -498,9 +498,17 @@ choice has run.
 **Life of a run**
 
 1. SIGALRM is reset to its default action and unblocked (an ignored
-   disposition survives `execve`), then `alarm(30)` is armed, before the
-   lock: a slow runtime dir is covered too. The default action kills the
-   process, so this is the last guard if everything else hangs.
+   disposition survives `execve`), then `alarm(5)` is armed, before the
+   lock: a slow runtime dir is covered too. The 5 s are the startup's
+   backstop: 2 s of startup plus 1 s of close is 3 s on the orderly path,
+   and 2 s remain for scheduling, so it fires only where no deadline
+   reaches. At the wheel's first commit the alarm becomes the user's stage,
+   30 s (below); when the close begins it is replaced by a 2 s one (the
+   close waits at most 1 s for the compositor), so a choice made in the
+   last second of a stage is not cut off by the stage's own alarm. The
+   default action kills the process, so this is the last guard if
+   everything else hangs; the kernel then releases the lock and the
+   connection.
 2. One instance: `flock` on `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, opened
    `O_NONBLOCK | O_NOFOLLOW` (a symlink or FIFO there is an error, exit 1).
    A held lock makes a second instance exit 0 at once, before touching

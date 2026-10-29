@@ -817,7 +817,7 @@ fn level1_from_the_early_list_within_budget() {
 // (`Root::cmd` removes the variable), so these see the exit code, the
 // timing and the log line. The notification itself is in `notify.rs`.
 
-/// The proposed `ui_startup_deadline` (parameters.g0p.json), and the pair
+/// The proposed `ui_startup_deadline` (`docs/resource-limits.md`), and the pair
 /// of delays the preflight measured around it.
 const STARTUP: Duration = Duration::from_millis(2000);
 const BELOW_STARTUP: Duration = Duration::from_millis(1900);
@@ -1026,6 +1026,147 @@ fn keyboard_lost_after_the_first_commit_closes_in_order() {
         c.layer_requests().contains(&7),
         "layer surface not destroyed"
     );
+}
+
+/// Stops `pid` and waits (by its state, not by time) until it is stopped,
+/// so what the compositor sends next is read by the client in one go.
+fn freeze(pid: u32) {
+    // SAFETY: a signal to our own child.
+    unsafe { libc::kill(pid as i32, libc::SIGSTOP) };
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // The state letter follows the last `)` (the name may hold one).
+        let state = stat.rsplit(')').next().unwrap().trim_start().as_bytes()[0];
+        if state == b'T' {
+            return;
+        }
+        assert!(Instant::now() < limit, "the wheel did not stop: {stat}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn thaw(pid: u32) {
+    // SAFETY: as above.
+    unsafe { libc::kill(pid as i32, libc::SIGCONT) };
+}
+
+/// The batch that shows the wheel (the keyboard arrives, the position is
+/// known) also takes the keyboard away: the first commit happens inside
+/// that dispatch, before the loop starts the user's stage, and the loss is
+/// decided by what is on the screen, not by which clock runs. Without it
+/// the wheel stays up with no Esc for the whole 30 s stage. The client is
+/// stopped while both capabilities are sent, so it reads them together.
+#[test]
+fn keyboard_lost_in_the_batch_that_showed_the_wheel_closes_in_order() {
+    let root = Root::new("startup-lostkbd-batch");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    // The drag brings the position; its early read is the client's answer,
+    // so the position is in the machine when the capabilities arrive.
+    let _silent = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    assert_eq!(c.attaches(), 0, "no keyboard: no wheel yet");
+    freeze(child.id());
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    thaw(child.id());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+    assert!(
+        c.layer_requests().contains(&7),
+        "layer surface not destroyed"
+    );
+}
+
+/// The keyboard goes away before the first commit: the wheel is never
+/// shown and the startup names the keyboard, at the startup deadline.
+#[test]
+fn keyboard_lost_before_the_first_commit_fails_naming_the_keyboard() {
+    let root = Root::new("startup-lostkbd-early");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    c.pointer_enters();
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// A keyboard that went away and came back is a new device: the client asks
+/// for it again, and Esc on the new object closes the wheel. The old
+/// object is inert, so without the new request Esc would never arrive.
+#[test]
+fn keyboard_back_after_a_loss_is_asked_for_again() {
+    let root = Root::new("startup-backkbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.keyboards_requested(2, Duration::from_secs(2));
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// Esc before the configure is a clean cancel too: exit 0, no
+/// `ConfigureTimeout` notice for a compositor that never configured.
+#[test]
+fn startup_esc_before_the_configure_cancels_cleanly() {
+    let root = Root::new("startup-esc-noconf");
+    let t0 = Instant::now();
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let (mut c, child) = start_with(&root, script);
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// A drop in a seat with no keyboard must not start the user's 30 s: the
+/// wheel is not on the screen, the startup clock is the only one, and the
+/// keyboard is named at the startup deadline. (The machine arms its stage
+/// on the drop whether or not the wheel is shown.)
+#[test]
+fn a_drop_before_the_wheel_is_shown_does_not_extend_the_startup() {
+    let root = Root::new("startup-drop-nokbd");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    let _silent = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    c.drop_it();
+    // The client took the drop (its own read): the stage was armed by now.
+    // The list arrives, so the machine goes on to the targets and waits
+    // for a choice nobody can see.
+    let own = c
+        .next_receive(0, Duration::from_secs(2))
+        .expect("the drop's own read");
+    source_writes(own, &list);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
 }
 
 /// The pointer enters before the configure: the position waits for the

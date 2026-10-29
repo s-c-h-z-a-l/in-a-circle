@@ -44,7 +44,7 @@ use wire::{Arg::*, Conn, DISPLAY, Event, Iface, op};
 
 use crate::measure::Meter;
 use crate::uri::MAX_BYTES;
-use crate::wheel::{Effect, Input, Machine, STAGE, URI_LIST};
+use crate::wheel::{Effect, Input, KEY_ESC, Machine, STAGE, URI_LIST};
 
 const FRAME: usize = (BOX * BOX * 4) as usize;
 /// Both wheel buffers, then the 1x1 background pixel.
@@ -72,6 +72,11 @@ pub const STARTUP: Duration = Duration::from_millis(2000);
 /// compositor that has stopped answering, and past it the connection is
 /// dropped anyway, which removes the surfaces.
 pub const TEARDOWN: Duration = Duration::from_millis(1000);
+/// The `alarm` armed for the close (`run`): `TEARDOWN` plus a second of
+/// scheduling slack, whole seconds only. The close's own wait ends within
+/// `TEARDOWN`, so this fires only where that wait cannot be reached; it
+/// replaces whatever the stage or the startup had armed.
+pub const TEARDOWN_BACKSTOP: Duration = Duration::from_secs(2);
 /// The `alarm` that backs the startup (and the lock before it) up, until
 /// the wheel's first commit; then `STAGE`'s takes over (`begin_user_stage`).
 /// The soft path ends a startup in at most `STARTUP` + `TEARDOWN` = 3 s;
@@ -160,7 +165,12 @@ pub fn run(m: &mut Machine, meter: &mut Option<Meter>) -> Result<Chosen, Startup
     let r = classify(r, s.shown.is_some());
     *meter = s.meter.take();
     // Release the grabs and the surfaces, then drop the connection; the
-    // caller frees the lock after this returns.
+    // caller frees the lock after this returns. The close may start in the
+    // last second of the user's stage (a choice, or the deadline), whose
+    // `alarm` would then kill the wait for the compositor and with it the
+    // choice: the close gets its own, so it always finishes first.
+    // SAFETY: alarm(2) has no memory effects; see main.
+    unsafe { libc::alarm(TEARDOWN_BACKSTOP.as_secs() as u32) };
     let ack = !matches!(&r, Err(e) if e.compositor_silent());
     s.teardown(m, ack);
     r
@@ -354,6 +364,9 @@ struct Surface {
     user_stage: bool,
     /// The seat's capabilities, once announced.
     caps: Option<u32>,
+    /// The version the seat was bound at (`wl_pointer.release` and
+    /// `wl_keyboard.release` need 3).
+    seat_version: u32,
     /// The teardown's `sync` callback, and its `done`.
     ack_cb: u32,
     acked: bool,
@@ -481,6 +494,7 @@ impl Surface {
             deadline: Instant::now() + STARTUP,
             user_stage: false,
             caps: None,
+            seat_version: 1,
             ack_cb: 0,
             acked: false,
             globals: Globals::default(),
@@ -537,6 +551,9 @@ impl Surface {
                 Err(e) => return Err(self.start_error(e)),
             }
             self.dispatch(m)?;
+            // What the events asked for (the seat's devices) goes out now,
+            // not after the wait: Esc must reach us while it lasts.
+            self.flush_start()?;
         }
         Ok(())
     }
@@ -577,6 +594,7 @@ impl Surface {
         self.id.compositor = self.need("wl_compositor", Iface::Compositor, 4, 4)?;
         self.id.shm = self.need("wl_shm", Iface::Shm, 1, 1)?;
         self.id.seat = self.need("wl_seat", Iface::Seat, 1, 7)?;
+        self.seat_version = self.globals.find("wl_seat", 1, 7).map_or(1, |g| g.1);
         self.id.subcompositor = self.need("wl_subcompositor", Iface::Subcompositor, 1, 1)?;
         self.id.viewporter = self.need("wp_viewporter", Iface::Viewporter, 1, 1)?;
         self.id.layer_shell = self.need("zwlr_layer_shell_v1", Iface::LayerShell, 1, 4)?;
@@ -646,7 +664,12 @@ impl Surface {
 
         // The configure is acked and the overlay mapped in `handle`; its
         // inputs wait in the queue for the event loop.
-        self.wait(m, |s| s.size.is_some())?;
+        // Esc ends the wait too: a user who cancelled before the compositor
+        // configured the overlay is not told it failed to open; the event
+        // loop feeds the Esc and closes in order.
+        self.wait(m, |s| {
+            s.size.is_some() || s.inputs.contains(&Input::Key(KEY_ESC))
+        })?;
         self.flush_start()?;
         Ok(())
     }
@@ -744,6 +767,22 @@ impl Surface {
             (Iface::Seat, op::wl_seat::CAPABILITIES) => {
                 let caps = e.u32()?;
                 let (id, c) = (&mut self.id, &mut self.conn);
+                // A capability that went away and came back is a new
+                // device: the old object is inert, so it is released (where
+                // the seat's version has the request) and asked for again.
+                // Its late events are ignored (`handle` checks the object).
+                if caps & SEAT_POINTER == 0 && id.pointer != 0 {
+                    if self.seat_version >= 3 {
+                        c.req(id.pointer, op::wl_pointer::RELEASE, &[]);
+                    }
+                    id.pointer = 0;
+                }
+                if caps & SEAT_KEYBOARD == 0 && id.keyboard != 0 {
+                    if self.seat_version >= 3 {
+                        c.req(id.keyboard, op::wl_keyboard::RELEASE, &[]);
+                    }
+                    id.keyboard = 0;
+                }
                 if caps & SEAT_POINTER != 0 && id.pointer == 0 {
                     id.pointer = c.new_id(Iface::Pointer);
                     c.req(id.seat, op::wl_seat::GET_POINTER, &[U(id.pointer)]);
@@ -758,13 +797,16 @@ impl Surface {
                 // capability may come after the first event, so the verdict
                 // waits for the startup deadline (`startup_timeout`). The
                 // pointer is judged there too: a drag brings its own
-                // position.
+                // position. What decides is what is on the screen, not
+                // which clock runs: this very event may have shown the
+                // wheel (`render`) and the next one take the keyboard away
+                // before the loop starts the user's stage.
                 if caps & SEAT_KEYBOARD != 0 {
-                    if !self.user_stage {
+                    if self.shown.is_none() {
                         self.render(m)?;
                     }
                     None
-                } else if self.user_stage {
+                } else if self.shown.is_some() {
                     // Lost once the wheel is up: Esc is gone, so close in
                     // order now instead of holding the grab until the stage
                     // ends. A close, not an error.
@@ -790,15 +832,15 @@ impl Surface {
             }
 
             // Pointer: without a drag (a drag owns the pointer).
-            (Iface::Pointer, op::wl_pointer::ENTER) => {
+            (Iface::Pointer, op::wl_pointer::ENTER) if e.obj == self.id.pointer => {
                 let (_serial, _surface) = (e.u32()?, e.u32()?);
                 Some(Input::PointerAt(e.fixed()?, e.fixed()?))
             }
-            (Iface::Pointer, op::wl_pointer::MOTION) => {
+            (Iface::Pointer, op::wl_pointer::MOTION) if e.obj == self.id.pointer => {
                 let _time = e.u32()?;
                 Some(Input::PointerAt(e.fixed()?, e.fixed()?))
             }
-            (Iface::Pointer, op::wl_pointer::BUTTON) => {
+            (Iface::Pointer, op::wl_pointer::BUTTON) if e.obj == self.id.pointer => {
                 let (_serial, _time, button, state) = (e.u32()?, e.u32()?, e.u32()?, e.u32()?);
                 (state == PRESSED).then_some(Input::Click(button))
             }
@@ -808,7 +850,7 @@ impl Surface {
                 drop(self.conn.take_fd());
                 None
             }
-            (Iface::Keyboard, op::wl_keyboard::KEY) => {
+            (Iface::Keyboard, op::wl_keyboard::KEY) if e.obj == self.id.keyboard => {
                 let (_serial, _time, key, state) = (e.u32()?, e.u32()?, e.u32()?, e.u32()?);
                 (state == PRESSED).then_some(Input::Key(key))
             }
@@ -967,9 +1009,16 @@ impl Surface {
             Effect::EndDrop => self.end_drop(),
             Effect::ReadDrop => self.start_read()?,
             Effect::Arm(d) => {
-                self.deadline = Instant::now() + d.saturating_sub(SOFT_MARGIN);
-                // SAFETY: alarm(2) has no memory effects; see main.
-                unsafe { libc::alarm(d.as_secs().max(1) as u32) };
+                // The user's wait runs only once the wheel is on the
+                // screen: the startup keeps its own, shorter clock (and
+                // its 5 s `alarm`) until the first commit, whatever a drag
+                // did to the machine meanwhile. `begin_user_stage` arms
+                // the stage then.
+                if self.user_stage {
+                    self.deadline = Instant::now() + d.saturating_sub(SOFT_MARGIN);
+                    // SAFETY: alarm(2) has no memory effects; see main.
+                    unsafe { libc::alarm(d.as_secs().max(1) as u32) };
+                }
             }
             Effect::Close => return Ok(Some(None)),
             Effect::Run(files, preset) => {
@@ -1642,6 +1691,10 @@ mod tests {
     #[test]
     fn startup_backstop_covers_the_soft_path_and_not_the_stage() {
         assert!(STARTUP + TEARDOWN < STARTUP_BACKSTOP);
+        // The close started at any instant of the user's stage ends before
+        // its own alarm, which is the only one then pending.
+        assert!(TEARDOWN < TEARDOWN_BACKSTOP);
+        assert_eq!(TEARDOWN_BACKSTOP.subsec_nanos(), 0, "alarm counts seconds");
         assert!(STARTUP_BACKSTOP < STAGE);
         assert_eq!(STARTUP_BACKSTOP.subsec_nanos(), 0, "alarm counts seconds");
     }

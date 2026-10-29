@@ -121,6 +121,8 @@ pub struct Compositor {
     seat: u32,
     pointer: u32,
     keyboard: u32,
+    /// `get_keyboard` requests so far (a capability that came back asks again).
+    keyboard_gets: usize,
     serial: u32,
     /// When the client destroyed its layer surface.
     destroyed_at: Option<Instant>,
@@ -178,6 +180,7 @@ impl Compositor {
             seat: 0,
             pointer: 0,
             keyboard: 0,
+            keyboard_gets: 0,
             serial: 100,
             destroyed_at: None,
             acked_at: None,
@@ -353,6 +356,7 @@ impl Compositor {
             }
             (obj, op::wl_seat::GET_KEYBOARD) if Some(&obj) == self.bound.get("wl_seat") => {
                 self.keyboard = r.word(0);
+                self.keyboard_gets += 1;
             }
             (obj, op::wl_data_device_manager::GET_DATA_DEVICE)
                 if Some(&obj) == self.bound.get("wl_data_device_manager") =>
@@ -413,6 +417,11 @@ impl Compositor {
             let kbd = caps & KEYBOARD == 0 || c.keyboard != 0;
             (ptr && kbd).then_some(())
         });
+    }
+
+    /// Handles requests until the client has asked for `n` keyboards in all.
+    pub fn keyboards_requested(&mut self, n: usize, limit: Duration) {
+        self.until(limit, |c, _| (c.keyboard_gets >= n).then_some(()));
     }
 
     /// The pointer enters the overlay at the output's center.

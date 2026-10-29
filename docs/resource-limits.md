@@ -140,5 +140,5 @@ the source; the reason column is why that number.
 | `user-dirs.dirs` | 64 KiB | A normal file is under 1 KiB. Followed if it is a symlink (the user's own configuration), but opened non-blocking and size-checked. |
 | Wheel start | 2000 ms wall (own clock, from the connection to the first commit) | 2 s is 400 times the normal start on the fake compositor (first commit 5.3 ms p50, see [wheel-startup-deadlines.md](benchmarks/wheel-startup-deadlines.md)); a policy bound, not a confidence bound. |
 | Wheel teardown | 1000 ms wall | Its own bound; the old observer's 5 s and the historic 30 s anomaly say nothing about a 1 s distribution. |
-| Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update | One shared frame for the whole open; the wait never holds the desktop. |
+| Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update; the wheel's start-failure notice: 500 ms to open plus 500 ms for its one call, under a 2 s `alarm` | One shared frame for the whole open; the wait never holds the desktop. |
 | User waits | 30 s per stage, 500 ms drop pipe, 500 ms soft margin | Unchanged from before; separate from the start clock. |
