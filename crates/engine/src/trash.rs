@@ -1415,6 +1415,11 @@ pub(crate) fn undo_group(g: &Group, log: &mut dyn Log, warn: &mut Vec<String>) -
     let (Some(parent), Some(leaf)) = (place.parent(), place.file_name()) else {
         return missing();
     };
+    // These opens and the `stat`s below have no deadline of their own: a
+    // hung network or FUSE mount at the group's place blocks them. Undo
+    // runs in the supervisor's Undo window or the CLI, never in the
+    // overlay, so it cannot lock the desktop; the history lock it holds
+    // makes a concurrent undo give up after its own bounded wait.
     let (Ok(src), Ok(cleaf)) = (
         open_dir_follow(parent.as_os_str().as_bytes()),
         c_name(leaf.as_bytes()),
