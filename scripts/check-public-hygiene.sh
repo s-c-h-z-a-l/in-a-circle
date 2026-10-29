@@ -22,6 +22,7 @@ ALLOW=(
   'bins/inacircle/tests/wheel.rs:starts_with("T1")'
   # This script and its self-test carry the patterns by definition.
   'scripts/check-public-hygiene.sh:'
+  'scripts/tests/test_public_hygiene.py:'
   # The contributor rules name the private notes folder on purpose.
   'CLAUDE.md:notes/'
 )

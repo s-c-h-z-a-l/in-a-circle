@@ -224,3 +224,51 @@ ops! {
         events { CONFIGURE = 0, CLOSED = 1 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Iface;
+
+    /// Every variant has a slot in `Iface::ALL`, in order, once. The match
+    /// has no wildcard: a new variant does not compile until it is placed
+    /// here, and the loop then fails until it is in `ALL` (which the
+    /// opcode and fd tests, and the server-id table, walk).
+    #[test]
+    fn all_lists_every_interface_once_in_order() {
+        fn slot(i: Iface) -> usize {
+            match i {
+                Iface::Display => 0,
+                Iface::Registry => 1,
+                Iface::Callback => 2,
+                Iface::Compositor => 3,
+                Iface::Surface => 4,
+                Iface::Region => 5,
+                Iface::Shm => 6,
+                Iface::ShmPool => 7,
+                Iface::Buffer => 8,
+                Iface::Seat => 9,
+                Iface::Pointer => 10,
+                Iface::Keyboard => 11,
+                Iface::Subcompositor => 12,
+                Iface::Subsurface => 13,
+                Iface::DataDeviceManager => 14,
+                Iface::DataDevice => 15,
+                Iface::DataOffer => 16,
+                Iface::Viewporter => 17,
+                Iface::Viewport => 18,
+                Iface::Presentation => 19,
+                Iface::PresentationFeedback => 20,
+                Iface::PrimaryManager => 21,
+                Iface::PrimaryDevice => 22,
+                Iface::PrimaryOffer => 23,
+                Iface::LayerShell => 24,
+                Iface::LayerSurface => 25,
+            }
+        }
+        for (n, i) in Iface::ALL.iter().enumerate() {
+            assert_eq!(slot(*i), n, "{i:?} is not at its slot in ALL");
+        }
+        // One past the last slot is not a variant: ALL is not longer.
+        assert_eq!(Iface::ALL.len(), slot(Iface::LayerSurface) + 1);
+    }
+}

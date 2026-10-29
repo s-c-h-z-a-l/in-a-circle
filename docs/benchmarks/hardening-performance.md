@@ -185,6 +185,9 @@ stripped release at each area's last commit, is in
 | ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; the cold condition has not been run |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
 | Choice-to-action entry with real clicks | OPEN: needs a real pointer session |
+| Separate counters for protocol events without input and for deadline wakes | OPEN: only premature empty polls (`idle_wakeups`) and inputs (`events`) are counted |
+| SHM first-touch / page-fault cost apart from render CPU | OPEN: not measured |
+| Presentation-time marker | OPEN: not implemented in the product; not shown to be available on every target compositor |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
 | Native ARM CI / own ARM VM | Native CI green on `c84f4ad` (run 40835264396). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
 | Engine/supervisor and Undo-window memory phases | OPEN: not yet measured (headless, to be run after the last code change) |

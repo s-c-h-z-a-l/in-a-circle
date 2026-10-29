@@ -25,6 +25,7 @@ jobs:
       - name: Public hygiene (no internal labels in tracked files)
         run: |
           python3 -m unittest scripts/tests/test_public_hygiene.py -v
+          python3 -m unittest scripts/tests/test_wheel_measure.py -v
           scripts/check-public-hygiene.sh
 
       - name: Qualify Landlock and isolated seccomp installation
