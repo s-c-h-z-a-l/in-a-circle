@@ -396,6 +396,11 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                     }
                     sink.push_str(&mut out, line);
                 }
+                // An empty item writes its marker and takes it back; at the
+                // very edge of the output budget the marker (1-2 bytes) can
+                // count against it first, so a document exactly that full
+                // may be refused one byte early. Accepted: refusing is the
+                // safe side, and the budget is a limit, not a promise.
                 if body.is_empty() {
                     out.truncate(out.trim_end().len());
                 }

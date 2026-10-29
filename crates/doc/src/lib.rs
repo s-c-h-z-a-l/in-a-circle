@@ -148,7 +148,12 @@ impl Limits {
 pub enum LimitError {
     /// Names the budget: `"input"`, `"nodes"`, `"owned text"` or `"output"`.
     Exceeded(&'static str),
-    /// The allocator refused a (small, budgeted) reservation.
+    /// The allocator refused a (small, budgeted) reservation. Best effort:
+    /// only the reservations that go through the budget can report it
+    /// (the text and output buffers). The smaller ones (headers, delimiter
+    /// and bracket stacks, unescaping, code-span copies) are bounded by the
+    /// same budgets but are plain allocations; the sandbox's `RLIMIT_DATA`
+    /// is the net under them.
     Allocation,
 }
 
