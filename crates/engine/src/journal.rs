@@ -5492,6 +5492,42 @@ mod tests {
         }
     }
 
+    /// A volume Trash keeps the strict rule on recovery: after a crash past
+    /// the move, an `info` folder at 0755 (accepted only in the home
+    /// Trash) is not trusted, and the group's place is reported uncertain,
+    /// never resumed into it.
+    #[test]
+    fn undo_recovery_keeps_the_strict_rule_in_a_volume_trash() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("t8-volume-rec-mode");
+        t.env(|| {
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = Some(t.0.clone()));
+            let (job, _, _) = single(&t, "a");
+            {
+                let _f = fault(|p| match p {
+                    Point::Home => Some(libc::EXDEV),
+                    Point::AfterMove => panic!("simulated crash at AfterMove"),
+                    _ => None,
+                });
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| undo(&job)));
+                assert!(r.is_err(), "no crash");
+            }
+            let info = t.0.join(format!(".Trash-{}", euid())).join("info");
+            fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+            let r = {
+                let _f = fault(|p| (p == Point::Home).then_some(libc::EXDEV));
+                undo(&job).unwrap()
+            };
+            crate::trash::tests::TOPDIR.with_borrow_mut(|p| *p = None);
+            assert!(matches!(one(&r), GroupOutcome::Uncertain { .. }), "{r:?}");
+            assert_eq!(
+                fs::metadata(&info).unwrap().permissions().mode() & 0o777,
+                0o755,
+                "never chmod-ed"
+            );
+        });
+    }
+
     /// The info swapped and the way back taken: the group stays in the
     /// Trash, and our info (renamed away by someone) is closed: it must not
     /// stay authentic anywhere; the foreign info is left alone.

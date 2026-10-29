@@ -101,8 +101,10 @@ own fixtures only (uid 1000, no capabilities). A check followed by an
   Trash by one no-replace `rename` on the same filesystem (home Trash, else
   the volume's), after a synced recovery intent. Every Trash folder is this
   user's directory, never a symlink; the home Trash's may not be writable by
-  group or others (KIO's 0755 passes), a volume Trash's must be 0700; ours
-  are made 0700. A changed, missing or extra
+  group or others and has no setuid or setgid bit (KIO's 0755 passes), a
+  volume Trash's must be 0700; ours are made 0700. A home Trash accepted at
+  0755 can be listed (not written) by others if `$HOME` itself is
+  traversable by them; the code does not check `$HOME`'s mode. A changed, missing or extra
   child, an unsafe Trash, a remote filesystem, `EXDEV` or any doubt keeps
   the whole group where it is. A group moved and then found different is
   moved back; if its way back is taken it stays in the Trash and the result

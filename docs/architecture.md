@@ -473,7 +473,9 @@ In the engine, in one place:
    of this user. A folder we make is 0700. An existing home Trash folder
    is accepted when neither group nor others can write it and it has no
    setuid/setgid bit (KDE's KIO makes it 0755); a volume Trash folder must
-   be exactly 0700. Recovery re-checks `info` under the same rule. A
+   be exactly 0700. A home Trash accepted at 0755 can be listed (not
+   written) by others if `$HOME` itself is traversable by them; the code
+   does not check `$HOME`'s mode. Recovery re-checks `info` under the same rule. A
    folder failing its rule is refused, never `chmod`ed, and the warning
    names it and why; a remote filesystem or no safe Trash keeps the group.
    Nothing is copied across filesystems (`EXDEV` keeps it). Before the
