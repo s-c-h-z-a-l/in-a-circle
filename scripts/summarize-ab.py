@@ -33,6 +33,8 @@ def trend(values):
 def main():
     run = Path(sys.argv[1])
     attempts = mw.read_attempts(run / "attempts.jsonl")
+    if not attempts:
+        sys.exit(f"summarize-ab: {run / 'attempts.jsonl'}: no attempts")
     keys = sorted({(a["series"], a["build"]) for a in attempts})
     out = {"groups": [], "regressions": [], "aa_spread": []}
     by = {}

@@ -27,6 +27,11 @@ import sys
 # CLAUDE.md Rules 2: timing acceptance needs >= 50 valid observations per
 # metric and condition. Below it the group is reported but not sufficient.
 MIN_VALID = 50
+# Failure records kept per group. The counts in `non_valid` stay exact; the
+# list is for diagnosis, and 50 lines (one acceptance sample's worth) name
+# the reasons of a failing series without a mostly-failing run of
+# thousands bloating the summary. `failures_dropped` says how many more.
+FAILURES_KEPT = 50
 UNITS = ("us", "bytes", "count")
 STATUSES = ("valid", "timeout", "invalid", "missing")
 NON_VALID = STATUSES[1:]
@@ -100,9 +105,16 @@ def parse_attempt(text, line_number):
 
 
 def read_attempts(path):
+    """Every attempt of a JSONL ledger. A line that is not UTF-8 is a
+    ValueError naming its line (a text-mode read would raise a
+    UnicodeDecodeError with no line number)."""
     attempts = []
-    with open(path, encoding="utf-8") as handle:
-        for number, line in enumerate(handle, start=1):
+    with open(path, "rb") as handle:
+        for number, raw in enumerate(handle, start=1):
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"line {number}: not UTF-8 ({error.reason})") from error
             if line.strip():
                 attempts.append(parse_attempt(line, number))
     return attempts
@@ -133,6 +145,10 @@ def summarize(attempts, min_valid=MIN_VALID, build=None):
         if len(units) != 1:
             raise ValueError(f"{metric}/{condition}/{series}: mixed units {sorted(units)}")
         values = [item["value"] for item in items if item["status"] == "valid"]
+        failures = [
+            {"line": i.get("line"), "status": i["status"], "note": i.get("note")}
+            for i in items if i["status"] != "valid"
+        ]
         enough = len(values) >= min_valid
         groups.append({
             "metric": metric,
@@ -143,10 +159,8 @@ def summarize(attempts, min_valid=MIN_VALID, build=None):
             "attempts": len(items),
             "valid": len(values),
             "non_valid": {s: sum(1 for i in items if i["status"] == s) for s in NON_VALID},
-            "failures": [
-                {"line": i.get("line"), "status": i["status"], "note": i.get("note")}
-                for i in items if i["status"] != "valid"
-            ],
+            "failures": failures[:FAILURES_KEPT],
+            "failures_dropped": max(0, len(failures) - FAILURES_KEPT),
             "min": min(values) if values else None,
             "p50": sorted(values)[(len(values) - 1) // 2] if values else None,  # lower-middle
             "p95": nearest_rank(values, 95),
@@ -167,8 +181,10 @@ def regression_percent(a_p95, b_p95):
 
 def _side(group):
     """The evidence behind one p95: its gate and the full attempt counts."""
-    return {key: group[key] for key in
-            ("p95", "sample_gate", "valid", "attempts", "non_valid", "failures")}
+    side = {key: group[key] for key in ("p95", "sample_gate", "valid", "attempts", "non_valid")}
+    # A summary written before `failures` existed has none: empty, not a crash.
+    side["failures"] = group.get("failures", [])
+    return side
 
 
 def compare(a_summary, b_summary):
@@ -348,8 +364,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "summarize":
-            write_json(args.output, summarize(read_attempts(args.attempts), args.min_valid,
-                                              args.build))
+            attempts = read_attempts(args.attempts)
+            if not attempts:
+                # An empty ledger is no evidence, never a summary that
+                # looks like one.
+                raise ValueError(f"{args.attempts}: no attempts")
+            write_json(args.output, summarize(attempts, args.min_valid, args.build))
         elif args.command == "gate-memory":
             summary = json.loads(Path(args.summary).read_text(encoding="utf-8"))
             gates = memory_gate(summary, min_samples=args.min_samples)

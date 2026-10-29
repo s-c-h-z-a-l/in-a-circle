@@ -224,6 +224,51 @@ class WheelMeasureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.m.parse_attempt(json.dumps({**attempt(1), "note": 5}), 1)
 
+    def test_compare_with_a_zero_baseline_p95_is_undefined(self):
+        a = self.m.summarize([attempt(0) for _ in range(50)])
+        b = self.m.summarize([attempt(5) for _ in range(50)])
+        row = self.m.compare(a, b)[0]
+        self.assertTrue(row["a"]["sample_gate"] and row["b"]["sample_gate"])
+        self.assertFalse(row["comparable"])
+        self.assertIsNone(row["regression_percent"])
+        self.assertEqual(row["reason"], "regression undefined")
+
+    def test_compare_accepts_a_summary_without_failures(self):
+        a = self.m.summarize([attempt(v) for v in range(1, 51)])
+        for g in a["groups"]:
+            del g["failures"]
+        b = self.m.summarize([attempt(v * 2) for v in range(1, 51)])
+        row = self.m.compare(a, b)[0]
+        self.assertEqual(row["a"]["failures"], [])
+        self.assertTrue(row["comparable"])
+
+    def test_failures_are_bounded_and_the_rest_counted(self):
+        n = self.m.FAILURES_KEPT + 7
+        rows = [attempt(None, "timeout") for _ in range(n)] + [attempt(1)]
+        g = group(self.m.summarize(rows))
+        self.assertEqual(len(g["failures"]), self.m.FAILURES_KEPT)
+        self.assertEqual(g["failures_dropped"], 7)
+        self.assertEqual(g["non_valid"]["timeout"], n)  # the counts stay exact
+
+    def test_an_empty_ledger_is_an_error_not_an_empty_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp) / "a.jsonl", Path(tmp) / "o.json"
+            src.write_text("\n\n")
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), "summarize", "--attempts", str(src),
+                 "--output", str(out)], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("no attempts", done.stderr)
+            self.assertFalse(out.exists())
+
+    def test_a_non_utf8_line_names_its_line_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "a.jsonl"
+            src.write_bytes((json.dumps(attempt(1)) + "\n").encode()
+                            + b"\xff\xfe\n" + (json.dumps(attempt(2)) + "\n").encode())
+            with self.assertRaisesRegex(ValueError, r"line 2: not UTF-8"):
+                self.m.read_attempts(src)
+
 
 MARKER = (
     "inacircle: measure wheel pid=7 start_abs_cpu_us=1 start_abs_wall_us=2 "
