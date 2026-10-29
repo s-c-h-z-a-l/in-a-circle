@@ -1810,6 +1810,31 @@ mod tests {
         assert!(s.shm.as_mut().unwrap().canvas(1) == &held[1][..]);
     }
 
+    /// Pixels covered by `rects` (`[x, y, w, h]`), overlaps counted once.
+    fn union_area(rects: &[[i32; 4]]) -> i64 {
+        let b = BOX as i32;
+        let mut n = 0;
+        for y in 0..b {
+            for x in 0..b {
+                if rects
+                    .iter()
+                    .any(|r| (r[0]..r[0] + r[2]).contains(&x) && (r[1]..r[1] + r[3]).contains(&y))
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn union_area_counts_overlaps_once() {
+        assert_eq!(union_area(&[[0, 0, 10, 10]]), 100);
+        assert_eq!(union_area(&[[0, 0, 10, 10], [5, 5, 10, 10]]), 175);
+        assert_eq!(union_area(&[[0, 0, 10, 10], [0, 0, 10, 10]]), 100);
+        assert_eq!(union_area(&[]), 0);
+    }
+
     /// The damage sent with each commit covers every pixel that differs
     /// between the frame on screen before and after it (the attached
     /// buffer's pixels at the commit), with buffers alternating, and stays
@@ -1831,7 +1856,9 @@ mod tests {
         });
         // `tight`: the damage must also stay near the change. Not asked
         // of the frames whose buffer was prepainted in full (first hovers
-        // after the swap): their damage is the whole box by design.
+        // after the swap): their damage is the whole box by design, so
+        // there is no over-damage to see there (a bound of "the box" is
+        // all the full-box damage could break).
         let mut on_screen: Vec<u8> = Vec::new();
         let step = |s: &mut Surface, m: &Machine, what: &str, tight: bool, screen: &mut Vec<u8>| {
             s.render(m).unwrap();
@@ -1859,10 +1886,7 @@ mod tests {
                 );
             }
             if tight && diff.2 >= diff.0 {
-                let area: i64 = rects
-                    .iter()
-                    .map(|r| i64::from(r[2]) * i64::from(r[3]))
-                    .sum();
+                let area = union_area(rects);
                 let bbox = ((diff.2 - diff.0 + 1) * (diff.3 - diff.1 + 1)) as i64;
                 assert!(
                     area <= 4 * bbox + 64 * 64,
