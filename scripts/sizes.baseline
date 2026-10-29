@@ -1,2 +1,13 @@
-inacircle 900352 671864
-inacircle-text 669920 374594
+# x86_64 baseline, refreshed at the end of the hardening branch
+# (plan-hardening, after Task 16a). Measured locally with
+# scripts/check-sizes.sh on the reference desktop: source c84f4ad (the
+# later commits of Task 15a change only docs and scripts), rustc 1.98.1 from rust-toolchain.toml, release profile
+# (fat LTO, codegen-units=1, panic=abort, strip); the same sizes came out
+# of a build in the repository and of one from a `git archive` of c84f4ad
+# in another directory. The per-area account of the growth over
+# the previous baseline (inacircle 900352 671864, Plan 7) is in
+# docs/benchmarks/binary-size.md. The native CI runner builds the same
+# source to inacircle 1082248 / 822040 and inacircle-text 695048 / 397298
+# (CI run 40835264396), a few bytes apart (cause not analysed).
+inacircle 1082216 822056
+inacircle-text 695000 397314

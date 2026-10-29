@@ -1,7 +1,11 @@
-# aarch64 baseline, first value: not measured on this machine but on the
-# native GitHub arm64 runner (ubuntu-26.04-arm), CI run 40453320707, job
-# 122020867683 ("Binary sizes"), commit efccecd (plan-hardening, Task 4),
-# toolchain from rust-toolchain.toml (1.98.1). It starts after Task 4's
-# growth; x86_64's scripts/sizes.baseline is unchanged.
-inacircle 856800 576052
-inacircle-text 660192 324232
+# aarch64 baseline, refreshed at the end of the hardening branch. Not
+# measured on this machine but on the native GitHub arm64 runner
+# (ubuntu-26.04-arm), CI run 40835264396, job "Native (ubuntu-26.04-arm)"
+# step "Binary sizes", commit c84f4ad (plan-hardening, after Task 16a),
+# rustc 1.98.1 from rust-toolchain.toml, release profile of Cargo.toml.
+# It replaces the first value (CI run 40453320707, commit efccecd, after
+# Task 4: inacircle 856800 576052, inacircle-text 660192 324232). The
+# x86_64 account is in docs/benchmarks/binary-size.md; no per-area
+# aarch64 account exists.
+inacircle 987880 688292
+inacircle-text 660192 345896
