@@ -819,9 +819,14 @@ inacircle cancel <job-id>
   `$XDG_RUNTIME_DIR`, or unwritten after an error): a job whose history
   has no closing `job` line is undone only once the owner its `job-start`
   names is provably gone (no process at the pid, or another start time or
-  boot). An owner that cannot be checked (a record from before owners,
-  another pid namespace) refuses the undo: unknown means nothing moves.
-  A job that died midway is undoable as soon as its process is gone. It prints one line per output group: `moved <Trash path>`,
+  boot). An owner that cannot be checked refuses the undo: unknown means
+  nothing moves. That is a job recorded without an owner (a record from
+  before owners, or `/proc` could not name the process when the job
+  started) and a job whose owner is in another pid namespace. Such a job
+  stays refused after a crash too: only a job with an owner recorded
+  here is undoable once its process is gone, and a crash recorded before
+  owners existed is not.
+  Undo prints one line per output group: `moved <Trash path>`,
   `kept <path|-> <reason>`, `restored <path|-> <reason>`,
   `recovery-kept <path|-> <reason> <errno|->` or
   `uncertain <op> <reason> <last path seen|->` (a hint, not a proved

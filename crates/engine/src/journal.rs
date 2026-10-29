@@ -1380,10 +1380,10 @@ impl Drop for OpenJob {
 /// prove it dead). A dead owner's job is undoable, as after a crash.
 fn may_run(job: &JobId, owner: Option<&Owner>) -> Option<io::Error> {
     let Some(o) = owner else {
-        return Some(io::Error::other(OWNER_UNKNOWN));
+        return Some(io::Error::other(NO_OWNER));
     };
     if pid_ns() != Some(o.ns) {
-        return Some(io::Error::other(OWNER_UNKNOWN));
+        return Some(io::Error::other(OTHER_NAMESPACE));
     }
     let alive = if Owner::me().as_ref() == Some(o) {
         OPEN_JOBS
@@ -1403,8 +1403,13 @@ fn running_refusal() -> io::Error {
     )
 }
 
-/// Undo's refusal of a job whose running state it cannot check.
-const OWNER_UNKNOWN: &str = "whether this job is still running cannot be checked (its record names no process of this system); nothing undone";
+/// Undo's refusal of a job that did not end and records no owner (a
+/// record from before owners, or `/proc` could not name the process when
+/// the job started).
+const NO_OWNER: &str = "this job did not end and its record names no owner process, so whether it is still running cannot be checked; nothing undone";
+/// Undo's refusal of a job that did not end and whose owner runs in
+/// another pid namespace than this process.
+const OTHER_NAMESPACE: &str = "this job did not end and its owner process is in another pid namespace, so whether it is still running cannot be checked from here; nothing undone";
 
 /// Whether the process now at the pid is the one that was recorded. An
 /// unreadable current identity (`None`) cannot prove a difference: same.
@@ -2794,8 +2799,12 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     // The registry above may be missing or unwritten (no runtime folder,
     // a failed write); the history decides too. A job that has not ended
     // is undone only once its owner is provably gone.
+    // An already undone or damaged record is refused for that reason by
+    // `refusal` below, not for an owner that cannot be checked.
     if !r.old
         && !r.ended
+        && !r.undone
+        && r.broken.is_none()
         && let Some(e) = may_run(job, r.owner.as_ref())
     {
         return Err(e);
@@ -6135,10 +6144,10 @@ mod tests {
                 ns: me.ns ^ 1,
                 ..me
             };
-            for owner in [None, Some(elsewhere)] {
+            for (owner, why) in [(None, NO_OWNER), (Some(elsewhere), OTHER_NAMESPACE)] {
                 let (job, f) = unended_job(&t, owner.clone());
                 let e = undo(&job).unwrap_err();
-                assert_eq!(e.to_string(), OWNER_UNKNOWN, "{owner:?}");
+                assert_eq!(e.to_string(), why, "{owner:?}");
                 assert!(f[0].exists());
             }
             let job = new_job_id();
@@ -6146,6 +6155,26 @@ mod tests {
             let f = publish(&t, &mut rec, "z", &[("x.md", "z")]);
             assert!(rec.finish(true).undoable);
             assert!(all_moved(&undo(&job).unwrap(), &f));
+        });
+    }
+
+    /// Regression: an unended job without an owner whose record is also
+    /// damaged was refused as "cannot be checked"; the damage is the
+    /// precise reason, and what the message says.
+    #[test]
+    fn a_damaged_ownerless_job_is_refused_as_damaged() {
+        use std::io::Write;
+        let t = Tmp::new("owner-damaged");
+        without_runtime_dir(&t, || {
+            let (job, f) = unended_job(&t, None);
+            let mut h = fs::OpenOptions::new()
+                .append(true)
+                .open(history_path())
+                .unwrap();
+            writeln!(h, "job-start\tjob={}\tpid=x", job.0).unwrap();
+            let e = undo(&job).unwrap_err().to_string();
+            assert!(e.contains("damaged"), "{e}");
+            assert!(f[0].exists());
         });
     }
 
