@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Pre-commit hook: formatting and "every target compiles".
+#
+# Checks (read-only, never modifies files):
+#   1. cargo fmt --all --check
+#   2. cargo check --workspace --all-targets --quiet
+#
+# Why: a commit whose test target did not compile was once pushed.
+# `--all-targets` builds tests, benches and examples too, which is exactly
+# what a plain `cargo check` misses. Incrementally it takes a few seconds.
+#
+# Why not the full test suite: its cost per commit would slow the many
+# small commits down by minutes. The suite runs at the end of each task and
+# in CI.
+#
+# Enable (once per clone; shared by all its worktrees):
+#   git config core.hooksPath scripts/git-hooks
+#
+# Bypassing it with --no-verify defeats the purpose; do not.
+set -eu
+
+# Doc- and notes-only commits stay instant: nothing to compile or format
+# unless Rust or Cargo inputs are part of the commit.
+if ! git diff --cached --name-only | grep -qE '(\.rs$|(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|^\.cargo/)'; then
+  exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! cargo fmt --all --check >/dev/null 2>&1; then
+  echo "pre-commit: FAILED step 'cargo fmt --all --check'; fix: run 'cargo fmt --all' and re-stage." >&2
+  cargo fmt --all --check 2>&1 | head -20 >&2 || true
+  exit 1
+fi
+
+# Bound memory for cargo when a user systemd manager is available (a
+# runaway build must not take the machine down); plain cargo otherwise,
+# e.g. in CI or containers.
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1 \
+  || { command -v systemctl >/dev/null 2>&1 && [ "$(systemctl --user is-system-running 2>/dev/null)" = degraded ]; }; then
+  run=(systemd-run --user --scope -q --slice=inacircle-tests.slice -p MemoryMax=60G -p MemorySwapMax=0 --)
+else
+  echo "pre-commit: no systemd user manager; running cargo without a memory scope." >&2
+  run=()
+fi
+
+if ! ${run[@]+"${run[@]}"} cargo check --workspace --all-targets --quiet; then
+  echo "pre-commit: FAILED step 'cargo check --workspace --all-targets'; fix the compile errors above (tests and benches included) and re-stage." >&2
+  exit 1
+fi
