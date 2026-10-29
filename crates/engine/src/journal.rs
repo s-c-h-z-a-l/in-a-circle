@@ -1228,9 +1228,14 @@ fn job_alive(pid: u32, recorded: Option<&ProcId>) -> bool {
 }
 
 fn job_alive_with(pid: u32, recorded: Option<&ProcId>, now: Option<&ProcId>) -> bool {
+    // Pid 0 is no process: `kill(0, 0)` would test our own process group
+    // and succeed, and a garbage entry would look alive forever.
     let Ok(p) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    if p == 0 {
+        return false;
+    }
     // SAFETY: signal 0 only checks existence; no preconditions.
     let r = unsafe { libc::kill(p, 0) };
     if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
@@ -5792,6 +5797,13 @@ mod tests {
             assert!(list_running().unwrap().is_empty());
             assert!(!p.exists());
         });
+    }
+
+    /// Pid 0 (a garbage entry) is dead, not "alive" through `kill(0, 0)`.
+    #[test]
+    fn pid_zero_is_not_a_live_job() {
+        assert!(!job_alive_with(0, None, None));
+        assert!(job_alive_with(std::process::id(), None, None));
     }
 
     #[test]
