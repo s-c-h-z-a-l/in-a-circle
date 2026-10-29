@@ -315,6 +315,21 @@ class AcceptanceHarnessTests(unittest.TestCase):
             required=("main_to_commit_cpu_us", "pss_bytes", "hover_us_p95"))
         self.assertEqual({r["status"] for r in rows}, {"missing"})
 
+    def test_zero_timing_is_invalid_not_a_pass(self):
+        """A 0 us timing is a clock or marker failure, not a fast run."""
+        rows = self.m.marker_attempts(
+            MARKER.replace("main_to_commit_cpu_us=600", "main_to_commit_cpu_us=0")
+            .replace("wheel_cpu_us=800", "wheel_cpu_us=0"),
+            condition="c", series="A", build="B",
+            required=("main_to_commit_cpu_us", "wheel_cpu_us", "main_to_commit_wall_us",
+                      "idle_wakeups"))
+        status = {r["metric"]: r["status"] for r in rows}
+        self.assertEqual(status["main_to_commit_cpu_us"], "invalid")
+        self.assertEqual(status["wheel_cpu_us"], "invalid")
+        self.assertEqual(status["main_to_commit_wall_us"], "valid")
+        # A count of 0 (no idle wakeups) is a real value.
+        self.assertEqual(status["idle_wakeups"], "valid")
+
     def test_zero_pss_is_invalid_not_a_pass(self):
         rows = self.m.marker_attempts(
             MARKER.replace("pss_kb=2800", "pss_kb=0"), condition="c", series="A",
@@ -434,12 +449,158 @@ class AbRunnerTests(unittest.TestCase):
         self.assertIsNotNone(row["failure"])
         self.assertEqual({r["status"] for r in ab.to_ledger(row, "startup")}, {"invalid"})
 
+    def test_pgrep_pattern_is_escaped_and_anchored(self):
+        import types
+        seen = []
+        ab = self.ab
+        saved = ab.subprocess.run
+        ab.subprocess.run = lambda cmd, **kw: (seen.append(cmd) or types.SimpleNamespace(
+            returncode=1, stdout="", stderr=""))
+        try:
+            ab.pids("/tmp/a.b+c (x)/inacircle")
+        finally:
+            ab.subprocess.run = saved
+        pattern = seen[0][-1]
+        self.assertTrue(pattern.startswith("^"), pattern)
+        self.assertIn(r"a\.b\+c", pattern)
+        self.assertIn(r"\(x\)", pattern)
+
+    def test_pids_keeps_only_our_own_executable(self):
+        import types
+        ab = self.ab
+        saved = (ab.subprocess.run, ab.os.readlink)
+        ab.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout="11\n12\n", stderr="")
+        ab.os.readlink = lambda p: "/opt/a/inacircle" if p.endswith("/11/exe") else "/usr/bin/other"
+        try:
+            self.assertEqual(ab.pids("/opt/a/inacircle"), [11])
+        finally:
+            ab.subprocess.run, ab.os.readlink = saved
+
+    def test_run_stops_after_three_failures_and_sends_no_input(self):
+        import types
+        ab = self.ab
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        saved = (ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S,
+                 ab.shutil.which)
+        ab.subprocess.run, ab.time.sleep = fake_run, lambda s: None
+        ab.pids = lambda exe: []  # the wheel never appears: every attempt fails
+        ab.residency = lambda exe: (0, 0)
+        ab.shutil.which = lambda name: None
+        ab.MAP_DEADLINE_S = 0.0
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                bindir = Path(d) / "a"
+                bindir.mkdir()
+                (bindir / "inacircle").write_text("")
+                out = Path(d) / "out"
+                argv = sys.argv
+                sys.argv = ["measure-ab.py", "--out", str(out), "--a-bin", str(bindir),
+                            "--plan", "aa", "--valid", "50"]
+                try:
+                    with self.assertRaises(SystemExit) as stop:
+                        ab.main()
+                finally:
+                    sys.argv = argv
+                self.assertEqual(stop.exception.code, 1)
+                spawns = [c for c in calls if c[:3] == ["niri", "msg", "action"]]
+                self.assertEqual(len(spawns), ab.MAX_CONSECUTIVE_FAILURES, spawns)
+                # The raw data of the failed attempts stays.
+                lines = (out / "attempts.jsonl").read_text().splitlines()
+                self.assertEqual(len(lines), ab.MAX_CONSECUTIVE_FAILURES * len(ab.METRICS))
+                self.assertTrue((out / "runs.json").exists())
+        finally:
+            (ab.subprocess.run, ab.pids, ab.time.sleep, ab.residency, ab.MAP_DEADLINE_S,
+             ab.shutil.which) = saved
+        self.assertFalse(any(c[0] == "wtype" for c in calls), calls)
+
+    def test_installed_build_directory_is_refused(self):
+        ab = self.ab
+        saved = ab.shutil.which
+        with tempfile.TemporaryDirectory() as d:
+            ab.shutil.which = lambda name: str(Path(d) / "inacircle")
+            try:
+                with self.assertRaises(SystemExit):
+                    ab.refuse_installed([d])
+                ab.refuse_installed(["/nonexistent-elsewhere"])  # fine
+            finally:
+                ab.shutil.which = saved
+
     def test_valid_count_requires_every_gated_metric(self):
         ok = self.row(MARKER)
         no_pss = self.row(MARKER.replace("pss_kb=", "pss_kb=0 x="))
         self.assertTrue(self.ab.all_metrics_valid(ok))
         self.assertFalse(self.ab.all_metrics_valid(no_pss))
         self.assertFalse(self.ab.all_metrics_valid(self.row(None)))
+
+
+class SummarizeAbTests(unittest.TestCase):
+    SUMMARY = SCRIPT.with_name("summarize-ab.py")
+
+    def run_dir(self, rows, roles=None):
+        d = tempfile.mkdtemp(prefix="sumab-")
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        Path(d, "attempts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        if roles:
+            Path(d, "environment.json").write_text(json.dumps({"roles": roles}))
+        return d
+
+    def rows(self, series, build, values, metric="main_to_commit_cpu_us"):
+        return [{"metric": metric, "condition": "c", "series": series, "build": build,
+                 "unit": "us", "status": "valid", "value": v} for v in values]
+
+    def summarize(self, d, *extra):
+        return subprocess.run([sys.executable, str(self.SUMMARY), d, *extra],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_direction_comes_from_the_roles_not_the_label_order(self):
+        # Baseline "Z" at 100, candidate "A" at 200: +100% for the candidate,
+        # although "A" sorts before "Z".
+        rows = self.rows("ab1", "Z", [100] * 50) + self.rows("ab1", "A", [200] * 50)
+        d = self.run_dir(rows, roles={"a": "Z", "b": "A"})
+        out = Path(d, "o.json")
+        r = self.summarize(d, "--json", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        reg = [x for x in json.loads(out.read_text())["regressions"]
+               if x["metric"] == "main_to_commit_cpu_us"][0]
+        self.assertEqual((reg["a"], reg["b"]), ("Z", "A"))
+        self.assertAlmostEqual(reg["regression_percent"], 100.0)
+
+    def test_unnamed_roles_are_an_error_not_a_guess(self):
+        rows = self.rows("ab1", "Z", [100] * 50) + self.rows("ab1", "A", [200] * 50)
+        r = self.summarize(self.run_dir(rows))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--a-label", r.stderr)
+        ok = self.summarize(self.run_dir(rows), "--a-label", "Z", "--b-label", "A")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_aa_spread_needs_the_sample_gate_and_zero_is_undefined(self):
+        few = self.rows("aa1", "A", [100] * 49) + self.rows("aa2", "A", [110] * 49)
+        out = Path(self.run_dir(few), "o.json")
+        r = self.summarize(str(out.parent), "--json", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        spread = [x for x in json.loads(out.read_text())["aa_spread"]
+                  if x["metric"] == "main_to_commit_cpu_us"][0]
+        self.assertIsNone(spread["percent"])
+        self.assertFalse(spread["comparable"])
+        self.assertIn("n/a", r.stdout)
+        # With the gate met a spread is a number; a zero baseline is
+        # undefined, and still listed rather than silently skipped.
+        full = self.rows("aa1", "A", [100] * 50) + self.rows("aa2", "A", [110] * 50)
+        out = Path(self.run_dir(full), "o.json")
+        self.summarize(str(out.parent), "--json", str(out))
+        spread = json.loads(out.read_text())["aa_spread"][0]
+        self.assertAlmostEqual(spread["percent"], 10.0)
+        zero = self.rows("aa1", "A", [0] * 50) + self.rows("aa2", "A", [110] * 50)
+        out = Path(self.run_dir(zero), "o.json")
+        self.summarize(str(out.parent), "--json", str(out))
+        spread = json.loads(out.read_text())["aa_spread"][0]
+        self.assertIsNone(spread["percent"])
 
 
 if __name__ == "__main__":

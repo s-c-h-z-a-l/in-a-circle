@@ -33,6 +33,7 @@ import mmap
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -78,9 +79,20 @@ def residency(path):
 
 
 def pids(exe):
-    r = subprocess.run(["pgrep", "-f", f"^{exe}( |$)"], capture_output=True, text=True,
-                       timeout=CMD_TIMEOUT_S)
-    return [int(p) for p in r.stdout.split()]
+    """Processes running exactly `exe`: the command line starts with the
+    escaped path (a path is not a regex), and the process's own executable
+    link says the same, so nothing else of the user's is ever matched, let
+    alone killed."""
+    r = subprocess.run(["pgrep", "-f", f"^{re.escape(exe)}( |$)"], capture_output=True,
+                       text=True, timeout=CMD_TIMEOUT_S)
+    found = []
+    for p in r.stdout.split():
+        try:
+            if os.readlink(f"/proc/{p}/exe") == exe:
+                found.append(int(p))
+        except OSError:
+            pass  # gone already
+    return found
 
 
 class Build:
@@ -146,7 +158,9 @@ def attempt(build, series, index):
         # Otherwise the attempt is invalid and the launched process is killed
         # below (the exit wait finds it alive and SIGKILLs it).
         row["mapped"] = row["engine_seen"] and wheel_mapped(build.exe)
-        if row["mapped"]:
+        # The wheel may have closed between the proof and the keystroke: the
+        # Escape goes only if it is still ours and alive right now.
+        if row["mapped"] and pids(build.exe):
             subprocess.run(["wtype", "-k", "Escape", "-s", "50"], timeout=CMD_TIMEOUT_S)
         elif failure is None:
             failure = "wheel not verified alive and mapped; no input sent"
@@ -213,6 +227,7 @@ def environment(args, builds):
         "builds": {b.label: {"exe": b.exe, "sha256": sh(f"sha256sum {b.exe} | cut -d' ' -f1")}
                    for b in builds},
         "plan": args.plan, "valid_target": args.valid,
+        "roles": {"a": args.label_a, "b": args.label_b if args.b_bin else None},
         "launcher": "niri msg action spawn -- sh -c <INACIRCLE_MEASURE=1 ... exec exe 2>>log>",
         "condition": CONDITION,
         "waits_s": {"settle": SETTLE_S, "exit_deadline": EXIT_DEADLINE_S, "pause": PAUSE_S,
@@ -221,6 +236,31 @@ def environment(args, builds):
 
 
 CONDITION = "startup-plain-warm-niri-spawn"
+
+# Consecutive attempts without a full set of valid metrics after which the
+# run stops. Each attempt holds a full-screen, keyboard-grabbing overlay for
+# up to MAP_DEADLINE_S + EXIT_DEADLINE_S on the user's own session, so a
+# setup that does not work (the layer listing differs, the binary fails to
+# start) must not go on for the ~600 attempts of a full plan: three in a
+# row is a pattern, not noise. The raw data already written stays.
+MAX_CONSECUTIVE_FAILURES = 3
+
+
+class Abort(Exception):
+    pass
+
+
+def refuse_installed(bindirs):
+    """A measured build directory must not be the one the user's own
+    `inacircle` runs from: the run launches and, if one hangs, kills the
+    binary there."""
+    installed = shutil.which("inacircle")
+    if not installed:
+        return
+    home = Path(installed).resolve().parent
+    for d in bindirs:
+        if d and Path(d).resolve() == home:
+            sys.exit(f"{d} holds the installed inacircle ({installed}); measure copies")
 
 
 def main():
@@ -239,6 +279,7 @@ def main():
         sys.exit("--plan ab needs --b-bin")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    refuse_installed([args.a_bin, args.b_bin])
     a = Build(args.label_a, args.a_bin, out)
     b = Build(args.label_b, args.b_bin, out) if args.b_bin else None
     builds = [x for x in (a, b) if x]
@@ -247,6 +288,7 @@ def main():
             sys.exit(f"{x.exe} is already running; refusing to start")
     (out / "environment.json").write_text(json.dumps(environment(args, builds), indent=1))
     rows, counters = [], {}
+    streak = [0]
     ledger = open(out / "attempts.jsonl", "a")
 
     def run(build, series, pair=None):
@@ -258,9 +300,13 @@ def main():
             ledger.write(json.dumps(rec) + "\n")
         ledger.flush()
         ok = row["failure"] is None and row["marker"] is not None
+        streak[0] = 0 if all_metrics_valid(row) else streak[0] + 1
         print(f"{series} {build.label} #{row['attempt']} {'ok' if ok else 'FAIL ' + str(row['failure'])} "
               f"{(row['marker'] or '')[:0]}", flush=True)
         time.sleep(PAUSE_S)
+        if streak[0] >= MAX_CONSECUTIVE_FAILURES:
+            raise Abort(f"{streak[0]} attempts in a row without valid metrics; stopping "
+                        f"(last: {row['failure'] or 'incomplete marker'})")
         return ok
 
     def valid_count(series, label):
@@ -268,6 +314,7 @@ def main():
                    and all_metrics_valid(r))
 
     seen = {}
+    aborted = 0
     try:
         for step in steps:
             seen[step] = seen.get(step, 0) + 1
@@ -291,12 +338,17 @@ def main():
             else:
                 sys.exit(f"unknown plan step {step!r}")
             time.sleep(SERIES_PAUSE_S)
+    except Abort as why:
+        print("measure-ab: aborted:", why, file=sys.stderr)
+        aborted = 1
     finally:
         for x in builds:
             for pid in pids(x.exe):
                 os.kill(pid, signal.SIGKILL)
         ledger.close()
         (out / "runs.json").write_text(json.dumps(rows, indent=1))
+    if aborted:
+        sys.exit(1)
     print("done:", out)
 
 

@@ -239,7 +239,8 @@ def marker_attempts(line, *, condition, series, build, required, note=None, fail
 
     A required metric absent from the line, or reported as -1 (never taken),
     is `missing`; a line of None (no marker at all) makes every one missing.
-    `pss_bytes` comes from `pss_kb` (KiB -> B); 0 is `invalid`, not a value.
+    `pss_bytes` comes from `pss_kb` (KiB -> B); 0 is `invalid`, not a value,
+    and so is a 0 in any microsecond timing.
     A functional `failure` (crash, hang, non-zero exit) makes every row
     `invalid` with that reason: the run is kept, never silently skipped.
     """
@@ -263,6 +264,10 @@ def marker_attempts(line, *, condition, series, build, required, note=None, fail
             status, why = "missing", "marker reports -1 (never taken)"
         elif value == 0 and metric == "pss_bytes":
             status, why = "invalid", "PSS 0 is not a measurement"
+        elif value == 0 and unit == "us":
+            # A compositor round trip, a commit or a repaint cannot take 0 us:
+            # a zero is a clock or marker failure, and must not pass a p95 gate.
+            status, why = "invalid", "a 0 us timing is not a measurement"
         else:
             status, why = "valid", None
         rows.append({

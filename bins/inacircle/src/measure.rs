@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 /// = 32 KiB, a few seconds of continuous pointer motion, well inside a
 /// wheel session that lasts one gesture. Past it `hover_events` still
 /// counts every repaint but the percentiles describe the first
-/// `hover_samples` ones; reported, not hidden.
+/// `hover_samples` ones (reported, not hidden), while `hover_us_max` covers
+/// every event.
 const HOVER_SAMPLES: usize = 4096;
 
 /// Paint records kept for the trace. Measurement-only memory, allocated
@@ -33,6 +34,9 @@ pub struct Meter {
     /// The same, to the first successful flush after that commit.
     flush: Option<(i64, Duration)>,
     hover_us: Vec<u64>,
+    /// The longest hover repaint over every event, kept or not: the
+    /// samples are capped, the maximum must not be.
+    hover_max_us: u64,
     /// The first paints in order: phase, buffer, generation, whether the
     /// buffer was held by the compositor (it must never be).
     paint_trace: Vec<(char, u8, u32, bool)>,
@@ -60,6 +64,16 @@ pub struct Meter {
     choice_at: Option<(i64, i64)>,
 }
 
+/// A CPU reading relative to the start, or -1 (never taken) if either
+/// reading failed: two failed readings must not subtract to a valid 0.
+fn since(cpu_us: i64, cpu0_us: i64) -> i64 {
+    if cpu_us < 0 || cpu0_us < 0 {
+        -1
+    } else {
+        cpu_us - cpu0_us
+    }
+}
+
 /// A pair of readings, or `None` if either failed.
 fn pair(cpu_us: i64, mono_us: i64) -> Option<(i64, i64)> {
     (cpu_us >= 0 && mono_us >= 0).then_some((cpu_us, mono_us))
@@ -76,6 +90,7 @@ impl Meter {
             commit: None,
             flush: None,
             hover_us: Vec::with_capacity(HOVER_SAMPLES),
+            hover_max_us: 0,
             paint_trace: Vec::with_capacity(PAINT_TRACE),
             paints: 0,
             busy_paints: 0,
@@ -96,7 +111,7 @@ impl Meter {
     /// yet sent); later calls are ignored.
     pub fn committed(&mut self, cpu_us: i64, now: Instant) {
         if self.commit.is_none() {
-            self.commit = Some((cpu_us - self.cpu0_us, now.duration_since(self.wall0)));
+            self.commit = Some((since(cpu_us, self.cpu0_us), now.duration_since(self.wall0)));
         }
     }
 
@@ -110,7 +125,7 @@ impl Meter {
     /// commit is ignored.
     pub fn flushed(&mut self, cpu_us: i64, now: Instant) {
         if self.awaiting_flush() {
-            self.flush = Some((cpu_us - self.cpu0_us, now.duration_since(self.wall0)));
+            self.flush = Some((since(cpu_us, self.cpu0_us), now.duration_since(self.wall0)));
         }
     }
 
@@ -118,8 +133,10 @@ impl Meter {
     /// capped at [`HOVER_SAMPLES`].
     pub fn hover(&mut self, d: Duration) {
         self.hover_count += 1;
+        let us = d.as_micros() as u64;
+        self.hover_max_us = self.hover_max_us.max(us);
         if self.hover_us.len() < HOVER_SAMPLES {
-            self.hover_us.push(d.as_micros() as u64);
+            self.hover_us.push(us);
         }
     }
 
@@ -241,7 +258,8 @@ impl Meter {
             line.push('-');
         }
         line += &format!(" hover_events={}", self.hover_count);
-        if let (Some(&max), n) = (sorted.last(), sorted.len()) {
+        if let (Some(_), n) = (sorted.last(), sorted.len()) {
+            let max = self.hover_max_us;
             // Nearest rank: the ceil(p * n)-th smallest.
             let rank = |pct: usize| sorted[(pct * n).div_ceil(100).max(1) - 1];
             line += &format!(
@@ -465,6 +483,38 @@ mod tests {
             Some((cap + 100).to_string().as_str())
         );
         assert_eq!(field(&r, "hover_samples"), Some(cap.to_string().as_str()));
+    }
+
+    /// The maximum covers every hover, not only the kept samples: a spike
+    /// after the cap must show.
+    #[test]
+    fn hover_max_covers_events_past_the_sample_cap() {
+        let mut m = Meter::new(0, 0, Instant::now());
+        let cap = m.hover_capacity();
+        for _ in 0..cap {
+            m.hover(ms(5));
+        }
+        m.hover(ms(900)); // the cap + 1st event, the largest
+        let r = m.report(0, -1);
+        assert_eq!(field(&r, "hover_us_max"), Some("900"), "{r}");
+        assert_eq!(field(&r, "hover_us_p95"), Some("5"), "{r}");
+        assert_eq!(field(&r, "hover_samples"), Some(cap.to_string().as_str()));
+    }
+
+    /// Two failed CPU readings are not a 0 us timing: the marker stays -1.
+    #[test]
+    fn failed_cpu_readings_do_not_subtract_to_zero() {
+        let t0 = Instant::now();
+        let mut m = Meter::new(-1, 0, t0);
+        m.committed(-1, t0 + ms(10));
+        m.flushed(-1, t0 + ms(20));
+        let r = m.report(0, -1);
+        assert_eq!(field(&r, "main_to_commit_cpu_us"), Some("-1"), "{r}");
+        assert_eq!(field(&r, "main_to_flush_cpu_us"), Some("-1"), "{r}");
+        let mut m = Meter::new(100, 0, t0);
+        m.committed(-1, t0 + ms(10));
+        let r = m.report(0, -1);
+        assert_eq!(field(&r, "main_to_commit_cpu_us"), Some("-1"), "{r}");
     }
 
     /// A reading the clock could not give (negative) is a missing marker.
