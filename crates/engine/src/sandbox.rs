@@ -784,6 +784,37 @@ pub fn effective_data_limit(limits: &Limits) -> u64 {
     clamped(libc::RLIMIT_DATA, limits.data).map_or(limits.data, |r| r.rlim_max)
 }
 
+/// Asks the kernel to `SIGKILL` the calling process when the thread that
+/// forked it dies, then checks that `parent` (the forker's pid, read
+/// before the fork) is still its parent: had it died in between, no
+/// signal would come, so the child refuses to run. If the supervisor dies
+/// abnormally (`SIGKILL`, a panic's abort), its action's leader dies with
+/// it; the leader's own descendants are not covered (the action cannot
+/// set this flag: seccomp denies the parent-death prctl) and live on under
+/// the next subreaper, sandboxed and unpublished.
+///
+/// The signal follows the forking *thread*: spawn only from a thread that
+/// outlives the child (the supervisor runs its actions on its main
+/// thread, and reaps each before it returns).
+///
+/// # Safety
+///
+/// Runs in the child after fork and before exec: only `prctl` and
+/// `getppid`, both async-signal-safe.
+pub unsafe fn die_with_parent(parent: libc::pid_t) -> io::Result<()> {
+    // SAFETY: prctl with integer arguments and getppid have no memory
+    // preconditions and are async-signal-safe.
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::getppid() != parent {
+            return Err(io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    Ok(())
+}
+
 /// Puts the calling process in its own session, applies `limits`, sets
 /// `no_new_privs`, enforces the ruleset, installs the seccomp
 /// filter (always: without one, [`seccomp_filter`]'s error, before any
@@ -877,6 +908,100 @@ pub(crate) mod tests {
     impl Drop for Tmp {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Plays a supervisor for `a_leader_dies_with_its_supervisor` (only
+    /// with `INACIRCLE_PDEATH` set): spawns `sleep 60`, with
+    /// [`die_with_parent`] when the value is `1`, prints `child <pid>`,
+    /// then waits for it (killed first, or at most its 60 s).
+    #[test]
+    fn helper_pdeath_supervisor() {
+        use std::io::Write;
+        let Some(mode) = std::env::var_os("INACIRCLE_PDEATH") else {
+            return;
+        };
+        let parent = std::process::id() as libc::pid_t;
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60").stdin(Stdio::null()).stdout(Stdio::null());
+        if mode == "1" {
+            // SAFETY: die_with_parent makes only async-signal-safe calls.
+            unsafe {
+                cmd.pre_exec(move || die_with_parent(parent));
+            }
+        }
+        let mut c = cmd.spawn().unwrap();
+        let mut out = std::io::stdout();
+        // On a line of its own: libtest has printed `test <name> ... `.
+        writeln!(out, "\nchild {}", c.id()).unwrap();
+        out.flush().unwrap();
+        // Until killed, or the sleep's 60 s are over.
+        let _ = c.wait();
+    }
+
+    /// Whether `pid` has ended (gone, or a zombie, reaped if it is ours)
+    /// within `wait`, checked every 20 ms.
+    fn ends_within(pid: libc::pid_t, wait: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            // SAFETY: WNOHANG never blocks; a pid that is not our child
+            // gives ECHILD and changes nothing.
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+            let state = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|s| {
+                    s.rsplit_once(')')
+                        .map(|(_, r)| r.trim_start().chars().next())
+                });
+            if !matches!(state, Some(Some(c)) if c != 'Z') {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// T16 A-m4: when the supervisor is killed with `SIGKILL`, the leader it
+    /// spawned with `die_with_parent` dies too; without it (the negative
+    /// control) the leader lives on.
+    #[test]
+    fn a_leader_dies_with_its_supervisor() {
+        use std::io::BufRead;
+        for (mode, dies) in [("1", true), ("0", false)] {
+            let mut sup = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sandbox::tests::helper_pdeath_supervisor",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("INACIRCLE_PDEATH", mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let rd = std::io::BufReader::new(sup.stdout.take().unwrap());
+            let pid: libc::pid_t = rd
+                .lines()
+                .map_while(Result::ok)
+                .find_map(|l| l.strip_prefix("child ").map(|p| p.parse().unwrap()))
+                .expect("the helper names its child");
+            sup.kill().unwrap();
+            sup.wait().unwrap();
+            // A kill-on-death is immediate; 10 s is slack for a loaded
+            // machine. The control's leader is still alive after 0.5 s.
+            let wait = std::time::Duration::from_millis(if dies { 10_000 } else { 500 });
+            let ended = ends_within(pid, wait);
+            if !ended {
+                // SAFETY: kill has no memory preconditions; the pid is the
+                // sleep just seen alive.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                assert!(ends_within(pid, std::time::Duration::from_secs(10)));
+            }
+            assert_eq!(ended, dies, "mode {mode}");
         }
     }
 

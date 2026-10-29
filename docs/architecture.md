@@ -183,6 +183,14 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   at all (`--work` missing or not writable).
 - Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
   later; the engine removes the temp dir either way.
+- If the supervisor itself dies abnormally (`SIGKILL`, an abort), nobody
+  kills the group: the leader dies with it (`PR_SET_PDEATHSIG`, set
+  before the sandbox, which then denies changing it), but the leader's
+  own children live on under the next subreaper (e.g. `systemd --user`),
+  still sandboxed, writing only into the work dir (a later run in that
+  folder removes it after a day); nothing of them is published, and `jobs` and `cancel`
+  no longer see them. A cgroup would bound that; it is not used (no
+  systemd dependency).
 - Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
   writes at 16 × the total input size, clamped to 256 MiB – 16 GiB
   (archive bombs, with no plugin code; many files can still fill a disk);

@@ -106,7 +106,10 @@ processes, so it stays unset: an action can fork-bomb until it is
 cancelled. What does hold is the group: every action and manifest probe
 runs in one process group it cannot leave (`setsid` and `setpgid` are
 denied), the whole group is killed on cancel, timeout and exit, and a
-member still alive or killed at the leader's exit fails the input
+member still alive or killed at the leader's exit fails the input. If the
+supervisor itself is killed, only the leader dies with it
+(`PR_SET_PDEATHSIG`); its descendants live on, sandboxed and unpublished,
+until they end (see [architecture.md](architecture.md), Invocation)
 ([sandbox-hardening.md](benchmarks/sandbox-hardening.md)). That limits how
 long a runaway tree lives, not how much memory it takes meanwhile.
 

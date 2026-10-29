@@ -1143,12 +1143,15 @@ fn run_step(
         .stderr(Stdio::piped());
     // No `process_group(0)`: std applies it before pre_exec, and the
     // child's `setsid` (which also makes it a group leader) would then fail.
+    // The leader dies with us if we die abnormally (see `die_with_parent`).
+    let parent = std::process::id() as libc::pid_t;
     // SAFETY: the closure makes only async-signal-safe calls (sigemptyset,
-    // sigprocmask, and apply_in_child's documented ones) on stack data; the
-    // ruleset fd stays open until spawn returns (`ruleset` lives to the end
-    // of this function).
+    // sigprocmask, and die_with_parent's and apply_in_child's documented
+    // ones) on stack data; the ruleset fd stays open until spawn returns
+    // (`ruleset` lives to the end of this function).
     unsafe {
         cmd.pre_exec(move || {
+            sandbox::die_with_parent(parent)?;
             // The child inherits the supervisor's blocked SIGTERM/SIGINT.
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
@@ -1840,7 +1843,8 @@ impl<'a> Supervisor<'a> {
         // The whole group is killed first, whatever happens next: the
         // unreaped leader keeps `pid` the action's group id, so the kill
         // cannot reach another group, and nothing of the action outlives
-        // us even if its members cannot be counted.
+        // this run even if its members cannot be counted. (If we die
+        // abnormally only the leader follows: see `die_with_parent`.)
         self.signal(libc::SIGKILL);
         let until = Instant::now() + GROUP_GONE;
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {

@@ -650,11 +650,16 @@ fn spawn_manifest(bin: &Path) -> Result<std::process::Child, Fail> {
     // No `process_group(0)`: std applies it before pre_exec, and the
     // child's `setsid` in `apply_in_child` (which also makes it a group
     // leader, so `kill_group` still reaches its descendants) would fail.
+    // The probe dies with us if we die abnormally (see `die_with_parent`).
+    let parent = std::process::id() as libc::pid_t;
     // SAFETY: the closure makes only the async-signal-safe calls of
-    // `apply_in_child`; the ruleset fd stays open until spawn returns
-    // (`ruleset` is dropped only after the spawn).
+    // `die_with_parent` and `apply_in_child`; the ruleset fd stays open
+    // until spawn returns (`ruleset` is dropped only after the spawn).
     unsafe {
-        cmd.pre_exec(move || sandbox::apply_in_child(fd, &limits));
+        cmd.pre_exec(move || {
+            sandbox::die_with_parent(parent)?;
+            sandbox::apply_in_child(fd, &limits)
+        });
     }
     // Orphans of the manifest come back to us (see `exec::reap_group`).
     exec::become_subreaper().map_err(|e| Fail::Transient(format!("cannot supervise: {e}")))?;
