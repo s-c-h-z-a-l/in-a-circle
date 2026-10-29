@@ -112,8 +112,9 @@ but a separate wakeup count of the window is not made.
 
 Intel i5-7500T, kernel 7.2.11-arch1-1, governor `powersave`
 (`balance_performance`, 0.8-3.3 GHz), niri 26.04, 4 CPUs, 8 GB.
-**The machine has no monitor or dummy plug**, so the session niri has no
-output. The series ran inside a second niri (winit backend) started under
+**During these automated series the machine had no monitor or dummy
+plug**, so the session niri had no output (the manual series below ran with
+a monitor attached). The series ran inside a second niri (winit backend) started under
 the session niri: a real niri with one 1280x960 output, but the compositor
 side (configure, frame pacing: wall time ~1.5 s) is not representative.
 The CPU intervals are the wheel's own; wall times are reported, not
@@ -206,9 +207,11 @@ of 50 attempts in every row; A = `169163b`), then 60 real choices by
 pointer click on 60 prepared files (`INACIRCLE_MEASURE=1`; each wheel is
 one stage-2 session with a conversion; every conversion succeeded and
 produced its output folder in the second session; in the first, the
-history directory of the real account was not writable, so the 60
-conversions reported a failure after the action had started. The entry
-timing does not depend on it).
+history directory of the real account was not writable (a test run of
+this branch had changed its mode; tests now run in an isolated home and a
+guard fails any run that touches the real one), so the 60 conversions
+reported a failure after the action had started. The entry timing does not
+depend on it).
 
 Startup CPU, main to first commit, p95 in microseconds (p50 in brackets):
 
