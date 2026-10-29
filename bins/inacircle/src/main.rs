@@ -22,6 +22,14 @@
 //! The same file (by canonical path) given more than once counts once; the
 //! first spelling wins.
 //!
+//! `undo` moves each of the job's output groups whole into the Trash and
+//! prints one line per group: `moved <trash path>`, `kept <path|-> <reason>`,
+//! `restored <path|-> <reason>`, `recovery-kept <path|-> <reason> <errno|->`
+//! or `uncertain <op> <reason> <last path seen|->` (never a made-up place),
+//! then `warning <text>` lines. It exits 0 when every group went to the
+//! Trash or was kept in a place the line names (`kept <path>`), else 1
+//! (`kept - <reason>`: not found where it was saved).
+//!
 //! `--notify` adds desktop notifications: "running" with Cancel after a
 //! second, the result with Undo at the end. The stdout lines are written
 //! before the Undo window starts; the exit code does not depend on them.
@@ -36,6 +44,15 @@
 //! exit 0.
 //! A choice tears the wheel down, releases the lock, then runs the preset
 //! as `run --notify` does, exit code included.
+//!
+//! The wheel's start is bounded on its own clock (`surface::STARTUP`),
+//! apart from the user's wait. A start that fails (no configure, no
+//! position, no keyboard, a broken connection, a setup error) closes in
+//! order: the surfaces and the keyboard grab, the connection, the lock, the
+//! alarm; only then one desktop notification says why (`Could not open the
+//! circle.` and the cause), bounded by its own deadlines, and the exit is 1.
+//! No retry, no second window. Esc, a close by the compositor and a second
+//! instance are not failures and notify nothing.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -46,8 +63,10 @@ use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
 use engine::classify::{Classified, Kind, classify};
-use engine::exec::{self, CancelToken, Observer, Outcome, Wake};
-use engine::journal::{self, JobId, Recorder, Running};
+use engine::exec::{
+    self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
+};
+use engine::journal::{self, GroupOutcome, JobId, Recorder, Running};
 use engine::menu::{self, PRESETS};
 use manifest::{Line, write_line};
 use notice::Notifier;
@@ -71,6 +90,18 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_UNSUPPORTED: u8 = 3;
 
 fn main() -> ExitCode {
+    // Transparent huge pages off for this process. Measured
+    // on ARM: about 68 kB of live heap sat in a 2048 kB AnonHugePages region
+    // (base and hardening builds alike). PSS held (worst 3.62 MB, budget
+    // 5 MB), but VmHWM/RSS reached ~5.2 MB, and the CI guard measures
+    // that stricter proxy. The flag survives fork and exec, so the sandbox resets it in
+    // the action child. Failure is ignored: kernels before 3.15 lack
+    // PR_SET_THP_DISABLE (EINVAL), and then there is nothing to disable
+    // and nothing lost; the budget is only measured, never enforced here.
+    //
+    // SAFETY: prctl with integer arguments only; no pointers, no memory
+    // is touched.
+    let _ = unsafe { libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0) };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let rest = args.get(1..).unwrap_or_default();
     let code = match args.first().and_then(|a| a.to_str()) {
@@ -102,15 +133,43 @@ fn lossy(p: &Path) -> String {
 }
 
 fn print_outcome(o: &Outcome) {
-    let line = match o {
+    out(&outcome_line(o));
+}
+
+/// The stdout line of an outcome.
+fn outcome_line(o: &Outcome) -> Line {
+    match o {
         Outcome::Done { input, output, .. } => {
             Line::new("done").bare(&lossy(input)).bare(&lossy(output))
         }
         Outcome::Skipped { input, reason } => Line::new("skip").bare(&lossy(input)).bare(reason),
         Outcome::Failed { input, reason } => Line::new("fail").bare(&lossy(input)).bare(reason),
         Outcome::Warned { input, message } => Line::new("warn").bare(&lossy(input)).bare(message),
-    };
-    out(&line);
+        // Published, but not where (or not as) it could be proved: no
+        // invented path, the operation and its anchor instead.
+        Outcome::PublishedUnknown {
+            input,
+            group,
+            location,
+            reason,
+            durability,
+        } => {
+            let a = &location.anchor;
+            let mut l = Line::new("unknown")
+                .bare(&lossy(input))
+                .bare(&notice::unknown_reason(*reason))
+                .pair("group", &format!("{:016x}", group.0))
+                .pair("op", &format!("{:016x}", a.op.0))
+                .pair("parent", &format!("{}:{}", a.parent_dev, a.parent_ino))
+                .pair("object", &format!("{}:{}", a.object_dev, a.object_ino))
+                .pair("leaf", &a.leaf.to_string_lossy())
+                .pair("durability", journal::durability_str(durability));
+            if let Some(p) = &location.path_at_check {
+                l = l.pair("path", &lossy(p));
+            }
+            l
+        }
+    }
 }
 
 /// Absolute against the cwd, `.` components and trailing slashes dropped.
@@ -187,6 +246,30 @@ struct Printer<'a> {
     rec: &'a mut Recorder,
     notifier: Option<&'a mut Notifier>,
     last: Option<String>,
+    /// The measurement switch's action-entry marks; `None` without it, so
+    /// the callback then costs one branch.
+    entry: Option<Entry>,
+}
+
+/// When the supervisor first observed an action child running: CPU and
+/// `CLOCK_MONOTONIC`, absolute, in µs. An upper bound on the child's own
+/// entry, taken at the first valid event the engine read, not at its
+/// `main`. Only the first child is kept; `count` counts all.
+#[derive(Default)]
+struct Entry {
+    first: Option<(i64, i64)>,
+    count: u32,
+}
+
+impl Entry {
+    /// One child seen running, at the readings `cpu` and `mono` (µs; a
+    /// negative one failed): counted, and the first valid pair kept.
+    fn seen(&mut self, cpu: i64, mono: i64) {
+        self.count += 1;
+        if self.first.is_none() && cpu >= 0 && mono >= 0 {
+            self.first = Some((cpu, mono));
+        }
+    }
 }
 
 impl Observer for Printer<'_> {
@@ -198,8 +281,26 @@ impl Observer for Printer<'_> {
         }
     }
 
-    fn dir(&mut self, path: &Path) {
-        self.rec.dir(path);
+    fn started(&mut self, _pid: u32) {
+        // Clocks first, nothing else between the event and the reading.
+        if let Some(e) = &mut self.entry {
+            e.seen(cpu_us(libc::RUSAGE_SELF), monotonic_us().unwrap_or(-1));
+        }
+    }
+
+    /// Never called: [`Observer::group`] is forwarded whole below.
+    fn dir(&mut self, _path: &Path) {}
+
+    /// The group's manifest and intent go to the history (synced) before
+    /// the publishing rename; an error refuses the publication.
+    fn prepare_group(&mut self, group: &OutputGroup, private_path: &Path) -> io::Result<()> {
+        self.rec.prepare_group(group, private_path)
+    }
+
+    /// The commit (or the uncertain place) goes to the history; no new
+    /// baseline is taken of the visible files.
+    fn group(&mut self, group: &OutputGroup, location: &LocationEvidence, d: &Durability) {
+        self.rec.group(group, location, d);
     }
 
     fn progress(&mut self, done: usize, total: usize, fraction: f32) {
@@ -277,7 +378,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         Target::Action(_) => None,
     };
     // The measurement switch: our CPU at each phase boundary of the run.
-    let mut lap = measuring().then(|| vec![("start", cpu_us(libc::RUSAGE_SELF))]);
+    let measure_on = measuring();
+    let mut lap = measure_on.then(|| vec![("start", cpu_us(libc::RUSAGE_SELF))]);
     let mut mark = |name: &'static str| {
         if let Some(l) = &mut lap {
             l.push((name, cpu_us(libc::RUSAGE_SELF)));
@@ -344,6 +446,9 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     }
 
     let mut notifier = notify.then(|| {
+        // `lossy` is only the gate (a warning of a lossless route says
+        // nothing about formatting); the line itself needs a warning of an
+        // input that has an output (`Summary::lost_done`).
         let label = route.last().map_or(name.as_str(), |a| a.label.as_str());
         Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
     });
@@ -361,32 +466,39 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             n.event(&o);
         }
     }
+    let mut entry = None;
     let sandboxed = if inputs.is_empty() {
-        engine::sandbox::landlock_abi().is_some()
+        engine::sandbox::ready().is_ok()
     } else {
         let mut obs = Printer {
             running: &mut running,
             rec: &mut rec,
             notifier: notifier.as_mut(),
             last: None,
+            entry: measure_on.then(Entry::default),
         };
-        exec::run(&route, &inputs, &mut obs, &cancel).sandboxed
+        let sandboxed = exec::run(&route, &inputs, &mut obs, &cancel).sandboxed;
+        entry = obs.entry.take();
+        sandboxed
     };
     mark("exec");
     // Read now: a cancel after this point stopped nothing.
     let cancelled = cancel.is_cancelled();
-    let tally = rec.finish(sandboxed);
+    let closed = rec.finish(sandboxed);
     drop(running);
     mark("record");
 
-    let (done, skipped, failed) = tally.counts();
+    if let Some(w) = &closed.warning {
+        eprintln!("inacircle: warning: {w}");
+    }
+    let (done, skipped, failed) = closed.tally.counts();
     out(&Line::new("summary")
         .pair("done", &done.to_string())
         .pair("skipped", &skipped.to_string())
         .pair("failed", &failed.to_string()));
     let _ = io::stdout().flush();
     // Before the notifications: their cost is measured on its own.
-    if measuring() {
+    if measure_on {
         measure();
     }
     if let Some(l) = &lap {
@@ -394,17 +506,32 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             .windows(2)
             .map(|w| format!("{}_cpu_us={}", w[1].0, w[1].1 - w[0].1))
             .collect();
+        // Absent when no child emitted a valid event, never 0.
+        let entry = entry.unwrap_or_default();
+        let marks = entry.first.map_or(String::new(), |(c, w)| {
+            format!(" action_entry_observed_abs_cpu_us={c} action_entry_observed_abs_wall_us={w}")
+        });
         eprintln!(
-            "inacircle: measure run start_abs_cpu_us={} {}",
+            "inacircle: measure run pid={} start_abs_cpu_us={} {} action_entries={}{marks}",
+            std::process::id(),
             l[0].1,
-            phases.join(" ")
+            phases.join(" "),
+            entry.count
         );
     }
     // The job is closed in the history and gone from the registry, so an
     // Undo click can undo it. The token stays: a signal in the Undo window
     // ends the window, not the process.
-    if let Some(n) = notifier {
-        n.finish(&job, sandboxed, (done, skipped, failed), cancelled, &cancel);
+    if let Some(mut n) = notifier {
+        n.record_warning(closed.warning.as_deref());
+        n.finish(
+            &job,
+            sandboxed,
+            (done, skipped, failed, closed.tally.unknown()),
+            cancelled,
+            closed.undoable,
+            &cancel,
+        );
     }
     // A cancel that arrived after the run must be consumed here: dropping
     // the token with it pending would kill the process. Inputs it stopped
@@ -438,6 +565,21 @@ fn cpu_us(who: libc::c_int) -> i64 {
     }
     let us = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec;
     us(ru.ru_utime) + us(ru.ru_stime)
+}
+
+/// `CLOCK_MONOTONIC` in microseconds: the wall clock of the measurement
+/// log, shared by every process on the machine, so the wheel's choice and
+/// the run's action entry compare directly.
+fn monotonic_us() -> io::Result<i64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec into `ts`, which outlives it.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000)
 }
 
 /// Measurement switch (`INACIRCLE_MEASURE=1`): our CPU time, the reaped
@@ -542,13 +684,67 @@ fn cmd_undo(args: &[OsString]) -> u8 {
     };
     match journal::undo(&job) {
         Ok(r) => {
-            for p in &r.removed {
-                out(&Line::new("removed").bare(&lossy(p)));
+            let place = |p: &Option<PathBuf>| p.as_deref().map_or_else(|| "-".to_owned(), lossy);
+            let mut attention = false;
+            for o in &r.groups {
+                let l = match o {
+                    GroupOutcome::MovedToTrash { location, .. } => {
+                        Line::new("moved").bare(&place(&location.path_at_check))
+                    }
+                    GroupOutcome::Kept {
+                        location, reason, ..
+                    } => {
+                        // Kept with no place (`-`): nothing proves it is
+                        // still where it was saved, so it needs a look.
+                        attention |= location.path_at_check.is_none();
+                        Line::new("kept")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                    }
+                    GroupOutcome::Restored {
+                        location, reason, ..
+                    } => {
+                        attention = true;
+                        Line::new("restored")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                    }
+                    GroupOutcome::RecoveryKept {
+                        location,
+                        reason,
+                        errno,
+                        ..
+                    } => {
+                        attention = true;
+                        Line::new("recovery-kept")
+                            .bare(&place(&location.path_at_check))
+                            .bare(reason.name())
+                            .bare(&errno.map_or_else(|| "-".to_owned(), |e| e.to_string()))
+                    }
+                    GroupOutcome::Uncertain {
+                        op,
+                        locations,
+                        reason,
+                        ..
+                    } => {
+                        attention = true;
+                        let seen = locations.iter().find_map(|l| {
+                            l.path_at_check
+                                .clone()
+                                .or_else(|| l.last_unverified_path.clone())
+                        });
+                        Line::new("uncertain")
+                            .bare(&format!("{:016x}", op.0))
+                            .bare(reason.name())
+                            .bare(&place(&seen))
+                    }
+                };
+                out(&l);
             }
-            for (p, why) in &r.kept {
-                out(&Line::new("kept").bare(&lossy(p)).bare(why));
+            for w in &r.warnings {
+                out(&Line::new("warning").bare(w));
             }
-            EXIT_DONE
+            if attention { EXIT_FAILED } else { EXIT_DONE }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             eprintln!("inacircle: unknown job {}", job.0);
@@ -573,7 +769,15 @@ fn cmd_jobs(args: &[OsString]) -> u8 {
     if !args.is_empty() {
         return usage("jobs takes no arguments");
     }
-    for (id, action, pid, progress) in journal::list_running() {
+    // Not knowing which jobs run is a failure, not an empty list.
+    let jobs = match journal::list_running() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("inacircle: jobs: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    for (id, action, pid, progress) in jobs {
         out(&Line::new("job")
             .pair("id", &id.0)
             .pair("action", &action)
@@ -588,10 +792,14 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
         Ok(j) => j,
         Err(c) => return c,
     };
-    let Some((_, _, pid, _)) = journal::list_running()
-        .into_iter()
-        .find(|(id, ..)| *id == job)
-    else {
+    let jobs = match journal::list_running() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("inacircle: cancel {}: {e}", job.0);
+            return EXIT_FAILED;
+        }
+    };
+    let Some((_, _, pid, _)) = jobs.into_iter().find(|(id, ..)| *id == job) else {
         eprintln!("inacircle: no running job {}", job.0);
         return EXIT_USAGE;
     };
@@ -615,23 +823,33 @@ fn cmd_cancel(args: &[OsString]) -> u8 {
 
 /// The wheel: lock, deadline, surface; then the chosen preset, if any.
 fn cmd_wheel() -> u8 {
-    let mut meter =
-        measuring().then(|| measure::Meter::new(cpu_us(libc::RUSAGE_SELF), Instant::now()));
+    let mut meter = measuring().then(|| {
+        measure::Meter::new(
+            cpu_us(libc::RUSAGE_SELF),
+            monotonic_us().unwrap_or(-1),
+            Instant::now(),
+        )
+    });
     // The deadline first: it covers the lock too (a slow runtime dir).
     if let Err(e) = default_sigalrm() {
-        eprintln!("inacircle: cannot arm the deadline: {e}");
-        return EXIT_FAILED;
+        return wheel_failed(&surface::StartupError::Initialization(io::Error::new(
+            e.kind(),
+            format!("cannot arm the deadline: {e}"),
+        )));
     }
     // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
-    // kills the process: the backstop if anything below hangs.
-    unsafe { libc::alarm(wheel::STAGE.as_secs() as u32) };
+    // kills the process: the backstop if anything below hangs. Only the
+    // startup's: the first commit re-arms it with the user's stage.
+    unsafe { libc::alarm(surface::STARTUP_BACKSTOP.as_secs() as u32) };
     // The lock comes before Wayland: a second instance must not draw.
     let lock = match lock_wheel() {
         Ok(Some(l)) => l,
         Ok(None) => return EXIT_DONE,
         Err(e) => {
-            eprintln!("inacircle: wheel lock: {e}");
-            return EXIT_FAILED;
+            return wheel_failed(&surface::StartupError::Initialization(io::Error::new(
+                e.kind(),
+                format!("wheel lock: {e}"),
+            )));
         }
     };
     let mut machine = wheel::Machine::new();
@@ -658,11 +876,38 @@ fn cmd_wheel() -> u8 {
             EXIT_DONE
         }
         Err(e) => {
-            eprintln!("inacircle: wheel: {e}");
+            // The surface, the lock and the alarm are settled above; the
+            // desktop hears first, and the catalog refresh (manifests, with
+            // their own deadlines) comes after, so it cannot delay it.
+            let code = wheel_failed(&e);
             Catalog::load();
-            EXIT_FAILED
+            code
         }
     }
+}
+
+/// `alarm` seconds for the failure notice: the open (`notice::ERROR_OPEN`,
+/// 0.5 s) plus the call (`notice::CALL_WAIT`, 0.5 s) is 1 s of waiting at
+/// most; `alarm` counts whole seconds, so 2 s leaves a second for
+/// scheduling. Past it the process is killed, the lock long since free.
+const NOTICE_BACKSTOP_SECS: u32 = 2;
+
+/// Tells that the wheel failed to open: the log line first (it exists even
+/// if the bus hangs), then one bounded notification under a short alarm.
+/// Called with the surface, the lock and the main alarm already gone.
+fn wheel_failed(e: &surface::StartupError) -> u8 {
+    eprintln!("inacircle: wheel: {e}");
+    if matches!(e, surface::StartupError::AfterOpen(_)) {
+        // The circle did open; "Could not open the circle." would be false.
+        return EXIT_FAILED;
+    }
+    // SAFETY: alarm(2) has no memory effects. SIGALRM's default action
+    // kills the process: the backstop if the notification hangs.
+    unsafe { libc::alarm(NOTICE_BACKSTOP_SECS) };
+    notice::notify_startup_error(e);
+    // SAFETY: as above; 0 cancels the pending alarm.
+    unsafe { libc::alarm(0) };
+    EXIT_FAILED
 }
 
 /// Runs the wheel's choice exactly as `inacircle run --notify <preset>
@@ -844,6 +1089,46 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A publication of unknown place is its own line: the input, the
+    /// cause, the operation and anchor, never a `done` with a path.
+    #[test]
+    fn published_unknown_line_names_the_operation_not_a_path() {
+        use engine::exec::{
+            AnchorHint, CheckPoint, Durability, GroupId, LocationEvidence, OperationId,
+            PublicationReason,
+        };
+        let o = Outcome::PublishedUnknown {
+            input: "/in/a.txt".into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                last_unverified_path: None,
+                anchor: AnchorHint {
+                    parent_dev: 8,
+                    parent_ino: 9,
+                    object_dev: 8,
+                    object_ino: 10,
+                    leaf: "a".into(),
+                    op: OperationId(2),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Synced,
+        };
+        let l = outcome_line(&o);
+        assert_eq!(l.kind, "unknown");
+        assert_eq!(l.bare_at(0), Some("/in/a.txt"));
+        assert!(l.bare_at(1).unwrap().contains("moved or replaced"));
+        assert_eq!(l.get("op"), Some("0000000000000002"));
+        assert_eq!(l.get("group"), Some("0000000000000001"));
+        assert_eq!(l.get("parent"), Some("8:9"));
+        assert_eq!(l.get("object"), Some("8:10"));
+        assert_eq!(l.get("leaf"), Some("a"));
+        assert_eq!(l.get("durability"), Some("synced"));
+        assert_eq!(l.get("path"), None);
+    }
 
     /// The wheel's choice runs as `inacircle run --notify <preset> <files…>`:
     /// through `cmd_run` itself, whose contract the CLI tests hold.
@@ -1029,5 +1314,45 @@ mod tests {
         let g = group_menu_for(vec![pdf], Some(md_catalog()));
         assert!(g.slices[0].as_ref().is_some_and(|d| !d.lit), "dim");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Only the first valid pair is kept; every child is counted. Kills the
+    /// `&&` -> `||` of `Entry::seen`.
+    #[test]
+    fn the_entry_keeps_the_first_valid_pair_and_counts_all() {
+        let mut e = Entry::default();
+        e.seen(-1, 5);
+        e.seen(5, -1);
+        assert_eq!((e.first, e.count), (None, 2));
+        e.seen(10, 20);
+        e.seen(30, 40);
+        e.seen(-1, -1);
+        assert_eq!((e.first, e.count), (Some((10, 20)), 5));
+    }
+
+    /// `CLOCK_MONOTONIC` in µs, compared with an independent reading of
+    /// the same clock before and after. Kills the constant and the three
+    /// arithmetic mutants.
+    #[test]
+    fn monotonic_us_reads_the_monotonic_clock() {
+        let ns = || {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: clock_gettime writes one timespec into `ts`.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) },
+                0
+            );
+            i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec)
+        };
+        let before = ns();
+        let us = i128::from(monotonic_us().unwrap());
+        let after = ns();
+        assert!(
+            us * 1000 >= before - 1000 && us * 1000 <= after,
+            "{us} not in {before}..{after}"
+        );
     }
 }

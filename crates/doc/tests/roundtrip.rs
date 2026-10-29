@@ -37,19 +37,18 @@ fn has_ws_run(s: &str) -> bool {
     ["  ", "\t\t", " \t", "\t "].iter().any(|p| s.contains(p))
 }
 
-/// Whether two blank (whitespace-only) lines follow each other, the only
-/// thing the txt reader may report as `BlankLines`.
+/// Whether the text has a blank-line run, a blank line before the first or
+/// after the last paragraph, or a whitespace-only line: what the txt reader
+/// may report as `BlankLines`.
 fn has_blank_run(s: &str) -> bool {
     let norm = s.replace("\r\n", "\n").replace('\r', "\n");
-    let mut prev_blank = false;
-    for line in norm.split('\n') {
-        let blank = line.trim().is_empty();
-        if blank && prev_blank {
-            return true;
-        }
-        prev_blank = blank;
-    }
-    false
+    let norm = norm.strip_suffix('\n').unwrap_or(&norm);
+    let lines: Vec<&str> = norm.split('\n').collect();
+    let blank = |l: &str| l.trim().is_empty();
+    blank(lines[0])
+        || blank(lines[lines.len() - 1])
+        || lines.iter().any(|l| !l.is_empty() && blank(l))
+        || lines.windows(2).any(|w| blank(w[0]) && blank(w[1]))
 }
 
 /// `None` when the round trip is lossless, else a description.

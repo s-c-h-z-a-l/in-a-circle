@@ -20,7 +20,8 @@ use super::scan::{
     close_tag, is_space_or_tab, link_destination, link_label, link_title, open_tag, peek,
     skip_spaces, skip_spnl, utf8,
 };
-use super::{LinkDef, Refs, inlines, normalize_label, unescape};
+use super::{LinkDef, Refs, decoded_len, inlines, normalize_label, unescape};
+use crate::budget::Meter;
 use crate::{Block, Document};
 
 const TAB_STOP: usize = 4;
@@ -86,19 +87,22 @@ struct Node {
     depth: u32,
 }
 
-/// Parses `text` (valid UTF-8, NUL already replaced) into a document.
-pub(super) fn parse(text: &str) -> Document {
-    let mut p = run(text);
+/// Parses `text` (valid UTF-8, NUL already replaced) into a document. The
+/// meter is charged while the arena and the tree are built (`Err` is the
+/// first budget that ran out).
+pub(super) fn parse(text: &str, m: &mut Meter) -> Result<Document, crate::LimitError> {
+    let mut p = run(text, m);
     let blocks = p.convert_children(ROOT);
-    Document { blocks }
+    p.m.result()?;
+    Ok(Document { blocks })
 }
 
 /// The block phase alone: every block closed, definitions collected.
-fn run(text: &str) -> Parser {
-    let mut p = Parser::new();
+fn run<'m>(text: &str, m: &'m mut Meter) -> Parser<'m> {
+    let mut p = Parser::new(m);
     let mut line = String::new();
     let mut rest = text;
-    while !rest.is_empty() {
+    while !rest.is_empty() && !p.m.failed() {
         let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
         line.clear();
         line.push_str(&rest[..end]);
@@ -125,7 +129,10 @@ fn is_blank(s: &str) -> bool {
     s.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
-struct Parser {
+struct Parser<'m> {
+    /// The budget; the first failure stops the line loop and the
+    /// conversion, and `add_child` stops allocating.
+    m: &'m mut Meter,
     nodes: Vec<Node>,
     refs: Refs,
     /// The innermost open block.
@@ -142,9 +149,10 @@ struct Parser {
     thematic_break_kill_pos: usize,
 }
 
-impl Parser {
-    fn new() -> Self {
+impl<'m> Parser<'m> {
+    fn new(m: &'m mut Meter) -> Self {
         Parser {
+            m,
             nodes: vec![Node {
                 kind: Kind::Document,
                 parent: ROOT,
@@ -338,10 +346,12 @@ impl Parser {
 
     fn open_new_blocks(&mut self, container: &mut usize, b: &[u8], all_matched: bool) {
         let mut maybe_lazy = matches!(self.nodes[self.current].kind, Kind::Paragraph);
-        while !matches!(
-            self.nodes[*container].kind,
-            Kind::CodeBlock { .. } | Kind::HtmlBlock(_)
-        ) {
+        while !self.m.failed()
+            && !matches!(
+                self.nodes[*container].kind,
+                Kind::CodeBlock { .. } | Kind::HtmlBlock(_)
+            )
+        {
             self.find_first_nonspace(b);
             let indented = self.indent >= CODE_INDENT;
             let fns = self.first_nonspace;
@@ -501,7 +511,9 @@ impl Parser {
             _ if self.blank => {}
             Kind::Heading { setext: false, .. } => {
                 let text = chop_closing_hashes(&line[self.first_nonspace..]);
-                self.nodes[container].content.push_str(text);
+                if self.m.text(text.len()) {
+                    self.nodes[container].content.push_str(text);
+                }
             }
             Kind::Paragraph | Kind::Heading { .. } => {
                 self.advance_offset(b, self.first_nonspace - self.offset, false);
@@ -517,20 +529,45 @@ impl Parser {
     }
 
     fn add_line(&mut self, n: usize, line: &str) {
-        let content = &mut self.nodes[n].content;
+        let mut to_tab = 0;
         if self.partially_consumed_tab {
             self.offset += 1;
-            let to_tab = TAB_STOP - self.column % TAB_STOP;
-            content.extend(std::iter::repeat_n(' ', to_tab));
+            to_tab = TAB_STOP - self.column % TAB_STOP;
         }
-        content.push_str(&line[self.offset..]);
+        let rest = &line[self.offset..];
+        // Charge the line's bytes, then reserve them, before they are
+        // appended.
+        if !self.m.text(to_tab + rest.len()) {
+            return;
+        }
+        let content = &mut self.nodes[n].content;
+        self.m.reserve_str(content, to_tab + rest.len());
+        if self.m.failed() {
+            return;
+        }
+        content.extend(std::iter::repeat_n(' ', to_tab));
+        content.push_str(rest);
     }
 
     /// Appends a new block to `parent`, first closing blocks that cannot
     /// contain it.
     fn add_child(&mut self, mut parent: usize, kind: Kind) -> usize {
+        // After a failure the caller may hand us a parent that cannot hold
+        // the kind (its own child was never made): nothing more is made.
+        if self.m.failed() {
+            return parent;
+        }
         while !can_contain(&self.nodes[parent].kind, &kind) {
             parent = self.finalize(parent);
+        }
+        // One node, charged before the arena grows. Past the budget the
+        // block is not made and its parent stands in for it: the caller's
+        // loop ends on the failed meter and the result is discarded.
+        if !self.m.node() || self.nodes.try_reserve(1).is_err() {
+            if !self.m.failed() {
+                self.m.fail_allocation();
+            }
+            return parent;
         }
         let depth =
             self.nodes[parent].depth + u32::from(matches!(kind, Kind::BlockQuote | Kind::Item(_)));
@@ -567,7 +604,13 @@ impl Parser {
                 let content = std::mem::take(&mut self.nodes[n].content);
                 let eol = content.find('\n').unwrap_or(content.len());
                 let info_line = content[..eol].trim_matches(|c: char| c.is_ascii_whitespace());
-                let info = unescape(info_line);
+                // The info string is at most the line, already counted as
+                // content; its unescaped copy is charged as it is kept.
+                let info = if self.m.text(info_line.len()) {
+                    unescape(info_line)
+                } else {
+                    String::new()
+                };
                 self.nodes[n].content = content[(eol + 1).min(content.len())..].to_string();
                 if let Kind::CodeBlock { info: i, .. } = &mut self.nodes[n].kind {
                     *i = info;
@@ -640,12 +683,31 @@ impl Parser {
         let content = std::mem::take(&mut self.nodes[n].content);
         let mut pos = 0;
         while content[pos..].starts_with('[') {
-            let Some((len, label, def)) = parse_link_def(&content[pos..]) else {
+            let Some((len, label, dest, title)) = parse_link_def(&content[pos..]) else {
                 break;
             };
             let key = normalize_label(label);
-            if !key.is_empty() {
-                self.refs.entry(key).or_insert(def);
+            // A kept definition is one node plus its key, destination and
+            // title (the first definition of a label wins; later ones are
+            // dropped and cost nothing). Destination and title are charged
+            // by their decoded length, before they are decoded.
+            if !key.is_empty()
+                && !self.refs.contains_key(&key)
+                && self.m.node()
+                && self.m.text(
+                    key.len()
+                        .saturating_add(decoded_len(dest, true))
+                        .saturating_add(decoded_len(title, true)),
+                )
+            {
+                let def = LinkDef {
+                    dest: unescape(dest),
+                    title: unescape(title),
+                };
+                self.refs.insert(key, def);
+            }
+            if self.m.failed() {
+                break;
             }
             pos += len;
         }
@@ -686,7 +748,15 @@ impl Parser {
 
     fn convert_children(&mut self, n: usize) -> Vec<Block> {
         let children = std::mem::take(&mut self.nodes[n].children);
-        children.into_iter().map(|c| self.convert(c)).collect()
+        let mut out = Vec::new();
+        for c in children {
+            if self.m.failed() {
+                break;
+            }
+            let b = self.convert(c);
+            self.m.push(&mut out, b);
+        }
+        out
     }
 
     fn convert(&mut self, n: usize) -> Block {
@@ -694,14 +764,14 @@ impl Parser {
         match std::mem::replace(&mut self.nodes[n].kind, Kind::Document) {
             Kind::Paragraph => {
                 let raw = content.trim_end_matches([' ', '\t', '\n']);
-                Block::Paragraph(inlines(raw, &self.refs))
+                Block::Paragraph(inlines(raw, &self.refs, self.m))
             }
             Kind::Heading { level, .. } => {
                 let raw = content.trim_matches([' ', '\t', '\n']);
                 let content = if raw.is_empty() {
                     Vec::new()
                 } else {
-                    inlines(raw, &self.refs)
+                    inlines(raw, &self.refs, self.m)
                 };
                 Block::Heading { level, content }
             }
@@ -720,10 +790,17 @@ impl Parser {
                         Marker::Ordered(_) => Some(data.start),
                     },
                     tight,
-                    items: items
-                        .into_iter()
-                        .map(|i| self.convert_children(i))
-                        .collect(),
+                    items: {
+                        let mut out = Vec::new();
+                        for i in items {
+                            if self.m.failed() {
+                                break;
+                            }
+                            let blocks = self.convert_children(i);
+                            self.m.push(&mut out, blocks);
+                        }
+                        out
+                    },
                 }
             }
             Kind::Document | Kind::Item(_) => {
@@ -1019,8 +1096,9 @@ fn html_block_end(t: u8, s: &[u8]) -> bool {
 }
 
 /// Link reference definition at the start of `s`: (consumed length
-/// including the line ending, raw label, definition).
-fn parse_link_def(s: &str) -> Option<(usize, &str, LinkDef)> {
+/// including the line ending, raw label, raw destination, raw title). The
+/// caller decodes them once the budget has paid for the result.
+fn parse_link_def(s: &str) -> Option<(usize, &str, &str, &str)> {
     let b = s.as_bytes();
     let (mut i, label) = link_label(b, 0)?;
     if is_blank(utf8(label)) || peek(b, i) != b':' {
@@ -1053,11 +1131,7 @@ fn parse_link_def(s: &str) -> Option<(usize, &str, LinkDef)> {
         }
         None => return None,
     };
-    let def = LinkDef {
-        dest: unescape(utf8(dest)),
-        title: unescape(utf8(title)),
-    };
-    Some((end, utf8(label), def))
+    Some((end, utf8(label), utf8(dest), utf8(title)))
 }
 
 #[cfg(test)]
@@ -1066,12 +1140,17 @@ mod tests {
     use crate::{Inline, html};
     use std::time::{Duration, Instant};
 
+    fn parse(md: &str) -> Document {
+        super::parse(md, &mut Meter::new(crate::Limits::UNLIMITED)).unwrap()
+    }
+
     fn html(md: &str) -> String {
         html::write(&parse(md))
     }
 
     fn refs(md: &str) -> Refs {
-        run(md).refs
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        run(md, &mut m).refs
     }
 
     fn timed(input: &str) -> (Document, Duration) {

@@ -1,10 +1,10 @@
 //! The executor and supervisor: runs an action route (one or two actions)
 //! over a batch of input files, sandboxed, speaking contract v0
-//! (docs/architecture.md, "Invocation"), and moves the results into place
-//! with the output policy.
+//! (docs/architecture.md, "Invocation"), and publishes the results, one
+//! input at a time, with the output policy.
 //!
 //! Inputs are grouped by their final target folder; each group gets one
-//! work dir inside that folder (so placement is a same-filesystem rename)
+//! work dir inside that folder (the producers' staging)
 //! and one process per route step (`batch=no`: one group per input, run in
 //! turn). Step `k` runs with `--work <work>/step<k>` and reads its inputs
 //! from `<work>/step<k>.inputs`; step 2's inputs are step 1's outputs, so
@@ -18,7 +18,10 @@
 //! taken for a stale one) and, after a SIGTERM, the 5 s grace before
 //! SIGKILL.
 
-pub use crate::output::FileId;
+pub use crate::output::{
+    AnchorHint, CheckPoint, ChildBaseline, DirectoryId, Durability, FileId, GroupId,
+    LocationEvidence, NodeKind, OperationId, OutputGroup, Publication, PublicationReason,
+};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -56,10 +59,19 @@ const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// Bytes read from one pipe per poll wakeup, so a flood cannot starve the
 /// cancel signalfd or the exit pidfd.
 const READ_QUOTA: usize = 64 * 1024;
-/// How long the group may take to be gone after its SIGKILL.
-const GROUP_GONE: Duration = Duration::from_secs(1);
+/// The cleanup after a child's exit, from its group's SIGKILL: the leader
+/// reaped, no process of the group left, and its pipes at EOF. A killed
+/// process is gone in milliseconds unless it sits in an uninterruptible
+/// kernel wait (a hung filesystem); 1 s covers a loaded machine with a wide
+/// margin and stays short next to the 5 s `TERM_GRACE`. Past it nothing of
+/// the process is accepted: its inputs fail, nothing is placed.
+pub(crate) const GROUP_GONE: Duration = Duration::from_secs(1);
+/// Longest sleep between two probes of a group that is not gone yet:
+/// short next to `GROUP_GONE`, and few wakeups while a stuck one is waited
+/// for.
+const GROUP_PROBE_MAX: Duration = Duration::from_millis(50);
 /// Poll period when the kernel has no pidfd (before Linux 5.3).
-const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
+pub(crate) const NO_PIDFD_POLL: Duration = Duration::from_millis(100);
 
 /// What became of one input. One input can have several (warnings, or
 /// several outputs).
@@ -83,20 +95,37 @@ pub enum Outcome {
         input: PathBuf,
         message: String,
     },
+    /// The input's outputs were published (visible, never removed again),
+    /// but where they are, or that they are still what was made, could
+    /// not be proved: no `Done` with an invented path. Engine-internal:
+    /// the action wire protocol has no such event.
+    PublishedUnknown {
+        input: PathBuf,
+        group: GroupId,
+        location: LocationEvidence,
+        reason: PublicationReason,
+        durability: Durability,
+    },
 }
 
-/// Per input, the strongest outcome so far: done (any output), else failed,
-/// else skipped; an input with only warnings is not counted. One entry per
-/// input, never per outcome.
+/// Per input, the strongest outcome so far: done (any output, or a
+/// publication whose place is unknown: the conversion happened), else
+/// failed, else skipped; an input with only warnings is not counted. One
+/// entry per input, never per outcome.
 #[derive(Debug, Default)]
 pub struct Tally {
     rank: HashMap<PathBuf, u8>,
+    /// Inputs with a `PublishedUnknown`, once each however often it is seen.
+    unknown: HashSet<PathBuf>,
 }
 
 impl Tally {
     pub fn add(&mut self, o: &Outcome) {
+        if let Outcome::PublishedUnknown { input, .. } = o {
+            self.unknown.insert(input.clone());
+        }
         let (input, rank) = match o {
-            Outcome::Done { input, .. } => (input, 3),
+            Outcome::Done { input, .. } | Outcome::PublishedUnknown { input, .. } => (input, 3),
             Outcome::Failed { input, .. } => (input, 2),
             Outcome::Skipped { input, .. } => (input, 1),
             Outcome::Warned { input, .. } => (input, 0),
@@ -107,6 +136,12 @@ impl Tally {
                 self.rank.insert(input.clone(), rank);
             }
         }
+    }
+
+    /// Inputs published where it could not be confirmed (counted in
+    /// `done` too: the conversion happened).
+    pub fn unknown(&self) -> usize {
+        self.unknown.len()
     }
 
     /// `(done, skipped, failed)` inputs.
@@ -120,7 +155,8 @@ impl Tally {
 /// as they happen, so a run holds nothing proportional to its outputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
-    /// Whether Landlock confined the actions (seccomp and limits always apply).
+    /// Whether the sandbox gate passed ([`sandbox::ready`]); without it no
+    /// action ran.
     pub sandboxed: bool,
 }
 
@@ -128,11 +164,32 @@ pub struct Report {
 pub trait Observer {
     /// Every outcome, as it happens (`Done` once the output is in place).
     fn event(&mut self, o: &Outcome);
-    /// A folder created for several outputs of one input, before their
-    /// `Done` (undo may remove it if empty).
+    /// An input's wrapper folder, before its `Done`s (undo may remove it
+    /// if empty). Called by the default [`Observer::group`] only.
     fn dir(&mut self, path: &Path);
+    /// An input's outputs, complete and fixed in private at `private_path`,
+    /// right before the publishing rename. An error stops this input's
+    /// publication only: nothing of it becomes visible.
+    fn prepare_group(&mut self, _group: &OutputGroup, _private_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    /// An input's group after its commit, before its `Done`s (or its
+    /// `PublishedUnknown`). The default reports the wrapper to
+    /// [`Observer::dir`], only when its place was proved.
+    fn group(&mut self, _group: &OutputGroup, location: &LocationEvidence, _d: &Durability) {
+        if let Some(p) = &location.path_at_check {
+            self.dir(p);
+        }
+    }
     /// `done` of `total` inputs finished; `fraction` of the whole run.
     fn progress(&mut self, done: usize, total: usize, fraction: f32);
+    /// The first valid action event of a child was read, once per child
+    /// (a two-step route has two), before the event itself is handled.
+    /// `pid` is the child's. It marks the moment the supervisor *observed*
+    /// the child running: an upper bound on when the child reached its
+    /// entry point, not that instant. A child that emits no valid event
+    /// never gets the call.
+    fn started(&mut self, _pid: u32) {}
     /// An fd the supervisor polls for `POLLIN` while an action runs;
     /// [`Observer::wake`] is called when it is readable. Asked again
     /// before every poll. After a hangup (or an error, or an invalid fd)
@@ -200,6 +257,9 @@ impl CancelToken {
                 return Err(io::Error::from_raw_os_error(r));
             }
             let fd = libc::signalfd(-1, &set, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC);
+            // mutants: the failing `signalfd` branch needs an fd/memory exhaustion
+            // or a stale errno to reach; it restores the mask and returns the error,
+            // so the token is not installed (fail closed).
             if fd < 0 {
                 let e = io::Error::last_os_error();
                 libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
@@ -225,6 +285,9 @@ impl CancelToken {
                 self.cancelled.set(true);
                 continue;
             }
+            // mutants: EINTR from read(2) on a signalfd is not reachable here: no
+            // handler, the cancel signals are blocked. A changed branch only skips or
+            // repeats a read; a cancel is still seen by the next poll (fail closed).
             if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
@@ -257,7 +320,10 @@ pub fn run(
     obs: &mut dyn Observer,
     cancel: &CancelToken,
 ) -> Report {
-    let abi = sandbox::landlock_abi();
+    // The gate before anything else: no action runs without the whole
+    // sandbox, built-in or not, whether the catalog knows it from a fresh
+    // manifest run or from its cache.
+    let gate = sandbox::ready();
     let mut seen = HashSet::new();
     let uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
     let mut sink = Sink::new(obs, &uniq);
@@ -268,10 +334,12 @@ pub fn run(
     };
     if route.is_empty() || route.len() > 2 {
         all(&mut sink, "invalid route");
-        return sink.report(false);
+        // The gate's own result: a bad route is not a missing sandbox, and
+        // the notice must not say it is.
+        return sink.report(gate.is_ok());
     }
-    if refuse_without_landlock(abi.is_some(), route) {
-        all(&mut sink, "sandbox unavailable");
+    if let Err(e) = gate {
+        all(&mut sink, &format!("sandbox unavailable: {e}"));
         return sink.report(false);
     }
     let mut ok = Vec::new();
@@ -286,11 +354,6 @@ pub fn run(
                 Ok(_) => sink.fail(i, "not a regular file".to_owned()),
                 Err(e) => sink.fail(i, format!("cannot read input: {e}")),
             }
-        }
-    }
-    if abi.is_none() {
-        for &i in &ok {
-            sink.warn(i, "ran without sandbox".to_owned());
         }
     }
     let batch = route.iter().all(|a| a.batch);
@@ -328,11 +391,11 @@ pub fn run(
                 let _ = fs::create_dir_all(&g.target);
                 output::clean_stale(&g.target);
             }
-            run_group(route, &members, &g.target, abi.is_some(), cancel, &mut sink);
+            run_group(route, &members, &g.target, cancel, &mut sink);
         }
         sink.end_group();
     }
-    sink.report(abi.is_some())
+    sink.report(true)
 }
 
 /// Forwards outcomes to the observer, tracks progress.
@@ -434,6 +497,25 @@ impl<'a> Sink<'a> {
         self.finish(i);
     }
 
+    /// Published, but its place or baseline could not be proved.
+    fn unknown(
+        &mut self,
+        i: usize,
+        p: Publication,
+        location: LocationEvidence,
+        reason: PublicationReason,
+    ) {
+        let input = self.input(i);
+        self.emit(Outcome::PublishedUnknown {
+            input,
+            group: p.group.group,
+            location,
+            reason,
+            durability: p.durability,
+        });
+        self.finish(i);
+    }
+
     fn begin_group(&mut self, span: usize) {
         self.span = span;
         self.step = 0;
@@ -511,7 +593,6 @@ fn run_group(
     route: &[&Action],
     members: &[usize],
     target: &Path,
-    landlock: bool,
     cancel: &CancelToken,
     sink: &mut Sink,
 ) {
@@ -546,7 +627,6 @@ fn run_group(
                 &dir,
                 &list,
                 &work.path,
-                landlock,
                 cancel,
                 sink,
             ),
@@ -561,27 +641,23 @@ fn run_group(
             return; // cancelled
         };
         if last {
-            place_outputs(action, &step_in, outputs, &dir, target, sink);
+            place_outputs(action, &step_in, outputs, &dir, target, cancel, sink);
             return;
         }
         // Each output was checked when its `done` arrived, but the action
         // could swap it for a symlink afterwards. Its whole process group is
-        // gone now (`outputs` is `None` otherwise), but a descendant that
-        // left the group (`setsid`, where seccomp does not deny it) may still
-        // write its dir. So the next step's read rules are built here, from
-        // the fds this check opens, and no path is resolved again.
-        let rules = if landlock {
-            match sandbox::create() {
-                Ok(r) => r,
-                Err(e) => {
-                    for &o in &step_in.origin {
-                        sink.fail(o, format!("sandbox setup failed: {e}"));
-                    }
-                    return;
+        // gone now and its pipes are at EOF (`outputs` is `None` otherwise;
+        // seccomp denies leaving the group), so nothing changes the dir any
+        // more. The next step's read rules are still built here, from the
+        // fds this check opens, and no path is resolved again.
+        let rules = match sandbox::create() {
+            Ok(r) => r,
+            Err(e) => {
+                for &o in &step_in.origin {
+                    sink.fail(o, format!("sandbox setup failed: {e}"));
                 }
+                return;
             }
-        } else {
-            None
         };
         let mut changed: Vec<usize> = Vec::new();
         for (j, outs) in outputs.iter().enumerate() {
@@ -592,10 +668,9 @@ fn run_group(
             for rel in outs {
                 let allowed = output::open_regular_beneath(&dir, rel)
                     .map_err(|_| "intermediate output changed".to_owned())
-                    .and_then(|fd| match &rules {
-                        Some(r) => sandbox::allow_read_fd(r, fd.as_fd(), &dir.join(rel))
-                            .map_err(|e| format!("sandbox setup failed: {e}")),
-                        None => Ok(()),
+                    .and_then(|fd| {
+                        sandbox::allow_read_fd(&rules, fd.as_fd(), &dir.join(rel))
+                            .map_err(|e| format!("sandbox setup failed: {e}"))
                     });
                 if let Err(reason) = allowed {
                     changed.push(o);
@@ -625,23 +700,28 @@ fn run_group(
             return;
         }
         step_in = next;
-        pre = rules;
+        pre = Some(rules);
     }
 }
 
-/// Moves the last step's outputs to `target`: one output per input with
-/// `place_beneath`, several with `place_many_beneath`. Both resolve the
-/// output from the work dir fd without following symlinks, so even a file
-/// swapped after validation can only be one from inside the work dir.
+/// Publishes the last step's outputs to `target`, one input at a time:
+/// each input's outputs are copied into a fresh private wrapper folder and
+/// made visible by one no-replace rename ([`output::publish_beneath`]), so
+/// an input is either wholly published or not at all, and another input's
+/// failure never takes back a published one. `Done` comes only for files
+/// whose place the postcheck proved; a committed group that cannot be
+/// proved is `PublishedUnknown`, never removed. A cancel is honoured up to
+/// each input's commit.
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
     outputs: Vec<Vec<PathBuf>>,
     dir: &Path,
     target: &Path,
+    cancel: &CancelToken,
     sink: &mut Sink,
 ) {
-    // Outputs per original input, in order; the paths are moved, not copied.
+    // Outputs per original input, in order.
     let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
     for (j, outs) in outputs.into_iter().enumerate() {
         if outs.is_empty() {
@@ -658,32 +738,67 @@ fn place_outputs(
         per[at].1.extend(outs);
     }
     for (o, rels) in per {
+        if sink.is_cancelled(cancel) {
+            sink.fail(o, "cancelled".to_owned());
+            continue;
+        }
         let src = &sink.inputs[o];
         let stem = src
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "output".to_owned());
-        let placed = if rels.len() == 1 {
-            output::place_beneath(dir, &rels[0], target, &stem, &action.ext, None).map(|f| {
-                output::ManyPlaced {
-                    folder: PathBuf::new(),
-                    files: vec![f],
+        let mut cancelled = false;
+        let published = {
+            let mut before = |g: &OutputGroup, private: &Path| -> io::Result<()> {
+                #[cfg(test)]
+                tests::BEFORE_PREPARE.with_borrow_mut(|f| f.as_mut().map(|f| f()));
+                // Before the group is prepared (a later journal keeps a
+                // durable intent for it), so a cancel that came in during
+                // the copy leaves nothing behind but the private staging.
+                if sink.is_cancelled(cancel) {
+                    cancelled = true;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
                 }
-            })
-        } else {
-            output::place_many_beneath(dir, &rels, target, &stem)
+                sink.obs.prepare_group(g, private)?;
+                // And again right before the commit: preparing may take time.
+                if sink.is_cancelled(cancel) {
+                    cancelled = true;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                }
+                Ok(())
+            };
+            output::publish_beneath(dir, &rels, target, &stem, &action.ext, &mut before)
         };
-        match placed {
-            Ok(many) => {
-                if !many.folder.as_os_str().is_empty() {
-                    sink.obs.dir(&many.folder);
+        let p = match published {
+            Ok(p) => p,
+            Err(_) if cancelled => {
+                sink.fail(o, "cancelled".to_owned());
+                continue;
+            }
+            Err(e) => {
+                sink.fail(o, format!("cannot publish output: {e}"));
+                continue;
+            }
+        };
+        #[cfg(test)]
+        tests::AFTER_PUBLISH.with_borrow_mut(|f| f.as_mut().map(|f| f(&p)));
+        let checked = output::postcheck(&p);
+        let mut location = p.location.clone();
+        if checked == Err(PublicationReason::AncestorChanged) {
+            location.path_at_check = None;
+        }
+        sink.obs.group(&p.group, &location, &p.durability);
+        match checked {
+            Ok(files) => {
+                if let Durability::Unconfirmed(why) = &p.durability {
+                    sink.warn(o, format!("saved, but not confirmed on disk: {why}"));
                 }
-                for (p, id) in many.files {
-                    sink.placed(o, p, id);
+                for (path, id) in files {
+                    sink.placed(o, path, id);
                 }
             }
-            Err(e) => sink.fail(o, format!("cannot place output: {e}")),
+            Err(reason) => sink.unknown(o, p, location, reason),
         }
     }
 }
@@ -912,13 +1027,6 @@ fn last_line(tail: &[u8]) -> String {
         .to_owned()
 }
 
-/// Whether a route must be refused because Landlock is unavailable: only
-/// built-in actions (code we ship and trust) may run without it; a plugin
-/// anywhere in the route would run unconfined.
-fn refuse_without_landlock(landlock: bool, route: &[&Action]) -> bool {
-    !landlock && route.iter().any(|a| !a.builtin)
-}
-
 /// Where a step's Landlock ruleset comes from.
 #[derive(Debug, PartialEq, Eq)]
 enum RuleSource {
@@ -940,16 +1048,10 @@ fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
     }
 }
 
-/// Whether a step must fail because it ended up without a ruleset: only
-/// built-in actions may run unconfined.
-fn refuse_unsandboxed(has_ruleset: bool, builtin: bool) -> bool {
-    !has_ruleset && !builtin
-}
-
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
-/// unfinished input is then failed as cancelled). With Landlock, an
-/// intermediate step's ruleset comes as `pre`, already granting its inputs.
+/// unfinished input is then failed as cancelled). An intermediate step's
+/// ruleset comes as `pre`, already granting its inputs.
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
@@ -958,7 +1060,6 @@ fn run_step(
     dir: &Path,
     list: &Path,
     root: &Path,
-    landlock: bool,
     cancel: &CancelToken,
     sink: &mut Sink,
 ) -> Option<Vec<Vec<PathBuf>>> {
@@ -1004,23 +1105,16 @@ fn run_step(
         read_exact: &exact,
         write: Some(dir),
     };
-    let ruleset = if landlock {
-        let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
-            (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| Some(r)),
-            (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
-            (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
-            (RuleSource::Build, _) => sandbox::build(&policy),
-        };
-        match built {
-            Ok(r) => r,
-            Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
-        }
-    } else {
-        None
+    let built = match (rule_source(pre.is_some(), step_in.intermediate), pre) {
+        (RuleSource::Extend, Some(r)) => sandbox::add(&r, &policy).map(|()| r),
+        (RuleSource::Extend, None) => Err(io::Error::other("no ruleset to extend")),
+        (RuleSource::Refuse, _) => Err(io::Error::other("no intermediate rules")),
+        (RuleSource::Build, _) => sandbox::build(&policy),
     };
-    if refuse_unsandboxed(ruleset.is_some(), action.builtin) {
-        return fail_all(sink, "sandbox unavailable");
-    }
+    let ruleset = match built {
+        Ok(r) => r,
+        Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
+    };
     let total: u64 = step_in
         .paths
         .iter()
@@ -1028,8 +1122,14 @@ fn run_step(
         .map(|m| m.len())
         .sum();
     let limits = sandbox::limits_for(total);
-    let fd = ruleset.as_ref().map(|r| r.as_raw_fd());
+    let tmp = match sandbox::make_child_tmp(dir) {
+        Ok(t) => t,
+        Err(e) => return fail_all(sink, &format!("cannot create temp directory: {e}")),
+    };
+    let fd = ruleset.as_raw_fd();
     let mut cmd = Command::new(&action.bin);
+    // Inside the work dir, the one place the ruleset lets it write.
+    sandbox::configure_child_env(&mut cmd, Some(&tmp));
     cmd.arg("run")
         .arg(&action.id)
         .arg("--work")
@@ -1043,12 +1143,15 @@ fn run_step(
         .stderr(Stdio::piped());
     // No `process_group(0)`: std applies it before pre_exec, and the
     // child's `setsid` (which also makes it a group leader) would then fail.
+    // The leader dies with us if we die abnormally (see `die_with_parent`).
+    let parent = std::process::id() as libc::pid_t;
     // SAFETY: the closure makes only async-signal-safe calls (sigemptyset,
-    // sigprocmask, and apply_in_child's documented ones) on stack data; the
-    // ruleset fd stays open until spawn returns (`ruleset` lives to the end
-    // of this function).
+    // sigprocmask, and die_with_parent's and apply_in_child's documented
+    // ones) on stack data; the ruleset fd stays open until spawn returns
+    // (`ruleset` lives to the end of this function).
     unsafe {
         cmd.pre_exec(move || {
+            sandbox::die_with_parent(parent)?;
             // The child inherits the supervisor's blocked SIGTERM/SIGINT.
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
@@ -1063,6 +1166,11 @@ fn run_step(
             sink.fail(o, "cancelled".to_owned());
         }
         return None;
+    }
+    // Orphans of the action come back to us (see `reap_group`); without
+    // that nothing could tell whether one still runs.
+    if let Err(e) = become_subreaper() {
+        return fail_all(sink, &format!("cannot supervise the action: {e}"));
     }
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -1121,14 +1229,18 @@ struct Supervisor<'a> {
     /// it fails and nothing of it is placed.
     offender: Option<(usize, String)>,
     cancelled: bool,
+    /// [`Observer::started`] was called for this child.
+    started: bool,
     term_at: Option<Instant>,
     killed: bool,
     /// The child is reaped: its pid, and so the group id, may now be
     /// reused by an unrelated process. Nothing is signalled after this.
     reaped: bool,
+    /// `run` stopped because poll failed: nothing is accepted.
+    poll_failed: bool,
 }
 
-fn set_nonblocking(fd: RawFd) {
+pub(crate) fn set_nonblocking(fd: RawFd) {
     // SAFETY: fd is an open pipe fd owned by the Child handles.
     unsafe {
         let fl = libc::fcntl(fd, libc::F_GETFL);
@@ -1138,7 +1250,7 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
+pub(crate) fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
     // SAFETY: pidfd_open takes a pid and flags 0; the child is not reaped
     // yet, so the pid still names it.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
@@ -1148,7 +1260,9 @@ fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
 
 /// Whether our child `pid` has exited, observed without reaping it (the
 /// fallback for kernels without pidfd).
-fn exited_unreaped(pid: libc::pid_t) -> bool {
+pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
+    #[cfg(test)]
+    tests::PROBES.set(tests::PROBES.get() + 1);
     // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
@@ -1159,25 +1273,150 @@ fn exited_unreaped(pid: libc::pid_t) -> bool {
     r == 0 && unsafe { info.si_pid() } != 0
 }
 
-/// Waits, with signal 0 (which delivers nothing), until process group
-/// `pgid` has no member left; false if it still has one after
-/// `GROUP_GONE`. Called after the leader is reaped (a zombie leader still
-/// counts as a member). If the id were reused meanwhile, the probe could
-/// only report a false "left behind", never touch the other process.
-fn group_gone(pgid: libc::pid_t) -> bool {
-    let start = Instant::now();
+/// Waits until our unreaped child `pid` has exited (it stays unreaped),
+/// by its pidfd or, without one, by `waitid(WNOWAIT)`; false if it has not
+/// by `until`.
+pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> bool {
     let mut nap = Duration::from_millis(1);
     loop {
-        // SAFETY: kill with signal 0 only checks for existence.
-        let r = unsafe { libc::kill(-pgid, 0) };
-        if r != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            return true;
+        let left = until.saturating_duration_since(Instant::now());
+        match pidfd {
+            Some(fd) => {
+                let mut p = libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // Round up so the deadline has passed when poll times out.
+                let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+                // SAFETY: p is one valid pollfd.
+                let r = unsafe { libc::poll(&mut p, 1, ms) };
+                if r > 0 {
+                    return true;
+                }
+                // mutants: not killable by a test. No signal handler is
+                // installed and SIGTERM/SIGINT are blocked, so poll does not
+                // see EINTR; the `==` -> `!=` mutant on the EINTR test would
+                // only matter then (an early `false`). Every caller of
+                // `wait_exited` (the supervisor, catalog.rs twice) treats
+                // `false` as "not gone" and fails closed: no security gap.
+                if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                // mutants: the `r < 0` fallback needs a poll error other than EINTR on a
+                // valid pidfd; none can be provoked. It asks `waitid` instead (no verdict
+                // is guessed), so a changed condition cannot open a gap.
+                if r < 0 {
+                    return exited_unreaped(pid);
+                }
+            }
+            None if exited_unreaped(pid) => return true,
+            None => {}
         }
-        if start.elapsed() >= GROUP_GONE {
+        if left.is_zero() {
             return false;
         }
-        std::thread::sleep(nap);
-        nap = (nap * 2).min(Duration::from_millis(50));
+        if pidfd.is_none() {
+            std::thread::sleep(nap.min(left));
+            nap = (nap * 2).min(GROUP_PROBE_MAX);
+        }
+    }
+}
+
+/// Makes this process the subreaper of everything it starts: a process
+/// whose parent dies is reparented to us, not to init. With `setsid` and
+/// `setpgid` denied in the sandbox, every member of an action's process
+/// group then descends from one of our own children until it is reaped,
+/// and the kernel's child list ([`reap_group`]) shows it whatever `/proc`
+/// shows (hidepid) and whatever the member made of itself (non-dumpable).
+/// Not inherited across fork (prctl(2)), so no child is one; kept across
+/// our own exec, which never happens. Idempotent and cheap: called before
+/// every spawn of a manifest or an action.
+pub(crate) fn become_subreaper() -> io::Result<()> {
+    // SAFETY: prctl with an int option and plain integer arguments.
+    let r = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Reaps every member of process group `pgid` with `waitid(P_PGID,
+/// WEXITED | WNOHANG | __WALL)` until none is left (`ECHILD`). Called after
+/// the group got our SIGKILL (sent while its leader was unreaped, so to
+/// no other group) and with the leader reaped, under [`become_subreaper`]:
+/// every member then descends from one of our children, and a process's
+/// children become ours before it is a zombie, so `ECHILD` means the group
+/// is empty and no fork chain slips past.
+///
+/// True if any member was alive at the kill: one still running when
+/// looked at, or reaped as killed by SIGKILL. False if all had exited on
+/// their own. `__WALL` also reports a child whose exit signal is not
+/// SIGCHLD. Fails closed: any error but `ECHILD`, or members still there
+/// at `until`, is an error (the kill is already sent either way).
+pub(crate) fn reap_group(pgid: libc::pid_t, until: Instant) -> io::Result<bool> {
+    let mut alive = false;
+    let mut nap = Duration::from_millis(1);
+    loop {
+        // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        #[cfg(test)]
+        let injected = {
+            tests::PROBES.set(tests::PROBES.get() + 1);
+            tests::WAITID_ERRNO.get()
+        };
+        #[cfg(not(test))]
+        let injected: Option<i32> = None;
+        let r = match injected {
+            Some(e) => {
+                // SAFETY: errno is thread-local storage of this thread.
+                unsafe { *libc::__errno_location() = e };
+                -1
+            }
+            // SAFETY: info is a valid out-pointer; pgid > 0 names a group.
+            None => unsafe {
+                libc::waitid(
+                    libc::P_PGID,
+                    pgid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::__WALL,
+                )
+            },
+        };
+        if r != 0 {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return Ok(alive),
+                _ => return Err(e),
+            }
+        }
+        let timed_out = || {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the action's processes are not all gone",
+            )
+        };
+        // With WNOHANG and no exited child, si_pid stays 0: one still runs
+        // (dying of our SIGKILL, or stuck in the kernel).
+        // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
+        if unsafe { info.si_pid() } == 0 {
+            alive = true;
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(timed_out());
+            }
+            std::thread::sleep(nap.min(left));
+            nap = (nap * 2).min(GROUP_PROBE_MAX);
+            continue;
+        }
+        // SAFETY: as above; si_status is set for a reaped child.
+        if info.si_code == libc::CLD_KILLED && unsafe { info.si_status() } == libc::SIGKILL {
+            alive = true;
+        }
+        if Instant::now() >= until {
+            return Err(timed_out());
+        }
     }
 }
 
@@ -1250,9 +1489,11 @@ impl<'a> Supervisor<'a> {
             violation: None,
             offender: None,
             cancelled: false,
+            started: false,
             term_at: None,
             killed: false,
             reaped: false,
+            poll_failed: false,
         }
     }
 
@@ -1270,7 +1511,9 @@ impl<'a> Supervisor<'a> {
     }
 
     fn terminate(&mut self) {
-        if self.term_at.is_none() {
+        // Reaped: the group is being finished already, and its id is no
+        // longer ours to signal (a violation found in the final drain).
+        if self.term_at.is_none() && !self.reaped {
             self.signal(libc::SIGTERM);
             self.term_at = Some(Instant::now());
         }
@@ -1344,11 +1587,14 @@ impl<'a> Supervisor<'a> {
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
             if r < 0 {
+                // mutants: as for `drain`'s poll: no handler is installed and the cancel
+                // signals are blocked, so EINTR does not come; early exit fails closed.
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
                 // Unexpected: stop supervising; finish kills and reaps.
                 self.signal(libc::SIGKILL);
+                self.poll_failed = true;
                 return;
             }
             let ready = |at: Option<usize>| at.is_some_and(|i| fds[i].revents != 0);
@@ -1362,6 +1608,15 @@ impl<'a> Supervisor<'a> {
             {
                 self.signal(libc::SIGKILL);
                 self.killed = true;
+            }
+            let exited = match pid_at {
+                Some(_) => ready(pid_at),
+                None => exited_unreaped(self.pid),
+            };
+            // Once the leader is gone, nothing more is read until its whole
+            // group is: `finish` kills it, then reads the rest.
+            if exited {
+                return;
             }
             // At most READ_QUOTA per pipe, then the signalfd and the pidfd
             // are looked at again: a flood cannot delay a cancel.
@@ -1389,13 +1644,6 @@ impl<'a> Supervisor<'a> {
                     sink.cancelled = true;
                     self.terminate();
                 }
-            }
-            let exited = match pid_at {
-                Some(_) => ready(pid_at),
-                None => exited_unreaped(self.pid),
-            };
-            if exited {
-                return;
             }
         }
     }
@@ -1469,6 +1717,10 @@ impl<'a> Supervisor<'a> {
                 return;
             }
         };
+        if !self.started {
+            self.started = true;
+            sink.obs.started(self.pid as u32);
+        }
         let again = |paths: &[PathBuf], index: usize| {
             format!(
                 "second result for {} after skip or fail",
@@ -1523,28 +1775,110 @@ impl<'a> Supervisor<'a> {
         !self.output_hashes.insert(h) && self.outputs.iter().any(|(_, p)| p == rel)
     }
 
-    /// After the exit (child still unreaped): kills what is left of the
-    /// group while its id is still ours, drains the pipes, reaps, waits for
-    /// the group to be gone, and settles every input without a result.
-    /// Nothing is placed unless the group is confirmed gone.
-    fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
-        self.signal(libc::SIGKILL);
-        // Bounded: the writers are dead or dying, the pipes hold what is left.
-        for _ in 0..64 {
-            let out = self.read_stdout(sink);
-            let err = self.read_stderr();
-            if !out && !err {
-                break;
+    /// Reads both pipes to EOF, parsing stdout, until `until`. True if
+    /// both reached EOF. Called once the group is gone: no process holds a
+    /// write end any more, so EOF comes as soon as the pipes are empty.
+    fn drain(&mut self, sink: &mut Sink, until: Instant) -> bool {
+        while self.stdout.is_some() || self.stderr.is_some() {
+            let out = self.stdout.as_ref().map(|s| s.as_raw_fd());
+            let err = self.stderr.as_ref().map(|s| s.as_raw_fd());
+            let mut fds: Vec<libc::pollfd> = [out, err]
+                .into_iter()
+                .flatten()
+                .map(|fd| libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            let left = until.saturating_duration_since(Instant::now());
+            // The deadline holds while data keeps arriving, not only when
+            // the pipes go quiet: poll alone returns at once as long as a
+            // writer never stops, so the clock is checked on every pass. In
+            // practice no writer is left (the group is reaped, the sandbox
+            // forbids what could keep one), but "a hard deadline on every
+            // wait, data pipe reads included" must not rest on that.
+            if left.is_zero() {
+                return false;
+            }
+            let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            // SAFETY: fds is a valid array of fds.len() pollfds.
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+            // mutants: unreachable in a test: EINTR needs a signal handler or an
+            // unblocked signal, and none is installed (SIGTERM/SIGINT are blocked by
+            // the cancel token, nothing else handles signals). A poll that failed
+            // early would end the drain with `false`: the caller fails closed.
+            if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if r <= 0 {
+                return false;
+            }
+            if out.is_some() && fds[0].revents != 0 {
+                self.read_stdout(sink);
+            }
+            let e = usize::from(out.is_some());
+            if err.is_some() && fds[e].revents != 0 {
+                self.read_stderr();
             }
         }
+        true
+    }
+
+    /// Kills the whole group first (the unreaped leader keeps `pid` the
+    /// group id ours, so the kill reaches nothing else), waits for the
+    /// leader's exit and reaps it, then asks the kernel's child list
+    /// whether any other process of the group was still there (then every
+    /// unsettled input of this process fails and nothing is placed),
+    /// reaps every member until none is left, and only then reads the rest
+    /// of the pipes, to EOF. EOF is the kernel's word that no write end is
+    /// open anywhere, so no writer is left, whatever pids were reused. Then
+    /// it settles every input without a result. Nothing is accepted unless
+    /// all of this finishes within `GROUP_GONE`.
+    fn finish(mut self, sink: &mut Sink) -> Option<Vec<Vec<PathBuf>>> {
+        // A cancel that came in the same wake as the exit still counts.
+        if self.cancel.is_cancelled() || sink.cancelled {
+            self.cancelled = true;
+        }
+        // The whole group is killed first, whatever happens next: the
+        // unreaped leader keeps `pid` the action's group id, so the kill
+        // cannot reach another group, and nothing of the action outlives
+        // this run even if its members cannot be counted. (If we die
+        // abnormally only the leader follows: see `die_with_parent`.)
+        self.signal(libc::SIGKILL);
+        let until = Instant::now() + GROUP_GONE;
+        if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
+            // Killed but not exiting: stuck in the kernel. It stays
+            // unreaped (its group id stays ours); nothing is accepted.
+            let why = if self.cancelled {
+                "cancelled"
+            } else {
+                "action left processes behind"
+            };
+            for &o in &self.step_in.origin {
+                sink.fail(o, why.to_owned());
+            }
+            return None;
+        }
+        // Exited: wait returns at once.
         let end = match self.child.wait() {
             Ok(s) => End::from(s),
             Err(_) => End::Exit(-1),
         };
         self.reaped = true;
+        // A descendant still running after the leader's exit fails the
+        // process, whatever it reported: killed, it may have been mid-write
+        // to an output. The kernel's child list tells (see `reap_group`),
+        // and fails closed: unreadable, or members left at the deadline,
+        // counts as left behind.
+        let reaped = reap_group(self.pid, until);
+        let vanished = reaped.is_ok();
+        let left_behind = !matches!(reaped, Ok(false));
+        let gone = vanished && !left_behind && self.drain(sink, until);
         // A line cut off by a crash is not an event; after a normal exit it
         // is a broken one. (No signal: the child is reaped.)
-        if !self.line.is_empty()
+        if gone
+            && !self.line.is_empty()
             && !self.overlong
             && matches!(end, End::Exit(_))
             && self.violation.is_none()
@@ -1552,7 +1886,6 @@ impl<'a> Supervisor<'a> {
         {
             self.violation = Some("unterminated event line".to_owned());
         }
-        let gone = group_gone(self.pid);
         let origin = &self.step_in.origin;
         if self.cancelled {
             for &o in origin {
@@ -1560,7 +1893,27 @@ impl<'a> Supervisor<'a> {
             }
             return None;
         }
+        if self.poll_failed {
+            for &o in origin {
+                sink.fail(o, "supervision failed (poll error)".to_owned());
+            }
+            return None;
+        }
         if !gone {
+            // After a contract violation the group got our SIGTERM, so a
+            // member still dying is its consequence, not a cause: the
+            // violation stays the reason. Still nothing is placed.
+            if vanished && self.violation.is_some() {
+                if let Some((j, why)) = self.offender.take() {
+                    sink.fail(origin[j], why);
+                }
+                let reason =
+                    unreported_reason(self.violation.as_deref(), end, &self.tail, self.data_limit);
+                for &o in origin {
+                    sink.fail(o, reason.clone());
+                }
+                return None;
+            }
             for &o in origin {
                 sink.fail(o, "action left processes behind".to_owned());
             }
@@ -1593,7 +1946,7 @@ impl<'a> Supervisor<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1624,6 +1977,239 @@ mod tests {
 
     fn violation(r: Result<Event, String>) -> String {
         r.expect_err("expected a contract violation")
+    }
+
+    thread_local! {
+        /// The errno `reap_group` gets from its `waitid`, on this thread.
+        pub(crate) static WAITID_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+        /// How many times `exited_unreaped` and `reap_group` called
+        /// `waitid` on this thread: a count of probes does not shrink with
+        /// load the way a CPU-time budget does (a slow machine probes less,
+        /// never more), so a bound on it holds on a busy machine and still
+        /// catches a nap that stays at zero.
+        pub(crate) static PROBES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Starts `sh -c script` as the leader of its own group and waits for
+    /// its exit; returns its pid, still unreaped, and the child.
+    fn leader(script: &str) -> (libc::pid_t, std::process::Child) {
+        become_subreaper().unwrap();
+        let child = Command::new("sh")
+            .args(["-c", script])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        let pidfd = pidfd_open(pid);
+        let until = Instant::now() + Duration::from_secs(5);
+        assert!(wait_exited(pid, pidfd.as_ref(), until));
+        (pid, child)
+    }
+
+    /// Kills `pid`'s group (the leader exited, unreaped), reaps the
+    /// leader, then the group.
+    fn kill_and_reap(pid: libc::pid_t, mut c: std::process::Child) -> io::Result<bool> {
+        // SAFETY: the leader is unreaped: the group id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        c.wait().unwrap();
+        reap_group(pid, Instant::now() + Duration::from_secs(5))
+    }
+
+    /// The kernel's child list after the leader's exit: a background job
+    /// still running at the kill is found (and reaped); one the leader
+    /// waited for, or none at all, is not.
+    #[test]
+    fn reap_group_tells_a_running_orphan_from_a_finished_one() {
+        let (pid, c) = leader("sleep 30 & exit 0");
+        assert!(kill_and_reap(pid, c).unwrap());
+        let (pid, c) = leader("sleep 0.01 & wait; exit 0");
+        assert!(!kill_and_reap(pid, c).unwrap());
+        let (pid, c) = leader("exit 0");
+        assert!(!kill_and_reap(pid, c).unwrap());
+    }
+
+    /// A member already dead of our SIGKILL when the group is reaped (no
+    /// longer running) still counts as alive at the kill, by its status.
+    #[test]
+    fn reap_group_counts_a_member_killed_by_our_kill() {
+        let (pid, mut c) = leader("sleep 30 & exit 0");
+        // SAFETY: the leader is unreaped: the group id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        c.wait().unwrap();
+        // Wait, without reaping, until the sleep is a zombie.
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: zeroed siginfo is valid storage; WNOWAIT reaps nothing.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL;
+            // SAFETY: info is a valid out-pointer.
+            let r = unsafe { libc::waitid(libc::P_PGID, pid as libc::id_t, &mut info, flags) };
+            assert_eq!(r, 0, "{}", io::Error::last_os_error());
+            // SAFETY: waitid filled (or zeroed) the CLD fields.
+            if unsafe { info.si_pid() } != 0 {
+                break;
+            }
+            assert!(Instant::now() < until, "the sleep did not die");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(reap_group(pid, until).unwrap());
+    }
+
+    /// A member that made itself unreadable in `/proc` (non-dumpable, by
+    /// executing a binary it may not read, as `hidepid` would hide any
+    /// foreign one) is still on the kernel's child list.
+    #[test]
+    fn reap_group_sees_a_non_dumpable_member() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("nodump");
+        let bin = t.0.join("hidden-sleep");
+        // Copied by `cp`, not through a writable fd of ours (ETXTBSY).
+        let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+            .unwrap();
+        assert!(
+            Command::new("cp")
+                .arg(sleep)
+                .arg(&bin)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o111)).unwrap();
+        let token = format!("30.{}{}", std::process::id(), line!());
+        let (pid, c) = leader(&format!("{} {token} & exit 0", bin.display()));
+        // Positive control: it is non-dumpable, so its environ (a
+        // ptrace-checked file) is closed to us, as all of it is to a
+        // foreign reader under hidepid.
+        // Only the exec'd process counts (argv[0] is the binary): before
+        // its exec the forked `sh` carries the token in its cmdline too,
+        // and is readable. Waited for by condition: 5 s is far above a
+        // fork+exec even on a loaded slow machine, and a miss fails the
+        // assert below with an empty list.
+        use std::os::unix::ffi::OsStrExt;
+        let argv0 = bin.as_os_str().as_bytes().to_owned();
+        let until = Instant::now() + Duration::from_secs(5);
+        let hidden = loop {
+            let found = fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    fs::read(e.path().join("cmdline"))
+                        .is_ok_and(|c| c.split(|&b| b == 0).next() == Some(&argv0[..]))
+                })
+                .map(|e| fs::File::open(e.path().join("environ")).map(drop))
+                .collect::<Vec<_>>();
+            if !found.is_empty() || Instant::now() >= until {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            matches!(&hidden[..], [Err(e)] if e.raw_os_error() == Some(libc::EACCES)),
+            "{hidden:?}"
+        );
+        assert!(kill_and_reap(pid, c).unwrap());
+    }
+
+    /// Fails closed: an error from `waitid` other than ECHILD is an error,
+    /// which the callers count as left behind.
+    #[test]
+    fn reap_group_fails_closed_on_a_waitid_error() {
+        let (pid, mut c) = leader("exit 0");
+        c.wait().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let r = reap_group(pid, Instant::now() + Duration::from_secs(1));
+        WAITID_ERRNO.set(None);
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::EINVAL));
+    }
+
+    /// `__WALL`: a child whose exit signal is not SIGCHLD (raw `clone`
+    /// with exit signal 0) is invisible to `waitid` without it. Our own
+    /// member children are reparented ones, which the kernel gives
+    /// SIGCHLD (`reparent_leader`), and the sandbox lets no action make
+    /// us such a child directly, so the case is built here: a direct
+    /// child in its own group, as a leader would be.
+    #[test]
+    fn reap_group_sees_a_child_without_exit_signal() {
+        // SAFETY: a raw clone with flags 0 is a fork with exit signal 0.
+        // The child only makes async-signal-safe calls (setpgid, pause,
+        // _exit), as after any fork of a threaded process.
+        let pid = unsafe { libc::syscall(libc::SYS_clone, 0, 0, 0, 0, 0) } as libc::pid_t;
+        if pid == 0 {
+            // SAFETY: as above.
+            unsafe {
+                libc::setpgid(0, 0);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        assert!(pid > 0, "clone: {}", io::Error::last_os_error());
+        let until = Instant::now() + Duration::from_secs(5);
+        // SAFETY: getpgid only reads; the child is ours and unreaped.
+        while unsafe { libc::getpgid(pid) } != pid {
+            assert!(Instant::now() < until, "the child never led its group");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Without __WALL the running child is not seen at all.
+        // SAFETY: zeroed siginfo is valid storage; WNOHANG does not block.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PGID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG,
+            )
+        };
+        assert_eq!(
+            (r, io::Error::last_os_error().raw_os_error()),
+            (-1, Some(libc::ECHILD)),
+            "control"
+        );
+        // SAFETY: our unreaped child leads the group: the id is ours.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert!(reap_group(pid, until).unwrap(), "missed the killed child");
+    }
+
+    /// The subreaper flag is not inherited across fork: a child (here,
+    /// in the gap between fork and exec) is not one.
+    #[test]
+    fn subreaper_is_not_inherited() {
+        use std::os::unix::process::CommandExt;
+        become_subreaper().unwrap();
+        let mut cmd = Command::new("/bin/true");
+        // SAFETY: prctl is async-signal-safe; `v` is on the child's stack.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut v: libc::c_int = -1;
+                libc::prctl(
+                    libc::PR_GET_CHILD_SUBREAPER,
+                    &mut v as *mut libc::c_int,
+                    0,
+                    0,
+                    0,
+                );
+                if v != 0 {
+                    return Err(io::Error::from_raw_os_error(libc::EEXIST));
+                }
+                Ok(())
+            });
+        }
+        assert!(cmd.status().unwrap().success(), "the child is a subreaper");
+        let mut v: libc::c_int = -1;
+        // SAFETY: PR_GET_CHILD_SUBREAPER writes one int to `v`.
+        unsafe {
+            libc::prctl(
+                libc::PR_GET_CHILD_SUBREAPER,
+                &mut v as *mut libc::c_int,
+                0,
+                0,
+                0,
+            )
+        };
+        assert_eq!(v, 1, "control: we are one");
     }
 
     #[test]
@@ -1845,6 +2431,21 @@ mod tests {
         /// the rule and the next step's spawn.
         pub(super) static AFTER_CHECK: std::cell::RefCell<Hook> =
             const { std::cell::RefCell::new(None) };
+        /// Runs in `place_outputs` between an input's commit and its
+        /// postcheck: the window in which a moved ancestor must not turn
+        /// into a `Done` with a wrong path.
+        pub(super) static AFTER_PUBLISH: std::cell::RefCell<PublishHook> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    type PublishHook = Option<Box<dyn FnMut(&Publication)>>;
+
+    thread_local! {
+        /// Runs in `place_outputs` as the first thing of each
+        /// `before_commit`, before the cancel check and `prepare_group`:
+        /// the window in which a cancel arrives during the copy.
+        pub(super) static BEFORE_PREPARE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     #[derive(Default)]
@@ -1881,8 +2482,9 @@ mod tests {
 
     #[test]
     fn intermediate_rule_comes_from_the_checked_fd() {
-        if sandbox::landlock_abi().is_none() {
-            eprintln!("SKIPPED intermediate_rule_comes_from_the_checked_fd: no Landlock");
+        if crate::sandbox::tests::abi_or_skip("intermediate_rule_comes_from_the_checked_fd", 0)
+            .is_none()
+        {
             return;
         }
         let t = Tmp::new("ruleswap");
@@ -1939,6 +2541,55 @@ mod tests {
         );
     }
 
+    /// A cancel that arrives while the outputs are copied stops before
+    /// `prepare_group` (no intent for a group that is never published),
+    /// not only before the commit.
+    #[test]
+    fn cancel_during_the_copy_stops_before_prepare_group() {
+        #[derive(Default)]
+        struct Prep(Seen, usize);
+        impl Observer for Prep {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn prepare_group(&mut self, _: &OutputGroup, _: &Path) -> io::Result<()> {
+                self.1 += 1;
+                Ok(())
+            }
+        }
+        let t = Tmp::new("cancel-prepare");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        BEFORE_PREPARE.set(Some(Box::new(|| {
+            // SAFETY: signals this thread, which has SIGTERM blocked.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        })));
+        let mut seen = Prep::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        BEFORE_PREPARE.set(None);
+        assert_eq!(seen.1, 0, "prepare_group ran for a cancelled input");
+        assert_eq!(
+            seen.0.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cancelled".to_owned()
+            }]
+        );
+        let mut left: Vec<_> = fs::read_dir(&docs).unwrap().flatten().collect();
+        left.sort_by_key(|e| e.file_name());
+        let left: Vec<_> = left.iter().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["a.txt"], "something became visible");
+    }
+
     #[test]
     fn cancel_token_sees_sigterm_to_this_thread() {
         let t = CancelToken::install().unwrap();
@@ -1949,23 +2600,335 @@ mod tests {
         assert!(t.is_cancelled(), "stays cancelled");
     }
 
+    /// Installs `body` as an executable `#!/bin/sh` script at `path`
+    /// without this process holding a writable fd on it (`cp` writes it):
+    /// a parallel test's fork could inherit one and make our exec fail
+    /// with ETXTBSY.
+    fn install_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let src = path.with_extension("src");
+        fs::write(&src, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let tmp = path.with_extension("tmp");
+        let ok = std::process::Command::new("/bin/cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&tmp, path).unwrap();
+    }
+
+    /// Copies the first input to `0/a.md` and reports it.
+    const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
+                        printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// The group is killed before its members are counted, so even when
+    /// they cannot be counted (an injected `waitid` error) nothing of the
+    /// action survives the run: not a lingering descendant, nor a chain
+    /// that hops pids with its pipes closed. Each is seen running first,
+    /// by its exact command line (the positive control).
     #[test]
-    fn only_builtins_may_run_without_the_sandbox() {
-        let t = Tmp::new("decisions");
-        let builtin = script_action(&t, "b", "exit 0", "md");
-        let mut plugin = script_action(&t, "p", "exit 0", "md");
-        plugin.builtin = false;
-        assert!(!refuse_without_landlock(true, &[&builtin]));
-        assert!(!refuse_without_landlock(true, &[&plugin]));
-        assert!(!refuse_without_landlock(false, &[&builtin, &builtin]));
-        assert!(refuse_without_landlock(false, &[&plugin]));
-        assert!(refuse_without_landlock(false, &[&builtin, &plugin]));
-        assert!(refuse_without_landlock(false, &[&plugin, &builtin]));
-        // The same rule, once a step has (or lacks) its ruleset.
-        assert!(!refuse_unsandboxed(true, true));
-        assert!(!refuse_unsandboxed(true, false));
-        assert!(!refuse_unsandboxed(false, true));
-        assert!(refuse_unsandboxed(false, false));
+    fn an_unreadable_child_list_still_kills_the_group() {
+        use crate::catalog::tests::{procs_with, seen_all_running};
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_unreadable_child_list_still_kills_the_group", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("waitid-kill");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let token = format!("36.{}{}", std::process::id(), line!());
+        let hop_token = format!("hop{}{}", std::process::id(), line!());
+        let up = t.0.join("up");
+        // Each link lives 50 ms before it forks the next and exits, long
+        // enough for the sampler to see one; the pid still moves on. The
+        // chain is bounded (200 links, about 10 s) so it cannot outlive a
+        // harness that was killed.
+        let hop = "exec >&- 2>&-; hop() { [ $1 -lt 200 ] || exit 0; sleep 0.05; ( hop $(($1+1)) ) & exit 0; }; hop 0";
+        // The leader holds the `skip` line back until the sampler has seen
+        // both (it creates `up`), bounded to 1000 x 10 ms: the kill then
+        // always meets a running lingerer and a running chain, however long
+        // the sandbox and bash take to start on a loaded machine.
+        // `$` is escaped for the leader's own double quotes, so the chain's
+        // command line is exactly `hop`.
+        let hop_quoted = hop.replace('$', "\\$");
+        let script = format!(
+            "sleep {token} &\n\
+             bash -c \"{hop_quoted}\" {hop_token} &\n\
+             n=0; while [ ! -e {up} ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done\n\
+             read -r in < \"$6\"; printf \"skip\\t%s\\tx\\n\" \"$in\"",
+            up = up.display()
+        );
+        let bin = t.0.join("lingers");
+        install_script(&bin, &format!("exec /bin/bash -c '{script}' bash \"$@\""));
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        // The sampler's own bound: the longest the whole start may take.
+        let seen = seen_all_running(
+            vec![
+                vec!["sleep".to_owned(), token.clone()],
+                vec![
+                    "bash".to_owned(),
+                    "-c".to_owned(),
+                    hop.to_owned(),
+                    hop_token.clone(),
+                ],
+            ],
+            up.clone(),
+            Duration::from_secs(20),
+        );
+        let tok = CancelToken::install().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let mut seen_obs = Seen::default();
+        run(
+            &[&action],
+            std::slice::from_ref(&input),
+            &mut seen_obs,
+            &tok,
+        );
+        WAITID_ERRNO.set(None);
+        assert!(seen.join().unwrap(), "the lingerer or the chain never ran");
+        // A killed process stays in /proc until the kernel has torn it down,
+        // which takes longer on a loaded machine; one that escaped the kill
+        // never goes (the lingerer lives 36 s, the chain about 10 s). So wait,
+        // bounded to 5 s, for 3 empty samples in a row 50 ms apart: the
+        // spacing is the 50 ms a link lives, so a hop that escaped shows in
+        // at least one of them.
+        let until = Instant::now() + Duration::from_secs(5);
+        let (mut quiet, mut left) = (0, Vec::new());
+        while quiet < 3 && Instant::now() < until {
+            left = procs_with(&token);
+            left.extend(procs_with(&hop_token));
+            quiet = if left.is_empty() { quiet + 1 } else { 0 };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(quiet >= 3, "survived the run: {left:?}");
+    }
+
+    /// A child list that cannot be read (an injected `waitid` error)
+    /// fails the action: nothing tells whether a descendant still runs.
+    /// Positive control: the same action, then, places its output.
+    #[test]
+    fn an_unreadable_child_list_fails_the_action() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_unreadable_child_list_fails_the_action", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("waitid-err");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let out = t.0.join("a/a.md");
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        WAITID_ERRNO.set(Some(libc::EINVAL));
+        let mut seen = Seen::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        WAITID_ERRNO.set(None);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "action left processes behind".to_owned()
+            }]
+        );
+        assert!(!out.exists());
+        let mut seen = Seen::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
+    }
+
+    /// Between an input's commit and its postcheck the folder is moved, or
+    /// a published file edited: the group stays where it is, no `Done`
+    /// with a path that was not proved, one `PublishedUnknown` that counts
+    /// as a conversion (once, however often it is seen), and the observer's
+    /// group callback gets no path for a moved folder.
+    #[test]
+    fn a_change_after_the_commit_is_published_unknown_not_done() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("a_change_after_the_commit_is_published_unknown", 0).is_none() {
+            return;
+        }
+        #[derive(Default)]
+        struct Groups(Seen, Vec<Option<PathBuf>>);
+        impl Observer for Groups {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn group(&mut self, _: &OutputGroup, l: &LocationEvidence, _: &Durability) {
+                self.1.push(l.path_at_check.clone());
+            }
+        }
+        for (change, reason) in [
+            ("move", PublicationReason::AncestorChanged),
+            ("edit", PublicationReason::BaselineChanged),
+        ] {
+            let t = Tmp::new("after-commit");
+            let docs = t.0.join("docs");
+            fs::create_dir(&docs).unwrap();
+            let input = docs.join("a.txt");
+            fs::write(&input, "a\n").unwrap();
+            let bin = t.0.join("copy");
+            install_script(&bin, COPY);
+            let mut action = script_action(&t, "unused", "exit 1", "md");
+            action.bin = bin;
+            let tok = CancelToken::install().unwrap();
+            let (from, to) = (docs.clone(), t.0.join("moved"));
+            AFTER_PUBLISH.set(Some(Box::new(move |_p: &Publication| {
+                if change == "move" {
+                    fs::rename(&from, &to).unwrap();
+                } else {
+                    fs::write(from.join("a/a.md"), "edited").unwrap();
+                }
+            })));
+            let mut seen = Groups::default();
+            run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            AFTER_PUBLISH.set(None);
+            let [
+                Outcome::PublishedUnknown {
+                    input: i,
+                    location,
+                    reason: r,
+                    durability,
+                    ..
+                },
+            ] = &seen.0.0[..]
+            else {
+                panic!("{change}: {:?}", seen.0.0)
+            };
+            assert_eq!((i, *r, durability), (&input, reason, &Durability::Synced));
+            let kept = if change == "move" {
+                assert_eq!(location.path_at_check, None);
+                assert_eq!(seen.1, [None]);
+                t.0.join("moved/a/a.md")
+            } else {
+                assert_eq!(location.path_at_check, Some(docs.join("a")));
+                docs.join("a/a.md")
+            };
+            assert!(kept.exists(), "{change}: the published output is gone");
+            let mut tally = Tally::default();
+            tally.add(&seen.0.0[0]);
+            tally.add(&seen.0.0[0]);
+            assert_eq!(tally.counts(), (1, 0, 0));
+            assert_eq!(tally.unknown(), 1, "one input, two events");
+        }
+    }
+
+    /// Every action, built-in or a plugin's, runs only behind the whole
+    /// sandbox gate; a failure is a refusal of every input (never a
+    /// warning and an unconfined run), and the action never starts.
+    /// Positive control: the same action runs once the gate passes.
+    #[test]
+    fn every_action_needs_the_sandbox_gate() {
+        use crate::sandbox::tests::{GATE_FAILURES, abi_or_skip, inject_failure};
+        if abi_or_skip("every_action_needs_the_sandbox_gate", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("gate");
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let out = t.0.join("a/a.md");
+        for builtin in [true, false] {
+            let bin = t.0.join(if builtin { "builtin" } else { "plugin" });
+            install_script(&bin, COPY);
+            let mut action = script_action(&t, "unused", "exit 1", "md");
+            action.bin = bin;
+            action.builtin = builtin;
+            let tok = CancelToken::install().unwrap();
+            for name in GATE_FAILURES {
+                let _g = inject_failure(name);
+                let mut seen = Seen::default();
+                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                // A setup error comes after the gate (which passed).
+                assert_eq!(
+                    r.sandboxed,
+                    name == "setup error",
+                    "builtin={builtin}, {name}"
+                );
+                match &seen.0[..] {
+                    [Outcome::Failed { reason, .. }] => assert!(
+                        reason.starts_with("sandbox unavailable: ")
+                            || reason.starts_with("sandbox setup failed: "),
+                        "builtin={builtin}, {name}: {reason}"
+                    ),
+                    other => panic!("builtin={builtin}, {name}: {other:?}"),
+                }
+                // The ambient case is refused on its own branch, not on
+                // permitted or effective.
+                if let ("ambient capability", [Outcome::Failed { reason, .. }]) =
+                    (name, &seen.0[..])
+                {
+                    assert!(reason.contains("ambient capabilities"), "{reason}");
+                }
+                assert!(!out.exists(), "builtin={builtin}, {name}: the action ran");
+            }
+            let mut seen = Seen::default();
+            let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            assert!(r.sandboxed);
+            assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
+            assert_eq!(fs::read_to_string(&out).unwrap(), "a\n");
+            fs::remove_dir_all(t.0.join("a")).unwrap();
+        }
+    }
+
+    /// An action the catalog knows from its cache (its manifest does not
+    /// run again) still meets the gate when it runs.
+    #[test]
+    fn a_cached_action_still_needs_the_sandbox_gate() {
+        use crate::catalog::Catalog;
+        use crate::sandbox::tests::{abi_or_skip, inject_failure};
+        if abi_or_skip("a_cached_action_still_needs_the_sandbox_gate", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("cached");
+        let dir = t.0.join("actions");
+        fs::create_dir(&dir).unwrap();
+        let cache = t.0.join("cache/catalog");
+        install_script(
+            &dir.join("conv"),
+            &format!(
+                "if [ \"$1\" = --manifest ]; then\n\
+                 printf 'inacircle-manifest 0\\naction\\tx.conv\\tfamily=x\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=C\\tgroup=g\\tcost=1\\tlossy=no\\tbatch=yes\\n'\n\
+                 exit 0\nfi\n{COPY}"
+            ),
+        );
+        let input = t.0.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        // The manifest runs (sandboxed) and the cache is written.
+        let warm = Catalog::load_from(&[(dir.clone(), true)], &cache);
+        assert!(warm.get("x.conv").is_some());
+        assert!(cache.exists());
+        let tok = CancelToken::install().unwrap();
+        for name in ["no landlock", "root"] {
+            let _g = inject_failure(name);
+            // No manifest could run now: the action comes from the cache.
+            let cat = Catalog::load_from(&[(dir.clone(), true)], &cache);
+            let action = cat.get("x.conv").expect("known from the cache");
+            let mut seen = Seen::default();
+            let r = run(&[action], std::slice::from_ref(&input), &mut seen, &tok);
+            assert!(!r.sandboxed, "{name}");
+            assert!(
+                matches!(&seen.0[..], [Outcome::Failed { reason, .. }] if reason.starts_with("sandbox unavailable: ")),
+                "{name}: {:?}",
+                seen.0
+            );
+            assert!(!t.0.join("a").exists(), "{name}: the cached action ran");
+        }
+        // Control: the same cached action runs behind a passing gate.
+        let cat = Catalog::load_from(&[(dir, true)], &cache);
+        let mut seen = Seen::default();
+        run(
+            &[cat.get("x.conv").unwrap()],
+            std::slice::from_ref(&input),
+            &mut seen,
+            &tok,
+        );
+        assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
     }
 
     #[test]
@@ -2032,7 +2995,7 @@ mod tests {
         for route in [&[][..], &[&a, &a, &a][..]] {
             let tok = CancelToken::install().unwrap();
             let mut seen = Seen::default();
-            run(route, std::slice::from_ref(&input), &mut seen, &tok);
+            let report = run(route, std::slice::from_ref(&input), &mut seen, &tok);
             assert_eq!(
                 seen.0,
                 [Outcome::Failed {
@@ -2040,6 +3003,10 @@ mod tests {
                     reason: "invalid route".to_owned()
                 }]
             );
+            // The sandbox was not the problem: the report carries the
+            // gate's result, so the notice does not say "Sandbox
+            // unavailable." for a route error.
+            assert_eq!(report.sandboxed, sandbox::ready().is_ok());
         }
         assert_eq!(
             fs::read_dir(&t.0).unwrap().count(),
@@ -2068,7 +3035,8 @@ mod tests {
         assert_eq!(left.len(), 2, "only the input and the script: {left:?}");
     }
 
-    /// Child side of the no-Landlock wiring tests; a no-op without the env.
+    /// Child side of the no-Landlock wiring test (the kernel itself has no
+    /// Landlock there, no injection); a no-op without the env.
     #[test]
     fn helper_no_landlock() {
         let (Some(dir), Some(case)) = (
@@ -2097,41 +3065,28 @@ mod tests {
         );
         let tok = CancelToken::install().unwrap();
         let mut seen = Seen::default();
-        match case.to_str().unwrap() {
-            "plugin" => {
-                action.builtin = false;
-                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
-                assert!(!r.sandboxed);
-                assert_eq!(
-                    seen.0,
-                    [Outcome::Failed {
-                        input: input.clone(),
-                        reason: "sandbox unavailable".to_owned()
-                    }]
-                );
-                assert!(!t.0.join("a.md").exists(), "a plugin ran unconfined");
-            }
-            "builtin" => {
-                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
-                assert!(!r.sandboxed);
-                assert_eq!(
-                    seen.0[0],
-                    Outcome::Warned {
-                        input: input.clone(),
-                        message: "ran without sandbox".to_owned()
-                    }
-                );
-                assert!(matches!(seen.0[1], Outcome::Done { .. }), "{:?}", seen.0);
-                assert_eq!(fs::read_to_string(t.0.join("a.md")).unwrap(), "a\n");
-            }
+        // Built-in or not, no action runs without Landlock.
+        action.builtin = match case.to_str().unwrap() {
+            "plugin" => false,
+            "builtin" => true,
             other => panic!("unknown case {other}"),
-        }
+        };
+        let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(!r.sandboxed);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "sandbox unavailable: Landlock unavailable".to_owned()
+            }]
+        );
+        assert!(!t.0.join("a").exists(), "an action ran unconfined");
         // SAFETY: skips the harness' teardown, which the filter may affect.
         unsafe { libc::_exit(0) };
     }
 
     #[test]
-    fn without_landlock_plugins_are_refused_and_builtins_warn() {
+    fn sandbox_without_landlock_refuses_every_action() {
         if !crate::sandbox::tests::seccomp_or_skip("without_landlock") {
             return;
         }
@@ -2156,5 +3111,550 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+
+    // ---- Mutation pass 2: tests for cleanup, supervision and the
+    // ---- cancel token.
+
+    /// How long a probing wait runs, and how many probes it may make. The
+    /// nap doubles from 1 ms up to `GROUP_PROBE_MAX` (50 ms), so 400 ms is
+    /// about 14 probes at the very most (6 doubling steps, then one per
+    /// 50 ms); oversleeping on a loaded machine only lowers it. A nap stuck
+    /// at zero probes thousands of times, an additive nap about 28 times:
+    /// 20 separates both from the real code with a margin, whatever the load.
+    const PROBE_WAIT: Duration = Duration::from_millis(400);
+    const PROBES_MAX: u32 = 20;
+
+    fn blocked(sig: libc::c_int) -> bool {
+        // SAFETY: with a null `set`, pthread_sigmask only reads the current
+        // mask into `cur`, a valid out-pointer.
+        unsafe {
+            let mut cur: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut cur);
+            libc::sigismember(&cur, sig) == 1
+        }
+    }
+
+    /// Dropping the token puts the thread's signal mask back: SIGTERM and
+    /// SIGINT are blocked while it lives (so only the signalfd sees them)
+    /// and deliverable again after.
+    #[test]
+    fn dropping_the_token_restores_the_signal_mask() {
+        // The mask is inherited through exec: a parent that blocks these
+        // signals is not this test's failure, so compare with the start.
+        let before = (blocked(libc::SIGTERM), blocked(libc::SIGINT));
+        let tok = CancelToken::install().unwrap();
+        assert!(blocked(libc::SIGTERM) && blocked(libc::SIGINT));
+        drop(tok);
+        assert_eq!((blocked(libc::SIGTERM), blocked(libc::SIGINT)), before);
+    }
+
+    /// The raw fd is the signalfd: silent until a cancel signal is
+    /// pending, readable once one is, so a caller can poll it.
+    #[test]
+    fn the_token_fd_becomes_readable_on_a_cancel_signal() {
+        let tok = CancelToken::install().unwrap();
+        let readable = || {
+            let mut p = libc::pollfd {
+                fd: tok.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: p is one valid pollfd.
+            unsafe { libc::poll(&mut p, 1, 0) };
+            p.revents & libc::POLLIN != 0
+        };
+        assert!(!readable());
+        // SAFETY: raise signals this thread, which blocks SIGTERM now.
+        unsafe { libc::raise(libc::SIGTERM) };
+        assert!(readable());
+        assert!(tok.is_cancelled());
+    }
+
+    /// A reader that plays back a script of results (popped from the
+    /// back), then data forever.
+    struct Script(Vec<io::Result<usize>>);
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop() {
+                Some(Ok(n)) => {
+                    buf[..n].fill(b'x');
+                    Ok(n)
+                }
+                Some(Err(e)) => Err(e),
+                None => {
+                    buf.fill(b'x');
+                    Ok(buf.len())
+                }
+            }
+        }
+    }
+
+    /// `read_quota` reads the whole quota from a flood (a smaller one only
+    /// adds wakeups, a larger one delays the cancel) and stops within one
+    /// buffer of it.
+    #[test]
+    fn read_quota_takes_the_whole_quota_from_a_flood() {
+        let mut total = 0;
+        let (open, full) = read_quota(&mut Script(Vec::new()), |b| total += b.len());
+        assert!(open && full);
+        // 64 KiB spelled out: the constant under test must not be its own
+        // oracle.
+        assert!((65_536..65_536 + 8192).contains(&total), "{total}");
+    }
+
+    /// An interrupted read is retried, WouldBlock leaves the pipe open for
+    /// the next wakeup, and any other error closes it (fail closed: a
+    /// broken pipe is never polled again as if healthy).
+    #[test]
+    fn read_quota_handles_interrupts_would_block_and_errors() {
+        let ek = |k| Err(io::Error::from(k));
+        let mut got = 0;
+        let r = read_quota(
+            &mut Script(vec![
+                ek(io::ErrorKind::WouldBlock),
+                Ok(5),
+                ek(io::ErrorKind::Interrupted),
+            ]),
+            |b| got += b.len(),
+        );
+        assert_eq!((r, got), ((true, false), 5), "interrupt, data, would-block");
+        let r = read_quota(&mut Script(vec![ek(io::ErrorKind::BrokenPipe)]), |_| {});
+        assert_eq!(r, (false, false));
+        let r = read_quota(&mut Script(vec![Ok(0)]), |_| {});
+        assert_eq!(r, (false, false));
+    }
+
+    /// A status that is neither an exit nor a signal (a stop) reads as exit
+    /// -1; exits and signals keep their numbers.
+    #[test]
+    fn end_from_status_keeps_codes_and_maps_a_stop_to_minus_one() {
+        assert_eq!(End::from(ExitStatus::from_raw(3 << 8)), End::Exit(3));
+        assert_eq!(
+            End::from(ExitStatus::from_raw(libc::SIGKILL)),
+            End::Signal(libc::SIGKILL)
+        );
+        // WIFSTOPPED (0x137f): neither exited nor signaled.
+        assert_eq!(End::from(ExitStatus::from_raw(0x137f)), End::Exit(-1));
+    }
+
+    /// `set_nonblocking` sets O_NONBLOCK and keeps it when called again
+    /// (it must not toggle).
+    #[test]
+    fn set_nonblocking_is_idempotent() {
+        let mut fds = [0 as RawFd; 2];
+        // SAFETY: fds holds two ints, as pipe2 writes.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: F_GETFL on an open fd.
+        let nb = |fd| unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+        assert!(!nb(fds[0]));
+        set_nonblocking(fds[0]);
+        assert!(nb(fds[0]));
+        set_nonblocking(fds[0]);
+        assert!(nb(fds[0]));
+        // SAFETY: both fds are ours.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    fn spawn_sh(script: &str) -> Child {
+        Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    /// The fallback exit probe (no pidfd): false while the child runs,
+    /// true once it has exited, still unreaped; false for a pid that is not
+    /// our child.
+    #[test]
+    fn exited_unreaped_tells_running_from_exited_without_reaping() {
+        let mut running = spawn_sh("sleep 30");
+        let pid = running.id() as libc::pid_t;
+        assert!(!exited_unreaped(pid));
+        // SAFETY: our own unreaped child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let until = Instant::now() + Duration::from_secs(5);
+        while !exited_unreaped(pid) {
+            assert!(
+                Instant::now() < until,
+                "a killed child never showed as exited"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(exited_unreaped(pid), "the probe must not reap");
+        assert!(running.try_wait().unwrap().is_some(), "still reapable once");
+        // Not our child: waitid fails (ECHILD), which reads as not exited.
+        assert!(!exited_unreaped(1));
+    }
+
+    /// Without a pidfd `wait_exited` polls `waitid`: it sees an exit, gives
+    /// up at the deadline for a child that runs on, and does not spin while
+    /// it waits.
+    #[test]
+    fn wait_exited_without_a_pidfd_waits_and_gives_up_cheaply() {
+        let mut quick = spawn_sh("exit 0");
+        let t0 = Instant::now();
+        assert!(wait_exited(
+            quick.id() as libc::pid_t,
+            None,
+            t0 + Duration::from_secs(5)
+        ));
+        quick.wait().unwrap();
+
+        let mut slow = spawn_sh("sleep 30");
+        PROBES.set(0);
+        let t0 = Instant::now();
+        assert!(!wait_exited(
+            slow.id() as libc::pid_t,
+            None,
+            t0 + PROBE_WAIT
+        ));
+        assert!(t0.elapsed() >= PROBE_WAIT, "returned before the deadline");
+        let probes = PROBES.get();
+        assert!(probes <= PROBES_MAX, "the wait spun: {probes} probes");
+        slow.kill().unwrap();
+        slow.wait().unwrap();
+    }
+
+    /// `reap_group` sleeps between probes of a member that still runs: it
+    /// gives up at the deadline without spinning.
+    #[test]
+    fn reap_group_waits_for_a_running_member_without_spinning() {
+        let (pid, c) = leader("sleep 30 & exit 0");
+        PROBES.set(0);
+        let t0 = Instant::now();
+        let r = reap_group(pid, t0 + PROBE_WAIT);
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(t0.elapsed() >= PROBE_WAIT);
+        let probes = PROBES.get();
+        assert!(probes <= PROBES_MAX, "the reap spun: {probes} probes");
+        // The member still runs: end the group (reap_group took the leader).
+        drop(c);
+        // SAFETY: the group id stays ours while a member of it exists.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        reap_group(pid, Instant::now() + Duration::from_secs(5)).unwrap();
+    }
+
+    /// Whether process group `pgid` holds an exited, unreaped member
+    /// (`waitid(P_PGID, WNOWAIT)` sees it; the leader is already reaped).
+    fn member_exited_unreaped(pgid: libc::pid_t) -> bool {
+        // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG | libc::__WALL;
+        // SAFETY: info is a valid out-pointer; WNOWAIT reaps nothing.
+        let r = unsafe { libc::waitid(libc::P_PGID, pgid as libc::id_t, &mut info, flags) };
+        // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
+        r == 0 && unsafe { info.si_pid() } != 0
+    }
+
+    /// Only a member that was running at our kill counts as alive: one that
+    /// ended by itself before it (a zombie of ours once its leader is gone)
+    /// does not, whether it exited with 0, exited with the number 9 (the
+    /// number of SIGKILL), or died of its own SIGTERM.
+    #[test]
+    fn reap_group_counts_only_members_running_at_the_kill() {
+        for script in [
+            "sleep 0.1 & exit 0",
+            "sh -c 'sleep 0.1; exit 9' & exit 0",
+            "sh -c 'sleep 0.1; kill -TERM $$' & exit 0",
+        ] {
+            let (pid, mut c) = leader(script);
+            // The member must have ended on its own before the kill: wait
+            // (bounded) until the group holds an exited member besides the
+            // leader, which is reaped first so it cannot answer for it. A
+            // fixed sleep would break on a loaded machine.
+            c.wait().unwrap();
+            let until = Instant::now() + Duration::from_secs(30);
+            while !member_exited_unreaped(pid) {
+                assert!(Instant::now() < until, "{script}: the member never ended");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // SAFETY: the zombie member keeps the group id ours.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let r = reap_group(pid, Instant::now() + Duration::from_secs(5));
+            assert!(!r.unwrap(), "{script}");
+        }
+    }
+
+    fn step_over(t: &Tmp) -> StepIn {
+        StepIn {
+            paths: vec![t.0.join("in.txt")],
+            origin: vec![0],
+            intermediate: false,
+        }
+    }
+
+    /// A supervisor over `script`, for driving its parts directly.
+    fn sup_over<'a>(
+        script: &str,
+        step: &'a StepIn,
+        t: &'a Tmp,
+        tok: &'a CancelToken,
+    ) -> Supervisor<'a> {
+        become_subreaper().unwrap();
+        Supervisor::new(spawn_sh(script), step, &t.0, &t.0, tok, 0)
+    }
+
+    /// Ends and reaps a test supervisor's child group.
+    fn stop(sup: &mut Supervisor) {
+        sup.signal(libc::SIGKILL);
+        sup.child.wait().unwrap();
+    }
+
+    /// A line of exactly `MAX_LINE` bytes (no newline yet) is pending; one
+    /// byte more is a violation.
+    #[test]
+    fn feed_limits_a_line_to_max_line() {
+        let t = Tmp::new("feed");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.feed(&vec![b'x'; MAX_LINE], &mut sink);
+        assert_eq!(sup.violation, None);
+        sup.feed(b"x", &mut sink);
+        assert_eq!(sup.violation.as_deref(), Some("event line too long"));
+        stop(&mut sup);
+    }
+
+    /// The stderr tail keeps exactly the last `STDERR_TAIL` bytes, and
+    /// `drain` reads both pipes to EOF.
+    #[test]
+    fn stderr_tail_keeps_the_last_bytes_and_drain_reaches_eof() {
+        let t = Tmp::new("tail");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        // stdout is closed at once while stderr carries 200 KB, more than
+        // one `READ_QUOTA` and than a pipe holds: `drain` must go on for
+        // stderr after stdout is done.
+        let mut sup = sup_over(
+            "exec >&-; head -c 200000 /dev/zero | tr '\\0' a >&2; head -c 100 /dev/zero | tr '\\0' b >&2",
+            &step,
+            &t,
+            &tok,
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        assert!(sup.drain(&mut sink, until));
+        assert!(sup.stdout.is_none() && sup.stderr.is_none());
+        assert_eq!(sup.tail.len(), STDERR_TAIL);
+        assert!(sup.tail.ends_with(&[b'b'; 100]));
+        assert!(sup.tail[..STDERR_TAIL - 100].iter().all(|&b| b == b'a'));
+        sup.child.wait().unwrap();
+    }
+
+    /// `drain` gives up at its deadline while writers never stop (three of
+    /// them, so the pipe is hardly ever empty and poll returns ready, EOF
+    /// never comes): it returns false at `until`,
+    /// not when the writer ends. The writer is bounded to 10 s (`timeout`),
+    /// so a broken `drain` ends the test by itself and fails its `took`
+    /// assert, rather than hanging it; the failing run is slow, not quick
+    /// (4 to 70 s were seen with the deadline check removed by hand, as the
+    /// reader then loops over the data until the writer stops). The group
+    /// is killed at the end.
+    #[test]
+    fn drain_gives_up_at_the_deadline_while_data_keeps_arriving() {
+        let t = Tmp::new("drain-flood");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over(
+            "exec >&-; timeout 10 yes >&2 & timeout 10 yes >&2 & exec timeout 10 yes >&2",
+            &step,
+            &t,
+            &tok,
+        );
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let t0 = Instant::now();
+        let given_up = !sup.drain(&mut sink, t0 + Duration::from_millis(300));
+        let took = t0.elapsed();
+        stop(&mut sup);
+        assert!(given_up, "drain ran on to EOF past its deadline");
+        // 5 s: far past the deadline, far short of the writer's 10 s.
+        assert!(took < Duration::from_secs(5), "drain took {took:?}");
+    }
+
+    /// A deadline that has passed ends `drain` with false even though the
+    /// pipes are ready and would reach EOF at once: data waiting is not a
+    /// reason to go on past it. Deterministic, unlike the flood above (which
+    /// shows the wall-clock effect, but with a writer that may fall behind).
+    #[test]
+    fn drain_does_not_read_on_after_its_deadline() {
+        let t = Tmp::new("drain-late");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over("exec >&-; echo data >&2", &step, &t, &tok);
+        // Exited: the data is in the pipe and EOF follows it.
+        sup.child.wait().unwrap();
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(!sup.drain(&mut sink, past));
+        assert!(sup.tail.is_empty(), "read past the deadline");
+    }
+
+    fn done_event(t: &Tmp, rel: &str) -> Vec<u8> {
+        fs::create_dir_all(t.0.join(rel).parent().unwrap()).unwrap();
+        fs::write(t.0.join(rel), "x").unwrap();
+        format!("done\t{}\t{rel}", t.0.join("in.txt").display()).into_bytes()
+    }
+
+    /// Output paths: a second `done` for the same path is a violation, a
+    /// different path is not; the byte total may reach `MAX_OUTPUT_BYTES`
+    /// exactly and not exceed it.
+    #[test]
+    fn done_events_are_checked_for_duplicates_and_the_byte_cap() {
+        let t = Tmp::new("done");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let mut sink = Sink::new(&mut seen, &inputs);
+        let (a, b) = (done_event(&t, "0/a.md"), done_event(&t, "0/b.md"));
+        // The same path twice while it is the only one recorded.
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.handle_line(&a, &mut sink);
+        sup.handle_line(&a, &mut sink);
+        let v = sup.violation.clone().unwrap();
+        assert!(v.starts_with("duplicate output"), "{v}");
+        assert_eq!(sup.outputs.len(), 1);
+        stop(&mut sup);
+        // A different path is no duplicate.
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.handle_line(&a, &mut sink);
+        sup.handle_line(&b, &mut sink);
+        assert_eq!(sup.violation, None);
+        assert_eq!(sup.outputs.len(), 2);
+        stop(&mut sup);
+
+        // The path "0/a.md" is 6 bytes: at the cap exactly is accepted, one
+        // byte over is refused.
+        for (used, ok) in [(MAX_OUTPUT_BYTES - 6, true), (MAX_OUTPUT_BYTES - 5, false)] {
+            let mut sup = sup_over("sleep 30", &step, &t, &tok);
+            sup.output_bytes = used;
+            sup.handle_line(&a, &mut sink);
+            assert_eq!(sup.violation.is_none(), ok, "used {used}");
+            stop(&mut sup);
+        }
+    }
+
+    /// A violation is recorded once (the first stays), never while
+    /// cancelled, and ends the group with SIGTERM.
+    #[test]
+    fn violate_keeps_the_first_reason_and_ignores_a_cancelled_run() {
+        let t = Tmp::new("violate");
+        let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.violate("first".to_owned());
+        sup.violate("second".to_owned());
+        assert_eq!(sup.violation.as_deref(), Some("first"));
+        assert!(sup.term_at.is_some());
+        stop(&mut sup);
+
+        let mut sup = sup_over("sleep 30", &step, &t, &tok);
+        sup.cancelled = true;
+        sup.violate("late".to_owned());
+        sup.violate_by(Some(0), "late".to_owned(), None);
+        assert_eq!(sup.violation, None);
+        assert!(sup.offender.is_none() && sup.term_at.is_none());
+        stop(&mut sup);
+    }
+
+    /// A cancel seen by either the token or the observer, at the child's
+    /// exit, fails the input as cancelled and places nothing.
+    #[test]
+    fn finish_honours_a_cancel_from_the_token_or_the_observer() {
+        for from_observer in [true, false] {
+            let t = Tmp::new("finish-cancel");
+            let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
+            let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+            let mut sink = Sink::new(&mut seen, &inputs);
+            let sup = sup_over("exit 0", &step, &t, &tok);
+            if from_observer {
+                sink.cancelled = true;
+            } else {
+                // SAFETY: raise signals this thread, which blocks SIGTERM.
+                unsafe { libc::raise(libc::SIGTERM) };
+            }
+            assert!(sup.finish(&mut sink).is_none());
+            drop(sink);
+            assert_eq!(
+                seen.0,
+                [Outcome::Failed {
+                    input: step.paths[0].clone(),
+                    reason: "cancelled".to_owned()
+                }],
+                "observer: {from_observer}"
+            );
+            tok.is_cancelled();
+        }
+    }
+
+    /// The default `group` callback reports the published wrapper folder to
+    /// `dir`.
+    #[test]
+    fn the_default_group_callback_reports_the_wrapper_folder() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("the_default_group_callback_reports_the_wrapper_folder", 0).is_none() {
+            return;
+        }
+        #[derive(Default)]
+        struct Dirs(Seen, Vec<PathBuf>);
+        impl Observer for Dirs {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+            }
+            fn dir(&mut self, p: &Path) {
+                self.1.push(p.to_owned());
+            }
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+        }
+        let t = Tmp::new("group-default");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.txt");
+        fs::write(&input, "a\n").unwrap();
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Dirs::default();
+        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        assert!(
+            matches!(seen.0.0[..], [Outcome::Done { .. }]),
+            "{:?}",
+            seen.0.0
+        );
+        assert_eq!(seen.1, [docs.join("a")]);
+    }
+
+    /// Progress is `(base + span * (step + f) / steps) / total`: the second
+    /// step of two, halfway, in a group of two after one input.
+    #[test]
+    fn sink_progress_scales_by_steps_group_and_total() {
+        #[derive(Default)]
+        struct P(Vec<(usize, usize, f32)>);
+        impl Observer for P {
+            fn event(&mut self, _: &Outcome) {}
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, d: usize, t: usize, f: f32) {
+                self.0.push((d, t, f));
+            }
+        }
+        let inputs: Vec<PathBuf> = (0..4).map(|i| PathBuf::from(format!("/in/{i}"))).collect();
+        let mut obs = P::default();
+        let mut sink = Sink::new(&mut obs, &inputs);
+        sink.base = 1;
+        sink.span = 2;
+        sink.steps = 2;
+        sink.step = 1;
+        sink.progress(0.5);
+        drop(sink);
+        // within = (1 + 0.5) / 2 = 0.75; frac = (1 + 2 * 0.75) / 4 = 0.625.
+        assert_eq!(obs.0, [(0, 4, 0.625)]);
     }
 }

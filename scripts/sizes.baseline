@@ -1,2 +1,12 @@
-inacircle 900352 671864
-inacircle-text 669920 374594
+# x86_64 baseline of the final hardening build.
+# Measured locally with scripts/check-sizes.sh on the reference desktop,
+# built from commit 70e9984 (tree clean apart from documentation), rustc
+# 1.98.1 from rust-toolchain.toml, release profile (fat LTO,
+# codegen-units=1, panic=abort, strip). The sources of the shipped
+# binaries changed since the previous baseline (420a714) by the second
+# buffer's first-touch move, the Undo/Trash ownership rule and the
+# measurement markers.
+# The per-area account of the growth over the Plan 7 baseline
+# (inacircle 900352 671864) is in docs/benchmarks/binary-size.md.
+inacircle 1105536 841176
+inacircle-text 695000 397314

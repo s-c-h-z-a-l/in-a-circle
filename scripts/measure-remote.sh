@@ -7,6 +7,10 @@
 # the host (nothing is built there), starts the wheel `runs` times inside the
 # user's running niri session with INACIRCLE_MEASURE=1, closes it with Esc
 # (wtype), and prints p50/max of the `measure wheel` lines plus machine facts.
+# PRELIMINARY / DIAGNOSTIC ONLY: the default 20 runs and the p50/max output do
+# not meet the acceptance rule (>= 50 valid observations, nearest-rank p95,
+# attempt accounting). Do not cite it as closing acceptance; use
+# scripts/measure-wheel.py for that.
 # Method: docs/benchmarks/wheel.md. The host needs a logged-in, unlocked
 # Wayland session and wtype. Every wait below has a deadline.
 set -euo pipefail

@@ -82,6 +82,96 @@ symbol and relocation tables and the ELF headers.
 - The per-output cost (~8 µs of our CPU per placed file) is the
   `rename`, the identity `stat` and one history line each.
 
+## Hardening growth since Plan 7
+
+`CLAUDE.md` asks a plan that grows a binary by more than 100 KB to explain
+why. Over the hardening branch `inacircle` went from 900,352 B to
+1,082,216 B (**+181,864 B**; `.text` 671,864 to 822,056 B, **+150,192 B**).
+It stays under the 1,572,864 B limit with 490,648 B to spare. No single
+area is over 100 KB; the sum is.
+
+Method: the stripped release build (`cargo build --release`, rustc 1.98.1,
+fat LTO, `codegen-units=1`, `panic=abort`) of the last commit of each area,
+sizes from `stat` and `size -A`. The build at the Plan 7 commit `6e5604c`
+reproduces the old baseline exactly (900,352 / 671,864 B), and the builds at
+`169163b` and `12a4b32` have the same SHA-256 as the measurement binaries A
+and B. Each row is the difference to the row above it.
+
+| Area (commits) | File | `.text` | Why this code exists |
+|---|---|---|---|
+| Measurement markers (`169163b`) | +4,752 | +4,208 | Phase and action-entry markers and hover samples behind the runtime switch `INACIRCLE_MEASURE`; kept in the shipped binary so the binary that ships is the one measured. |
+| seccomp policy (`7bb1f04`) | +784 | +32 | One policy table evaluated at compile time into a static BPF program per architecture; it lives in data, the code is tiny. |
+| Mandatory sandbox gate, privilege check, clean environment (`111361b`, `5875d84`) | +8,640 | +7,568 | Landlock ABI probe, the uid/gid/capability snapshot and its refusal, the environment allowlist. No weakened mode exists. |
+| Process-tree cleanup (`b33befa`) | +6,040 | +5,056 | Child subreaper, group `SIGKILL` before reaping, `waitid` over the kernel's child list. |
+| Publication (`8f9ccae`) | +31,272 | +26,880 | Private staging, fresh copies, final modes, baselines, `RENAME_NOREPLACE` commit, outcome states. |
+| History v1 and private state (`39ca066`) | +52,920 | +40,752 | Strict versioned writer and reader (22 refusal cases), intents before the rename, state folders opened once, registry. |
+| Trash Undo and recovery (`37a655d`) | +74,552 | +63,328 | Trash selection (home and volume), `mountinfo`, `.trashinfo`, recovery intent, move-back, place proof, per-group results. The largest area: it replaces a delete that could not be made safe. |
+| THP switch (`081459b`) | +64 | +64 | Two `prctl` calls. |
+| Bounded reads and state (`38604ea`) | -10,928 | -9,472 | Bounded readers for input, cache, scan and history replaced whole-file reads; the net is a decrease, analysed below. |
+| Text loss notice in `inacircle` (`9754585`) | +1,360 | +1,072 | The "Formatting was lost." line only for a real loss. |
+| Wheel start and failure lifecycle (`86a9b4a`) | +7,232 | +5,920 | Own start deadline, ordered teardown, the failure notice through the bounded notification path. |
+| Render generation tracking (`12a4b32`) | +3,448 | +3,280 | Which buffer is painted when, so a held buffer is never written. |
+| Review fixes up to HEAD (`d6569c4` to `HEAD`) | +1,728 | +1,504 | Recovery trusts only the recorded source, retry after a no-op Undo, registry pid 0, manifest failure ordering. |
+| **Total** | **+181,864** | **+150,192** | |
+
+Cross-check by symbol (unstripped builds at `6e5604c` and `HEAD`, grouped
+by the first two path segments of the demangled name; inlining and generics
+blur it): `engine::trash` +46.8 KB (a new module), `engine::journal`
++39.8 KB, `engine::catalog` +13.9 KB, `engine::exec` +11.4 KB,
+`engine::output` +7.5 KB, `dbus::notifications` +6.7 KB. The rest is spread
+over the wheel and the shared standard-library generics.
+
+`inacircle-text` grew from 669,920 B to 695,000 B (+25,080 B; `.text`
++22,720 B), almost all in the text-family structure budgets and loss
+tracking (`9754585`: +23,944 B). That is under 100 KB, far under the
+family limit of 1 MiB of code (397,314 B), and its baseline is refreshed
+too.
+
+The bounded-reads decrease, by evidence. Unstripped builds of the
+commits from `081459b` (the row above) to `38604ea`, `nm -S --size-sort`
+per commit (a build after each of the commits, same flags, `strip` off):
+`.text` 819,752 B to 810,280 B (-9,472); the stripped file 1,079,376 B
+to 1,068,448 B (-10,928). Where it
+went, per commit: `7980655` (bounded input and state reads) -3,072 B of
+`.text`; `9005e83` (the action folder scan bounded while it runs)
+-8,368 B; the other six together +1,552 B. By symbol, `081459b` to
+`38604ea`: the old whole-file `journal::job_records` (-10,812 B) is gone
+and its work is done by the new bounded `journal::scan_file` (+11,513 B),
+`read_line_bounded` (+1,057 B) and `read_header_len` (+1,125 B), so the
+journal is a small net growth, not a shrink. The shrink is in the catalog
+and the standard library: the iterator and sort instantiations over
+`catalog::Bin` (a `FilterMap` over the directory iterator -8,929 B,
+`quicksort` -4,421 B, `drift::sort` -2,534 B, `sort4_stable` -931 B)
+were replaced by a bounded loop in `Catalog::load` (+8,914 B) and
+`read_cache_from` (+2,920 B), and the `BufReader` `read_until`,
+`skip_until` and `read_exact` instantiations (about -4.7 KB) are no
+longer used. Net by symbol -11,186 B (unstripped; the stripped file
+differs by 258 B of symbol-table and frame data). So the decrease is
+fewer monomorphised generic instantiations, not a lost function, and the
+bounded readers' own code is included in the later rows' totals.
+
+Judgement: every area is a contract the hardening adds and tests; nothing
+here is dead weight, and none is unexplained. The weakest explanation is
+stated above (the measurement markers could be compiled out at the price
+of measuring a different binary). All figures in this section are for
+`c84f4ad` (read "HEAD" above as `c84f4ad`); later commits change code (a
+plain message for a symlinked state, cache or jobs folder) and the
+baselines are refreshed once more from the final commit. A release build
+of the tip after those messages measures `inacircle` 1,093,584 B (`.text`
+830,968 B), 11,368 B above `c84f4ad`, still 479,280 B under the limit; the
+cause of that growth has not been analysed yet. The final code commit
+`420a714` measured `inacircle` 1,103,168 B (`.text` 839,112 B) locally. The final
+build, `70e9984` (it adds the second buffer's first-touch move and the
+Trash ownership rule), measures 1,105,536 B (`.text` 841,176 B), +23,320 B over
+`c84f4ad` and 467,328 B under the limit; both baselines were refreshed on it,
+and the per-area account of that last growth was not made. The
+aarch64 baseline is measured on the native arm64 runner, not here: on
+`c84f4ad` it was 987,880 B (`.text` 688,292 B), +131,080 B over the earlier
+baseline taken after the sandbox gate (856,800 B); on the final build it is
+987,912 B (`.text` 704,420 B; native CI run 40955927479). It has no per-area
+account; the x86_64 areas above are the guide. Both baselines are
+refreshed in `scripts/` with their provenance.
+
 ## Reproduce
 
 ```sh

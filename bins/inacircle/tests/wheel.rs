@@ -8,8 +8,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod fake_compositor;
+mod isolate;
 
-use fake_compositor::{Compositor, source_writes};
+use fake_compositor::{Compositor, Delay, KEYBOARD, POINTER, Script, source_writes};
+use isolate::isolate;
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
 
@@ -23,7 +25,9 @@ fn runtime_dir(name: &str) -> PathBuf {
 
 fn wheel(rt: &Path) -> (Option<i32>, String, String, Duration) {
     let t = Instant::now();
-    let out = Command::new(BIN)
+    // Never the developer's session bus (`isolate`): a failed start
+    // notifies.
+    let out = isolate(&mut Command::new(BIN), rt)
         .env("XDG_RUNTIME_DIR", rt)
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("WAYLAND_SOCKET")
@@ -42,6 +46,17 @@ fn try_lock(f: &fs::File) -> bool {
     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
+/// Releases the lock at once. A plain `drop` closes only this process's
+/// descriptor: a thread of this test binary that forks (every test spawns
+/// children) holds a copy of it until its `exec` closes it, and `flock`
+/// belongs to the open file description, so the lock would stay held for
+/// that window and the next wheel would see a second instance (a flaky 0
+/// where 1 is expected). `LOCK_UN` releases it for every copy.
+fn unlock(f: &fs::File) {
+    // SAFETY: flock on an fd the file owns.
+    assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) }, 0);
+}
+
 #[test]
 fn second_instance_exits_at_once() {
     let rt = runtime_dir("second");
@@ -49,11 +64,14 @@ fn second_instance_exits_at_once() {
     assert!(try_lock(&lock));
     let (code, stdout, stderr, took) = wheel(&rt);
     assert_eq!(code, Some(0), "{stderr}");
-    assert!(took < Duration::from_millis(100), "{took:?}");
+    // Far below the startup deadline it would hit if it went on to
+    // Wayland; the bound only has to survive a loaded machine.
+    assert!(took < Duration::from_secs(1), "{took:?}");
     assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
 
     // Without the lock held it goes on to Wayland, which is not there: an
     // error, and the lock is free again afterwards.
+    unlock(&lock);
     drop(lock);
     let (code, _, stderr, _) = wheel(&rt);
     assert_eq!(code, Some(1), "{stderr}");
@@ -85,7 +103,8 @@ fn alarm_works_even_if_the_parent_disabled_sigalrm() {
     // A compositor that accepts and never answers.
     let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
     let mut cmd = Command::new(BIN);
-    cmd.env("XDG_RUNTIME_DIR", &rt)
+    isolate(&mut cmd, &rt)
+        .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -137,7 +156,7 @@ fn bad_lock(name: &str, plant: impl FnOnce(&Path), limit: Duration) {
     let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
     listener.set_nonblocking(true).unwrap();
     let t = Instant::now();
-    let mut child = Command::new(BIN)
+    let mut child = isolate(&mut Command::new(BIN), &rt)
         .env("XDG_RUNTIME_DIR", &rt)
         .env("WAYLAND_DISPLAY", "wayland-0")
         .stdout(std::process::Stdio::null())
@@ -208,13 +227,14 @@ impl Root {
     }
 
     fn cmd(&self) -> Command {
-        let mut c = Command::new(BIN);
-        c.env("XDG_RUNTIME_DIR", self.0.join("runtime"))
+        // `INACIRCLE_TEST_BIN` runs another build against the same fake
+        // compositor (the A/B hover measurement); never set in the suite.
+        let bin = std::env::var("INACIRCLE_TEST_BIN").unwrap_or_else(|_| BIN.to_owned());
+        let mut c = Command::new(bin);
+        // Never the developer's session bus; the fallback `<runtime>/bus`
+        // does not exist here.
+        isolate(&mut c, &self.0)
             .env("WAYLAND_DISPLAY", "wayland-0")
-            .env("XDG_CACHE_HOME", self.0.join("cache"))
-            .env("XDG_STATE_HOME", self.0.join("state"))
-            .env("XDG_DATA_HOME", self.0.join("home/.local/share"))
-            .env("HOME", self.0.join("home"))
             .env("INACIRCLE_ACTIONS_DIR", self.0.join("actions"))
             .stdin(std::process::Stdio::null());
         c
@@ -289,10 +309,21 @@ impl Drop for Root {
 /// The proportional set size (`Pss`) of a live process, in kB: the
 /// budget's measure (shared libc and loader pages count by their share).
 fn pss_kb(pid: u32) -> u64 {
+    rollup_kb(pid, "Pss:")
+}
+
+/// The anonymous memory (`Anonymous`) of a live process, in kB: its heap
+/// and stacks, which no other process shares, so what a drop adds to it
+/// does not depend on how many wheels run beside it.
+fn anon_kb(pid: u32) -> u64 {
+    rollup_kb(pid, "Anonymous:")
+}
+
+fn rollup_kb(pid: u32, field: &str) -> u64 {
     let rollup = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap();
     rollup
         .lines()
-        .find_map(|l| l.strip_prefix("Pss:"))
+        .find_map(|l| l.strip_prefix(field))
         .and_then(|v| v.split_whitespace().next()?.parse().ok())
         .unwrap()
 }
@@ -405,13 +436,65 @@ fn a_hanging_manifest_never_runs_under_the_overlay() {
     assert!(dead(pid), "the hanging manifest outlived the wheel");
 }
 
-/// A drop of 1024 files stays within the 5 MB peak-RSS budget at stage 2.
-/// The budget is for the optimized binary (`cargo test --release`); a
-/// debug build, larger by itself, checks that the drop adds little over a
-/// one-file drop instead.
+/// The engine memory ceiling (docs/benchmarks/acceptance.md): 5 MB PSS,
+/// 5,000,000 bytes. `smaps_rollup` reports kB that are KiB, so a sample is
+/// multiplied by 1024 before it is compared.
+const PSS_CEILING_BYTES: u64 = 5_000_000;
+
+/// The gate over every PSS observation (`label`, KiB): each one must be a
+/// real measurement (non-zero) and at or below the ceiling. No sample is
+/// dropped, no minimum is taken, and an empty list is missing evidence,
+/// not a pass.
+fn pss_gate(samples: &[(&str, u64)]) -> Result<(), String> {
+    if samples.is_empty() {
+        return Err("no PSS observation: incomplete evidence".into());
+    }
+    for &(label, kib) in samples {
+        if kib == 0 {
+            return Err(format!("{label}: PSS 0 kB is not a measurement"));
+        }
+        if kib * 1024 > PSS_CEILING_BYTES {
+            return Err(format!(
+                "{label}: {kib} KiB = {} B exceeds {PSS_CEILING_BYTES} B",
+                kib * 1024
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_pss_gate_checks_every_sample_in_bytes() {
+    // 4882 KiB = 4,999,168 B passes; 4883 KiB = 5,000,192 B is over 5 MB
+    // although it is under the old 5120 KiB smoke limit.
+    let ok = [("a", 4882), ("b", 4882), ("c", 4882), ("d", 4882)];
+    assert_eq!(pss_gate(&ok), Ok(()));
+    // One bad sample among four fails, even when the others are low: the
+    // gate is not the minimum of two runs.
+    let one_over = [("1a", 2500), ("1b", 2500), ("1024a", 4883), ("1024b", 2500)];
+    let err = pss_gate(&one_over).unwrap_err();
+    assert!(err.starts_with("1024a:"), "{err}");
+    // The worst of the four decides, wherever it sits.
+    assert!(pss_gate(&[("x", 6000), ("y", 100)]).is_err());
+    assert!(pss_gate(&[("x", 100), ("y", 6000)]).is_err());
+}
+
+#[test]
+fn the_pss_gate_rejects_missing_or_zero_evidence() {
+    assert!(pss_gate(&[]).is_err());
+    assert!(pss_gate(&[("a", 2500), ("b", 0)]).is_err());
+}
+
+/// A drop of 1024 files stays within the 5 MB PSS ceiling at stage 2. All
+/// four observations (two runs of 1 file, two of 1024) are kept and each
+/// must pass `pss_gate`: no minimum, no 5120 KiB smoke limit. The budget
+/// is for the optimized binary (`cargo test --release`); a debug build,
+/// larger by itself, checks that the drop adds little over a one-file drop
+/// instead. The PSS is taken once, after stage 2 has painted (a sampled
+/// value, not a transient peak: acceptance.md).
 #[test]
 fn a_large_drop_stays_within_the_memory_budget() {
-    let peak = |name: &str, n: usize| -> u64 {
+    let peak = |name: &str, n: usize| -> (u64, u64) {
         let root = Root::new(name);
         root.markdown_action_cached();
         let list = root.files(n);
@@ -428,7 +511,7 @@ fn a_large_drop_stays_within_the_memory_budget() {
         let mut child = child.unwrap();
         c.mapped(Duration::from_secs(2));
         drag_to_stage2(&mut c, &list);
-        let kb = pss_kb(child.id());
+        let kb = (pss_kb(child.id()), anon_kb(child.id()));
         c.close();
         assert_eq!(
             wait_exit(&mut child, Duration::from_secs(5)).code(),
@@ -436,18 +519,34 @@ fn a_large_drop_stays_within_the_memory_budget() {
         );
         kb
     };
-    // Shared and file-backed pages vary by tens of kB from run to run: the lower of
-    // two runs each.
-    let one = peak("rss1a", 1).min(peak("rss1b", 1));
-    let many = peak("rss1024a", 1024).min(peak("rss1024b", 1024));
-    eprintln!("PSS at stage 2: 1 file {one} kB, 1024 files {many} kB");
+    let runs = [
+        ("1 file, run a", peak("rss1a", 1), 1usize),
+        ("1 file, run b", peak("rss1b", 1), 1),
+        ("1024 files, run a", peak("rss1024a", 1024), 1024),
+        ("1024 files, run b", peak("rss1024b", 1024), 1024),
+    ];
+    for (label, (pss, anon), _) in &runs {
+        eprintln!("PSS at stage 2, {label}: {pss} kB (anonymous {anon} kB)");
+    }
     if cfg!(debug_assertions) {
-        // Debug builds allocate more per file; under a loaded full-suite run
-        // the drop's own growth measured 310-345 kB here. The budget itself is
-        // the release assertion below.
-        assert!(many <= one + 512, "1 file {one} kB, 1024 files {many} kB");
+        // Debug builds allocate more per file; the drop's own growth is its
+        // anonymous memory (measured 160 kB). PSS is not the measure
+        // here: it divides the shared pages among the processes alive at
+        // that moment, so beside other tests' wheels the runs differ by
+        // more than the drop adds. The budget itself is the release
+        // assertion below. Worst against best, so no run is hidden.
+        let anon = |n: usize| runs.iter().filter(move |r| r.2 == n).map(|r| (r.1).1);
+        let one = anon(1).min().unwrap();
+        let many = anon(1024).max().unwrap();
+        assert!(
+            many <= one + 512,
+            "1 file {one} kB, 1024 files {many} kB anonymous"
+        );
     } else {
-        assert!(many <= 5 * 1024, "1024 files: {many} kB");
+        let samples: Vec<(&str, u64)> = runs.iter().map(|r| (r.0, (r.1).0)).collect();
+        if let Err(why) = pss_gate(&samples) {
+            panic!("{why}");
+        }
     }
 }
 
@@ -492,6 +591,78 @@ fn reader_gone(w: &std::os::fd::OwnedFd) -> bool {
     // SAFETY: one valid pollfd.
     unsafe { libc::poll(&mut p, 1, 0) };
     p.revents & libc::POLLERR != 0
+}
+
+/// The context switches of every thread of `pid`, voluntary and
+/// involuntary: each is one time the kernel took the process off the CPU,
+/// so while the wheel waits for the user, no switch means no wakeup.
+fn context_switches(pid: u32) -> u64 {
+    let mut total = 0;
+    for task in fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+        let status = fs::read_to_string(task.unwrap().path().join("status")).unwrap();
+        total += status
+            .lines()
+            .filter(|l| l.contains("ctxt_switches:"))
+            .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+            .sum::<u64>();
+    }
+    total
+}
+
+/// The number of live child processes of `pid` (any thread).
+fn children(pid: u32) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .map(|t| fs::read_to_string(t.unwrap().path().join("children")).unwrap_or_default())
+        .map(|c| c.split_whitespace().count())
+        .sum()
+}
+
+/// Observation window of a stationary wheel: 2 s is far above any startup
+/// settle and long enough that a periodic timer of 1 s or faster would show
+/// at least one switch, yet short for the suite. The wheel's own deadlines
+/// are 30 s (user) and 2 s (startup, long over after the first 300 ms
+/// settle below), so none can fire inside the window.
+const IDLE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Idle, property by property (acceptance.md): a mapped wheel that nobody
+/// touches (1) takes no context switch during the window, so no
+/// autonomous periodic work (the poll sleeps on a deadline), (2) has no
+/// child process (no resident engine), (3) reports `idle_wakeups=0` (no
+/// premature empty poll) and (4) is gone, exit 0, once closed.
+#[test]
+fn a_stationary_wheel_wakes_for_nothing_and_leaves_no_engine() {
+    let root = Root::new("idle");
+    root.markdown_action_cached();
+    let (mut c, child) = start(&root, true);
+    let pid = child.id();
+    // A seat with pointer and keyboard and the pointer over the surface
+    // end the startup waits: what remains is the steady state of a wheel
+    // that waits for the user.
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    // The frame passes; the wheel prepaints the released buffer.
+    c.pump(Duration::from_millis(300));
+    c.release_held();
+    c.pump(Duration::from_millis(300));
+    let before = context_switches(pid);
+    std::thread::sleep(IDLE_WINDOW);
+    let after = context_switches(pid);
+    assert_eq!(
+        before,
+        after,
+        "{} switches while nobody touched the wheel",
+        after - before
+    );
+    assert_eq!(children(pid), 0, "a child process is resident");
+    let err = finish(c, child);
+    let line = err
+        .lines()
+        .find(|l| l.contains("measure wheel "))
+        .unwrap_or_else(|| panic!("no measure line: {err}"));
+    assert!(line.contains(" idle_wakeups=0 "), "{line}");
+    assert!(dead(pid as i32), "the wheel outlived its close");
 }
 
 /// The list is read once, on `enter`; the drop on a lit category is then
@@ -607,9 +778,836 @@ fn level1_from_the_early_list_within_budget() {
         .unwrap_or_else(|| panic!("no list_to_level1_cpu_us in {err:?}"))
         .parse()
         .unwrap();
-    eprintln!("list_to_level1_cpu_us={us}");
+    // The whole line, for benchmark runs that collect it.
+    if let Some(line) = err.lines().find(|l| l.contains("measure wheel")) {
+        eprintln!("{line}");
+    }
     assert!(us >= 0, "never measured: {err}");
+    // The phases report CPU and wall separately; the queued commit and the
+    // flush that sent it are two points, in that order.
+    let get = |k: &str| -> i64 {
+        err.split_whitespace()
+            .find_map(|w| w.strip_prefix(k)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("no {k} in {err:?}"))
+            .parse()
+            .unwrap()
+    };
+    assert!(get("list_abs_cpu_us") >= get("start_abs_cpu_us"), "{err}");
+    assert!(get("list_abs_wall_us") >= get("start_abs_wall_us"), "{err}");
+    assert!(get("drop_abs_cpu_us") >= get("list_abs_cpu_us"), "{err}");
+    assert!(get("drop_abs_wall_us") >= get("list_abs_wall_us"), "{err}");
+    assert!(
+        get("main_to_flush_cpu_us") >= get("main_to_commit_cpu_us"),
+        "{err}"
+    );
+    assert!(
+        get("main_to_flush_wall_us") >= get("main_to_commit_wall_us"),
+        "{err}"
+    );
+    // Closed without a choice: no choice marker, not a zero.
+    assert!(!err.contains("choice_abs"), "{err}");
     if !cfg!(debug_assertions) {
         assert!(us <= 1000, "{us} us");
     }
+}
+
+/// The wait for the drag source's list takes buffer 1's first touch: the
+/// level-1 wheel painted into it after the list pays no page faults for it
+/// (a fresh 480x480 buffer is 225 of them). The list comes well after the
+/// first commit, so the wheel is idle in between.
+#[test]
+fn level1_from_a_late_list_pays_no_first_touch() {
+    let root = Root::new("level1-touch");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    // `Drop here` is on the screen; the source answers later.
+    c.attached(1, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(50));
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    let err = finish(c, child);
+    if let Some(line) = err.lines().find(|l| l.contains("measure wheel")) {
+        eprintln!("{line}");
+    }
+    let flt: i64 = err
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("list_to_level1_minflt="))
+        .unwrap_or_else(|| panic!("no list_to_level1_minflt in {err:?}"))
+        .parse()
+        .unwrap();
+    // Below one buffer's 225 pages: the paint's own allocations stay
+    // under 20 on the reference machine.
+    assert!(flt < 100, "{flt} faults: {err}");
+}
+
+// Bounded startup and teardown (hardening task 11). The fake compositor's
+// script decides what arrives, and when; the wheel has no bus to notify on
+// (`Root::cmd` removes the variable), so these see the exit code, the
+// timing and the log line. The notification itself is in `notify.rs`.
+
+/// The proposed `ui_startup_deadline` (`docs/resource-limits.md`), and the pair
+/// of delays the preflight measured around it.
+const STARTUP: Duration = Duration::from_millis(2000);
+const BELOW_STARTUP: Duration = Duration::from_millis(1900);
+const ABOVE_STARTUP: Duration = Duration::from_millis(2100);
+/// `ui_teardown_deadline` and its pair.
+const TEARDOWN: Duration = Duration::from_millis(1000);
+const BELOW_TEARDOWN: Duration = Duration::from_millis(900);
+const ABOVE_TEARDOWN: Duration = Duration::from_millis(1100);
+/// How long a test waits for the wheel before it fails the test: a hung
+/// wheel must fail, never hang the suite. Well past every deadline above.
+const PATIENCE: Duration = Duration::from_secs(8);
+
+/// The wheel against a fake compositor that behaves as `script` says.
+fn start_with(root: &Root, script: Script) -> (Compositor, std::process::Child) {
+    let mut child = None;
+    let c = Compositor::serve_with(
+        &root.0.join("runtime"),
+        Duration::from_secs(2),
+        script,
+        || {
+            child = Some(
+                root.cmd()
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        },
+    );
+    (c, child.unwrap())
+}
+
+/// Serves the compositor until the wheel hangs up, then reaps it: exit
+/// code, its stderr, and how long it ran.
+fn until_gone(
+    c: &mut Compositor,
+    mut child: std::process::Child,
+    t0: Instant,
+) -> (Option<i32>, String, Duration) {
+    if c.hangs_up(PATIENCE).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the wheel did not hang up within {PATIENCE:?}");
+    }
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    let took = t0.elapsed();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    (st.code(), err, took)
+}
+
+/// A mapped overlay whose seat has `caps` and the devices they imply.
+fn seat_up(c: &mut Compositor, caps: u32) {
+    c.seat_bound(Duration::from_secs(2));
+    c.seat_caps(caps);
+    c.seat_devices(caps, Duration::from_secs(2));
+}
+
+#[test]
+fn startup_without_a_configure_fails_at_the_startup_deadline() {
+    let root = Root::new("startup-noconf");
+    let t0 = Instant::now();
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let (mut c, child) = start_with(&root, script);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    eprintln!("PREFLIGHT startup no-configure: exit={code:?} took={took:?} stderr={err:?}");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("did not configure"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// The pair around the startup deadline: a configure 100 ms before it still
+/// opens the wheel, one 100 ms after it does not.
+#[test]
+fn startup_configure_below_the_deadline_still_opens() {
+    let root = Root::new("startup-below");
+    root.markdown_action_cached();
+    let script = Script {
+        configure: Delay::After(BELOW_STARTUP),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, mut child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(4));
+    // The startup is over once the wheel is on the screen; the drag gives
+    // the position.
+    let _early = c.drag_enters(0, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    eprintln!(
+        "PREFLIGHT startup configure@{BELOW_STARTUP:?}: first wheel commit at {:?}",
+        t0.elapsed()
+    );
+    c.close();
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(st.code(), Some(0));
+}
+
+#[test]
+fn startup_configure_above_the_deadline_fails() {
+    let root = Root::new("startup-above");
+    let script = Script {
+        configure: Delay::After(ABOVE_STARTUP),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    eprintln!(
+        "PREFLIGHT startup configure@{ABOVE_STARTUP:?}: exit={code:?} took={took:?} stderr={err:?}"
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        took < ABOVE_STARTUP,
+        "gave up only after the late configure: {took:?}"
+    );
+}
+
+/// The wheel is configured but no position ever comes, and the seat has no
+/// pointer: that is the named cause, at the startup deadline (not the
+/// 30 s the stage used to take, and not a silent exit 0).
+#[test]
+fn startup_without_a_pointer_names_the_pointer() {
+    let root = Root::new("startup-nopointer");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, KEYBOARD);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("pointer position was unavailable"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// With a pointer present the missing position has no proven cause: the
+/// pointer is not blamed.
+#[test]
+fn startup_without_a_position_does_not_blame_the_pointer() {
+    let root = Root::new("startup-nopos");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(!err.contains("pointer position was unavailable"), "{err}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// A seat without a keyboard cannot take Esc, but the capability may come
+/// late: the wheel waits for it until the startup deadline, then fails
+/// with the proven cause.
+#[test]
+fn startup_without_a_keyboard_fails_at_the_startup_deadline() {
+    let root = Root::new("startup-nokbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    c.pointer_enters();
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// The keyboard capability arrives after the first (pointer-only) one,
+/// inside the deadline: the wheel opens, and Esc closes it.
+#[test]
+fn startup_keyboard_arriving_late_within_the_deadline_still_opens() {
+    let root = Root::new("startup-latekbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    c.pointer_enters();
+    c.pump(Duration::from_millis(300));
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// The keyboard goes away after the wheel is on the screen: Esc could no
+/// longer close it, so it closes in order at once. Not a failure.
+#[test]
+fn keyboard_lost_after_the_first_commit_closes_in_order() {
+    let root = Root::new("startup-lostkbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    c.seat_caps(POINTER);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+    assert!(
+        c.layer_requests().contains(&7),
+        "layer surface not destroyed"
+    );
+}
+
+/// Stops `pid` and waits (by its state, not by time) until it is stopped,
+/// so what the compositor sends next is read by the client in one go.
+fn freeze(pid: u32) {
+    // SAFETY: a signal to our own child.
+    unsafe { libc::kill(pid as i32, libc::SIGSTOP) };
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // The state letter follows the last `)` (the name may hold one).
+        let state = stat.rsplit(')').next().unwrap().trim_start().as_bytes()[0];
+        if state == b'T' {
+            return;
+        }
+        assert!(Instant::now() < limit, "the wheel did not stop: {stat}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn thaw(pid: u32) {
+    // SAFETY: as above.
+    unsafe { libc::kill(pid as i32, libc::SIGCONT) };
+}
+
+/// The batch that shows the wheel (the keyboard arrives, the position is
+/// known) also takes the keyboard away: the first commit happens inside
+/// that dispatch, before the loop starts the user's stage, and the loss is
+/// decided by what is on the screen, not by which clock runs. Without it
+/// the wheel stays up with no Esc for the whole 30 s stage. The client is
+/// stopped while both capabilities are sent, so it reads them together.
+#[test]
+fn keyboard_lost_in_the_batch_that_showed_the_wheel_closes_in_order() {
+    let root = Root::new("startup-lostkbd-batch");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    // The drag brings the position; its early read is the client's answer,
+    // so the position is in the machine when the capabilities arrive.
+    let _silent = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    assert_eq!(c.attaches(), 0, "no keyboard: no wheel yet");
+    freeze(child.id());
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    thaw(child.id());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+    assert!(
+        c.layer_requests().contains(&7),
+        "layer surface not destroyed"
+    );
+}
+
+/// The keyboard goes away before the first commit: the wheel is never
+/// shown and the startup names the keyboard, at the startup deadline.
+#[test]
+fn keyboard_lost_before_the_first_commit_fails_naming_the_keyboard() {
+    let root = Root::new("startup-lostkbd-early");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    c.pointer_enters();
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took >= STARTUP - Duration::from_millis(100), "{took:?}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// A keyboard that went away and came back is a new device: the client asks
+/// for it again, and Esc on the new object closes the wheel. The old
+/// object is inert, so without the new request Esc would never arrive.
+#[test]
+fn keyboard_back_after_a_loss_is_asked_for_again() {
+    let root = Root::new("startup-backkbd");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.seat_caps(POINTER);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.keyboards_requested(2, Duration::from_secs(2));
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// Esc before the configure is a clean cancel too: exit 0, no
+/// `ConfigureTimeout` notice for a compositor that never configured.
+#[test]
+fn startup_esc_before_the_configure_cancels_cleanly() {
+    let root = Root::new("startup-esc-noconf");
+    let t0 = Instant::now();
+    let script = Script {
+        configure: Delay::Never,
+        ..Script::default()
+    };
+    let (mut c, child) = start_with(&root, script);
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// A drop in a seat with no keyboard must not start the user's 30 s: the
+/// wheel is not on the screen, the startup clock is the only one, and the
+/// keyboard is named at the startup deadline. (The machine arms its stage
+/// on the drop whether or not the wheel is shown.)
+#[test]
+fn a_drop_before_the_wheel_is_shown_does_not_extend_the_startup() {
+    let root = Root::new("startup-drop-nokbd");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER);
+    let _silent = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    c.drop_it();
+    // The client took the drop (its own read): the stage was armed by now.
+    // The list arrives, so the machine goes on to the targets and waits
+    // for a choice nobody can see.
+    let own = c
+        .next_receive(0, Duration::from_secs(2))
+        .expect("the drop's own read");
+    source_writes(own, &list);
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("keyboard was unavailable"), "{err}");
+    assert!(took < STARTUP + Duration::from_millis(1500), "{took:?}");
+}
+
+/// The pointer enters before the configure: the position waits for the
+/// size, and the wheel opens.
+#[test]
+fn startup_pointer_before_the_configure_still_opens() {
+    let root = Root::new("startup-reorder");
+    let script = Script {
+        configure: Delay::After(Duration::from_millis(300)),
+        ..Script::default()
+    };
+    let (mut c, mut child) = start_with(&root, script);
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.pointer_enters();
+    c.mapped(Duration::from_secs(4));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let st = wait_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(st.code(), Some(0));
+}
+
+fn wheel_esc() -> u32 {
+    1
+}
+
+/// Esc between the configure and the first position is a clean cancel:
+/// exit 0, nothing logged.
+#[test]
+fn startup_esc_before_the_first_commit_cancels_cleanly() {
+    let root = Root::new("startup-esc");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// Esc once the wheel is on the screen is the same clean cancel.
+#[test]
+fn startup_esc_after_the_first_commit_cancels_cleanly() {
+    let root = Root::new("startup-esc2");
+    root.markdown_action_cached();
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    let _early = c.drag_enters(0, Duration::from_secs(2));
+    c.attached(1, Duration::from_secs(4));
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
+/// The compositor drops the connection during startup: a failure, at once.
+#[test]
+fn startup_compositor_hangup_fails_at_once() {
+    let root = Root::new("startup-hangup");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    c.disconnect();
+    let (code, err, took) = until_gone(&mut c, child, t0);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("wheel:"), "{err}");
+    assert!(took < STARTUP, "{took:?}");
+}
+
+/// Orderly teardown, below the deadline: the layer surface (the keyboard
+/// grab) is destroyed first, and the wheel waits for the compositor's
+/// answer to its `sync` before it closes the connection.
+#[test]
+fn startup_teardown_waits_for_the_ack_below_the_deadline() {
+    let root = Root::new("startup-td-below");
+    let script = Script {
+        teardown_ack: Delay::After(BELOW_TEARDOWN),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(c.teardown_acked(), "the wheel left before the ack");
+    assert!(c.layer_requests().contains(&7), "no layer surface destroy");
+    let held = c.since_destroy().expect("destroyed");
+    eprintln!(
+        "PREFLIGHT teardown ack@{BELOW_TEARDOWN:?}: client left {held:?} after the layer destroy, acked={}",
+        c.teardown_acked()
+    );
+    assert!(held >= BELOW_TEARDOWN, "{held:?}");
+    assert!(held < TEARDOWN + Duration::from_millis(500), "{held:?}");
+}
+
+/// Above the deadline the wheel gives up on the answer and closes.
+#[test]
+fn startup_teardown_gives_up_above_the_deadline() {
+    let root = Root::new("startup-td-above");
+    let script = Script {
+        teardown_ack: Delay::After(ABOVE_TEARDOWN),
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(!c.teardown_acked(), "it waited past the deadline");
+    let held = c.since_destroy().expect("destroyed");
+    eprintln!(
+        "PREFLIGHT teardown ack@{ABOVE_TEARDOWN:?}: client left {held:?} after the layer destroy, acked={}",
+        c.teardown_acked()
+    );
+    assert!(held >= TEARDOWN - Duration::from_millis(100), "{held:?}");
+    assert!(held < ABOVE_TEARDOWN, "{held:?}");
+}
+
+// Paint trace (hardening task 12). The wheel's measurement line names every
+// paint: phase, buffer, wheel generation (`S`/`T` startup buffers 0/1, `F`
+// full and `H` hover paint inside a render, `P` prepaint; `!` marks a paint
+// onto a buffer the compositor still held).
+
+/// The paint trace of a finished run's stderr.
+fn trace(err: &str) -> Vec<String> {
+    err.split_whitespace()
+        .find_map(|w| w.strip_prefix("paint_trace="))
+        .unwrap_or_else(|| panic!("no paint_trace in {err:?}"))
+        .split(',')
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A run of the wheel with no drag: the pointer opens the first wheel.
+fn no_drag_run(name: &str) -> String {
+    let root = Root::new(name);
+    let mut child = None;
+    let mut c = Compositor::serve(&root.0.join("runtime"), Duration::from_secs(2), || {
+        child = Some(
+            root.cmd()
+                .env("INACIRCLE_MEASURE", "1")
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+    });
+    c.mapped(Duration::from_secs(2));
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    c.attached(1, Duration::from_secs(4));
+    // The frame passes; whatever the wheel paints ahead of time is done.
+    c.release_held();
+    c.pump(Duration::from_millis(100));
+    finish(c, child.unwrap())
+}
+
+/// With no drag the pointer replaces the `Drop here` wheel at once, so the
+/// buffers painted for it while the compositor configured are obsolete:
+/// before the first commit the wheel paints only what it shows (the
+/// buffer-0 paint during the configure wait costs no waiting time and
+/// cannot know what comes), and the second buffer is painted after the
+/// commit, for the generation on screen.
+#[test]
+fn render_no_drag_startup_paints_no_obsolete_second_buffer() {
+    let err = no_drag_run("render-nodrag");
+    assert_eq!(trace(&err), ["S0g0", "F0g1", "P1g1"], "{err}");
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+}
+
+/// A drag whose list arrives: the second buffer is first painted for a
+/// wheel that is shown (never the startup wheel nobody will see), and no
+/// paint ever lands on a buffer the compositor holds.
+#[test]
+fn render_drag_to_stage2_paints_no_unused_buffer_and_never_a_busy_one() {
+    let root = Root::new("render-drag");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    drag_to_stage2(&mut c, &list);
+    let err = finish(c, child);
+    let t = trace(&err);
+    assert!(!t.iter().any(|p| p.starts_with("T1")), "{t:?}");
+    // While the list is on its way the wheel is about to be replaced: the
+    // free buffer is not made ready for the `Drop here` wheel (g0).
+    assert!(!t.contains(&"P1g0".to_owned()), "{t:?}");
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+    // A buffer's generation never goes back, and the stage swaps are in
+    // order: Drop here (0), the categories (1), the targets (2).
+    let gens: Vec<u32> = t
+        .iter()
+        .map(|p| {
+            p[p.find('g').unwrap() + 1..]
+                .trim_end_matches('!')
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(gens.windows(2).all(|w| w[0] <= w[1]), "{t:?}");
+    assert_eq!(gens.last(), Some(&2), "{t:?}");
+}
+
+/// Both buffers held by the compositor: nothing is painted or attached
+/// until the release (the compositor owns the pixels meanwhile), and the
+/// paint after it lands on the released buffer.
+#[test]
+fn render_delayed_release_never_paints_a_held_buffer() {
+    let root = Root::new("render-held");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    // `Drop here`, then the categories: both buffers are in use now.
+    c.attached(2, Duration::from_secs(5));
+    // The drag moves onto a slice before any release: the repaint waits.
+    c.drag_motion(960, 390);
+    c.pump(Duration::from_millis(150));
+    assert_eq!(c.attaches(), 2, "painted onto a held buffer");
+    c.release_held();
+    c.attached(3, Duration::from_secs(2));
+    c.drop_it();
+    c.release_held();
+    c.attached(4, Duration::from_secs(5));
+    let err = finish(c, child);
+    assert!(err.contains(" busy_paints=0 "), "{err}");
+}
+
+/// The hover series of the A/B measurement (`#[ignore]`: it measures, it
+/// does not assert a budget). Stage 2 with two lit targets, then
+/// `HOVER_EVENTS` pointer motions cycling Markdown, Plain text and the hub,
+/// so every repaint changes the lit slice. One summary line on stdout:
+/// `HOVER exit=.. misses=.. <the wheel's measurement line>`.
+#[test]
+#[ignore]
+fn probe_hover_series() {
+    let root = Root::new("hoverseries");
+    root.markdown_action_cached();
+    root.action(
+        "pt",
+        "[ \"$1\" = --manifest ] || exit 1\nprintf 'inacircle-manifest 0\\n'\n\
+         printf 'action\\tt.txt\\tfamily=t\\tin=text/markdown\\tout=text/plain\\t\
+         ext=txt\\tlabel=Plain\\tgroup=g\\tcost=1\\tlossy=yes\\tbatch=yes\\n'",
+    );
+    // Refresh the cache with both actions.
+    let f = root.0.join("f/primer.txt");
+    fs::write(&f, "words\n").unwrap();
+    assert!(
+        root.cmd()
+            .arg("offer")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::remove_file(&f).unwrap();
+    let a = root.0.join("f/a.txt");
+    let b = root.0.join("f/b.md");
+    fs::write(&a, "words\n").unwrap();
+    fs::write(&b, "# words\n").unwrap();
+    let list = format!("file://{}\r\nfile://{}\r\n", a.display(), b.display()).into_bytes();
+    let (mut c, child) = start(&root, true);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    // `HOVER_SETTLE_MS` (diagnostic only, default 0): after every release
+    // the fake waits this long before its next event, so the wheel can
+    // prepaint the released buffer; 0 delivers the release and the next
+    // event together, the worst case of the series.
+    let settle = Duration::from_millis(
+        std::env::var("HOVER_SETTLE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    );
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    c.release_held();
+    c.pump(settle);
+    c.drag_motion(960, 390);
+    c.attached(3, Duration::from_secs(2));
+    c.release_held();
+    c.pump(settle);
+    c.drop_it();
+    c.attached(4, Duration::from_secs(5));
+    c.release_held();
+    c.pump(settle);
+    c.pointer_enters();
+    // The frame passes: the compositor releases, the wheel prepaints.
+    c.pump(Duration::from_millis(200));
+    c.release_held();
+    let n: usize = std::env::var("HOVER_EVENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let pts = [(960u32, 390u32), (960, 690), (960, 540)];
+    let mut misses = 0;
+    for k in 0..n {
+        let before = c.attaches();
+        let (x, y) = pts[k % pts.len()];
+        c.pointer_motion(x, y);
+        let t = Instant::now();
+        while c.attaches() == before && t.elapsed() < Duration::from_millis(100) {
+            c.pump(Duration::from_millis(2));
+        }
+        misses += usize::from(c.attaches() == before);
+        c.release_held();
+        c.pump(Duration::from_millis(2));
+    }
+    let attaches = c.attaches();
+    let err = finish(c, child);
+    let line = err
+        .lines()
+        .find(|l| l.contains("measure wheel"))
+        .unwrap_or(&err);
+    println!("HOVER misses={misses} attaches={attaches} {line}");
+}
+
+/// Whether the wheel with `SIGALRM` pending at `secs` of stopped time is
+/// killed by it: the exit status of a wheel stopped right after it
+/// connected, continued after `secs`.
+fn stopped_wheel_after(name: &str, secs: u64) -> std::process::ExitStatus {
+    use std::os::unix::net::UnixListener;
+    let rt = runtime_dir(name);
+    // A compositor that accepts and never answers.
+    let listener = UnixListener::bind(rt.join("wayland-0")).unwrap();
+    let mut child = isolate(&mut Command::new(BIN), &rt)
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Connected: past the lock and the alarm.
+    let (_conn, _) = listener.accept().unwrap();
+    let pid = child.id() as i32;
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    // A stopped process runs no code, so only the kernel's timer can end it
+    // (the soft deadlines are not evaluated): the alarm stays pending and
+    // acts when the process continues.
+    std::thread::sleep(Duration::from_secs(secs));
+    // SAFETY: as above.
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    wait_exit(&mut child, Duration::from_secs(5))
+}
+
+/// The hard backstop of the startup is `STARTUP_BACKSTOP` (5 s: the soft
+/// path takes at most `STARTUP` + `TEARDOWN`, 3 s), not the user's 30 s: a
+/// startup stuck where no deadline reaches must not hold the grab for the
+/// user's stage.
+#[test]
+fn startup_alarm_backstop_kills_a_stuck_startup_after_five_seconds() {
+    use std::os::unix::process::ExitStatusExt;
+    let st = stopped_wheel_after("alarm5", 6);
+    assert_eq!(st.signal(), Some(libc::SIGALRM), "{st:?}");
+}
+
+/// The close waits for the answer to its own `sync`, not for any callback's
+/// `done`: a `done` on another callback leaves it waiting until its
+/// deadline (the fake never answers the `sync`). Kills `&&` -> `||` in the
+/// callback handler. Only a lower bound is asserted, which load can only
+/// help.
+#[test]
+fn startup_teardown_ignores_a_done_on_another_callback() {
+    let root = Root::new("startup-td-decoy");
+    let script = Script {
+        teardown_ack: Delay::Never,
+        teardown_decoy: true,
+        ..Script::default()
+    };
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, script);
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    assert!(!c.teardown_acked());
+    let held = c.since_destroy().expect("destroyed");
+    // The client's own deadline is counted from before its layer destroy
+    // was sent, so allow the flush in between.
+    assert!(held >= TEARDOWN - Duration::from_millis(100), "{held:?}");
+}
+
+/// The answer to the close's own `sync` ends the wait at once: the client
+/// does not sit out its deadline. Kills `!=` -> `==` (the answer never
+/// recognised). The bound is half the deadline: the deadline itself is the
+/// failure being detected.
+#[test]
+fn startup_teardown_leaves_when_its_sync_is_answered() {
+    let root = Root::new("startup-td-prompt");
+    let t0 = Instant::now();
+    let (mut c, child) = start_with(&root, Script::default());
+    c.mapped(Duration::from_secs(2));
+    seat_up(&mut c, POINTER | KEYBOARD);
+    c.key(wheel_esc());
+    let (code, err, _) = until_gone(&mut c, child, t0);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+    let after = c.since_ack().expect("the fake answered");
+    assert!(after < TEARDOWN / 2, "{after:?}");
 }

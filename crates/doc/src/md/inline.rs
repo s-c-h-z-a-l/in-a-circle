@@ -16,8 +16,9 @@
 //! and their content is kept. This bounds the recursion of every writer.
 
 use super::scan::{close_tag, link_destination, link_label, link_title, open_tag, utf8};
-use super::{Refs, char_ref, decode, normalize_label, punct::PUNCT, unescape};
+use super::{Refs, char_ref, decode, decoded_len, normalize_label, punct::PUNCT, unescape};
 use crate::Inline;
+use crate::budget::Meter;
 use std::collections::HashMap;
 
 /// Deepest inline nesting kept in the tree.
@@ -32,8 +33,13 @@ const NONE: usize = usize::MAX;
 const HEAD: usize = 0;
 
 /// Parses a paragraph's or heading's raw content (see `md::inlines`).
-pub(super) fn parse(raw: &str, refs: &Refs) -> Vec<Inline> {
+///
+/// Every node, every owned string and every copy of a reference's
+/// destination and title is charged to `m` before it is made; once `m`
+/// has failed the pass stops and the (partial) result is discarded.
+pub(super) fn parse(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
     let mut p = Parser {
+        m,
         s: raw,
         b: raw.as_bytes(),
         pos: 0,
@@ -49,6 +55,9 @@ pub(super) fn parse(raw: &str, refs: &Refs) -> Vec<Inline> {
         ends: [Memo::default(); 4],
     };
     p.run();
+    if p.m.failed() {
+        return Vec::new();
+    }
     p.process_emphasis(0);
     let mut out = Vec::new();
     let first = p.nodes[HEAD].next;
@@ -133,6 +142,7 @@ struct Memo {
 const ENDS: [&[u8]; 4] = [b"-->", b"?>", b"]]>", b">"];
 
 struct Parser<'a> {
+    m: &'a mut Meter,
     s: &'a str,
     b: &'a [u8],
     pos: usize,
@@ -237,7 +247,7 @@ fn scan_email(b: &[u8], i: usize) -> Option<usize> {
 
 impl Parser<'_> {
     fn run(&mut self) {
-        while self.pos < self.b.len() {
+        while self.pos < self.b.len() && !self.m.failed() {
             let c = self.b[self.pos];
             match c {
                 b'\n' => self.newline(),
@@ -262,7 +272,13 @@ impl Parser<'_> {
 
     // ---- node list ----
 
+    /// Appends a node. One node is charged and the arena reserved first;
+    /// without room the node is not made and the tail stands in for it
+    /// (the pass ends at its next step on the failed meter).
     fn add(&mut self, kind: Kind) -> usize {
+        if !self.room() {
+            return self.tail;
+        }
         let n = self.nodes.len();
         let mut node = Node::new(kind);
         node.prev = self.tail;
@@ -272,8 +288,30 @@ impl Parser<'_> {
         n
     }
 
+    /// Charges one node and reserves its arena slot.
+    fn room(&mut self) -> bool {
+        if !self.m.node() {
+            return false;
+        }
+        if self.nodes.try_reserve(1).is_err() {
+            self.m.fail_allocation();
+            return false;
+        }
+        true
+    }
+
     fn text(&mut self, s: &str) -> usize {
-        self.add(Kind::Text(s.to_string()))
+        let t = self.m.own(s);
+        self.add(Kind::Text(t))
+    }
+
+    /// A text node of an already built string (small: one character, an
+    /// entity's replacement); its bytes are charged.
+    fn text_owned(&mut self, t: String) -> usize {
+        if !self.m.text(t.len()) {
+            return self.tail;
+        }
+        self.add(Kind::Text(t))
     }
 
     fn unlink(&mut self, n: usize) {
@@ -289,6 +327,9 @@ impl Parser<'_> {
     /// Makes the nodes strictly between `a` and `b` (or after `a` to the
     /// end when `b == NONE`) the children of a new `kind` node placed there.
     fn wrap(&mut self, a: usize, b: usize, kind: Kind) -> usize {
+        if !self.room() {
+            return a;
+        }
         let first = self.nodes[a].next;
         let last = if b == NONE {
             self.tail
@@ -358,7 +399,7 @@ impl Parser<'_> {
         match self.b.get(self.pos + 1) {
             Some(&c) if c.is_ascii_punctuation() => {
                 self.pos += 2;
-                self.add(Kind::Text(char::from(c).to_string()));
+                self.text_owned(char::from(c).to_string());
             }
             Some(b'\n') => {
                 self.pos += 2;
@@ -377,7 +418,7 @@ impl Parser<'_> {
         match char_ref(self.b, self.pos, &mut out) {
             Some(end) => {
                 self.pos = end;
-                self.add(Kind::Text(out));
+                self.text_owned(out);
             }
             None => {
                 self.pos += 1;
@@ -397,6 +438,10 @@ impl Parser<'_> {
             return;
         };
         self.pos = close + n;
+        // The span's copy is charged before it is made.
+        if !self.m.text(close - after) {
+            return;
+        }
         let mut code = self.s[after..close].replace('\n', " ");
         if code.len() >= 2
             && code.starts_with(' ')
@@ -413,6 +458,26 @@ impl Parser<'_> {
     /// `from`.
     fn backtick_run(&mut self, n: usize, from: usize) -> Option<usize> {
         let b = self.b;
+        if self.backticks.is_none() {
+            // The index holds one offset per maximal run: counted and
+            // charged (8 bytes each) before it is built.
+            let mut count = 0usize;
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'`' {
+                    i += b[i..].iter().take_while(|&&c| c == b'`').count();
+                    count += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            if !self
+                .m
+                .text(count.saturating_mul(std::mem::size_of::<usize>()))
+            {
+                return None;
+            }
+        }
         let runs = self.backticks.get_or_insert_with(|| {
             let mut runs: HashMap<usize, Vec<usize>> = HashMap::new();
             let mut i = 0;
@@ -462,7 +527,8 @@ impl Parser<'_> {
         }
         if let Some(end) = self.raw_html(start) {
             self.pos = end;
-            self.add(Kind::Html(self.s[start..end].to_string()));
+            let h = self.m.own(&self.s[start..end]);
+            self.add(Kind::Html(h));
             return;
         }
         self.pos = i;
@@ -471,6 +537,22 @@ impl Parser<'_> {
 
     fn autolink(&mut self, i: usize, n: usize, email: bool) {
         self.pos = i + n + 1;
+        // Two nodes (link, its text); the destination (with `mailto:`) and
+        // the link text are two strings of the decoded length each (a
+        // reference can decode to more bytes than it takes), charged
+        // before they are made.
+        let d = decoded_len(&self.s[i..i + n], false);
+        if !self.m.nodes(2)
+            || !self
+                .m
+                .text(d.saturating_mul(2).saturating_add("mailto:".len()))
+        {
+            return;
+        }
+        if self.nodes.try_reserve(2).is_err() {
+            self.m.fail_allocation();
+            return;
+        }
         // Backslashes are literal in autolinks; references are decoded.
         let text = decode(&self.s[i..i + n], false);
         let dest = if email {
@@ -478,10 +560,16 @@ impl Parser<'_> {
         } else {
             text.clone()
         };
-        let link = self.add(Kind::Link {
+        // The two nodes are already charged and reserved.
+        let link = self.nodes.len();
+        let mut node = Node::new(Kind::Link {
             dest,
             title: String::new(),
         });
+        node.prev = self.tail;
+        self.nodes.push(node);
+        self.nodes[self.tail].next = link;
+        self.tail = link;
         let t = self.nodes.len();
         self.nodes.push(Node::new(Kind::Text(text)));
         self.nodes[link].first = t;
@@ -596,7 +684,7 @@ impl Parser<'_> {
             closer = d;
             d = self.delims[d].prev;
         }
-        while closer != NONE {
+        while closer != NONE && !self.m.failed() {
             let c = &self.delims[closer];
             if !c.can_close {
                 closer = c.next;
@@ -752,7 +840,14 @@ impl Parser<'_> {
             return None;
         }
         self.pos = end + 1;
-        Some((unescape(utf8(dest)), unescape(utf8(title))))
+        // Charged by the decoded length (a reference can decode to more
+        // bytes than its source), before the copies are made.
+        let (dest, title) = (utf8(dest), utf8(title));
+        let n = decoded_len(dest, true).saturating_add(decoded_len(title, true));
+        if !self.m.text(n) {
+            return None;
+        }
+        Some((unescape(dest), unescape(title)))
     }
 
     /// Full (`[label]`), collapsed (`[]`) or shortcut reference for the
@@ -782,6 +877,11 @@ impl Parser<'_> {
             return None;
         }
         let def = self.refs.get(&normalize_label(utf8(label)))?;
+        // Each use of a reference copies its destination and title: this
+        // is the expansion the owned-text budget stops.
+        if !self.m.text(def.dest.len() + def.title.len()) {
+            return None;
+        }
         Some((def.dest.clone(), def.title.clone()))
     }
 
@@ -790,7 +890,7 @@ impl Parser<'_> {
     /// Appends the sibling list from `n` to `out` as inlines, nested at
     /// `depth`. Adjacent text is merged.
     fn convert(&mut self, mut n: usize, depth: usize, out: &mut Vec<Inline>) {
-        while n != NONE {
+        while n != NONE && !self.m.failed() {
             let next = self.nodes[n].next;
             let first = self.nodes[n].first;
             let kind = std::mem::replace(&mut self.nodes[n].kind, Kind::SoftBreak);
@@ -801,7 +901,7 @@ impl Parser<'_> {
             };
             let inline = match kind {
                 Kind::Text(t) => {
-                    push_text(out, &t);
+                    push_text(out, &t, self.m);
                     n = next;
                     continue;
                 }
@@ -827,7 +927,7 @@ impl Parser<'_> {
                     alt: children(self),
                 },
             };
-            out.push(inline);
+            self.m.push(out, inline);
             n = next;
         }
     }
@@ -843,11 +943,11 @@ impl Parser<'_> {
             stack.push(self.nodes[n].next);
             let kind = std::mem::replace(&mut self.nodes[n].kind, Kind::SoftBreak);
             match kind {
-                Kind::Text(t) => push_text(out, &t),
-                Kind::Code(t) => out.push(Inline::Code(t)),
-                Kind::Html(t) => out.push(Inline::Html(t)),
-                Kind::SoftBreak => out.push(Inline::SoftBreak),
-                Kind::HardBreak => out.push(Inline::HardBreak),
+                Kind::Text(t) => push_text(out, &t, self.m),
+                Kind::Code(t) => self.m.push(out, Inline::Code(t)),
+                Kind::Html(t) => self.m.push(out, Inline::Html(t)),
+                Kind::SoftBreak => self.m.push(out, Inline::SoftBreak),
+                Kind::HardBreak => self.m.push(out, Inline::HardBreak),
                 Kind::Emph | Kind::Strong | Kind::Link { .. } | Kind::Image { .. } => {
                     stack.push(self.nodes[n].first);
                 }
@@ -856,14 +956,25 @@ impl Parser<'_> {
     }
 }
 
-fn push_text(out: &mut Vec<Inline>, t: &str) {
+/// Appends text, merged into a preceding text. The arena's string is
+/// already charged and is dropped right after, so a merge or a copy here
+/// is transient and only needs a fallible reservation.
+fn push_text(out: &mut Vec<Inline>, t: &str, m: &mut Meter) {
     if t.is_empty() {
         return;
     }
     if let Some(Inline::Text(last)) = out.last_mut() {
-        last.push_str(t);
+        m.reserve_str(last, t.len());
+        if !m.failed() {
+            last.push_str(t);
+        }
     } else {
-        out.push(Inline::Text(t.to_string()));
+        let mut copy = String::new();
+        m.reserve_str(&mut copy, t.len());
+        if !m.failed() {
+            copy.push_str(t);
+            m.push(out, Inline::Text(copy));
+        }
     }
 }
 

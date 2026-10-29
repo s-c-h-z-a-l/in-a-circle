@@ -1,0 +1,6 @@
+# Every test binary runs with a private HOME and XDG dirs, and fails if it
+# wrote to them or the real state or download folder changed (see the
+# script). `cargo run` is untouched. The path is relative to this folder's
+# parent, so a copy of the tree (cargo-mutants) runs its own copy.
+[target.'cfg(target_os = "linux")']
+runner = "scripts/test-runner.sh"

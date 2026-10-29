@@ -5,6 +5,9 @@
 //! Requests are parsed generically by their header; the few whose
 //! arguments matter (registry, binds, surfaces, receive) are decoded.
 
+// Two test crates share this module and each uses a different part of it.
+#![allow(dead_code)]
+
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -15,6 +18,9 @@ use std::time::{Duration, Instant};
 use wire::op;
 
 pub const OUTPUT: (u32, u32) = (1920, 1080);
+/// `wl_seat` capability bits.
+pub const POINTER: u32 = 1;
+pub const KEYBOARD: u32 = 2;
 /// The first offer the fake source makes; `offer(n)` is the nth.
 const OFFER: u32 = 0xff00_0000;
 const URI_LIST: &str = "text/uri-list";
@@ -29,6 +35,45 @@ const GLOBALS: [(&str, u32); 7] = [
     ("zwlr_layer_shell_v1", 4),
     ("wl_data_device_manager", 3),
 ];
+
+/// When the fake answers something: at once, after a delay counted from the
+/// request that asks for it (a timer polled by the same loop that reads the
+/// client, not a sleep), or never.
+#[derive(Clone, Copy, Debug)]
+pub enum Delay {
+    Now,
+    After(Duration),
+    Never,
+}
+
+/// How the fake behaves where the tests vary it.
+#[derive(Clone, Copy, Debug)]
+pub struct Script {
+    /// The layer surface's first `configure`, after `get_layer_surface`.
+    pub configure: Delay,
+    /// The `done` of the `sync` the client sends after destroying its layer
+    /// surface (its orderly teardown).
+    pub teardown_ack: Delay,
+    /// Before that answer, a `done` on another callback (the one of the
+    /// startup `sync`), which is not the answer to the teardown's `sync`.
+    pub teardown_decoy: bool,
+}
+
+impl Default for Script {
+    fn default() -> Script {
+        Script {
+            configure: Delay::Now,
+            teardown_ack: Delay::Now,
+            teardown_decoy: false,
+        }
+    }
+}
+
+/// Something the fake sends later.
+enum Timer {
+    Configure,
+    Ack(u32),
+}
 
 /// One client request: object, opcode, argument bytes, and its fd if the
 /// request carries one.
@@ -71,12 +116,40 @@ pub struct Compositor {
     shown: Option<u32>,
     /// Buffers replaced on screen, not yet released to the client.
     held: Vec<u32>,
+    script: Script,
+    timers: Vec<(Instant, Timer)>,
+    seat: u32,
+    pointer: u32,
+    keyboard: u32,
+    /// `get_keyboard` requests so far (a capability that came back asks again).
+    keyboard_gets: usize,
+    serial: u32,
+    /// When the client destroyed its layer surface.
+    destroyed_at: Option<Instant>,
+    /// When the fake sent the teardown's `done`.
+    acked_at: Option<Instant>,
+    /// The callback of the startup `sync` (0 before it).
+    startup_cb: u32,
+    /// When the fake saw the client hang up (`hangs_up`).
+    left_at: Option<Instant>,
+    /// Every request to the layer surface so far: opcodes, in order.
+    layer_log: Vec<u16>,
 }
 
 impl Compositor {
     /// Listens on `<runtime>/wayland-0` and accepts the client `spawn`
     /// starts, within `limit`.
     pub fn serve(runtime: &Path, limit: Duration, spawn: impl FnOnce()) -> Compositor {
+        Compositor::serve_with(runtime, limit, Script::default(), spawn)
+    }
+
+    /// `serve` with the behaviour `script`.
+    pub fn serve_with(
+        runtime: &Path,
+        limit: Duration,
+        script: Script,
+        spawn: impl FnOnce(),
+    ) -> Compositor {
         let listener = UnixListener::bind(runtime.join("wayland-0")).unwrap();
         listener.set_nonblocking(true).unwrap();
         spawn();
@@ -102,6 +175,18 @@ impl Compositor {
             attaches: 0,
             shown: None,
             held: Vec::new(),
+            script,
+            timers: Vec::new(),
+            seat: 0,
+            pointer: 0,
+            keyboard: 0,
+            keyboard_gets: 0,
+            serial: 100,
+            destroyed_at: None,
+            acked_at: None,
+            startup_cb: 0,
+            left_at: None,
+            layer_log: Vec::new(),
         }
     }
 
@@ -117,6 +202,15 @@ impl Compositor {
                 Ok(n) => rest = &rest[n..],
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                // The client left (a test of that): nothing to tell it.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    return;
                 }
                 Err(e) => panic!("send: {e}"),
             }
@@ -198,6 +292,7 @@ impl Compositor {
         let until = Instant::now() + limit;
         loop {
             let open = self.fill();
+            self.tick();
             while let Some(mut r) = self.next() {
                 self.note(&r);
                 self.answer(&r);
@@ -215,8 +310,17 @@ impl Compositor {
     fn answer(&mut self, r: &Req) {
         match (r.obj, r.op) {
             (1, op::wl_display::GET_REGISTRY) => self.registry = r.word(0),
+            (1, op::wl_display::SYNC) if self.destroyed_at.is_some() => {
+                // The teardown's round trip.
+                let cb = r.word(0);
+                if self.script.teardown_decoy && self.startup_cb != 0 {
+                    self.send(self.startup_cb, op::wl_callback::DONE, &0u32.to_ne_bytes());
+                }
+                self.later(self.script.teardown_ack, Timer::Ack(cb));
+            }
             (1, op::wl_display::SYNC) => {
                 let cb = r.word(0);
+                self.startup_cb = cb;
                 for (i, (name, ver)) in GLOBALS.iter().enumerate() {
                     let mut a = (i as u32 + 1).to_ne_bytes().to_vec();
                     a.extend(wstr(name));
@@ -228,6 +332,9 @@ impl Compositor {
             (obj, op::wl_registry::BIND) if obj == self.registry => {
                 let (iface, next) = r.string(1);
                 let id = r.word(next + 1);
+                if iface == "wl_seat" {
+                    self.seat = id;
+                }
                 self.bound.insert(iface, id);
             }
             (obj, op::wl_compositor::CREATE_SURFACE)
@@ -239,9 +346,17 @@ impl Compositor {
                 if Some(&obj) == self.bound.get("zwlr_layer_shell_v1") =>
             {
                 self.layer = r.word(0);
-                let (w, h) = OUTPUT;
-                let a = words(&[1, w, h]);
-                self.send(self.layer, op::zwlr_layer_surface_v1::CONFIGURE, &a);
+                self.later(self.script.configure, Timer::Configure);
+            }
+            (obj, op::zwlr_layer_surface_v1::DESTROY) if obj == self.layer && obj != 0 => {
+                self.destroyed_at = Some(Instant::now());
+            }
+            (obj, op::wl_seat::GET_POINTER) if Some(&obj) == self.bound.get("wl_seat") => {
+                self.pointer = r.word(0);
+            }
+            (obj, op::wl_seat::GET_KEYBOARD) if Some(&obj) == self.bound.get("wl_seat") => {
+                self.keyboard = r.word(0);
+                self.keyboard_gets += 1;
             }
             (obj, op::wl_data_device_manager::GET_DATA_DEVICE)
                 if Some(&obj) == self.bound.get("wl_data_device_manager") =>
@@ -250,6 +365,157 @@ impl Compositor {
             }
             _ => {}
         }
+    }
+
+    /// Schedules `t` after `d`; `Never` drops it.
+    fn later(&mut self, d: Delay, t: Timer) {
+        match d {
+            Delay::Now => self.fire(t),
+            Delay::After(d) => self.timers.push((Instant::now() + d, t)),
+            Delay::Never => {}
+        }
+    }
+
+    fn fire(&mut self, t: Timer) {
+        match t {
+            Timer::Configure => {
+                let (w, h) = OUTPUT;
+                let a = words(&[1, w, h]);
+                self.send(self.layer, op::zwlr_layer_surface_v1::CONFIGURE, &a);
+            }
+            Timer::Ack(cb) => {
+                self.send(cb, op::wl_callback::DONE, &0u32.to_ne_bytes());
+                self.acked_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Sends what is due.
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.timers)
+            .into_iter()
+            .partition(|(at, _)| *at <= now);
+        self.timers = rest;
+        for (_, t) in due {
+            self.fire(t);
+        }
+    }
+
+    /// The seat announces `caps` (`POINTER`, `KEYBOARD`).
+    pub fn seat_caps(&mut self, caps: u32) {
+        let seat = self.seat;
+        assert!(seat != 0, "the client did not bind the seat");
+        self.send(seat, op::wl_seat::CAPABILITIES, &words(&[caps]));
+    }
+
+    /// Handles requests until the client has the pointer and keyboard its
+    /// seat capabilities asked for.
+    pub fn seat_devices(&mut self, caps: u32, limit: Duration) {
+        self.until(limit, |c, _| {
+            let ptr = caps & POINTER == 0 || c.pointer != 0;
+            let kbd = caps & KEYBOARD == 0 || c.keyboard != 0;
+            (ptr && kbd).then_some(())
+        });
+    }
+
+    /// Handles requests until the client has asked for `n` keyboards in all.
+    pub fn keyboards_requested(&mut self, n: usize, limit: Duration) {
+        self.until(limit, |c, _| (c.keyboard_gets >= n).then_some(()));
+    }
+
+    /// The pointer enters the overlay at the output's center.
+    pub fn pointer_enters(&mut self) {
+        let (p, overlay) = (self.pointer, self.surfaces[0]);
+        let (cx, cy) = (OUTPUT.0 / 2 * 256, OUTPUT.1 / 2 * 256);
+        self.send(p, op::wl_pointer::ENTER, &words(&[7, overlay, cx, cy]));
+    }
+
+    /// The pointer moves to `(x, y)` (output coordinates).
+    pub fn pointer_motion(&mut self, x: u32, y: u32) {
+        let p = self.pointer;
+        self.send(p, op::wl_pointer::MOTION, &words(&[0, x * 256, y * 256]));
+    }
+
+    /// A key press (`key` is the evdev code; Esc is 1).
+    pub fn key(&mut self, key: u32) {
+        self.serial += 1;
+        let (k, s) = (self.keyboard, self.serial);
+        self.send(k, op::wl_keyboard::KEY, &words(&[s, 0, key, 1]));
+    }
+
+    /// Requests to the layer surface so far, as opcodes, in order.
+    pub fn layer_requests(&self) -> &[u16] {
+        &self.layer_log
+    }
+
+    /// Waits until the client hangs up (handling requests and timers on the
+    /// way); how long after its layer surface was destroyed, or `None` if it
+    /// was never destroyed. `Err` if it did not hang up within `limit`.
+    pub fn hangs_up(&mut self, limit: Duration) -> Result<Option<Duration>, ()> {
+        let until = Instant::now() + limit;
+        loop {
+            let open = self.fill();
+            self.tick();
+            while let Some(r) = self.next() {
+                self.note(&r);
+                self.answer(&r);
+            }
+            if !open {
+                self.left_at = Some(Instant::now());
+                return Ok(self.destroyed_at.map(|t| t.elapsed()));
+            }
+            if Instant::now() >= until {
+                return Err(());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Handles requests until the client has bound the seat.
+    pub fn seat_bound(&mut self, limit: Duration) {
+        self.until(limit, |c, _| (c.seat != 0).then_some(()));
+    }
+
+    /// The compositor drops the connection.
+    pub fn disconnect(&mut self) {
+        let _ = self.sock.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// How long ago the client destroyed its layer surface, if it did,
+    /// measured when the client left (see `hangs_up`).
+    pub fn since_destroy(&self) -> Option<Duration> {
+        self.destroyed_at.zip(self.left_at).map(|(d, l)| l - d)
+    }
+
+    /// One round of reading the client and sending what is due; false once
+    /// the client has hung up.
+    pub fn service(&mut self) -> bool {
+        let open = self.fill();
+        self.tick();
+        while let Some(r) = self.next() {
+            self.note(&r);
+            self.answer(&r);
+        }
+        open
+    }
+
+    /// Whether the client has closed its end by now (a read, no waiting).
+    pub fn eof(&mut self) -> bool {
+        !self.service()
+    }
+
+    /// How long after the fake sent the teardown's `done` the client left;
+    /// `None` if the fake never sent it.
+    pub fn since_ack(&self) -> Option<Duration> {
+        self.acked_at
+            .zip(self.left_at)
+            .map(|(a, l)| l.duration_since(a))
+    }
+
+    /// Whether the fake sent the teardown's `done` before the client left.
+    pub fn teardown_acked(&self) -> bool {
+        self.acked_at.is_some()
     }
 
     /// Waits for the overlay to be mapped (its 1x1 buffer committed).
@@ -364,6 +630,7 @@ impl Compositor {
         let until = Instant::now() + limit;
         loop {
             let open = self.fill();
+            self.tick();
             while let Some(mut r) = self.next() {
                 self.note(&r);
                 self.answer(&r);
@@ -381,6 +648,9 @@ impl Compositor {
 
     /// Logs a request for the tests.
     fn note(&mut self, r: &Req) {
+        if self.layer != 0 && r.obj == self.layer {
+            self.layer_log.push(r.op);
+        }
         if is_offer(r.obj) {
             self.offer_log.push((r.obj, r.op));
         }

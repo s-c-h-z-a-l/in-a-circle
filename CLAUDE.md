@@ -171,11 +171,20 @@ it's a bug.
 - Safety: single instance (`flock`), and a hard deadline on every wait,
   data pipe reads included. A full-screen overlay that hangs locks the
   user out of the desktop.
+- Actions: every action and manifest probe runs under the mandatory
+  sandbox (Landlock ABI >= 6 and seccomp, x86_64 and aarch64); there is
+  no weakened mode. An output group is published per input by one
+  no-replace rename, and Undo moves it to the freedesktop.org Trash; the
+  engine never deletes a published output. A new action that needs a call
+  the policy denies needs a decision, not an exception. Contract and
+  limits: `docs/architecture.md`, `docs/benchmarks/sandbox-hardening.md`.
 
 ## Conventions
 
 - Run `cargo fmt` and `cargo clippy` after changes.
 - Prefer `cargo check` / narrow tests before the full suite.
+- Enable the pre-commit hook once per clone: `git config core.hooksPath scripts/git-hooks`
+  (checks `cargo fmt` and that every target compiles; never use `--no-verify`).
 - No `unsafe` without a documented invariant.
 - No magic numbers: every limit, deadline and threshold states its reason
   (why this value, derived from what, what happens past it) in a code
@@ -221,6 +230,13 @@ Test behavior, not lines. Coverage is a signal, never a target.
   report absolute overruns even outside the reference timing gate.
 - The closing verification runs the suite with
   `INACIRCLE_REQUIRE_LANDLOCK=1`.
+- Tests never touch the user's home. Cargo runs every test binary through
+  `scripts/test-runner.sh` (`.cargo/config.toml`): HOME and the XDG dirs
+  point into a honeypot, and the run fails if anything lands there or the
+  real state or download folder changes. A spawned `inacircle` gets its
+  paths from `isolate()` (`bins/inacircle/tests/isolate`); an engine test
+  sets the environment only through `xdg::tests::with_env`, which points
+  every user path it was not given at a place nothing can be made in.
 - CI (`.github/workflows/ci.yml`) is a safety net, not the authority: the
   final word is the local run.
 - Measure line coverage per crate with `cargo llvm-cov` at the end of each

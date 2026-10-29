@@ -6,6 +6,9 @@
 //! When a test ends without panicking, no `.inacircle-*` work dir may be
 //! left anywhere under its root.
 
+mod isolate;
+
+use isolate::isolate;
 use manifest::{Line, parse_line};
 use std::ffi::OsStr;
 use std::fs;
@@ -79,10 +82,11 @@ impl Out {
         let n = |k| s[0].get(k).unwrap().parse().unwrap();
         (n("done"), n("skipped"), n("failed"))
     }
+    /// Whether the sandbox gate refused the run (no Landlock ABI >= 6).
     fn unsandboxed(&self) -> bool {
-        self.pairs("warn")
+        self.pairs("fail")
             .iter()
-            .any(|(_, m)| m == "ran without sandbox")
+            .any(|(_, m)| m.starts_with("sandbox unavailable"))
     }
 }
 
@@ -152,14 +156,9 @@ impl Env {
 
     fn cmd<S: AsRef<OsStr>>(&self, args: &[S]) -> Command {
         let mut c = Command::new(BIN);
-        c.args(args)
+        isolate(&mut c, &self.root)
+            .args(args)
             .env("INACIRCLE_ACTIONS_DIR", self.root.join("actions"))
-            .env("XDG_CACHE_HOME", self.root.join("cache"))
-            .env("XDG_STATE_HOME", self.root.join("state"))
-            .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("XDG_DATA_HOME", self.root.join("home/.local/share"))
-            .env("HOME", self.root.join("home"))
             .current_dir(self.files())
             .stdin(Stdio::null());
         c
@@ -245,7 +244,8 @@ fn txt_to_md_end_to_end() {
     // A relative path is taken against the cwd (`files/`).
     let o = e.run(&["run", "markdown", "jegyzet.txt"]);
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join("jegyzet.md");
+    // Every input gets its own folder, a single output too.
+    let out = e.files().join("jegyzet/jegyzet.md");
     assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
     assert_eq!(
         fs::read_to_string(&out).unwrap(),
@@ -267,14 +267,33 @@ fn txt_to_md_end_to_end() {
         "{job}"
     );
 
+    // The job's start first; the group is recorded with its baseline
+    // before the publishing rename and its committed place after it.
     let history = e.history();
-    let out_line = history
+    assert!(history.starts_with("inacircle-history 1\n"), "{history}");
+    let records: Vec<Line> = history
         .lines()
         .filter_map(|l| parse_line(l).ok())
-        .find(|l| l.kind == "out" && l.get("job") == Some(&job))
-        .unwrap_or_else(|| panic!("no out line for {job}: {history}"));
-    assert_eq!(out_line.get("path"), Some(out.to_str().unwrap()));
-    assert_eq!(out_line.get("in"), Some(src.to_str().unwrap()));
+        .filter(|l| l.get("job") == Some(&job))
+        .collect();
+    let kinds: Vec<&str> = records.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "job-start",
+            "group-begin",
+            "child",
+            "group-end",
+            "publish-intent",
+            "publish-commit"
+        ],
+        "{history}"
+    );
+    assert_eq!(records[2].get("rel"), Some("jegyzet.md"));
+    let folder = e.files().join("jegyzet");
+    assert_eq!(records[4].get("target"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[5].get("actual"), Some(folder.to_str().unwrap()));
+    assert_eq!(records[5].get("durability"), Some("synced"));
     assert!(
         history
             .lines()
@@ -286,6 +305,9 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// Undo moves each input's group whole into the Trash (the test's own
+/// `XDG_DATA_HOME`), with its `.trashinfo`; a group with a changed file is
+/// kept whole, and the CLI prints one line per group.
 #[test]
 fn undo_end_to_end() {
     let e = Env::new("undo");
@@ -294,20 +316,31 @@ fn undo_end_to_end() {
     let o = e.run(&["run", "markdown", "a.txt", "b.txt"]);
     assert_eq!(o.summary(), (2, 0, 0), "{}", o.stdout);
     let job = o.job();
-    let (am, bm) = (e.files().join("a.md"), e.files().join("b.md"));
-    // A file changed since the run is kept.
+    let (am, bm) = (e.files().join("a/a.md"), e.files().join("b/b.md"));
+    // A file changed since the run keeps its group.
     fs::write(&bm, "edited\n").unwrap();
 
     let u = e.run(&["undo", &job]);
     assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
-    let removed: Vec<String> = u
-        .kind("removed")
+    let trash = e.root.join("home/.local/share/Trash");
+    let moved: Vec<String> = u
+        .kind("moved")
         .iter()
         .map(|l| l.bare_at(0).unwrap().to_owned())
         .collect();
-    assert_eq!(removed, [am.display().to_string()]);
-    assert_eq!(u.pairs("kept"), [(bm.clone(), "changed since".to_owned())]);
-    assert!(!am.exists());
+    assert_eq!(moved, [trash.join("files/a").display().to_string()]);
+    assert_eq!(
+        u.pairs("kept"),
+        [(e.files().join("b"), "Changed".to_owned())]
+    );
+    assert!(!am.exists() && !e.files().join("a").exists());
+    assert_eq!(
+        fs::read_to_string(trash.join("files/a/a.md")).unwrap(),
+        "a\n"
+    );
+    let info = fs::read_to_string(trash.join("info/a.trashinfo")).unwrap();
+    assert!(info.starts_with("[Trash Info]\nPath=/"), "{info}");
+    assert!(info.contains("/files/a\nDeletionDate="), "{info}");
     assert_eq!(fs::read_to_string(&bm).unwrap(), "edited\n");
     assert!(a.exists() && b.exists());
 
@@ -321,6 +354,44 @@ fn undo_end_to_end() {
     assert!(unknown.stderr.contains("unknown job"), "{}", unknown.stderr);
 }
 
+/// Without a safe Trash (a symlink in place of the home Trash) nothing
+/// moves: the group is kept and the link's target untouched.
+#[test]
+fn undo_without_a_safe_trash_keeps_the_outputs() {
+    let e = Env::new("undo-notrash");
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
+    let share = e.root.join("home/.local/share");
+    fs::create_dir_all(&share).unwrap();
+    let elsewhere = e.root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, share.join("Trash")).unwrap();
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(
+        u.pairs("kept"),
+        [(e.files().join("a"), "NoTrash".to_owned())]
+    );
+    assert!(e.files().join("a/a.md").exists());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A group whose folder is gone from where it was saved is kept, but not
+/// provably in place: the line has no path and the exit is 1.
+#[test]
+fn undo_of_a_group_not_found_exits_1() {
+    let e = Env::new("undo-missing");
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
+    fs::rename(e.files().join("a"), e.root.join("a-moved")).unwrap();
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(1), "{}{}", u.stdout, u.stderr);
+    assert!(u.stdout.contains("kept\t-\tMissing"), "{}", u.stdout);
+    assert!(e.root.join("a-moved/a.md").exists());
+}
+
 #[test]
 fn review_focus_names() {
     let e = Env::new("names");
@@ -328,19 +399,31 @@ fn review_focus_names() {
     let src = e.file(&format!("{name}.txt"), b"x\n");
     let o = e.run(&[OsStr::new("run"), OsStr::new("markdown"), src.as_os_str()]);
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join(format!("{name}.md"));
+    let out = e.files().join(name).join(format!("{name}.md"));
     assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "x\n");
     let job = o.job();
     let u = e.run(&["undo", &job]);
     assert_eq!(u.code, Some(0), "{}", u.stderr);
-    let removed: Vec<String> = u
-        .kind("removed")
+    let moved: Vec<String> = u
+        .kind("moved")
         .iter()
         .map(|l| l.bare_at(0).unwrap().to_owned())
         .collect();
-    assert_eq!(removed, [out.display().to_string()]);
+    let trash = e.root.join("home/.local/share/Trash");
+    assert_eq!(
+        moved,
+        [trash.join("files").join(name).display().to_string()]
+    );
     assert!(!out.exists() && src.exists());
+    assert!(!e.files().join(name).exists());
+    // The Trash spec's `Path=`: every byte outside the unreserved set
+    // percent-encoded.
+    let info = fs::read_to_string(trash.join("info").join(format!("{name}.trashinfo"))).unwrap();
+    assert!(
+        info.contains("/files/a%20b%09c%0Ad%3De%20-%3E%20%C3%A9\nDeletionDate="),
+        "{info}"
+    );
 }
 
 #[test]
@@ -353,8 +436,8 @@ fn conflict_in_same_batch() {
     let mut outs: Vec<String> = o.pairs("done").into_iter().map(|(_, p)| p).collect();
     outs.sort();
     let f = |n: &str| e.files().join(n).display().to_string();
-    assert_eq!(outs, [f("a (1).md"), f("a.md")]);
-    let mut contents: Vec<String> = ["a.md", "a (1).md"]
+    assert_eq!(outs, [f("a (1)/a.md"), f("a/a.md")]);
+    let mut contents: Vec<String> = ["a/a.md", "a (1)/a.md"]
         .iter()
         .map(|n| fs::read_to_string(e.files().join(n)).unwrap())
         .collect();
@@ -372,13 +455,13 @@ fn two_source_dirs_two_groups() {
     let mut done = o.pairs("done");
     done.sort();
     let p = |n: &str| e.files().join(n).display().to_string();
-    assert_eq!(done, [(a1, p("d1/a.md")), (a2, p("d2/a.md"))]);
+    assert_eq!(done, [(a1, p("d1/a/a.md")), (a2, p("d2/a/a.md"))]);
     assert_eq!(
-        fs::read_to_string(e.files().join("d1/a.md")).unwrap(),
+        fs::read_to_string(e.files().join("d1/a/a.md")).unwrap(),
         "1\n"
     );
     assert_eq!(
-        fs::read_to_string(e.files().join("d2/a.md")).unwrap(),
+        fs::read_to_string(e.files().join("d2/a/a.md")).unwrap(),
         "2\n"
     );
 }
@@ -397,10 +480,10 @@ fn readonly_source_goes_to_downloads() {
     let o = e.run(&["run", "markdown", "ro/a.txt"]);
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.root.join("home/Downloads/a.md");
+    let out = e.root.join("home/Downloads/a/a.md");
     assert_eq!(o.pairs("done"), [(src, out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "ro\n");
-    assert!(!ro.join("a.md").exists());
+    assert!(!ro.join("a").exists());
 }
 
 #[test]
@@ -422,10 +505,10 @@ fn symlinks() {
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
     assert_eq!(
         o.pairs("done"),
-        [(l.join("la.txt"), l.join("la.md").display().to_string())]
+        [(l.join("la.txt"), l.join("la/la.md").display().to_string())]
     );
-    assert_eq!(fs::read_to_string(l.join("la.md")).unwrap(), "linked\n");
-    assert!(!e.files().join("real/a.md").exists());
+    assert_eq!(fs::read_to_string(l.join("la/la.md")).unwrap(), "linked\n");
+    assert!(!e.files().join("real/a").exists());
     assert_eq!(
         o.pairs("skip"),
         [
@@ -456,8 +539,8 @@ fn same_file_given_twice_runs_once() {
     assert_eq!(o.pairs("done")[0].0, a);
     assert_eq!(o2.pairs("done").len(), 1, "{}", o2.stdout);
     assert_eq!(o2.summary(), (1, 0, 0));
-    assert!(e.files().join("a.md").exists() && e.files().join("a (1).md").exists());
-    assert!(!e.files().join("link.md").exists());
+    assert!(e.files().join("a/a.md").exists() && e.files().join("a (1)/a.md").exists());
+    assert!(!e.files().join("link").exists());
 }
 
 #[test]
@@ -518,10 +601,10 @@ fn direct_action_runs() {
         o.pairs("done"),
         [(
             e.files().join("d.md"),
-            e.files().join("d.txt").display().to_string()
+            e.files().join("d/d.txt").display().to_string()
         )]
     );
-    assert!(e.files().join("d.txt").is_file());
+    assert!(e.files().join("d/d.txt").is_file());
 }
 
 #[test]
@@ -580,6 +663,85 @@ fn catalog_from_actions_dir_list() {
             .unwrap(),
     );
     assert_eq!(o.code, Some(2));
+}
+
+/// The catalog cache file(s) of `e`, as (path, text).
+fn catalog_caches(e: &Env) -> Vec<(PathBuf, String)> {
+    fs::read_dir(e.root.join("cache/inacircle"))
+        .unwrap()
+        .map(|d| d.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("catalog")
+        })
+        .map(|p| {
+            let t = fs::read_to_string(&p).unwrap();
+            (p, t)
+        })
+        .collect()
+}
+
+/// `text.txt-to-md` is `lossy=yes` everywhere the catalog is seen (spec
+/// 5): the shipped manifest, the cache, and so the planner (no lossless
+/// intermediate) and the notice. A cache written by the old binary (said
+/// `lossy=no`) cannot stay active: its stamp (size, mtime) is the old
+/// binary's, so the next run rescans and rewrites it.
+#[test]
+fn txt_to_md_is_lossy_in_the_catalog_and_a_stale_cache_is_replaced() {
+    let e = Env::new("lossy-catalog");
+    e.file("a.txt", b"alpha\n\n\nbeta\n");
+    let o = e.run(&["run", "--action", "text.txt-to-md", "a.txt"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let action_line = |t: &str| {
+        t.lines()
+            .find(|l| l.starts_with("action\ttext.txt-to-md\t"))
+            .map(str::to_owned)
+    };
+    let caches = catalog_caches(&e);
+    assert_eq!(caches.len(), 1);
+    let (path, text) = &caches[0];
+    assert!(
+        action_line(text).unwrap().contains("\tlossy=yes\t"),
+        "{text}"
+    );
+    // The previous binary's cache: lossless claim, other size stamp.
+    let stale: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("action\ttext.txt-to-md\t") {
+                l.replace("\tlossy=yes\t", "\tlossy=no\t")
+            } else if l.starts_with("bin\t") && l.contains("inacircle-text") {
+                l.split('\t')
+                    .map(|f| if f.starts_with("size=") { "size=1" } else { f })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    assert_ne!(&stale, text);
+    fs::write(path, &stale).unwrap();
+    let o = e.run(&["run", "--action", "text.txt-to-md", "a.txt"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let fresh = catalog_caches(&e);
+    let line = action_line(&fresh[0].1).unwrap();
+    assert!(
+        line.contains("\tlossy=yes\t"),
+        "stale lossless cache stayed: {line}"
+    );
+    // The notice says so: the run is reported lossy.
+    assert!(
+        o.pairs("warn")
+            .iter()
+            .any(|(_, m)| m.contains("blank lines")),
+        "{}",
+        o.stdout
+    );
 }
 
 // ---- two-step routes through plugin scripts ----
@@ -641,10 +803,7 @@ fn mid_step(e: &Env, after: &str) {
 
 /// True (and a note printed) when plugins could not run for lack of Landlock.
 fn skip_no_sandbox(test: &str, o: &Out) -> bool {
-    if o.pairs("fail")
-        .iter()
-        .any(|(_, m)| m == "sandbox unavailable")
-    {
+    if o.unsandboxed() {
         assert!(
             !landlock_required(),
             "{test}: Landlock unavailable but INACIRCLE_REQUIRE_LANDLOCK=1"
@@ -665,9 +824,72 @@ fn two_step_route_end_to_end() {
         return;
     }
     assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    let out = e.files().join("doc.md");
+    let out = e.files().join("doc/doc.md");
     assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
     assert_eq!(fs::read_to_string(&out).unwrap(), "text\n+\n");
+}
+
+/// THP: `inacircle` runs with transparent huge pages disabled
+/// (`THP_enabled: 0`, so a small heap is not backed by a 2 MiB page). The
+/// action child gets the default back; that half is tested in the
+/// engine's sandbox tests, where the child can read `/proc`.
+#[test]
+fn thp_is_disabled_in_the_main_process() {
+    // The child inherits the harness's flag and restores 1 before main; if
+    // the harness itself had THP disabled, "child has 0" would prove nothing.
+    let own = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    if !own
+        .lines()
+        .any(|l| l.split_whitespace().eq(["THP_enabled:", "1"]))
+    {
+        let msg = "thp test: the harness has THP disabled (or /proc unreadable), the check would be vacuous";
+        assert!(
+            !landlock_required() && std::env::var_os("CI").is_none(),
+            "{msg}"
+        );
+        eprintln!("{msg}: skipped");
+        return;
+    }
+    let e = Env::with_actions("thp", &[]);
+    // A plugin that keeps the engine alive for a second while its status is
+    // read; it then ends normally so the engine cleans its work directory.
+    plugin(&e, "thp", "text/plain", "text/markdown", "md", "sleep 1");
+    e.file("doc.txt", b"text\n");
+    let child = e
+        .cmd(&["run", "markdown", "doc.txt"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = format!("/proc/{}/status", child.id());
+    // Between fork and main the process still has the test's value (1), so
+    // poll until main has run; 800 ms is far above a start (~1 ms) and
+    // under the plugin's 1 s, so if the call is ever missing the loop ends
+    // with the engine still alive and the assert fails.
+    let deadline = Instant::now() + Duration::from_millis(800);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line = fs::read_to_string(&status)
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("THP_enabled:"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if line == "THP_enabled: 0" {
+            break;
+        }
+        // 10 ms: ten starts (~1 ms), so the flag is seen within one tick
+        // of main; 80 polls fit under the deadline at negligible CPU.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Without Landlock the engine refuses the plugin and exits at once, so
+    // the status read above raced; follow the sandbox skip/require rule.
+    let o = parse_out(child.wait_with_output().unwrap());
+    if skip_no_sandbox("thp_is_disabled_in_the_main_process", &o) {
+        return;
+    }
+    assert_eq!(line, "THP_enabled: 0");
 }
 
 #[test]
@@ -690,11 +912,22 @@ fn two_step_intermediate_symlink_swap_is_refused() {
         return;
     }
     assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
-    assert_eq!(
-        o.pairs("fail"),
-        [(a, "intermediate output changed".to_owned())]
+    // The swap runs right after step 1 prints `done`: the engine refuses
+    // it either when it checks the `done` output (the name is gone or is
+    // the link by then) or when it rechecks it before step 2. Both are
+    // refusals; which one depends only on scheduling.
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{}{}", o.stdout, o.stderr);
+    assert_eq!(fails[0].0, a);
+    let why = &fails[0].1;
+    assert!(
+        why == "intermediate output changed"
+            || why.starts_with("contract violation: done output 0/a.mid: ")
+            || why
+                == "contract violation: done output 0/a.mid is not a regular file in the work directory",
+        "{why}"
     );
-    assert!(!e.files().join("doc.md").exists());
+    assert!(!e.files().join("doc").exists());
     for f in fs::read_dir(e.files()).unwrap().flatten() {
         let body = fs::read_to_string(f.path()).unwrap_or_default();
         assert!(
@@ -703,6 +936,101 @@ fn two_step_intermediate_symlink_swap_is_refused() {
             f.path().display()
         );
     }
+}
+
+/// Neither a manifest nor an action sees the parent's environment: no
+/// session socket, bus, display, loader switch or token, only the fixed
+/// PATH and locale, and for an action its own TMPDIR (its work dir).
+#[test]
+fn sandbox_children_get_a_clean_environment() {
+    let e = Env::with_actions("cleanenv", &[]);
+    let src = e.root.join("envdump.src");
+    // The manifest has no file to write: its verdict goes into the label.
+    fs::write(
+        &src,
+        "#!/bin/sh\n\
+         if [ \"$1\" = --manifest ]; then\n\
+         l=clean\n\
+         for v in SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY LD_PRELOAD \\\n\
+           INACIRCLE_FAKE_TOKEN HOME XDG_RUNTIME_DIR; do\n\
+           eval \"[ -z \\\"\\${$v+x}\\\" ]\" || l=leaked-$v\n\
+         done\n\
+         [ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C.UTF-8 ] && [ \"$LANG\" = C.UTF-8 ] \\\n\
+           && [ \"$TMPDIR\" = /nonexistent ] || l=badfixed\n\
+         printf 'inacircle-manifest 0\\naction\\tp.envdump\\tfamily=p\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=env-%s\\tgroup=p\\tcost=1\\tlossy=no\\tbatch=yes\\n' \"$l\"\n\
+         exit 0\nfi\n\
+         work=\"$4\"; list=\"$6\"\n\
+         in=$(head -n1 \"$list\"); mkdir -p \"$work/0\"; env > \"$work/0/env.md\"\n\
+         printf 'done\\t%s\\t0/env.md\\n' \"$in\"\n",
+    )
+    .unwrap();
+    let tmp = e.root.join("actions/.envdump.tmp");
+    assert!(
+        Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, e.root.join("actions/envdump")).unwrap();
+    let a = e.file("doc.txt", b"text\n");
+    let o = parse_out(
+        e.cmd(&["run", "--action", "p.envdump", "doc.txt"])
+            .env("SSH_AUTH_SOCK", "/run/user/1000/ssh-canary")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/canary-bus")
+            .env("WAYLAND_DISPLAY", "wayland-canary")
+            // A real library, so the loader of inacircle itself stays quiet.
+            .env("LD_PRELOAD", "libc.so.6")
+            .env("INACIRCLE_FAKE_TOKEN", "token-canary-4711")
+            .env("TMPDIR", "/tmp/parent-canary")
+            .output()
+            .unwrap(),
+    );
+    if skip_unsandboxed("sandbox_children_get_a_clean_environment", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("doc/doc.md");
+    assert_eq!(o.pairs("done"), [(a, out.display().to_string())]);
+    let cache = fs::read_dir(e.root.join("cache/inacircle"))
+        .unwrap()
+        .map(|d| fs::read_to_string(d.unwrap().path()).unwrap_or_default())
+        .collect::<String>();
+    assert!(cache.contains("label=env-clean"), "manifest env: {cache}");
+    let env = fs::read_to_string(&out).unwrap();
+    for canary in [
+        "SSH_AUTH_SOCK",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "WAYLAND_DISPLAY",
+        "LD_PRELOAD",
+        "token-canary-4711",
+        "parent-canary",
+        "HOME=",
+        "XDG_",
+        "INACIRCLE_",
+    ] {
+        assert!(!env.contains(canary), "{canary} leaked: {env}");
+    }
+    let vars: Vec<&str> = env.lines().collect();
+    for want in ["PATH=/usr/bin:/bin", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"] {
+        assert!(vars.contains(&want), "{want} missing: {env}");
+    }
+    let tmpdir = vars
+        .iter()
+        .find_map(|v| v.strip_prefix("TMPDIR="))
+        .unwrap_or_else(|| panic!("no TMPDIR: {env}"));
+    let tmpdir = Path::new(tmpdir);
+    assert!(
+        tmpdir.ends_with("tmp")
+            && tmpdir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n.to_string_lossy().starts_with("step")),
+        "TMPDIR is not <work>/tmp: {}",
+        tmpdir.display()
+    );
 }
 
 // ---- contract and sandbox through inacircle-testaction ----
@@ -732,10 +1060,6 @@ fn sandbox_blocks_write_outside() {
 
 #[test]
 fn sandbox_blocks_network() {
-    if !cfg!(target_arch = "x86_64") {
-        eprintln!("sandbox_blocks_network: skipped, seccomp filter is x86_64 only");
-        return;
-    }
     let e = Env::new("network");
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.set_nonblocking(true).unwrap();
@@ -751,6 +1075,51 @@ fn sandbox_blocks_network() {
         l.accept().map(|_| ()).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+/// Unix sockets, pathname and abstract, and socket pairs: the listeners
+/// take a connection from this (unsandboxed) process, the action gets
+/// EACCES from seccomp for each, with or without Landlock.
+#[test]
+fn sandbox_blocks_unix_sockets() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let e = Env::new("unix");
+    let path = e.root.join("listener.sock");
+    let named = UnixListener::bind(&path).unwrap();
+    let name = format!("inacircle-cli-test-{}", std::process::id());
+    let sa = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let abstract_ = UnixListener::bind_addr(&sa).unwrap();
+    // Control: both listeners work.
+    UnixStream::connect(&path).unwrap();
+    UnixStream::connect_addr(&sa).unwrap();
+    named.accept().unwrap();
+    abstract_.accept().unwrap();
+    named.set_nonblocking(true).unwrap();
+    abstract_.set_nonblocking(true).unwrap();
+    for (i, opt) in [
+        format!("unix_connect={}", path.display()),
+        format!("unix_connect=@{name}"),
+        "socketpair=stream".to_owned(),
+        "socketpair=dgram".to_owned(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let t = e.test_input(&format!("t{i}.test"), &[opt]);
+        let o = run_test_action(&e, &[&t]);
+        assert_eq!(o.code, Some(1), "{opt}: {}{}", o.stdout, o.stderr);
+        let f = o.pairs("fail");
+        assert_eq!(f.len(), 1, "{opt}: {}", o.stdout);
+        assert!(f[0].1.contains("os error 13"), "{opt}: {}", f[0].1);
+        assert!(o.pairs("warn").iter().all(|(_, m)| m != "connected"));
+    }
+    for l in [&named, &abstract_] {
+        assert_eq!(
+            l.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[test]
@@ -866,7 +1235,7 @@ fn progress_and_warn_passthrough() {
     );
     assert_eq!(
         o.pairs("done"),
-        [(t, e.files().join("t.bin").display().to_string())]
+        [(t, e.files().join("t/t.bin").display().to_string())]
     );
     assert_eq!(o.summary(), (1, 0, 0));
 }
@@ -988,24 +1357,39 @@ fn cancel_after_some_done_exits_0() {
 }
 
 #[test]
-fn undo_removes_a_multi_output_folder() {
+fn undo_moves_a_multi_output_folder_whole() {
     let e = Env::new("undo-many");
     let t = e.test_input("t.test", &["outputs=3"]);
     let o = run_test_action(&e, &[&t]);
     assert_eq!(o.summary(), (1, 0, 0), "{}", o.stdout);
     let folder = e.files().join("t");
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 3);
-    assert!(e.history().contains("dir\tjob="), "{}", e.history());
+    assert!(e.history().contains("\tchildren=3\n"), "{}", e.history());
     let u = e.run(&["undo", &o.job()]);
     assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
-    assert_eq!(u.kind("removed").len(), 3, "{}", u.stdout);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
     assert!(!folder.exists());
+    let moved = e.root.join("home/.local/share/Trash/files/t");
+    assert_eq!(fs::read_dir(moved).unwrap().count(), 3);
 }
 
-/// Peak RSS stays within the 5 MB budget however many outcomes a run has:
-/// 64 processes (source folders) × 1024 outputs each.
+/// The budget is the shipped `inacircle`'s peak PSS <= 5 MB, however many
+/// outcomes a run has: 64 processes (source folders) x 1024 outputs each.
+/// Gated on the release binary only (`cargo test --release`, a CI step of
+/// its own): peak RSS (`VmHWM`) <= 5 000 000 B. RSS counts shared pages
+/// whole, so RSS >= PSS and this is stricter than the budget. A debug
+/// build is not the shipped artifact: its 15 MB binary's code pages
+/// (kernel fault-around) dominate its RSS (5048-5140 kB here,
+/// 5428 kB on ARM CI, with the heap, RssAnon ~850 kB, unchanged; release
+/// ~3.9 MB), so there the number is printed, not judged, unless
+/// `INACIRCLE_RSS_GATE` is set (CI), which makes a non-release build a
+/// failure.
 #[test]
 fn many_groups_many_outputs_stay_within_rss_budget() {
+    let release = Path::new(BIN)
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == "release");
     let e = Env::new("rss");
     let mut args: Vec<PathBuf> = Vec::new();
     for i in 0..64 {
@@ -1022,7 +1406,22 @@ fn many_groups_many_outputs_stay_within_rss_budget() {
         .and_then(|(_, r)| r.split_whitespace().next())
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| panic!("no measure line: {}", o.stderr));
-    assert!(kb <= 5 * 1024, "VmHWM {kb} kB > 5 MB");
+    // CI sets the gate: that step must measure the shipped binary, so a
+    // changed profile or target layout fails it instead of passing as a
+    // diagnostic.
+    assert!(
+        release || std::env::var_os("INACIRCLE_RSS_GATE").is_none(),
+        "INACIRCLE_RSS_GATE is set but {BIN} is not a release build"
+    );
+    if !release {
+        eprintln!("diagnostic only (debug build, not gated): VmHWM {kb} kB");
+        return;
+    }
+    eprintln!("release VmHWM {kb} kB");
+    assert!(
+        kb * 1024 <= 5_000_000,
+        "VmHWM {kb} kB > 5 000 000 B (release)"
+    );
 }
 
 #[test]
@@ -1186,7 +1585,7 @@ fn invocation_errors_exit_2() {
         assert!(o.stdout.is_empty(), "{args:?}: {}", o.stdout);
         assert!(!o.stderr.is_empty(), "{args:?}");
     }
-    assert!(!e.files().join("a.md").exists());
+    assert!(!e.files().join("a").exists());
 }
 
 #[test]
@@ -1197,10 +1596,33 @@ fn jobs_empty_when_idle() {
     assert!(o.stdout.is_empty());
 }
 
+/// A registry that cannot be read in full is a failure of `jobs`,
+/// `cancel` and `undo`, never "no job runs"; idle stays quiet and exit 0
+/// (the control above).
 #[test]
-fn unwritable_history_warns_once_and_the_run_proceeds() {
+fn jobs_cancel_undo_fail_on_an_unreadable_registry() {
+    let e = Env::new("jobs-over");
+    let dir = e.root.join("runtime/inacircle/jobs");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("9-9"), vec![b'j'; 4097]).unwrap();
+    for args in [&["jobs"][..], &["cancel", "9-9"][..], &["undo", "9-9"][..]] {
+        let o = e.run(args);
+        assert_eq!(o.code, Some(1), "{args:?}: {} {}", o.stdout, o.stderr);
+        assert!(o.stderr.contains("safety limits"), "{args:?}: {}", o.stderr);
+        assert!(o.stdout.is_empty(), "{args:?}");
+    }
+    fs::remove_file(dir.join("9-9")).unwrap();
+    assert_eq!(e.run(&["jobs"]).code, Some(0));
+}
+
+/// Without a history nothing can be recorded before the publishing rename,
+/// so nothing is published: the input fails with the reason, the source
+/// stays, and the warning comes once.
+#[test]
+fn unwritable_history_refuses_publication_and_warns_once() {
     let e = Env::new("nohistory");
-    e.file("a.txt", b"hi\n");
+    let src = e.file("a.txt", b"hi\n");
     // The state home is a regular file: no history can be opened under it.
     let state = e.root.join("state-file");
     fs::write(&state, b"").unwrap();
@@ -1210,13 +1632,106 @@ fn unwritable_history_warns_once_and_the_run_proceeds() {
             .output()
             .unwrap(),
     );
-    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
-    assert_eq!(o.summary(), (1, 0, 0));
-    assert!(e.files().join("a.md").exists());
+    assert_eq!(o.code, Some(1), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 0, 1));
+    let fails = o.pairs("fail");
+    assert!(fails[0].1.contains("history not written"), "{fails:?}");
+    assert!(!e.files().join("a").exists());
+    assert_eq!(fs::read(&src).unwrap(), b"hi\n");
     let warns = o
         .stderr
         .lines()
-        .filter(|l| l.starts_with("inacircle: history not written: "))
+        .filter(|l| l.contains("history not written"))
         .count();
     assert_eq!(warns, 1, "{}", o.stderr);
+    // The warning says what happened: nothing was published, not "kept".
+    assert!(o.stderr.contains("; nothing was published"), "{}", o.stderr);
+    assert!(!o.stderr.contains("kept"), "{}", o.stderr);
+}
+
+/// A history of the previous format is archived on the first run, never
+/// overwritten; its jobs cannot be undone (with the reason), and their
+/// outputs stay.
+#[test]
+fn v0_history_is_archived_and_its_jobs_refused() {
+    let e = Env::new("v0");
+    let old_out = e.file("old.md", b"old\n");
+    let v0 = format!(
+        "inacircle-history 0\nout\tjob=1-1\tin=/i\tpath={}\tsize=4\tmtime=1\tctime=1\tdev=1\tino=1\njob\tid=1-1\ttime=1\taction=a\tstatus=done\tsandbox=yes\n",
+        old_out.display()
+    );
+    let dir = e.root.join("state/inacircle");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("history"), &v0).unwrap();
+    e.file("a.txt", b"a\n");
+    let o = e.run(&["run", "markdown", "a.txt"]);
+    assert_eq!(o.summary(), (1, 0, 0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(fs::read_to_string(dir.join("history.v0")).unwrap(), v0);
+    assert!(e.history().starts_with("inacircle-history 1\n"));
+    let u = e.run(&["undo", "1-1"]);
+    assert_eq!(u.code, Some(1), "{}{}", u.stdout, u.stderr);
+    assert!(u.stderr.contains("older version"), "{}", u.stderr);
+    assert!(old_out.exists());
+    // The new job undoes as usual.
+    let u = e.run(&["undo", &o.job()]);
+    assert_eq!(u.code, Some(0), "{}", u.stderr);
+    assert!(!e.files().join("a").exists());
+}
+
+/// The value of `key` in the first `measure <what>` stderr line.
+fn measure_field(stderr: &str, what: &str, key: &str) -> Option<i64> {
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with(&format!("inacircle: measure {what} ")))?;
+    line.split_whitespace()
+        .find_map(|w| w.strip_prefix(key)?.strip_prefix('='))?
+        .parse()
+        .ok()
+}
+
+/// The measurement log carries the moment the first action event was
+/// observed (CPU and `CLOCK_MONOTONIC`, absolute, with the process id the
+/// wheel's report also carries); a child that emits no event leaves the
+/// markers out, never 0.
+#[test]
+fn action_entry_marker_is_observed_once_and_absent_without_events() {
+    let e = Env::new("entry");
+    let ok = e.test_input("ok/a.test", &["events=progress:0,progress:0.5,done"]);
+    let mut c = e.cmd(&["run", "--action", "test.script"]);
+    c.arg(&ok).env("INACIRCLE_MEASURE", "1");
+    let o = parse_out(c.output().unwrap());
+    assert_eq!(o.summary(), (1, 0, 0), "{}", o.stderr);
+    let cpu = measure_field(&o.stderr, "run", "action_entry_observed_abs_cpu_us");
+    let wall = measure_field(&o.stderr, "run", "action_entry_observed_abs_wall_us");
+    let (cpu, wall) = (cpu.expect("cpu marker"), wall.expect("wall marker"));
+    let start = measure_field(&o.stderr, "run", "start_abs_cpu_us").unwrap();
+    assert!(cpu >= start, "{cpu} < {start}");
+    assert!(wall > 0);
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entries"),
+        Some(1),
+        "{}",
+        o.stderr
+    );
+    assert!(measure_field(&o.stderr, "run", "pid").is_some_and(|p| p > 1));
+
+    let silent = e.test_input("silent/a.test", &["kill_self=9"]);
+    let mut c = e.cmd(&["run", "--action", "test.script"]);
+    c.arg(&silent).env("INACIRCLE_MEASURE", "1");
+    let o = parse_out(c.output().unwrap());
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entry_observed_abs_cpu_us"),
+        None,
+        "{}",
+        o.stderr
+    );
+    assert_eq!(
+        measure_field(&o.stderr, "run", "action_entry_observed_abs_wall_us"),
+        None
+    );
+    assert_eq!(measure_field(&o.stderr, "run", "action_entries"), Some(0));
+
+    // Without the switch, no marker line at all.
+    let o = run_test_action(&e, &[&ok]);
+    assert!(!o.stderr.contains("action_entry"), "{}", o.stderr);
 }

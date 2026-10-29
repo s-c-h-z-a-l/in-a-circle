@@ -78,9 +78,10 @@ are in `CLAUDE.md`.
   the system directories and the binary), and `RLIMIT_FSIZE` 0 (a manifest
   writes only to its stdout pipe, which `FSIZE` does not cover, and may
   write no file). Its deadline, 64 KiB output limit and group kill are
-  unchanged. Without Landlock a plugin's manifest does not run ("sandbox
-  unavailable"; not cached, so a later start retries); a built-in one runs
-  under seccomp and the rlimits.
+  unchanged. It gets the same clean environment as `run`, with
+  `TMPDIR=/nonexistent`. Without the whole sandbox no manifest runs,
+  built-in or not ("sandbox unavailable"; not cached, so a later start
+  retries).
 - A whole catalog refresh shares one 10 s budget: each manifest gets
   min(2 s, the rest of the budget), so a run of hanging binaries cannot
   hold a start for N x 2 s. A binary cut by it keeps its old cache entry
@@ -95,19 +96,42 @@ are in `CLAUDE.md`.
   while the set of binaries and their mtime and size match it exactly.
   The wheel never runs a manifest while its overlay is up: it reads the
   cache as it is and refreshes it after it closes (see the B path).
+  The cache is read bounded (256 KiB, measured on the bytes read, not on
+  the size `stat` shows): at most 128 binaries, 1024 actions, 1152
+  records, 32 fields per record, 12288 fields and 32 KiB per line. A cache
+  over a limit is rejected loudly and rebuilt. A rebuild obeys the same
+  limits on what it has collected so far: a binary whose manifest would
+  cross one (each manifest valid alone) is refused whole with a message,
+  never trimmed silently. A manifest itself is limited to 256 records, 32
+  fields per record, 4096 fields and 32 KiB per line, checked before it is
+  parsed; past that its binary is refused. The scan of the action
+  folders (on the wheel's path too) is bounded while it runs: at most 512
+  entries per folder (more refuses that folder whole, loudly) and at most
+  129 binaries held, the smallest paths in folder order.
 - Per action: id and family; input and output as **MIME types** plus the
   output extension (`ext=`); one or many inputs (`batch=no` for one at a
   time); label and group; cost and whether it loses information
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
+  paragraph break (and runs of spaces may collapse when rendered), and
+  the action reports it (blank lines at the start or end of the text and
+  the spaces of whitespace-only lines count). The planner therefore never
+  takes it as a lossless intermediate, and the notice says formatting was
+  lost for a run whose output actually lost something.
+- The text family stops a document at structure budgets, charged while it
+  is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
+  and inlines, including link reference definitions), 32 MiB of owned
+  text (link reference expansion included), 32 MiB of output. Past one,
+  the input fails with the budget's own message and the batch goes on.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
 
 ```
 inacircle-manifest 0
-action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=no	batch=yes
+action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 ```
 
@@ -119,12 +143,15 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
 
 - argv only, never a shell. The engine decodes `file://` URIs and passes
   local files only. stdin is `/dev/null`, the working directory is the
-  temp dir. Very long input lists go through `--inputs-from <file>`.
-- **An action writes only into the temp dir.** The engine moves results to
-  their final names with an atomic `rename`. So the output policy lives in
-  one place, undo knows exactly what was created, no half-written file
-  ever appears in the user's folder, and a broken plugin cannot overwrite
-  anything.
+  temp dir. Very long input lists go through `--inputs-from <file>`; the
+  list (read bounded: 1 MiB, 8 KiB per encoded line) and argv together
+  hold at most 1024 paths of at most 4096 bytes each and 1 MiB in all.
+- **An action writes only into the temp dir.** Once its whole process
+  group is gone, the engine copies each input's results into fresh files
+  of its own and publishes them with one atomic no-replace `rename` (see
+  Output policy). So the output policy lives in one place, undo knows
+  exactly what was created, no half-written file ever appears in the
+  user's folder, and a broken plugin cannot overwrite anything.
 - stdout, one event per line:
 
   ```
@@ -144,6 +171,10 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
   paths are out of scope for v0.
 
+  An action may open with `progress<TAB>0.00` before any input work
+  (`inacircle-text run` always does), so a script that parses stdout must
+  not take the first `progress` line for the end of a run.
+
   stderr is free-form; on failure its last lines go into the message.
 - Exit codes: 0 done, 1 failed, 2 contract or invocation error (ours, not
   the file's), 3 unsupported input. For a batch: 0 if at least one input
@@ -152,6 +183,14 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   at all (`--work` missing or not writable).
 - Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
   later; the engine removes the temp dir either way.
+- If the supervisor itself dies abnormally (`SIGKILL`, an abort), nobody
+  kills the group: the leader dies with it (`PR_SET_PDEATHSIG`, set
+  before the sandbox, which then denies changing it), but the leader's
+  own children live on under the next subreaper (e.g. `systemd --user`),
+  still sandboxed, writing only into the work dir (a later run in that
+  folder removes it after a day); nothing of them is published, and `jobs` and `cancel`
+  no longer see them. A cgroup would bound that; it is not used (no
+  systemd dependency).
 - Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
   writes at 16 × the total input size, clamped to 256 MiB – 16 GiB
   (archive bombs, with no plugin code; many files can still fill a disk);
@@ -162,43 +201,88 @@ action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=
   a contract violation fails with nothing of it placed; inputs finished
   before keep their results. If any process of the action's group is
   still alive after it exits, the group is killed and every input of that
-  process fails ("action left processes behind"), nothing placed.
+  process fails ("action left processes behind"), nothing placed; an input
+  the process already settled with its own `skip` or `fail` keeps that
+  outcome (each input has one), as it placed nothing. After a contract
+  violation the reason stays the violation. The engine is the child
+  subreaper of what it starts, so the kernel's child list, not `/proc`,
+  tells whether a member still runs; if it cannot be read, nothing is
+  accepted. A member that was killed with `SIGKILL` before the leader
+  exited and that nobody waited for (the kernel's OOM killer, a hard
+  `RLIMIT_CPU`, `kill -9 $job; exit` in a script) also counts as left
+  behind: the engine cannot tell it from one its own kill caught, and
+  fails closed.
 
 ### Sandbox
 
 Every action runs sandboxed, set up in the child between `fork` and
 `execve`, after the child's own `setsid`:
 
-- **Landlock** at the best ABI the kernel offers, handling every right
-  that ABI knows. Read and execute: `/usr`, `/lib`, `/lib64`,
+- **Landlock** at the best ABI the kernel offers, at least 6, handling
+  every right that ABI knows. Read and execute: `/usr`, `/lib`, `/lib64`,
   `/etc/ld.so.cache` (those that exist) and the action binary. Read: the
-  inputs and the input list. Everything inside the step's temp dir.
+  inputs and the input list. Everything inside the step's work dir.
   Nothing else: no `/tmp`, `/proc`, `/dev` or `/etc`. Also denied: TCP
   (ABI 4) and UDP (ABI 10) on existing sockets, pathname unix sockets
   outside the temp dir (ABI 9), abstract unix sockets and signals outside
   the sandbox (ABI 6). File names outside can still be probed (`stat`).
-- **seccomp** (x86_64 only; other architectures get Landlock only), also
-  applied without Landlock. Denied: sockets other than `AF_UNIX`;
-  metadata changes (chmod, chown, utime, xattr, `file_setattr`); the
-  ioctls `FS_IOC_SETFLAGS`, `FS_IOC32_SETFLAGS`, `FS_IOC_FSSETXATTR` and
-  `FS_IOC_ENABLE_VERITY`; `io_uring`; `setsid` and `setpgid`, so the
-  action and every descendant stay in one killable group. A syscall
-  through another ABI (i386) kills the process; x32 gets `EPERM`.
+- **seccomp**, one policy for x86_64 and aarch64 (each with its own
+  syscall numbers), always installed; another architecture runs no
+  action. Denied: `socket` and `socketpair` for every
+  family, `AF_UNIX` included (`EACCES`); metadata changes (chmod, chown,
+  utime, xattr, `file_setattr`); every ioctl but a few queries
+  (`FIONREAD`, `TCGETS`, `TIOCGWINSZ`) and the ioctl forms of allowed
+  fcntls; async fcntls (owner, signal, lease, notify, seals, `O_ASYNC`);
+  other processes (ptrace, `process_vm_*`, the pidfd calls, `kcmp`);
+  keyrings; namespaces; clone flags beyond fork, vfork and threads
+  (`clone3` gets `ENOSYS`, so libc falls back to `clone`); scheduler and
+  priority setters; `prlimit64` on another pid; `migrate_pages` and
+  `move_pages`; the parent-death, subreaper and ptracer prctls; mounts
+  (`open_tree_attr` too), the mount queries `statmount` and `listmount`
+  (Landlock hides `/proc`'s mount table), and file handles; inotify and
+  fanotify groups (Landlock does not mediate their marks); io_uring, bpf, perf, userfaultfd; System V IPC and
+  POSIX queues; `setsid` and `setpgid`, so the action and every
+  descendant stay in one killable group. A syscall through another ABI
+  (i386, AArch32) kills the process; x32 gets `EPERM`.
 - `no_new_privs`; every inherited fd ≥ 3 is closed on `execve`.
-- **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB,
-  with or without Landlock. It is the last net against a faulty or missing
+- **Memory net**: `RLIMIT_DATA` (soft = hard) of RAM/8 clamped to 1-4 GiB.
+  It is the last net against a faulty or missing
   per-family limit, not the protection itself; over it an allocation fails
   and the input fails: a Rust action (allocation-failure line, then
   `SIGABRT`) with `out of memory (limit N MiB)`, any other action with its
   own error or the signal. The numbers and why `DATA` and not `AS` are in [resource-limits.md](resource-limits.md).
+- **Compatibility limits.** The policy denies by name, so a converter that
+  needs a denied call fails with `EPERM`, `EACCES` or `ENOSYS`. Known
+  costs: the ioctl default-deny (for example `cp --reflink`'s `FICLONE`),
+  the scheduler, affinity and priority setters (OpenMP thread pinning,
+  `nice`), System V IPC and POSIX queues, and `F_ADD_SEALS`. The shipped
+  actions and the test fixtures run; converters from third parties have
+  **not** been tried. A new action that needs one of these calls needs a
+  decision, not a silent exception.
 - Not covered: no `RLIMIT_NPROC` (an action can fork-bomb until cancelled).
   `RLIMIT_DATA` is per process, so each child of a forking action gets the
   cap again.
-- Not covered: keyring syscalls (`keyctl`, `add_key`) are allowed.
-- Without Landlock, actions from the user or plugin directory do not run
-  ("sandbox unavailable"); built-in actions run with a "ran without
-  sandbox" warning, and the history records `sandbox=no`. The same holds
-  for `--manifest`: a plugin's does not run, a built-in one does.
+- **Clean environment**: the parent's is cleared; the child gets only
+  `PATH=/usr/bin:/bin`, `LC_ALL` and `LANG` `C.UTF-8`, and `TMPDIR` (an
+  action's private `<work>/tmp`, mode 0700). No session socket, bus,
+  display, token or loader variable is passed through.
+- **Mandatory**: nothing runs without the whole sandbox, built-in actions
+  and manifests included, and an action the catalog knows from its cache
+  meets the same gate when it runs. The gate needs Landlock ABI >= 6 (the
+  signal and abstract unix socket scopes) and a parent that is not root,
+  has one real/effective/saved/filesystem uid and one gid, and holds no
+  permitted, effective or ambient capability (an inheritable one alone is
+  harmless under `no_new_privs` and is what systemd gives every session;
+  the bounding set does not count). Nothing is dropped instead. Otherwise
+  every input fails with "sandbox unavailable: <why>", and the history
+  records `sandbox=no`.
+- **Tested boundary, not proof.** The escape tests run under the same
+  seccomp policy and Landlock rules the product uses. On a host that
+  already refuses `unshare` to an unprivileged user (an AppArmor or
+  `max_user_namespaces` policy, or a PID namespace without a user
+  namespace), the `EPERM` is the host's, not the filter's; the filter's own
+  denial of namespaces is covered by the policy-table tests. What the
+  sandbox does not promise is in [sandbox-hardening.md](benchmarks/sandbox-hardening.md).
 
 ## Classifier
 
@@ -277,13 +361,23 @@ Every action runs sandboxed, set up in the child between `fork` and
   a second, same id) with **Cancel**. The supervisor then waits for Undo
   for ten seconds after completion.
 - The final text is fixed English. One input, one output: the output's file
-  name (plus `Saved to Downloads (source folder is read-only)` when it went
+  name, without its folder (plus `Saved to Downloads (source folder is read-only)` when it went
   there). Several: `<n> done[, <m> skipped][, <k> failed]` and up to three
   problem lines `<input>: <reason>` (failures first), then `… and <r>
-  more`. Nothing finished: `Nothing converted`. Cancelled: `Cancelled`,
-  `<n> done, <r> not converted`. A lossy action that produced output starts
-  the body with `Formatting was lost.`; a run without the sandbox ends it
-  with `Ran without sandbox.`. Text is cut to 200 characters on a UTF-8
+  more`. Nothing finished: `Nothing converted`. An input converted at an
+  unknown place adds `<input>: <cause> (op <id>)` and `<n> not confirmed
+  where it was saved; Undo unavailable.`, and the Undo button is left out.
+  Undo is offered only when the history holds every group of the run
+  complete, durable and synced; otherwise the recording warning (`history
+  not written: …; nothing was published; undo unavailable` when the error
+  came before any output, `history not written: …; <n> output folder(s)
+  kept; undo unavailable` when <n> were published before it, `… not
+  confirmed on disk; undo unavailable`) is a body line instead, and the
+  same text is the CLI's stderr warning. Cancelled: `Cancelled`,
+  `<n> done, <r> not converted`. An output whose lossy action reported a
+  loss (a `warn` for an input that has an output) starts the body with
+  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  the sandbox gate refused ends it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
   so a quick run connects once. The address is `DBUS_SESSION_BUS_ADDRESS`
@@ -316,8 +410,15 @@ Every action runs sandboxed, set up in the child between `fork` and
   SIGINT received during the window (a cancel during the run is part of the
   run; the signals stay blocked and are read through the signalfd): the
   result is closed and `run` exits with its own code. An Undo click
-  undoes the job and replaces the result with `Undone` and
-  `<n> removed[, <k> kept (<reason>)]`, or `Undo failed` with the cause.
+  undoes the job and replaces the result with what happened, per input
+  group: `Undone` / `Moved to Trash` when every group went to the Trash;
+  `Partially undone` with the counts (`2 moved to Trash, 1 kept because it
+  changed`); `Nothing undone` only when every group was kept (one not found
+  where it was saved says so in its line; the CLI exits 1 for it); `Undo uncertain` when a group's place or metadata could not be
+  proved (never shown as a success); `Undo incomplete` otherwise (a group
+  moved and came back, or stays in the Trash). Places that need attention
+  and warnings follow, each line escaped and bounded; `Undo failed` with
+  the cause when the job was refused before anything moved.
 - Mistakes are handled by safety and undo, not by confirmation dialogs:
   people click through confirmations, and they tax every correct choice.
 
@@ -330,18 +431,74 @@ In the engine, in one place:
 2. Same base name, new extension. When the format stays the same, a fixed
    suffix, English and Latin-only by default (`-small`, `-compressed`),
    configurable.
-3. Never overwrite: `name (1).ext`, `name (2).ext`, without asking.
-4. Several outputs from one input go into a folder (`doc/doc-01.png`, …).
-5. Extraction: a single top-level folder is extracted as is; loose files go
-   into a folder named after the archive.
-6. The temp dir is `.inacircle-<random>` inside the target folder (so the
-   final move is an atomic `rename`), always removed at the end; stale ones
-   from a crash are cleaned by the next run (our pattern only, older than a
-   day).
-7. Undo deletes only files we created, and only if unchanged since
-   placement (device, inode, size, mtime, ctime); otherwise it keeps them
-   and says why. A folder made for several outputs is removed only if
-   empty afterwards.
+3. Every input gets its own folder, a single output too (`a.txt` gives
+   `a/a.md`; several outputs keep their names, `doc/doc-01.png`, …).
+   Never overwrite: `name (1)/`, `name (2)/`, without asking.
+4. Per input, all or nothing: the outputs are copied into fresh files in a
+   private 0700 staging folder on the target's filesystem (`.inacircle-
+   <random>/`), checked (regular files, unchanged while copied, TXT/MD
+   valid UTF-8 up to 32 MiB, validated on the stream that is written),
+   given their final modes as `cp` would (0666 and 0777 minus the umask,
+   but the owner always keeps rw on files and rwx on the folder, and a
+   setgid target's S_ISGID is kept) while still inside the private folder,
+   synced, and their identity recorded; then the folder is published by one
+   `renameat2` `RENAME_NOREPLACE`. A filesystem without it is refused, with
+   no fallback. Before that commit an error (or a cancel) removes only the
+   engine's own staging; after it nothing is removed: a failed sync is
+   reported as unconfirmed, and a result that cannot be proved right after
+   the commit is reported as converted at an unknown place or state, with
+   its operation id and anchor, never with a guessed path: either an
+   ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
+   changed since the baseline (`BaselineChanged`, "files changed while
+   saved"). Other inputs' published results are never taken back.
+5. Extraction: the extracted files go, flattened, into one folder named
+   after the archive; a single top-level folder inside the archive is not
+   kept as such. (Every input gets its wrapper folder, also a single
+   output.)
+6. The temp dir is `.inacircle-<random>` inside the target folder, always
+   removed at the end through the folder's fd (never by a path that may
+   name something else by then); stale ones from a crash are cleaned by
+   the next run: our pattern, owned by this user, older than a day, mode
+   0700 and holding only our own names (`w`, `step<k>`, `step<k>.inputs`,
+   at most four). A published group renamed to that pattern holds its
+   outputs' names and is never removed. An output folder never takes that
+   pattern.
+7. Undo never deletes. It moves each input's output group (the wrapper
+   folder, whole) into the freedesktop.org Trash with one
+   `renameat2(RENAME_NOREPLACE)`: the home Trash
+   (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
+   the volume's (`$topdir/.Trash/$uid` under a sticky `.Trash` that root or this user owns, else
+   `$topdir/.Trash-$uid`); every Trash folder (the root, `files`,
+   `info`) is opened without following a symlink and must be a directory
+   of this user. A folder we make is 0700. An existing home Trash folder
+   is accepted when neither group nor others can write it and it has no
+   setuid/setgid bit (KDE's KIO makes it 0755); a volume Trash folder must
+   be exactly 0700. A home Trash accepted at 0755 can be listed (not
+   written) by others if `$HOME` itself is traversable by them; the code
+   does not check `$HOME`'s mode. Recovery re-checks `info` under the same rule. A
+   folder failing its rule is refused, never `chmod`ed, and the warning
+   names it and why; a remote filesystem or no safe Trash keeps the group.
+   Nothing is copied across filesystems (`EXDEV` keeps it). Before the
+   move the wrapper and every child must match their private baseline
+   (device, inode, size, mtime, ctime, type, owner, mode, link count; the
+   exact child count): one changed, missing or extra child keeps the whole
+   group; other groups are not affected. The `.trashinfo` (`Path=`
+   percent-encoded, `DeletionDate=` local time) is created with `O_EXCL`,
+   read back and synced before the move, after a synced recovery intent.
+   After the move the group and its info are checked again; on any
+   difference the group is moved back (no-replace); if its way back is
+   taken it stays in the Trash and its place is reported. Our info is
+   authentic only while it names our moved group: otherwise it is
+   neutralised through its fd and renamed off its `.trashinfo` name (even
+   when the neutralisation failed). A place is reported only when proved
+   at that moment: the known path, or the path resolved from the held fd
+   (at most 4 tries, no symlink); otherwise it is unknown, with an anchor,
+   and nothing is deleted. Later renames by other programs are not
+   followed. A job with an output at an unknown place, not confirmed on
+   disk, or with an incomplete or damaged record is refused before
+   anything moves, and so is a job of the previous history format. We
+   never empty or scan the Trash: the user manages it in the file
+   manager.
 
 ## The wheel
 
@@ -351,23 +508,51 @@ choice has run.
 **Life of a run**
 
 1. SIGALRM is reset to its default action and unblocked (an ignored
-   disposition survives `execve`), then `alarm(30)` is armed, before the
-   lock: a slow runtime dir is covered too. The default action kills the
-   process, so this is the last guard if everything else hangs.
+   disposition survives `execve`), then `alarm(5)` is armed, before the
+   lock: a slow runtime dir is covered too. The 5 s are the startup's
+   backstop: 2 s of startup plus 1 s of close is 3 s on the orderly path,
+   and 2 s remain for scheduling, so it fires only where no deadline
+   reaches. At the wheel's first commit the alarm becomes the user's stage,
+   30 s (below); when the close begins it is replaced by a 2 s one (the
+   close waits at most 1 s for the compositor), so a choice made in the
+   last second of a stage is not cut off by the stage's own alarm. The
+   default action kills the process, so this is the last guard if
+   everything else hangs; the kernel then releases the lock and the
+   connection.
 2. One instance: `flock` on `$XDG_RUNTIME_DIR/inacircle/wheel.lock`, opened
    `O_NONBLOCK | O_NOFOLLOW` (a symlink or FIFO there is an error, exit 1).
    A held lock makes a second instance exit 0 at once, before touching
    Wayland.
-3. The surface is shown (below). The wheel has two levels: categories,
-   then the chosen category's targets. Each wait (the drop, the category
-   choice after a fallback drop, the target choice) has 30 s. The drop and
-   the category choice re-arm `alarm` (and the
+3. The surface is shown (below). Its start has its own clock, 2 s from
+   the connection to the wheel's first commit (`ui_startup_deadline`), apart
+   from the user's wait. The wheel has two levels: categories, then the
+   chosen category's targets. Each user wait (the drop, the category choice
+   after a fallback drop, the target choice) has 30 s, counted from the
+   commit; the drop and the category choice re-arm `alarm` (and the
    surface's own deadline, 500 ms shorter so a timeout normally ends in an
    orderly close). The deadline will become configurable.
 4. Closed without a choice (Esc, a click off the wheel, the drag leaving
-   without a drop, the deadline, a Wayland error, the compositor closing
-   the connection): surface torn down, lock released, exit 0 (1 on an
-   error). Nothing runs and nothing is notified.
+   without a drop, the deadline, the compositor closing the surface):
+   surface torn down, lock released, exit 0. Nothing runs and nothing is
+   notified. The teardown is ordered: the layer surface (the keyboard grab)
+   and the surfaces are destroyed, the compositor's answer to a `sync` is
+   awaited for at most 1 s (`ui_teardown_deadline`), the connection is
+   closed, and only then is the lock released.
+   A start that fails (no configure within 2 s, no position and a seat
+   without a pointer, a seat that has no keyboard by then, a Wayland error before the
+   first commit, a setup
+   error) takes the same ordered close, then exit 1 and one desktop
+   notification, "Could not open the circle." with the proven cause (an
+   unproven one gets the general copy), through the bounded notification
+   path (the open within 500 ms, the call within 500 ms, a 2 s alarm as the
+   last guard). No retry and no second window; without a bus it is one
+   line on stderr.
+   The wheel is not shown before the seat has a keyboard (Esc could not
+   close it); a keyboard that comes late, within the 2 s, is waited for,
+   and one that never comes is the named cause at the deadline. A keyboard
+   lost after the wheel is up closes it in order (exit 0, no notification).
+   An error after the first commit is only logged (exit 1): the wheel did
+   open, so it is never announced as "Could not open".
 5. A choice: the Wayland connection is closed (the surface disappears), the
    lock released, `alarm(0)`; then the same run path as
    `inacircle run --notify <preset> <files…>` (executor, journal,
@@ -520,19 +705,96 @@ running jobs and history.
 No daemon:
 
 - history: an append-only log in `$XDG_STATE_HOME/inacircle/history`
-  (header `inacircle-history 0`), manifest-style lines, each one `write`
-  on an `O_APPEND` descriptor. A job's `dir`, `out` (input, path and the
-  identity taken at placement), `skip` and `fail` lines are appended as
-  they happen, its `job` line (id, time, action, status, sandbox) when it
-  ends, and `undo` once undone. A run that dies midway leaves a valid
-  partial record of what it placed, which undo still finds. Nothing of a
-  run is kept in memory per outcome;
+  (header `inacircle-history 1`), manifest-style lines. A job's first
+  record is `job-start`, written when it opens the history: its id and
+  its owner (the supervisor's pid, start time in ticks since boot, boot
+  id and pid namespace; without them when `/proc` cannot tell). Every
+  block is appended after a newline check under the append lock: a last
+  line another run left cut off gets its newline first, so it spoils only
+  its own record.
+  Before an output group's publishing rename, its whole manifest (`group-begin`
+  with the wrapper's identity and the child count, one `child` per output
+  with its private baseline, `group-end` with the count and the names'
+  bytes) and a `publish-intent` (planned place) are appended as one block
+  and synced; if that fails, the group is not published. A name taken at
+  the rename adds another intent for the same group and operation. After
+  the rename comes `publish-commit` (the proved place, durability) or
+  `publish-uncertain` (the anchor, when the place could not be proved),
+  synced; a failure there keeps the output and its success, and the job
+  is then not undoable. A publication that fails after its intent gets
+  `publish-abort`. `skip`, `fail` and `unknown` lines come as they
+  happen, the `job` line (id, time, action, status, sandbox, `undo=no`
+  when not undoable) at the end. Undo writes, per group, a synced
+  `recovery-intent` (source, Trash target, identities, mount, deletion
+  date) before anything is made in the Trash, and one synced ending:
+  `recovery-commit` (in the Trash), `recovery-restored`,
+  `recovery-kept`, `recovery-uncertain` or `recovery-abort` (nothing
+  moved), each with the proved place or `-`, the anchor and the reason;
+  then `undo` (unless every group was kept: nothing moved, so no `undo`
+  record; the CLI exits 0 when each was kept at a place its line names, 1
+  for `kept -`). An undo cut by a crash is resumed by the next one from
+  these records: an intent without its ending is recovered by looking only
+  at its target and our two info names (no Trash scan). Paths are
+  byte-exact (`%XX` for bytes that are not printable ASCII, `%` and
+  `\`). There is no digest: undo acts only on a job whose every group is
+  complete (version, unique group and operation, begin and end, matching
+  counts and bytes, a commit at a recorded intent's place, synced); a
+  duplicate, missing, cut-off or unknown record refuses the whole job
+  before anything is touched. A version 0 history is archived
+  (`history.v0`, `history.v0.1`, …, never overwritten) under the
+  history's lock by the first run that writes; its jobs are refused with
+  the reason, their outputs kept. A run that dies midway leaves its
+  complete groups, which undo still finds. Nothing of a run is kept in
+  memory per outcome;
+- state files (history, registry entries, the catalog cache) are created
+  exclusively under random names, never through a symlink, in a folder
+  opened once and checked (a directory of this user, not writable by
+  others: tightened if it is), and renamed or linked into place relative
+  to that folder. The folder itself (`$XDG_STATE_HOME/inacircle`,
+  `$XDG_RUNTIME_DIR/inacircle/jobs`, the catalog cache folder) must not be
+  a symlink: that is refused on purpose (the folder is opened with
+  `O_NOFOLLOW | O_DIRECTORY`; the operating system's bare `Not a
+  directory (os error 20)` is replaced, after an `lstat` confirms a real
+  symlink, by "the folder `<path>` is a symbolic link and is refused on
+  purpose", with the same error kind, also for a dangling link; the
+  history warning reads `history not written: …; nothing was published`,
+  so nothing is published and nothing is offered for Undo; a cache folder that is a link means no
+  cache is read or written, and a jobs folder that is a link means the
+  running job is not registered; both print one line on stderr saying
+  why). Its parents may be symlinks, and so may
+  `user-dirs.dirs`, which is the user's own configuration. To keep a
+  state folder elsewhere, make its parent the link or bind-mount it;
 - running jobs: each supervisor registers itself in
   `$XDG_RUNTIME_DIR/inacircle/jobs/<job-id>`, one `job` line (id, pid,
   action, inputs, done, progress, start time) rewritten by rename at most
   four times a second and removed at the end; a job id is
   `<unix-seconds>-<pid>-<8 random hex digits>`, and an entry whose
-  process is gone is ignored;
+  process is gone is ignored. A listing examines at most 128 entries and
+  reads each entry bounded (4096 bytes, 16 fields); past a limit, or when
+  the folder cannot be read, it is an error, never a shorter or empty list,
+  and `undo`, `jobs` and `cancel` fail on it (undo moves nothing), as
+  they do on an entry that cannot be opened (anything but one that is gone
+  or is not a regular file of this user). The dead entries among those
+  examined, and our own temporary files untouched for a minute, are
+  removed first (each only while its name is still the file just opened),
+  so a pile left by crashes heals. An entry records its process by pid,
+  start time and boot id; one written by an older build has no identity
+  and is judged by the pid alone, so after pid reuse it looks alive until
+  removed by hand (delete the file in `$XDG_RUNTIME_DIR/inacircle/jobs/`;
+  that folder is tmpfs and empties at the next boot). Where no file
+  descriptor of an object is held across the check and the removal (a
+  registry entry, a step's work folder), `(device, inode)` cannot prove
+  identity against inode reuse. Fooling that takes a process of the same
+  user that removes our private 0700 object and recreates the same random
+  name on the freed inode; the worst result is one of our own bookkeeping
+  files or an unpublished work folder removed, never a published output;
+- the history is read in a window: the header by itself (256 bytes), then
+  at most the last 8 MiB through a 1 KiB buffer, lines of at most 32 KiB
+  with at most 32 fields, a job with at most 1024 outputs and groups and
+  4096 publish intents, paths of at most 4096 bytes and 1 MiB in all. A job that is not provably inside
+  the window (its `job-start` has to be there, before any other line of
+  it; the append lock orders the records, no clock is trusted), or over a
+  limit, is refused before anything moves;
 - cancelling: `SIGTERM` to the supervisor.
 
 A jobs view (name, paths, what into what, progress, estimated time,
@@ -563,7 +825,23 @@ inacircle cancel <job-id>
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
 - `undo` of a job that is still running is refused (exit 1): cancel it
-  first.
+  first. The registry is not the only check (it may be missing, without
+  `$XDG_RUNTIME_DIR`, or unwritten after an error): a job whose history
+  has no closing `job` line is undone only once the owner its `job-start`
+  names is provably gone (no process at the pid, or another start time or
+  boot). An owner that cannot be checked refuses the undo: unknown means
+  nothing moves. That is a job recorded without an owner (a record from
+  before owners, or `/proc` could not name the process when the job
+  started) and a job whose owner is in another pid namespace. Such a job
+  stays refused after a crash too: only a job with an owner recorded
+  here is undoable once its process is gone, and a crash recorded before
+  owners existed is not.
+  Undo prints one line per output group: `moved <Trash path>`,
+  `kept <path|-> <reason>`, `restored <path|-> <reason>`,
+  `recovery-kept <path|-> <reason> <errno|->` or
+  `uncertain <op> <reason> <last path seen|->` (a hint, not a proved
+  place), then `warning <text>` lines; exit 0 when every group went to the
+  Trash or was kept at a place its line names, else 1.
 - An invocation error (unknown command, preset or action, no files, an
   empty path) is a message on stderr and exit 2, with nothing on stdout.
 - `--notify` adds the desktop notifications of [Feedback](#feedback). All

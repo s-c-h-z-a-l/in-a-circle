@@ -83,6 +83,31 @@ pub fn runtime_dir() -> Option<PathBuf> {
     abs_env("XDG_RUNTIME_DIR")
 }
 
+/// The longest `user-dirs.dirs` read (`docs/resource-limits.md`, `user_dirs_bytes`): xdg-user-dirs
+/// writes about eight short lines (under 0.5 KiB); eight keys with a 4096 B
+/// path each plus quotes stay under 34 KiB, so 64 KiB is about twice the
+/// worst real shape. A longer file is no user-dirs file we know: the
+/// fallback (`~/Downloads`) is used, as for an unreadable one.
+const USER_DIRS_MAX_BYTES: usize = 64 * 1024;
+
+/// The file's text, opened without blocking, only a regular file (checked
+/// on the open fd), read at most `USER_DIRS_MAX_BYTES`. A symlink at its
+/// name is followed: unlike the engine's own state files, this is the
+/// user's config, which dotfile managers link. `None` for anything
+/// else (the caller falls back).
+fn read_user_dirs(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    String::from_utf8(action::read_bounded(f, USER_DIRS_MAX_BYTES).ok()?).ok()
+}
+
 /// `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, else `~/Downloads` (or the
 /// no-home fallback).
 pub fn download_dir() -> io::Result<PathBuf> {
@@ -91,7 +116,7 @@ pub fn download_dir() -> io::Result<PathBuf> {
         None => Ok(fallback_root()?.join("downloads")),
     };
     let config = base("XDG_CONFIG_HOME", ".config", "config")?;
-    let Ok(text) = std::fs::read_to_string(config.join("user-dirs.dirs")) else {
+    let Some(text) = read_user_dirs(&config.join("user-dirs.dirs")) else {
         return fallback();
     };
     for line in text.lines() {
@@ -124,8 +149,34 @@ pub(crate) mod tests {
     /// Tests that touch the environment take this lock and restore it.
     static ENV: Mutex<()> = Mutex::new(());
 
+    /// Every variable a path of the user's is resolved from (state, config
+    /// with `user-dirs.dirs`, cache, Trash, runtime, the download
+    /// fallback through `HOME`).
+    pub(crate) const USER_PATH_VARS: [&str; 6] = [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    ];
+
+    /// What a variable of [`USER_PATH_VARS`] a test did not name points
+    /// at: absolute (so no default applies) and under `/proc`, where
+    /// nothing can be created, so a path the test forgot fails there
+    /// instead of reaching the user's home.
+    pub(crate) const NOWHERE: &str = "/proc/inacircle-test-nowhere";
+
+    /// The one way an engine test sets the environment: `vars` as given,
+    /// every other variable of [`USER_PATH_VARS`] at [`NOWHERE`], all
+    /// restored afterwards (also on a panic).
     pub(crate) fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
         let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let unnamed = USER_PATH_VARS
+            .iter()
+            .filter(|k| !vars.iter().any(|(n, _)| n == *k))
+            .map(|k| (*k, Some(NOWHERE)));
+        let vars: Vec<(&str, Option<&str>)> = vars.iter().copied().chain(unnamed).collect();
         let saved: Vec<_> = vars
             .iter()
             .map(|(k, _)| (*k, std::env::var_os(k)))
@@ -134,7 +185,7 @@ pub(crate) mod tests {
         // test that mutates or depends on the environment holds ENV, so no
         // code observes a half-changed environment.
         unsafe {
-            for (k, v) in vars {
+            for (k, v) in &vars {
                 match v {
                     Some(v) => std::env::set_var(k, v),
                     None => std::env::remove_var(k),
@@ -242,6 +293,69 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `user-dirs.dirs` is read bounded; a symlink at its own name is followed
+    /// to a regular file; a FIFO or directory, at the name or behind
+    /// a link, falls back to `~/Downloads`.
+    #[test]
+    fn user_dirs_read_is_bounded_typed_and_followed() {
+        use crate::sys::tests::{mkfifo, within};
+        let tmp = std::env::temp_dir().join(format!("engine-xdg-ud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cfg = tmp.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let f = cfg.join("user-dirs.dirs");
+        let want = "XDG_DOWNLOAD_DIR=\"/data/dl\"\n";
+        let pad = |n: usize| {
+            let mut c = String::from(want);
+            c.push('#');
+            while c.len() < n {
+                c.push('x');
+            }
+            c
+        };
+        let (home, cfgs) = (
+            tmp.to_str().unwrap().to_owned(),
+            cfg.to_str().unwrap().to_owned(),
+        );
+        let get = || {
+            let (h, c) = (home.clone(), cfgs.clone());
+            with_env(
+                &[
+                    ("HOME", Some(h.as_str())),
+                    ("XDG_CONFIG_HOME", Some(c.as_str())),
+                ],
+                || within(5, download_dir).unwrap(),
+            )
+        };
+        // Max is read, max + 1 falls back.
+        std::fs::write(&f, pad(USER_DIRS_MAX_BYTES)).unwrap();
+        assert_eq!(get(), PathBuf::from("/data/dl"));
+        std::fs::write(&f, pad(USER_DIRS_MAX_BYTES + 1)).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        // A symlink at the name is followed (a dotfile manager's link to
+        // the user's own config).
+        let real = tmp.join("real");
+        std::fs::write(&real, want).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&real, &f).unwrap();
+        assert_eq!(get(), PathBuf::from("/data/dl"));
+        // ... but only to a regular file: a link to a FIFO neither blocks
+        // nor is read, nor is a link to a directory.
+        let fifo = tmp.join("fifo");
+        mkfifo(&fifo);
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&fifo, &f).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&cfg, &f).unwrap();
+        assert_eq!(get(), tmp.join("Downloads"));
+        // A FIFO at the name itself neither blocks nor is read.
+        std::fs::remove_file(&f).unwrap();
+        mkfifo(&f);
+        assert_eq!(get(), tmp.join("Downloads"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn no_home_falls_back_to_tmp_never_relative() {
         // SAFETY: getuid cannot fail.
@@ -310,5 +424,13 @@ pub(crate) mod tests {
         std::fs::write(&f, "XDG_DOWNLOAD_DIR=\"$HOME\"\n").unwrap();
         assert_eq!(with_env(&v, download_dir).unwrap(), tmp);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The user-dirs bound is 64 KiB (derivation at the constant); the
+    /// boundary tests compare against the constant itself, so the value is
+    /// pinned here. Kills `*` -> `+`.
+    #[test]
+    fn the_user_dirs_bound_is_64_kib() {
+        assert_eq!(USER_DIRS_MAX_BYTES, 65_536);
     }
 }

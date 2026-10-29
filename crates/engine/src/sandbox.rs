@@ -1,5 +1,6 @@
 //! The sandbox every action runs in: Landlock (filesystem, network, scope),
-//! a seccomp filter (sockets, metadata) and resource limits.
+//! a seccomp filter (sockets, metadata, other processes, escapes; see
+//! [`seccomp`]) and resource limits.
 //!
 //! The parent builds the ruleset before spawning ([`build`], or [`create`]
 //! then [`allow_read_fd`] and [`add`]); the child applies everything
@@ -11,12 +12,11 @@
 //! - Filesystem (Landlock): read + execute the exec paths, read the read
 //!   paths, everything inside the write path; nothing else. Covers write,
 //!   create, remove, rename/link out of place (REFER), truncate.
-//! - Network: seccomp lets `socket`/`socketpair` create only `AF_UNIX`
-//!   sockets (`EACCES` otherwise), which shuts out TCP, UDP, MPTCP, SCTP,
-//!   ICMP, raw, netlink, packet. Landlock additionally denies TCP (ABI 4)
-//!   and UDP (ABI 10) bind/connect/send on sockets that already exist.
-//! - Unix sockets: pathname sockets outside the write path (ABI 9) and
-//!   abstract sockets outside the sandbox (ABI 6) are denied.
+//! - Sockets: seccomp denies `socket` and `socketpair` for every family,
+//!   `AF_UNIX` included (`EACCES`). Landlock additionally denies TCP
+//!   (ABI 4) and UDP (ABI 10) bind/connect/send on sockets that already
+//!   exist, pathname unix sockets outside the write path (ABI 9) and
+//!   abstract ones outside the sandbox (ABI 6).
 //! - Signals to processes outside the sandbox (ABI 6) are denied.
 //! - Metadata: seccomp denies (`EPERM`), everywhere and by path or fd:
 //!   chmod, fchmod, fchmodat, fchmodat2; chown, fchown, lchown, fchownat;
@@ -24,40 +24,47 @@
 //!   lsetxattr, fsetxattr, setxattrat, removexattr, lremovexattr,
 //!   fremovexattr, removexattrat; file_setattr; and the ioctls
 //!   FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR (chattr) and
-//!   FS_IOC_ENABLE_VERITY (makes a file immutable). Every other ioctl is
-//!   allowed.
+//!   FS_IOC_ENABLE_VERITY (makes a file immutable), as every ioctl but a
+//!   few queries is denied.
+//! - Other processes and escapes (seccomp, `EPERM`): ptrace,
+//!   process_vm_*, the pidfd calls, kcmp; keyrings; namespaces; clone
+//!   flags beyond fork/vfork/thread (clone3 gets `ENOSYS`); scheduler and
+//!   priority setters; prlimit64 on another pid; migrate/move_pages; the
+//!   lifecycle prctls; mounts, mount queries and file handles; inotify
+//!   and fanotify groups (Landlock does not mediate their marks); io_uring,
+//!   bpf, perf, userfaultfd; System V IPC and POSIX queues; async fcntls.
 //! - `setsid` and `setpgid` are denied (`EPERM`; x86_64 has no `setpgrp`
 //!   syscall): the filter is installed after the child's own `setsid`, so
 //!   the action and every descendant stay in one killable process group.
-//! - `io_uring` is denied (`EPERM`): its SOCKET and xattr ops would bypass
-//!   the seccomp filter.
 //! - Inherited fds: every fd >= 3 is marked close-on-exec, so nothing
 //!   opened before the sandbox reaches the action.
 //! - `no_new_privs`, its own session, `RLIMIT_CORE` 0, `RLIMIT_FSIZE`, and
-//!   the memory net `RLIMIT_DATA` (see [`data_cap`]), with or without Landlock.
+//!   the memory net `RLIMIT_DATA` (see [`data_cap`]).
+//! - A clean environment ([`configure_child_env`]): nothing of the
+//!   parent's is passed through.
+//!
+//! # What is required
+//!
+//! Nothing runs without the whole sandbox ([`ready`]): Landlock ABI >=
+//! [`MIN_LANDLOCK_ABI`] and a parent without elevated or inconsistent
+//! privileges ([`validate_privilege`]). Built-in actions and manifests
+//! are no exception.
 //!
 //! # What is not covered
 //!
-//! - Per Landlock ABI: below 3, truncate of any DAC-writable file; below
-//!   4, Landlock does not restrict the network (seccomp still blocks
-//!   non-unix sockets); below 5, device ioctls; below 6, abstract unix
-//!   sockets and signals; below 9, pathname unix sockets (e.g. D-Bus),
-//!   whose peer could also pass in a network socket via SCM_RIGHTS.
-//! - Without Landlock, protection from ptrace-family access (ptrace,
-//!   process_vm_*, pidfd_getfd) to the user's other processes depends on
-//!   Yama (`kernel.yama.ptrace_scope`).
-//! - Without Landlock only seccomp, the fd sweep and the limits apply.
+//! - Per Landlock ABI above the floor: below 9, pathname unix sockets
+//!   outside the write path (seccomp still blocks creating any socket);
+//!   below 10, UDP on inherited sockets.
 //! - File names outside the sandbox can still be probed (`stat`, path
 //!   lookup are not restricted).
 //! - `RLIMIT_FSIZE` caps each file, not their sum: many files can still
 //!   fill a disk.
-//! - The seccomp filter exists for x86_64 only; elsewhere [`apply_in_child`]
-//!   installs none (sockets and metadata are then not restricted).
+//! - The seccomp filter exists for x86_64 and aarch64; elsewhere
+//!   [`apply_in_child`] fails (`ENOSYS`) and nothing runs.
 //! - No `RLIMIT_NPROC`: an action can fork-bomb until it is cancelled.
 //! - `RLIMIT_DATA` is per process, not per process tree: a forking action
 //!   gets the cap once per child. File mmaps and shared memory are not
 //!   counted.
-//! - Keyring syscalls (`keyctl`, `add_key`, `request_key`) are allowed.
 
 use std::fs::OpenOptions;
 use std::io;
@@ -221,6 +228,10 @@ fn build_for_abi(policy: &Policy, abi: u32) -> io::Result<Ruleset> {
 
 /// A ruleset handling every right `abi` knows, with no rules yet.
 fn create_for_abi(abi: u32) -> io::Result<Ruleset> {
+    #[cfg(test)]
+    if let Some(errno) = inject::SETUP_ERRNO.get() {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
     let (fs, net, scoped) = handled(abi);
     let attr = RulesetAttr {
         handled_access_fs: fs,
@@ -345,19 +356,305 @@ fn allow_fd(ruleset: &Ruleset, fd: BorrowedFd, access: u64, path: &Path) -> io::
 }
 
 /// An empty ruleset at the best available ABI, for [`add`] and
-/// [`allow_read_fd`]. `Ok(None)` when Landlock is unavailable.
-pub fn create() -> io::Result<Option<Ruleset>> {
-    landlock_abi().map(create_for_abi).transpose()
+/// [`allow_read_fd`]. Fails unless [`ready`] passes: there is no
+/// unconfined spawn.
+pub fn create() -> io::Result<Ruleset> {
+    create_for_abi(ready()?)
 }
 
-/// Builds the ruleset for `policy` at the best available ABI. `Ok(None)`
-/// when Landlock is unavailable.
-pub fn build(policy: &Policy) -> io::Result<Option<Ruleset>> {
-    match landlock_abi() {
-        Some(abi) => build_for_abi(policy, abi).map(Some),
-        None => Ok(None),
+/// Builds the ruleset for `policy` at the best available ABI. Fails unless
+/// [`ready`] passes: there is no unconfined spawn.
+pub fn build(policy: &Policy) -> io::Result<Ruleset> {
+    build_for_abi(policy, ready()?)
+}
+
+/// The mandatory gate every manifest probe and action passes, in the
+/// parent and before any rule is built: the kernel's Landlock ABI must be
+/// at least [`MIN_LANDLOCK_ABI`], and this process must not run with
+/// elevated or inconsistent privileges ([`validate_privilege`]). Returns
+/// the ABI to build at. Every ruleset comes from [`create`] or [`build`],
+/// which call it, and [`apply_in_child`] takes a ruleset, never `None`.
+pub fn ready() -> io::Result<u32> {
+    let abi = floor_abi(current_abi())?;
+    validate_privilege(&current_privilege()?)?;
+    Ok(abi)
+}
+
+/// `abi` if it reaches [`MIN_LANDLOCK_ABI`]; an `Unsupported` error naming
+/// what the kernel has otherwise.
+fn floor_abi(abi: Option<u32>) -> io::Result<u32> {
+    match abi {
+        Some(abi) if abi >= MIN_LANDLOCK_ABI => Ok(abi),
+        Some(abi) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("Landlock ABI {abi} < {MIN_LANDLOCK_ABI}"),
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Landlock unavailable",
+        )),
     }
 }
+
+/// The kernel's ABI; in unit tests, the injected one if any.
+fn current_abi() -> Option<u32> {
+    #[cfg(test)]
+    if let Some(abi) = inject::ABI.get() {
+        return abi;
+    }
+    landlock_abi()
+}
+
+/// This process's privileges; in unit tests, the injected ones if any.
+fn current_privilege() -> io::Result<PrivilegeSnapshot> {
+    #[cfg(test)]
+    if let Some(p) = inject::PRIVILEGE.get() {
+        return Ok(p);
+    }
+    PrivilegeSnapshot::current()
+}
+
+/// Test-only overrides of what [`ready`] and [`create_for_abi`] see. They
+/// are thread-local: the engine builds rulesets and spawns on the calling
+/// thread, and parallel tests do not see each other's injections. They
+/// do not exist outside `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod inject {
+    use super::PrivilegeSnapshot;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `Some(abi)`: [`super::ready`] sees `abi` instead of the kernel's.
+        pub(crate) static ABI: Cell<Option<Option<u32>>> = const { Cell::new(None) };
+        /// `Some(errno)`: creating a ruleset fails with it (a setup error).
+        pub(crate) static SETUP_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+        /// `Some(p)`: [`super::ready`] validates `p` instead of this process.
+        pub(crate) static PRIVILEGE: Cell<Option<PrivilegeSnapshot>> = const { Cell::new(None) };
+    }
+
+    /// Clears every override when dropped (also when a test panics).
+    pub(crate) struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ABI.set(None);
+            SETUP_ERRNO.set(None);
+            PRIVILEGE.set(None);
+        }
+    }
+}
+
+/// The capability sets of the v3 `capget` ABI are 64 bits wide (two u32
+/// words); no capability number reaches 64.
+const CAP_BITS: u32 = 64;
+
+/// `_LINUX_CAPABILITY_VERSION_3` (include/uapi/linux/capability.h).
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+/// `struct __user_cap_header_struct`.
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+/// `struct __user_cap_data_struct`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// What the parent knows about its own privileges before it spawns: the
+/// four user and group IDs and the five capability sets. Collected (or, in
+/// tests, made up) in the parent only; the child between fork and exec
+/// never reads `/proc` or allocates for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivilegeSnapshot {
+    /// Real, effective, saved and filesystem user ID.
+    pub uid: [libc::uid_t; 4],
+    /// Real, effective, saved and filesystem group ID.
+    pub gid: [libc::gid_t; 4],
+    pub cap_permitted: u64,
+    pub cap_effective: u64,
+    pub cap_inheritable: u64,
+    pub cap_ambient: u64,
+    pub cap_bounding: u64,
+}
+
+impl PrivilegeSnapshot {
+    /// This process's privileges, from `getresuid`/`getresgid`,
+    /// `setfsuid(-1)`/`setfsgid(-1)` (an invalid ID changes nothing and
+    /// returns the current one), `capget` and the ambient and bounding
+    /// `prctl` queries (`EINVAL` past the kernel's last capability).
+    pub fn current() -> io::Result<PrivilegeSnapshot> {
+        let mut uid = [0; 4];
+        let mut gid = [0; 4];
+        // SAFETY: each pointer is to a writable u32 of this frame.
+        let r = unsafe {
+            let [r, e, s, _] = &mut uid;
+            libc::getresuid(r, e, s)
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        let r = unsafe {
+            let [r, e, s, _] = &mut gid;
+            libc::getresgid(r, e, s)
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: an invalid ID (-1) makes these change nothing and return
+        // the current fsuid/fsgid.
+        unsafe {
+            uid[3] = libc::setfsuid(libc::uid_t::MAX) as libc::uid_t;
+            gid[3] = libc::setfsgid(libc::gid_t::MAX) as libc::gid_t;
+        }
+        let mut header = CapHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        // SAFETY: v3 reads one header and writes two data structs, both
+        // live and writable here.
+        let r = unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let wide = |f: fn(&CapData) -> u32| u64::from(f(&data[0])) | u64::from(f(&data[1])) << 32;
+        Ok(PrivilegeSnapshot {
+            uid,
+            gid,
+            cap_permitted: wide(|d| d.permitted),
+            cap_effective: wide(|d| d.effective),
+            cap_inheritable: wide(|d| d.inheritable),
+            cap_ambient: cap_set(|cap| {
+                // SAFETY: a query; it reads nothing from memory.
+                unsafe { libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_IS_SET, cap, 0, 0) }
+            })?,
+            cap_bounding: cap_set(|cap| {
+                // SAFETY: a query; it reads nothing from memory.
+                unsafe { libc::prctl(libc::PR_CAPBSET_READ, cap, 0, 0, 0) }
+            })?,
+        })
+    }
+}
+
+/// The set a per-capability query (`1` set, `0` not, `EINVAL` past the
+/// kernel's last capability) describes.
+fn cap_set(query: impl Fn(libc::c_ulong) -> libc::c_int) -> io::Result<u64> {
+    let mut set = 0;
+    for cap in 0..CAP_BITS {
+        match query(libc::c_ulong::from(cap)) {
+            1 => set |= 1 << cap,
+            0 => {}
+            _ => {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EINVAL) {
+                    break;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(set)
+}
+
+/// Refuses to spawn with elevated or inconsistent privileges: root (any
+/// user ID 0), real/effective/saved/filesystem user IDs that differ (a
+/// setuid state), group IDs that differ (setgid), or any permitted,
+/// effective or ambient capability. Nothing is dropped instead: the user
+/// starts the tool unprivileged, or it does not run.
+///
+/// Two sets are recorded but not refused on their own:
+/// - The bounding set only limits what an execve could gain; a normal
+///   user's is full and grants nothing.
+/// - The inheritable set: systemd's user manager hands
+///   CAP_WAKE_ALARM to every process of a session, so refusing it would
+///   refuse every normal desktop. A child can gain a capability from it
+///   only through a file's inheritable capabilities at execve, and the
+///   child runs under `no_new_privs`, where the kernel's
+///   `cap_bprm_creds_from_file` keeps the new permitted set at the old
+///   one (empty, as checked here); with no ambient capability nothing is
+///   carried over either.
+pub fn validate_privilege(p: &PrivilegeSnapshot) -> io::Result<()> {
+    let refuse = |why: String| Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+    if p.uid.contains(&0) {
+        return refuse(format!("refusing to run as root (uids {:?})", p.uid));
+    }
+    if p.uid.iter().any(|&u| u != p.uid[0]) {
+        return refuse(format!("refusing to run setuid (uids {:?})", p.uid));
+    }
+    if p.gid.iter().any(|&g| g != p.gid[0]) {
+        return refuse(format!("refusing to run setgid (gids {:?})", p.gid));
+    }
+    for (set, name) in [
+        (p.cap_permitted, "permitted"),
+        (p.cap_effective, "effective"),
+        (p.cap_ambient, "ambient"),
+    ] {
+        if set != 0 {
+            return refuse(format!(
+                "refusing to run with {name} capabilities ({set:#x})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The clean environment of every child (manifest probe and action): the
+/// parent's is cleared, so no session secret (`SSH_AUTH_SOCK`,
+/// `DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`, tokens) and no loader
+/// switch (`LD_PRELOAD`, `LD_LIBRARY_PATH`) reaches it. What is set is
+/// fixed here, never passed through:
+/// - `PATH=/usr/bin:/bin`: the system directories the ruleset lets a child
+///   execute ([`SYSTEM_EXEC_PATHS`]); `/usr/local` and the user's own
+///   directories are not executable inside the sandbox anyway.
+/// - `LC_ALL` and `LANG` `C.UTF-8`: UTF-8 text handling with no dependency
+///   on which locales the user has generated (glibc builds C.UTF-8 in).
+/// - `TMPDIR=tmp` when given: a private directory the engine made inside
+///   the one the ruleset lets the child write (an action's `<work>/tmp`,
+///   see [`make_child_tmp`]). A manifest has no writable place: its
+///   `TMPDIR` is [`NO_TMPDIR`], so a tool that reads it finds nothing
+///   rather than falling back on a guess of ours.
+pub fn configure_child_env(command: &mut std::process::Command, tmp: Option<&Path>) {
+    command
+        .env_clear()
+        .env("PATH", CHILD_PATH)
+        .env("LC_ALL", CHILD_LOCALE)
+        .env("LANG", CHILD_LOCALE)
+        .env("TMPDIR", tmp.unwrap_or(Path::new(NO_TMPDIR)));
+}
+
+/// The manifest's `TMPDIR`: a path that does not exist and is never made.
+pub const NO_TMPDIR: &str = "/nonexistent";
+
+/// The name of an action's private temp directory inside its work dir.
+/// An output is always `<input index>/<name>` (a decimal first
+/// component), so it can never be this.
+pub const CHILD_TMP: &str = "tmp";
+
+/// Makes `<work>/tmp`, mode 0700 (only this user, whatever the umask
+/// leaves), for an action's `TMPDIR`; `work` is the directory its ruleset
+/// lets it write. Fails if it exists (the engine made `work` empty).
+pub fn make_child_tmp(work: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let tmp = work.join(CHILD_TMP);
+    std::fs::DirBuilder::new().mode(0o700).create(&tmp)?;
+    Ok(tmp)
+}
+
+/// The child's `PATH` (see [`configure_child_env`]).
+pub const CHILD_PATH: &str = "/usr/bin:/bin";
+/// The child's `LC_ALL` and `LANG` (see [`configure_child_env`]).
+pub const CHILD_LOCALE: &str = "C.UTF-8";
 
 /// `RLIMIT_FSIZE`: 16 x the total input size, at least 256 MiB, at most 16 GiB.
 /// `RLIMIT_DATA`: [`data_cap`] of this machine's RAM (read once per call).
@@ -427,169 +724,30 @@ pub fn total_ram() -> u64 {
     (si.totalram as u64).saturating_mul(u64::from(si.mem_unit))
 }
 
-/// The seccomp filter: deny non-unix sockets, metadata writes and io_uring.
-/// Syscall numbers from arch/x86/entry/syscalls/syscall_64.tbl, the
-/// `seccomp_data` layout from include/uapi/linux/seccomp.h.
-#[cfg(target_arch = "x86_64")]
-mod seccomp {
-    use libc::{
-        BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, SECCOMP_RET_ALLOW,
-        SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, sock_filter,
-    };
+pub mod seccomp;
 
-    /// EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE (not in libc).
-    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
-    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-    // Offsets in struct seccomp_data.
-    const NR: u32 = 0;
-    const ARCH: u32 = 4;
-    const ARG0_LOW: u32 = 16; // little endian
-    const ARG1_LOW: u32 = 24; // ioctl's cmd is an unsigned int
-    const SYS_SOCKET: u32 = 41;
-    const SYS_SOCKETPAIR: u32 = 53;
-    const SYS_IOCTL: u32 = 16;
-    /// ioctl commands denied with EPERM: the inode flag setters
-    /// (include/uapi/linux/fs.h) and fs-verity enabling
-    /// (include/uapi/linux/fsverity.h), which all work through a read-only fd.
-    const FS_IOC_SETFLAGS: u32 = 0x4008_6602; // _IOW('f', 2, long)
-    const FS_IOC32_SETFLAGS: u32 = 0x4004_6602; // _IOW('f', 2, int)
-    const FS_IOC_FSSETXATTR: u32 = 0x401c_5820; // _IOW('X', 32, struct fsxattr)
-    const FS_IOC_ENABLE_VERITY: u32 = 0x4080_6685; // _IOW('f', 133, 128-byte arg)
-    /// Denied with EPERM.
-    const DENIED: [u32; 26] = [
-        90,  // chmod
-        91,  // fchmod
-        92,  // chown
-        93,  // fchown
-        94,  // lchown
-        109, // setpgid
-        112, // setsid
-        132, // utime
-        188, // setxattr
-        189, // lsetxattr
-        190, // fsetxattr
-        197, // removexattr
-        198, // lremovexattr
-        199, // fremovexattr
-        235, // utimes
-        260, // fchownat
-        261, // futimesat
-        268, // fchmodat
-        280, // utimensat
-        425, // io_uring_setup
-        426, // io_uring_enter
-        427, // io_uring_register
-        452, // fchmodat2 (not in every libc)
-        463, // setxattrat (not in libc)
-        466, // removexattrat (not in libc)
-        469, // file_setattr (not in libc)
-    ];
+/// The Landlock ABI the hardening policy builds on: 6 adds the abstract
+/// unix socket and signal scopes (`LANDLOCK_SCOPE_*`,
+/// include/uapi/linux/landlock.h), which seccomp cannot express.
+pub const MIN_LANDLOCK_ABI: u32 = 6;
 
-    // mutants: the three `+ -> *` mutants on the layout constants below are
-    // equivalent in behavior: ALLOW, SOCKET and IOCTL_EPERM move further out
-    // and `program()` leaves the gap as `stmt(0, 0)` (a load of 0 into the
-    // accumulator, no jump), which every path that reaches it runs through
-    // before the next real instruction. No syscall gets another verdict; the
-    // filter only gets longer. The other layout mutants are not equivalent:
-    // `EPERM = ALLOW * 1` would overwrite ALLOW's slot, `SOCKET = EPERM * 1`
-    // collides with EPERM, and `LEN = IOCTL_EPERM * 1` leaves no room for the
-    // last instruction (the build fails); `jump` also refuses, at compile
-    // time, an offset that does not fit its u8.
-    // Layout: [arch check: 3] [nr load, x32, socket, socketpair, ioctl: 5]
-    // [DENIED] [ALLOW] [EPERM] [socket: load arg0, AF_UNIX?, ALLOW, EACCES]
-    // [ioctl: load arg1, 4 x cmd?, ALLOW, EPERM].
-    const FIRST_DENIED: usize = 8;
-    const ALLOW: usize = FIRST_DENIED + DENIED.len();
-    const EPERM: usize = ALLOW + 1;
-    const SOCKET: usize = EPERM + 1;
-    const IOCTL: usize = SOCKET + 4;
-    const IOCTL_EPERM: usize = IOCTL + 6;
-    const LEN: usize = IOCTL_EPERM + 1;
-
-    const fn stmt(code: u32, k: u32) -> sock_filter {
-        sock_filter {
-            code: code as u16,
-            jt: 0,
-            jf: 0,
-            k,
-        }
+/// The seccomp filter for the architecture this binary was built for;
+/// `ENOSYS` (a raw errno: no allocation, safe in `pre_exec`) on any
+/// other, so no action starts without one.
+pub fn seccomp_filter() -> io::Result<&'static [libc::sock_filter]> {
+    match seccomp::Arch::native() {
+        Some(arch) => Ok(seccomp::filter(arch)),
+        None => Err(io::Error::from_raw_os_error(libc::ENOSYS)),
     }
-
-    /// A conditional jump at `at` to `to` when true, to the next when false.
-    // mutants: equivalent for every `| -> ^` (and the `| -> &` where noted)
-    // in `jump` and `program`: BPF_LD, BPF_W and BPF_K are 0, BPF_RET, BPF_JMP,
-    // BPF_JEQ/JGE and BPF_ABS are distinct single bits or disjoint, and
-    // SECCOMP_RET_ERRNO (0x5_0000) does not overlap an errno, so `^` builds the
-    // same opcode as `|`; `LD & W` is 0 like `LD | W`. The `&` that would
-    // change an opcode (`W & ABS`, `JMP & JEQ`, ...) is killed by the seccomp
-    // tests below, which would see the wrong verdict.
-    const fn jump(at: usize, code: u32, k: u32, to: usize) -> sock_filter {
-        // `jt` is a u8 and a BPF jump goes forward only: a layout whose
-        // offset does not fit would truncate silently into a jump to the
-        // wrong instruction. `program()` is evaluated at compile time, so
-        // this stops the build instead.
-        assert!(to > at && to - at - 1 <= u8::MAX as usize);
-        sock_filter {
-            code: (BPF_JMP | code | BPF_K) as u16,
-            jt: (to - at - 1) as u8,
-            jf: 0,
-            k,
-        }
-    }
-
-    const fn program() -> [sock_filter; LEN] {
-        let mut p = [stmt(0, 0); LEN];
-        p[0] = stmt(BPF_LD | BPF_W | BPF_ABS, ARCH);
-        p[1] = sock_filter {
-            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
-            jt: 1,
-            jf: 0,
-            k: AUDIT_ARCH_X86_64,
-        };
-        p[2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
-        p[3] = stmt(BPF_LD | BPF_W | BPF_ABS, NR);
-        p[4] = jump(4, BPF_JGE, X32_SYSCALL_BIT, EPERM);
-        p[5] = jump(5, BPF_JEQ, SYS_SOCKET, SOCKET);
-        p[6] = jump(6, BPF_JEQ, SYS_SOCKETPAIR, SOCKET);
-        p[7] = jump(7, BPF_JEQ, SYS_IOCTL, IOCTL);
-        let mut i = 0;
-        while i < DENIED.len() {
-            let at = FIRST_DENIED + i;
-            p[at] = jump(at, BPF_JEQ, DENIED[i], EPERM);
-            i += 1;
-        }
-        p[ALLOW] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
-        p[SOCKET] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG0_LOW);
-        p[SOCKET + 1] = sock_filter {
-            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
-            jt: 0,
-            jf: 1,
-            k: libc::AF_UNIX as u32,
-        };
-        p[SOCKET + 2] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[SOCKET + 3] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EACCES as u32);
-        p[IOCTL] = stmt(BPF_LD | BPF_W | BPF_ABS, ARG1_LOW);
-        p[IOCTL + 1] = jump(IOCTL + 1, BPF_JEQ, FS_IOC_SETFLAGS, IOCTL_EPERM);
-        p[IOCTL + 2] = jump(IOCTL + 2, BPF_JEQ, FS_IOC32_SETFLAGS, IOCTL_EPERM);
-        p[IOCTL + 3] = jump(IOCTL + 3, BPF_JEQ, FS_IOC_FSSETXATTR, IOCTL_EPERM);
-        p[IOCTL + 4] = jump(IOCTL + 4, BPF_JEQ, FS_IOC_ENABLE_VERITY, IOCTL_EPERM);
-        p[IOCTL + 5] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-        p[IOCTL_EPERM] = stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32);
-        p
-    }
-
-    pub static FILTER: [sock_filter; LEN] = program();
 }
 
-/// The seccomp filter for this architecture; `None` where there is none yet
-/// (only x86_64 has one).
-fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
-    #[cfg(target_arch = "x86_64")]
-    return Some(&seccomp::FILTER);
-    #[cfg(not(target_arch = "x86_64"))]
-    return None;
-}
+/// The type of `getrlimit`'s resource argument: glibc's own enum type,
+/// musl's plain int (the hardening tests also build for musl, to run
+/// musl's thread start under the filter).
+#[cfg(target_env = "gnu")]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(target_env = "gnu"))]
+type RlimitResource = libc::c_int;
 
 /// `want` clamped to the inherited hard limit of `resource`, as a rlimit
 /// with soft = hard. A limit is never raised: if the supervisor itself runs
@@ -600,7 +758,7 @@ fn seccomp_filter() -> Option<&'static [libc::sock_filter]> {
 /// Also called between fork and exec: getrlimit is not on the POSIX
 /// async-signal-safe list, but in glibc it is a plain `prlimit64` syscall,
 /// with no locks or allocation, so it is safe there.
-fn clamped(resource: libc::__rlimit_resource_t, want: u64) -> io::Result<libc::rlimit> {
+fn clamped(resource: RlimitResource, want: u64) -> io::Result<libc::rlimit> {
     let mut cur = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -626,17 +784,51 @@ pub fn effective_data_limit(limits: &Limits) -> u64 {
     clamped(libc::RLIMIT_DATA, limits.data).map_or(limits.data, |r| r.rlim_max)
 }
 
+/// Asks the kernel to `SIGKILL` the calling process when the thread that
+/// forked it dies, then checks that `parent` (the forker's pid, read
+/// before the fork) is still its parent: had it died in between, no
+/// signal would come, so the child refuses to run. If the supervisor dies
+/// abnormally (`SIGKILL`, a panic's abort), its action's leader dies with
+/// it; the leader's own descendants are not covered (the action cannot
+/// set this flag: seccomp denies the parent-death prctl) and live on under
+/// the next subreaper, sandboxed and unpublished.
+///
+/// The signal follows the forking *thread*: spawn only from a thread that
+/// outlives the child (the supervisor runs its actions on its main
+/// thread, and reaps each before it returns).
+///
+/// # Safety
+///
+/// Runs in the child after fork and before exec: only `prctl` and
+/// `getppid`, both async-signal-safe.
+pub unsafe fn die_with_parent(parent: libc::pid_t) -> io::Result<()> {
+    // SAFETY: prctl with integer arguments and getppid have no memory
+    // preconditions and are async-signal-safe.
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::getppid() != parent {
+            return Err(io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    Ok(())
+}
+
 /// Puts the calling process in its own session, applies `limits`, sets
-/// `no_new_privs`, enforces the ruleset if given, installs the seccomp
-/// filter (even without a ruleset) and marks every fd >= 3 close-on-exec.
+/// `no_new_privs`, enforces the ruleset, installs the seccomp
+/// filter (always: without one, [`seccomp_filter`]'s error, before any
+/// change) and marks every fd >= 3 close-on-exec.
 ///
 /// # Safety
 ///
 /// Runs in the child after fork and before exec (`Command::pre_exec`):
 /// it makes only async-signal-safe calls (no allocation, no locks). The
-/// caller guarantees that `ruleset`, if given, is an open Landlock ruleset
-/// fd (kept alive by the parent until the spawn returns).
-pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Result<()> {
+/// caller guarantees that `ruleset` is an open Landlock ruleset fd from
+/// [`create`] or [`build`] (kept alive by the parent until the spawn
+/// returns). Any other fd makes `landlock_restrict_self` fail, and
+/// then nothing runs.
+pub unsafe fn apply_in_child(ruleset: RawFd, limits: &Limits) -> io::Result<()> {
     fn check(r: libc::c_long) -> io::Result<()> {
         // last_os_error only reads errno: no allocation.
         if r < 0 {
@@ -645,6 +837,7 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
             Ok(())
         }
     }
+    let filter = seccomp_filter()?;
     let fsize = clamped(libc::RLIMIT_FSIZE, limits.fsize)?;
     let data = clamped(libc::RLIMIT_DATA, limits.data)?;
     let core = libc::rlimit {
@@ -654,24 +847,32 @@ pub unsafe fn apply_in_child(ruleset: Option<RawFd>, limits: &Limits) -> io::Res
     // SAFETY: setsid, setrlimit, prctl and the raw syscalls are
     // async-signal-safe; the rlimit structs and `prog` live on this stack
     // frame, `prog` points at a static program of `len` instructions, and
-    // the caller guarantees `fd` is an open ruleset.
+    // the caller guarantees `ruleset` is an open ruleset.
     unsafe {
         check(libc::setsid().into())?;
         check(libc::setrlimit(libc::RLIMIT_FSIZE, &fsize).into())?;
         check(libc::setrlimit(libc::RLIMIT_DATA, &data).into())?;
         check(libc::setrlimit(libc::RLIMIT_CORE, &core).into())?;
         check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).into())?;
-        if let Some(fd) = ruleset {
-            check(libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32))?;
-        }
-        if let Some(filter) = seccomp_filter() {
-            let prog = libc::sock_fprog {
-                len: filter.len() as libc::c_ushort,
-                // The kernel only reads the program.
-                filter: filter.as_ptr().cast_mut(),
-            };
-            check(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog).into())?;
-        }
+        // `inacircle` disables transparent huge pages for itself and
+        // the flag is inherited across fork and exec; actions keep the
+        // system default, so clear it here. Runs before the seccomp filter
+        // is installed, so the filter needs no rule for it. The result is
+        // ignored on purpose: on a kernel without PR_SET_THP_DISABLE
+        // (EINVAL) the flag was never set, so there is nothing to clear,
+        // and failing the spawn over it would only lose the action.
+        let _ = libc::prctl(libc::PR_SET_THP_DISABLE, 0, 0, 0, 0);
+        check(libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset,
+            0u32,
+        ))?;
+        let prog = libc::sock_fprog {
+            len: filter.len() as libc::c_ushort,
+            // The kernel only reads the program.
+            filter: filter.as_ptr().cast_mut(),
+        };
+        check(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog).into())?;
         check(libc::syscall(
             libc::SYS_close_range,
             3u32,
@@ -710,28 +911,146 @@ pub(crate) mod tests {
         }
     }
 
-    /// The running ABI, or `None` after saying the test is skipped.
+    /// Plays a supervisor for `a_leader_dies_with_its_supervisor` (only
+    /// with `INACIRCLE_PDEATH` set): spawns `sleep 60`, with
+    /// [`die_with_parent`] when the value is `1`, prints `child <pid>`,
+    /// then waits for it (killed first, or at most its 60 s).
+    #[test]
+    fn helper_pdeath_supervisor() {
+        use std::io::Write;
+        let Some(mode) = std::env::var_os("INACIRCLE_PDEATH") else {
+            return;
+        };
+        let parent = std::process::id() as libc::pid_t;
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60").stdin(Stdio::null()).stdout(Stdio::null());
+        if mode == "1" {
+            // SAFETY: die_with_parent makes only async-signal-safe calls.
+            unsafe {
+                cmd.pre_exec(move || die_with_parent(parent));
+            }
+        }
+        let mut c = cmd.spawn().unwrap();
+        let mut out = std::io::stdout();
+        // On a line of its own: libtest has printed `test <name> ... `.
+        writeln!(out, "\nchild {}", c.id()).unwrap();
+        out.flush().unwrap();
+        // Until killed, or the sleep's 60 s are over.
+        let _ = c.wait();
+    }
+
+    /// Whether `pid` has ended (gone, or a zombie, reaped if it is ours)
+    /// within `wait`, checked every 20 ms.
+    fn ends_within(pid: libc::pid_t, wait: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            // SAFETY: WNOHANG never blocks; a pid that is not our child
+            // gives ECHILD and changes nothing.
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+            let state = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|s| {
+                    s.rsplit_once(')')
+                        .map(|(_, r)| r.trim_start().chars().next())
+                });
+            if !matches!(state, Some(Some(c)) if c != 'Z') {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// when the supervisor is killed with `SIGKILL`, the leader it
+    /// spawned with `die_with_parent` dies too; without it (the negative
+    /// control) the leader lives on.
+    #[test]
+    fn a_leader_dies_with_its_supervisor() {
+        use std::io::BufRead;
+        for (mode, dies) in [("1", true), ("0", false)] {
+            let mut sup = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sandbox::tests::helper_pdeath_supervisor",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("INACIRCLE_PDEATH", mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let rd = std::io::BufReader::new(sup.stdout.take().unwrap());
+            let pid: libc::pid_t = rd
+                .lines()
+                .map_while(Result::ok)
+                .find_map(|l| l.strip_prefix("child ").map(|p| p.parse().unwrap()))
+                .expect("the helper names its child");
+            sup.kill().unwrap();
+            sup.wait().unwrap();
+            // A kill-on-death is immediate; 10 s is slack for a loaded
+            // machine. The control's leader is still alive after 0.5 s.
+            let wait = std::time::Duration::from_millis(if dies { 10_000 } else { 500 });
+            let ended = ends_within(pid, wait);
+            if !ended {
+                // SAFETY: kill has no memory preconditions; the pid is the
+                // sleep just seen alive.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                assert!(ends_within(pid, std::time::Duration::from_secs(10)));
+            }
+            assert_eq!(ended, dies, "mode {mode}");
+        }
+    }
+
+    fn landlock_required() -> bool {
+        std::env::var_os("INACIRCLE_REQUIRE_LANDLOCK").is_some_and(|v| v == "1")
+    }
+
+    /// The running ABI, or `None` after saying the test is skipped. Every
+    /// ruleset now passes the gate, so the floor is at least
+    /// [`MIN_LANDLOCK_ABI`]; below it is an error under
+    /// `INACIRCLE_REQUIRE_LANDLOCK=1`. A feature newer than the floor
+    /// (`min` above it) may still skip.
     pub(crate) fn abi_or_skip(test: &str, min: u32) -> Option<u32> {
-        match landlock_abi() {
+        let abi = landlock_abi();
+        assert!(
+            !landlock_required() || abi.is_some_and(|a| a >= MIN_LANDLOCK_ABI),
+            "{test}: Landlock ABI {abi:?} < {MIN_LANDLOCK_ABI} but INACIRCLE_REQUIRE_LANDLOCK=1"
+        );
+        let min = min.max(MIN_LANDLOCK_ABI);
+        match abi {
             Some(abi) if abi >= min => Some(abi),
             Some(abi) => {
                 eprintln!("SKIPPED {test}: needs Landlock ABI >= {min}, kernel has {abi}");
                 None
             }
             None => {
-                assert!(
-                    std::env::var_os("INACIRCLE_REQUIRE_LANDLOCK").is_none_or(|v| v != "1"),
-                    "{test}: Landlock unavailable but INACIRCLE_REQUIRE_LANDLOCK=1"
-                );
                 eprintln!("SKIPPED {test}: Landlock unavailable on this kernel");
                 None
             }
         }
     }
 
+    /// The least restrictive ruleset the API can express: everything
+    /// beneath `/` writable (the scopes and the network stay handled). For
+    /// the tests of seccomp and the limits, which now always run under a
+    /// ruleset. Panics when the gate refuses: no sandbox test can run then.
+    pub(crate) fn open_ruleset() -> Ruleset {
+        build(&Policy {
+            exec: &[],
+            read: &[],
+            read_exact: &[],
+            write: Some(Path::new("/")),
+        })
+        .expect("the sandbox gate passes (Landlock ABI >= 6, unprivileged)")
+    }
+
     /// Whether this target has the seccomp filter; says the test is skipped if not.
     pub(crate) fn seccomp_or_skip(test: &str) -> bool {
-        let has = seccomp_filter().is_some();
+        let has = seccomp_filter().is_ok();
         if !has {
             eprintln!("SKIPPED {test}: no seccomp filter for this architecture");
         }
@@ -750,7 +1069,7 @@ pub(crate) mod tests {
             read_exact: &[],
             write: Some(write),
         };
-        build(&policy).unwrap().expect("Landlock available")
+        build(&policy).unwrap()
     }
 
     const NO_LIMIT: Limits = Limits {
@@ -765,34 +1084,40 @@ pub(crate) mod tests {
 
     /// `sh`, with `leak` (if >= 0) dup'd to fd 9 in the child before the
     /// sandbox is applied.
+    /// `ruleset` `None` is [`open_ruleset`].
     fn sh_with_fd9(ruleset: Option<&Ruleset>, limits: Limits, script: &str, leak: RawFd) -> Output {
-        let fd = ruleset.map(|r| r.as_raw_fd());
+        let open = ruleset.is_none().then(open_ruleset);
+        let fd = ruleset.or(open.as_ref()).unwrap().as_raw_fd();
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
             .arg(script)
             .env("LC_ALL", "C")
             .stdin(Stdio::null());
-        if leak >= 0 {
-            // SAFETY: dup2 is async-signal-safe.
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::dup2(leak, 9) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        // SAFETY: apply_in_child only makes async-signal-safe calls; the
+        const LEAK_FD: RawFd = 9;
+        // SAFETY: fcntl, dup2 and apply_in_child are async-signal-safe; the
         // ruleset outlives the spawn (borrowed for this whole function).
         unsafe {
-            cmd.pre_exec(move || apply_in_child(fd, &limits));
+            cmd.pre_exec(move || {
+                let mut fd = fd;
+                if leak >= 0 && leak != LEAK_FD && fd == LEAK_FD {
+                    // The ruleset is fd 9: move it above, or dup2 replaces it.
+                    fd = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, LEAK_FD + 1);
+                    cvt(fd)?;
+                }
+                // dup2 onto itself changes nothing (O_CLOEXEC would stay).
+                if leak == LEAK_FD {
+                    cvt(libc::fcntl(LEAK_FD, libc::F_SETFD, 0))?;
+                } else if leak >= 0 {
+                    cvt(libc::dup2(leak, LEAK_FD))?;
+                }
+                apply_in_child(fd, &limits)
+            });
         }
         cmd.output().unwrap()
     }
 
     /// How a probe runs: unsandboxed (the control), or through
-    /// `apply_in_child` with an optional ruleset.
+    /// `apply_in_child` with a ruleset (`None`: [`open_ruleset`]).
     #[derive(Clone, Copy)]
     enum Sb<'a> {
         Off,
@@ -807,9 +1132,10 @@ pub(crate) mod tests {
         B: Fn() -> io::Result<S> + Send + Sync + 'static,
         A: Fn(S) -> io::Result<()> + Send + Sync + 'static,
     {
+        let open = matches!(sb, Sb::On(None)).then(open_ruleset);
         let sandbox = match sb {
             Sb::Off => None,
-            Sb::On(rs) => Some(rs.map(|r| r.as_raw_fd())),
+            Sb::On(rs) => Some(rs.or(open.as_ref()).unwrap().as_raw_fd()),
         };
         let mut cmd = Command::new("/bin/true");
         cmd.stdin(Stdio::null());
@@ -851,6 +1177,41 @@ pub(crate) mod tests {
 
     fn stderr(o: &Output) -> String {
         String::from_utf8_lossy(&o.stderr).into_owned()
+    }
+
+    /// The sandboxed child gets the system THP default back: the
+    /// parent disables THP, `apply_in_child` clears it, and `/proc` is
+    /// readable here to see it.
+    #[test]
+    fn child_has_the_default_thp_setting() {
+        if abi_or_skip("child_has_the_default_thp_setting", 1).is_none()
+            || !seccomp_or_skip("child_has_the_default_thp_setting")
+        {
+            return;
+        }
+        let work = Tmp::new("thp");
+        let rs = ruleset(&[PathBuf::from("/proc")], &work.0);
+        let fd = rs.as_raw_fd();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("while read -r k v; do [ \"$k\" = THP_enabled: ] && echo \"$v\"; done < /proc/self/status")
+            .stdin(Stdio::null());
+        // SAFETY: prctl and apply_in_child are async-signal-safe; the
+        // ruleset outlives the spawn.
+        unsafe {
+            cmd.pre_exec(move || {
+                // As `inacircle` itself runs: THP off, inherited by the child.
+                cvt(libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0))?;
+                apply_in_child(fd, &NO_LIMIT)
+            });
+        }
+        let o = cmd.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).trim(),
+            "1",
+            "{}",
+            stderr(&o)
+        );
     }
 
     #[test]
@@ -1014,7 +1375,7 @@ pub(crate) mod tests {
             read_exact: &exact,
             write: Some(&work.0),
         };
-        let rs = build(&policy).unwrap().unwrap();
+        let rs = build(&policy).unwrap();
         let o = sh(Some(&rs), NO_LIMIT, &format!("cat '{}'", secret.display()));
         assert_eq!(o.stdout, b"secret\n", "{}", stderr(&o));
     }
@@ -1059,7 +1420,7 @@ pub(crate) mod tests {
             read_exact: &[],
             write: Some(&work.0),
         };
-        let rs = build(&policy).unwrap().unwrap();
+        let rs = build(&policy).unwrap();
         let o = sh(Some(&rs), NO_LIMIT, "echo ok");
         assert!(o.status.success(), "{}", stderr(&o));
     }
@@ -1144,7 +1505,7 @@ pub(crate) mod tests {
             data: 2 << 30,
             ..NO_LIMIT
         };
-        // Without Landlock: the net does not depend on it. `ulimit` is in KiB.
+        // Under the open ruleset: the net does not depend on the rules. `ulimit` is in KiB.
         let o = sh(None, limits, "ulimit -d; ulimit -H -d");
         assert!(o.status.success(), "{}", stderr(&o));
         assert_eq!(o.stdout, b"2097152\n2097152\n");
@@ -1156,12 +1517,14 @@ pub(crate) mod tests {
     fn inherited_lower_hard_limits_are_kept() {
         const DATA: u64 = 512 << 20;
         const FSIZE: u64 = 100 << 20;
+        let open = open_ruleset();
+        let fd = open.as_raw_fd();
         let mut cmd = Command::new("/bin/true");
         cmd.stdin(Stdio::null());
         // SAFETY: only setrlimit, getrlimit and apply_in_child (all
-        // async-signal-safe) on stack data.
+        // async-signal-safe) on stack data; `open` outlives the spawn.
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 let lower = |res, v: u64| {
                     let r = libc::rlimit {
                         rlim_cur: v,
@@ -1171,7 +1534,7 @@ pub(crate) mod tests {
                 };
                 lower(libc::RLIMIT_DATA, DATA)?;
                 lower(libc::RLIMIT_FSIZE, FSIZE)?;
-                apply_in_child(None, &NO_LIMIT)?;
+                apply_in_child(fd, &NO_LIMIT)?;
                 for (res, want) in [(libc::RLIMIT_DATA, DATA), (libc::RLIMIT_FSIZE, FSIZE)] {
                     let mut r = libc::rlimit {
                         rlim_cur: 0,
@@ -1264,11 +1627,6 @@ pub(crate) mod tests {
     }
 
     /// socket + connect, async-signal-safe.
-    fn connect<T: Copy>(domain: i32, ty: i32, addr: &T) -> io::Result<()> {
-        let s = socket(domain, ty, 0)?;
-        addr_call(libc::connect, s, addr)
-    }
-
     /// A socket created before the sandbox (so seccomp does not stop it),
     /// bound to 127.0.0.1:0 first when `prebind`.
     fn early_socket(domain: i32, ty: i32, prebind: bool) -> io::Result<RawFd> {
@@ -1453,15 +1811,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unix_sockets_allowed() {
-        probe(Sb::On(None), || {
-            socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)?;
-            socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0)?;
+    fn unix_sockets_denied() {
+        for ty in [libc::SOCK_STREAM, libc::SOCK_DGRAM] {
+            assert_socket_denied("unix_sockets_denied", libc::AF_UNIX, ty, 0, false);
+        }
+        let pair = || {
             let mut fds = [0; 2];
             // SAFETY: socketpair writes two ints into `fds`.
             cvt(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) })
-        })
-        .unwrap();
+        };
+        probe(Sb::Off, pair).unwrap();
+        assert_eq!(errno(probe(Sb::On(None), pair)), Some(libc::EACCES));
     }
 
     fn sockaddr_un(path: &[u8]) -> libc::sockaddr_un {
@@ -1490,23 +1850,22 @@ pub(crate) mod tests {
         path.extend_from_slice(name.as_bytes());
         let addr = sockaddr_un(&path);
         let len = 2 + path.len(); // sun_family + the name, no trailing NUL
-        let attempt = move || {
+        // Created before the sandbox (seccomp denies creating any socket):
+        // Landlock's scope still stops the connect.
+        let before = || socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let after = move |s| {
             // SAFETY: as in `connect`, with the abstract address length.
-            unsafe {
-                let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-                cvt(s)?;
-                let r = libc::connect(
+            cvt(unsafe {
+                libc::connect(
                     s,
                     (&addr as *const libc::sockaddr_un).cast(),
                     len as libc::socklen_t,
-                );
-                let err = io::Error::last_os_error();
-                libc::close(s);
-                if r == -1 { Err(err) } else { Ok(()) }
-            }
+                )
+            })
         };
-        probe(Sb::Off, attempt).unwrap();
-        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EPERM));
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EPERM));
     }
 
     #[test]
@@ -1523,9 +1882,12 @@ pub(crate) mod tests {
         let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
         bytes.push(0);
         let addr = sockaddr_un(&bytes);
-        let attempt = move || connect(libc::AF_UNIX, libc::SOCK_STREAM, &addr);
-        probe(Sb::Off, attempt).unwrap();
-        assert_eq!(errno(probe(Sb::On(Some(&rs)), attempt)), Some(libc::EACCES));
+        // Created before the sandbox, as above.
+        let before = || socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let after = move |s| addr_call(libc::connect, s, &addr);
+        probe_with(Sb::Off, before, after).unwrap();
+        let r = probe_with(Sb::On(Some(&rs)), before, after);
+        assert_eq!(errno(r), Some(libc::EACCES));
     }
 
     #[test]
@@ -1573,6 +1935,8 @@ pub(crate) mod tests {
         assert_eq!(errno(probe(Sb::On(None), attempt)), Some(libc::EPERM));
     }
 
+    /// x32 is an x86_64 ABI; on aarch64 the number is just unknown.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn x32_syscall_denied() {
         if !seccomp_or_skip("x32_syscall_denied") {
@@ -1598,6 +1962,8 @@ pub(crate) mod tests {
     fn foreign_arch_syscall_kills_the_process() {
         use std::os::unix::process::ExitStatusExt;
         fn run(sandboxed: bool) -> std::process::ExitStatus {
+            let open = open_ruleset();
+            let fd = open.as_raw_fd();
             let mut cmd = Command::new("/bin/true");
             // SAFETY: int 0x80 with eax = 20 is the i386 getpid: no memory
             // access; r8-r11 are declared clobbered. apply_in_child is
@@ -1605,7 +1971,7 @@ pub(crate) mod tests {
             unsafe {
                 cmd.pre_exec(move || {
                     if sandboxed {
-                        apply_in_child(None, &NO_LIMIT)?;
+                        apply_in_child(fd, &NO_LIMIT)?;
                     }
                     let r: i32;
                     std::arch::asm!(
@@ -1687,7 +2053,7 @@ pub(crate) mod tests {
         let other = Tmp::new("other");
         let input = other.0.join("input");
         fs::write(&input, "i").unwrap();
-        let rs = landlock_abi().map(|_| ruleset(std::slice::from_ref(&input), &work.0));
+        let rs = Some(ruleset(std::slice::from_ref(&input), &work.0));
         let before = fs::metadata(&input).unwrap();
         let c = cpath(&input);
         for which in 0..4 {
@@ -1904,11 +2270,11 @@ pub(crate) mod tests {
         assert_eq!(errno(r), Some(libc::EPERM));
     }
 
-    const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
-    const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
-    const FS_IOC32_SETFLAGS: libc::c_ulong = 0x4004_6602;
-    const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c_581f;
-    const FS_IOC_FSSETXATTR: libc::c_ulong = 0x401c_5820;
+    const FS_IOC_GETFLAGS: libc::Ioctl = 0x8008_6601u32 as libc::Ioctl;
+    const FS_IOC_SETFLAGS: libc::Ioctl = 0x4008_6602u32 as libc::Ioctl;
+    const FS_IOC32_SETFLAGS: libc::Ioctl = 0x4004_6602u32 as libc::Ioctl;
+    const FS_IOC_FSGETXATTR: libc::Ioctl = 0x801c_581fu32 as libc::Ioctl;
+    const FS_IOC_FSSETXATTR: libc::Ioctl = 0x401c_5820u32 as libc::Ioctl;
 
     /// Sets the nodump flag on `fd` with one of the flag ioctls.
     fn flag_ioctl(which: usize, fd: RawFd) -> io::Result<()> {
@@ -1963,7 +2329,7 @@ pub(crate) mod tests {
         let (scratch, input) = (other.0.join("scratch"), other.0.join("input"));
         fs::write(&scratch, "s").unwrap();
         fs::write(&input, "i").unwrap();
-        let rs = landlock_abi().map(|_| ruleset(std::slice::from_ref(&input), &work.0));
+        let rs = Some(ruleset(std::slice::from_ref(&input), &work.0));
         // Controls: the native ioctls work unsandboxed (the 32-bit compat
         // number is not a native ioctl, so it has no working control).
         for which in [0, 2] {
@@ -1988,21 +2354,22 @@ pub(crate) mod tests {
             assert_eq!(errno(r), Some(libc::EPERM), "flag ioctl {which}");
         }
         assert!(!nodump_set(&input));
-        // Other ioctls stay allowed.
+        // The query ioctls stay allowed (every other one, FS_IOC_GETFLAGS
+        // too, is denied: see the hardening tests).
         probe(Sb::On(rs.as_ref()), move || {
             // SAFETY: open reads the NUL-terminated path.
             let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             cvt(fd)?;
-            let mut f: libc::c_long = 0;
-            // SAFETY: FS_IOC_GETFLAGS writes one long into `f`.
-            cvt(unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS, &mut f) })
+            let mut n: libc::c_int = 0;
+            // SAFETY: FIONREAD writes one int into `n`.
+            cvt(unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) })
         })
         .unwrap();
     }
 
     /// `_IOW('f', 133, struct fsverity_enable_arg)`, 128-byte argument
     /// (include/uapi/linux/fsverity.h).
-    const FS_IOC_ENABLE_VERITY: libc::c_ulong = 0x4080_6685;
+    const FS_IOC_ENABLE_VERITY: libc::Ioctl = 0x4080_6685u32 as libc::Ioctl;
 
     /// Tries to enable fs-verity on `p`, opened read-only as an input is.
     fn enable_verity(p: &std::ffi::CStr) -> io::Result<()> {
@@ -2200,7 +2567,7 @@ pub(crate) mod tests {
             read_exact: &[],
             write: Some(&work.0),
         };
-        let rs = build(&policy).unwrap().unwrap();
+        let rs = build(&policy).unwrap();
         let dir = tools.0.display();
         let o = sh(
             Some(&rs),
@@ -2227,7 +2594,7 @@ pub(crate) mod tests {
         let other = Tmp::new("other");
         let file = other.0.join("intermediate");
         fs::write(&file, "data\n").unwrap();
-        let rs = create().unwrap().unwrap();
+        let rs = create().unwrap();
         let exec = system_exec();
         let policy = Policy {
             exec: &exec,
@@ -2365,5 +2732,365 @@ pub(crate) mod tests {
         let o = sh(Some(&rs), NO_LIMIT, &script);
         assert_eq!(o.stdout, b"REFUSED\n", "{}", stderr(&o));
         assert!(!outside.0.join("g").exists());
+    }
+
+    // ---- the mandatory gate ----
+
+    // Capability numbers, include/uapi/linux/capability.h.
+    const CAP_DAC_OVERRIDE: u32 = 1;
+    const CAP_NET_RAW: u32 = 13;
+    const CAP_WAKE_ALARM: u32 = 35;
+
+    /// Every way the gate can fail, for [`inject_failure`].
+    pub(crate) const GATE_FAILURES: [&str; 6] = [
+        "no landlock",
+        "abi 5",
+        "setup error",
+        "root",
+        "saved uid differs",
+        "ambient capability",
+    ];
+
+    /// A normal unprivileged user: one uid and gid, no capability but the
+    /// full bounding set every process starts with (41 capabilities on
+    /// current kernels, CAP_CHOWN ..= CAP_CHECKPOINT_RESTORE).
+    pub(crate) fn normal_user() -> PrivilegeSnapshot {
+        PrivilegeSnapshot {
+            uid: [1000; 4],
+            gid: [1000; 4],
+            cap_permitted: 0,
+            cap_effective: 0,
+            cap_inheritable: 0,
+            cap_ambient: 0,
+            cap_bounding: (1 << 41) - 1,
+        }
+    }
+
+    /// Makes the gate (or the ruleset creation after it) fail as `name`
+    /// says, on this thread, until the returned guard drops.
+    pub(crate) fn inject_failure(name: &str) -> inject::Reset {
+        let reset = inject::Reset;
+        match name {
+            "no landlock" => inject::ABI.set(Some(None)),
+            "abi 5" => inject::ABI.set(Some(Some(MIN_LANDLOCK_ABI - 1))),
+            "setup error" => inject::SETUP_ERRNO.set(Some(libc::ENOMEM)),
+            "root" => inject::PRIVILEGE.set(Some(PrivilegeSnapshot {
+                uid: [0; 4],
+                gid: [0; 4],
+                ..normal_user()
+            })),
+            "saved uid differs" => inject::PRIVILEGE.set(Some(PrivilegeSnapshot {
+                uid: [1000, 1000, 0, 1000],
+                ..normal_user()
+            })),
+            // Only the ambient set: with permitted or effective set too,
+            // the gate would refuse on that branch first.
+            "ambient capability" => inject::PRIVILEGE.set(Some(PrivilegeSnapshot {
+                cap_inheritable: 1 << CAP_DAC_OVERRIDE,
+                cap_ambient: 1 << CAP_DAC_OVERRIDE,
+                ..normal_user()
+            })),
+            other => panic!("unknown gate failure {other}"),
+        }
+        reset
+    }
+
+    fn any_policy() -> Policy<'static> {
+        Policy {
+            exec: &[],
+            read: &[],
+            read_exact: &[],
+            write: None,
+        }
+    }
+
+    #[test]
+    fn abi_floor_is_six() {
+        assert_eq!(MIN_LANDLOCK_ABI, 6);
+        for abi in [None, Some(1), Some(5)] {
+            let e = floor_abi(abi).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{abi:?}");
+        }
+        assert_eq!(floor_abi(Some(6)).unwrap(), 6);
+        assert_eq!(floor_abi(Some(10)).unwrap(), 10);
+    }
+
+    /// Positive control: on this kernel, as this user, the gate passes and
+    /// both constructors give a ruleset.
+    #[test]
+    fn gate_passes_for_a_normal_user_at_the_floor() {
+        if abi_or_skip("gate_passes_for_a_normal_user_at_the_floor", 0).is_none() {
+            return;
+        }
+        assert!(ready().unwrap() >= MIN_LANDLOCK_ABI);
+        create().unwrap();
+        build(&any_policy()).unwrap();
+        // The floor itself is enough.
+        let _g = inject::Reset;
+        inject::ABI.set(Some(Some(MIN_LANDLOCK_ABI)));
+        assert_eq!(ready().unwrap(), MIN_LANDLOCK_ABI);
+        create().unwrap();
+    }
+
+    /// Every gate failure is an error from `ready`, `create` and `build`;
+    /// none falls back to an unconfined spawn.
+    #[test]
+    fn gate_failures_give_no_ruleset() {
+        if abi_or_skip("gate_failures_give_no_ruleset", 0).is_none() {
+            return;
+        }
+        for name in GATE_FAILURES {
+            let _g = inject_failure(name);
+            if name != "setup error" {
+                assert!(ready().is_err(), "{name}: ready passed");
+            }
+            if name == "ambient capability" {
+                let e = ready().unwrap_err().to_string();
+                assert!(e.contains("ambient capabilities"), "{name}: {e}");
+            }
+            assert!(create().is_err(), "{name}: create passed");
+            assert!(build(&any_policy()).is_err(), "{name}: build passed");
+        }
+        // The guards reset everything: the control passes again.
+        create().unwrap();
+    }
+
+    /// A setup error keeps its errno and is never an `Unsupported`
+    /// (which a caller might read as "no Landlock").
+    #[test]
+    fn setup_error_is_reported_as_itself() {
+        if abi_or_skip("setup_error_is_reported_as_itself", 0).is_none() {
+            return;
+        }
+        let _g = inject_failure("setup error");
+        assert_eq!(create().unwrap_err().raw_os_error(), Some(libc::ENOMEM));
+        assert_eq!(
+            build(&any_policy()).unwrap_err().raw_os_error(),
+            Some(libc::ENOMEM)
+        );
+    }
+
+    /// `apply_in_child` takes no `None`: an fd that is not a ruleset makes
+    /// the spawn fail, and the program never runs.
+    #[test]
+    fn a_bad_ruleset_fd_runs_nothing() {
+        if abi_or_skip("a_bad_ruleset_fd_runs_nothing", 0).is_none() {
+            return;
+        }
+        let spawn = |fd: RawFd| {
+            let mut cmd = Command::new("/bin/true");
+            cmd.stdin(Stdio::null());
+            // SAFETY: apply_in_child only makes async-signal-safe calls.
+            unsafe {
+                cmd.pre_exec(move || apply_in_child(fd, &NO_LIMIT));
+            }
+            cmd.status()
+        };
+        assert_eq!(spawn(-1).unwrap_err().raw_os_error(), Some(libc::EBADF));
+        // An open fd that is not a ruleset (stdin of this process: /dev/null
+        // or a tty) is refused too.
+        let null = fs::File::open("/dev/null").unwrap();
+        assert!(spawn(null.as_raw_fd()).is_err(), "a non-ruleset fd ran");
+        // Control: a real ruleset runs.
+        let open = open_ruleset();
+        assert!(spawn(open.as_raw_fd()).unwrap().success());
+    }
+
+    /// The real snapshot of this (unprivileged) test process: one uid,
+    /// one gid, no permitted/effective/ambient capability, and it passes.
+    /// A nonzero bounding set (every normal process has one) and an
+    /// inheritable set (systemd gives CAP_WAKE_ALARM to a session)
+    /// do not matter.
+    #[test]
+    fn this_normal_user_passes_the_privilege_check() {
+        let p = PrivilegeSnapshot::current().unwrap();
+        assert!(!p.uid.contains(&0), "the suite must not run as root: {p:?}");
+        assert!(p.uid.iter().all(|&u| u == p.uid[0]), "{p:?}");
+        assert!(p.gid.iter().all(|&g| g == p.gid[0]), "{p:?}");
+        // SAFETY: getuid/getgid have no preconditions.
+        assert_eq!(p.uid[0], unsafe { libc::getuid() });
+        assert_eq!(p.gid[0], unsafe { libc::getgid() });
+        assert_eq!((p.cap_permitted, p.cap_effective, p.cap_ambient), (0, 0, 0));
+        assert_ne!(p.cap_bounding, 0, "a normal process has a bounding set");
+        validate_privilege(&p).unwrap();
+    }
+
+    #[test]
+    fn privilege_check_refuses_root_setid_and_capabilities() {
+        let ok = normal_user();
+        validate_privilege(&ok).unwrap();
+        // Positive: the bounding set alone, even full, is no privilege.
+        validate_privilege(&PrivilegeSnapshot {
+            cap_bounding: u64::MAX,
+            ..ok
+        })
+        .unwrap();
+        // Positive: an inheritable set alone gives nothing under
+        // no_new_privs with no ambient capability.
+        validate_privilege(&PrivilegeSnapshot {
+            cap_inheritable: 1 << CAP_WAKE_ALARM,
+            ..ok
+        })
+        .unwrap();
+        let bad = [
+            (
+                "root",
+                PrivilegeSnapshot {
+                    uid: [0; 4],
+                    gid: [0; 4],
+                    ..ok
+                },
+            ),
+            ("root, other gid", PrivilegeSnapshot { uid: [0; 4], ..ok }),
+            (
+                "euid 0",
+                PrivilegeSnapshot {
+                    uid: [1000, 0, 1000, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "ruid",
+                PrivilegeSnapshot {
+                    uid: [1001, 1000, 1000, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "euid",
+                PrivilegeSnapshot {
+                    uid: [1000, 1001, 1000, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "suid",
+                PrivilegeSnapshot {
+                    uid: [1000, 1000, 1001, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "fsuid",
+                PrivilegeSnapshot {
+                    uid: [1000, 1000, 1000, 1001],
+                    ..ok
+                },
+            ),
+            (
+                "rgid",
+                PrivilegeSnapshot {
+                    gid: [1001, 1000, 1000, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "egid",
+                PrivilegeSnapshot {
+                    gid: [1000, 1001, 1000, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "sgid",
+                PrivilegeSnapshot {
+                    gid: [1000, 1000, 1001, 1000],
+                    ..ok
+                },
+            ),
+            (
+                "fsgid",
+                PrivilegeSnapshot {
+                    gid: [1000, 1000, 1000, 1001],
+                    ..ok
+                },
+            ),
+            (
+                "permitted",
+                PrivilegeSnapshot {
+                    cap_permitted: 1,
+                    ..ok
+                },
+            ),
+            (
+                "effective",
+                PrivilegeSnapshot {
+                    cap_effective: 1 << 63,
+                    ..ok
+                },
+            ),
+            (
+                "ambient",
+                PrivilegeSnapshot {
+                    cap_ambient: 1 << CAP_NET_RAW,
+                    ..ok
+                },
+            ),
+        ];
+        for (name, p) in bad {
+            let e = validate_privilege(&p).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{name}");
+        }
+    }
+
+    /// The child sees exactly the fixed variables, never the parent's.
+    #[test]
+    fn child_env_is_fixed_and_clean() {
+        let tmp = Tmp::new("env");
+        let canaries = [
+            ("SSH_AUTH_SOCK", "/run/user/1000/ssh-canary"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/canary"),
+            ("WAYLAND_DISPLAY", "wayland-canary"),
+            ("LD_PRELOAD", "/nonexistent/canary.so"),
+            ("INACIRCLE_FAKE_TOKEN", "token-canary-4711"),
+            ("TMPDIR", "/tmp/parent-canary"),
+        ];
+        let env = |clean: Option<Option<&Path>>| {
+            let mut c = Command::new("/usr/bin/env");
+            c.stdin(Stdio::null());
+            for (k, v) in canaries {
+                c.env(k, v);
+            }
+            if let Some(tmp) = clean {
+                configure_child_env(&mut c, tmp);
+            }
+            let o = c.output().unwrap();
+            assert!(o.status.success(), "{}", stderr(&o));
+            let mut lines: Vec<String> = String::from_utf8(o.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            lines.sort();
+            lines
+        };
+        // Control: without the helper the canaries do reach the child.
+        let leaky = env(None);
+        assert!(leaky.iter().any(|l| l.contains("token-canary-4711")));
+        let mut want = vec![
+            "LANG=C.UTF-8".to_owned(),
+            "LC_ALL=C.UTF-8".to_owned(),
+            "PATH=/usr/bin:/bin".to_owned(),
+        ];
+        want.push("TMPDIR=/nonexistent".to_owned());
+        assert_eq!(env(Some(None)), want, "a manifest gets no usable TMPDIR");
+        assert!(!Path::new(NO_TMPDIR).exists());
+        want[3] = format!("TMPDIR={}", tmp.0.display());
+        assert_eq!(env(Some(Some(&tmp.0))), want);
+    }
+
+    #[test]
+    fn child_tmp_is_private_and_fresh() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = Tmp::new("childtmp");
+        let tmp = make_child_tmp(&work.0).unwrap();
+        assert_eq!(tmp, work.0.join("tmp"));
+        let mode = fs::metadata(&tmp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // It is made, never reused.
+        assert_eq!(
+            make_child_tmp(&work.0).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
     }
 }

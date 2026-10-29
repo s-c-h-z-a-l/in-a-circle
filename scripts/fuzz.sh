@@ -6,7 +6,12 @@
 #   scripts/fuzz.sh close    [target...]   600 s per target, in parallel
 #   scripts/fuzz.sh baseline [target...]   3600 s per target, in parallel
 #   scripts/fuzz.sh cmin     [target...]   minimize the committed corpus
+#   scripts/fuzz.sh target                 print the target triple and the
+#                                          binary dir the run would use
 #
+# The target triple is the pinned nightly's host (x86_64 or aarch64 GNU
+# Linux), or FUZZ_TARGET if set, which must be one of those and of the
+# host's architecture: libFuzzer runs what it built, natively.
 # No target given means all of them. Exit 1 if libFuzzer did not really run for a
 # target, or left a crash, timeout or OOM artifact in this run. Logs and
 # artifacts: fuzz/runs/<mode>-<time>/<target>/ (gitignored).
@@ -104,8 +109,28 @@ limits() {
 }
 
 mode=${1:-}
-[ -n "$mode" ] || { sed -n '2,10p' "$0" >&2; exit 2; }
+[ -n "$mode" ] || { sed -n '2,16p' "$0" >&2; exit 2; }
 shift
+
+# The triples this script builds and runs for (cargo-fuzz's sanitizers
+# need a GNU target; these are the two native CI architectures).
+SUPPORTED_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
+HOST=$(rustc +"$NIGHTLY" -vV 2>/dev/null | sed -n 's/^host: //p')
+[ -n "$HOST" ] || { echo "error: cannot read the host of rustc +$NIGHTLY" >&2; exit 2; }
+TARGET=${FUZZ_TARGET:-$HOST}
+case " $SUPPORTED_TARGETS " in
+*" $TARGET "*) ;;
+*) echo "error: fuzz target $TARGET is not one of: $SUPPORTED_TARGETS" >&2; exit 2 ;;
+esac
+if [ "${TARGET%%-*}" != "${HOST%%-*}" ]; then
+    echo "error: fuzz target $TARGET cannot run on host $HOST" >&2
+    exit 2
+fi
+BIN_DIR=fuzz/target/$TARGET/release
+if [ "$mode" = target ]; then
+    echo "$TARGET $BIN_DIR"
+    exit 0
+fi
 TARGETS=${*:-$ALL_TARGETS}
 for t in $TARGETS; do limits "$t" >/dev/null; done
 
@@ -123,8 +148,8 @@ count=$(wc -w <<<"$TARGETS")
 WORKERS=$((NPROC / count))
 [ "$WORKERS" -ge 1 ] || WORKERS=1
 
-cargo +"$NIGHTLY" fuzz build >&2
-BIN_DIR=fuzz/target/x86_64-unknown-linux-gnu/release
+# Build and run use the same triple: the binaries are read from its dir.
+cargo +"$NIGHTLY" fuzz build --target "$TARGET" >&2
 
 # Every run gets its own directory, fuzz/runs/<mode>-<time>/<target>/, holding
 # the libFuzzer logs and the artifacts (crash-*, timeout-*, oom-*) of that run
@@ -218,7 +243,7 @@ close | baseline)
     ;;
 cmin)
     for t in $TARGETS; do
-        cargo +"$NIGHTLY" fuzz cmin "$t" >&2
+        cargo +"$NIGHTLY" fuzz cmin --target "$TARGET" "$t" >&2
     done
     ;;
 *)
