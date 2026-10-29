@@ -1,13 +1,12 @@
-# aarch64 baseline, refreshed at the end of the hardening branch (it
-# is the size of c84f4ad, not of the branch tip; it is refreshed again
-# from the final commit). Not
-# measured on this machine but on the native GitHub arm64 runner
-# (ubuntu-26.04-arm), CI run 40835264396, job "Native (ubuntu-26.04-arm)"
-# step "Binary sizes", commit c84f4ad (plan-hardening, after Task 16a),
-# rustc 1.98.1 from rust-toolchain.toml, release profile of Cargo.toml.
-# It replaces the first value (CI run 40453320707, commit efccecd, after
-# Task 4: inacircle 856800 576052, inacircle-text 660192 324232). The
-# x86_64 account is in docs/benchmarks/binary-size.md; no per-area
-# aarch64 account exists.
-inacircle 987880 688292
+# aarch64 baseline of the final hardening code. Not measured on this
+# machine but on the native GitHub arm64 runner (ubuntu-26.04-arm), CI
+# run 40895881758, job "Native (ubuntu-26.04-arm)", step "Binary sizes",
+# commit 431d8df (plan-hardening), rustc 1.98.1 from rust-toolchain.toml,
+# release profile of Cargo.toml. The run of the final code commit
+# 420a714 itself (run 40892284640) stopped at the script tests before
+# its native job, because of a test-only bug; 431d8df differs from 420a714
+# only in scripts and tests, no shipped source, so the sizes are those of
+# the final code. The x86_64 account is in docs/benchmarks/binary-size.md;
+# no per-area aarch64 account exists.
+inacircle 987912 702692
 inacircle-text 660192 345896

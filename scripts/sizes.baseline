@@ -1,15 +1,14 @@
-# x86_64 baseline, refreshed at the end of the hardening branch.
-# Measured locally with scripts/check-sizes.sh on the reference desktop
-# at commit c84f4ad, rustc 1.98.1 from rust-toolchain.toml, release
-# profile (fat LTO, codegen-units=1, panic=abort, strip). The same sizes
-# came out of a build in the repository and of one from a `git archive`
-# of c84f4ad in another directory. This is NOT the size of the current
-# branch tip: later commits changed code (a symlink message in the
-# state-folder code), and the baseline is refreshed again from the
-# final commit. The per-area account of the growth over the previous
-# baseline (inacircle 900352 671864, Plan 7) is in
-# docs/benchmarks/binary-size.md. The native CI runner builds the same
-# c84f4ad to inacircle 1082248 / 822040 and inacircle-text 695048 /
-# 397298 (CI run 40835264396), a few bytes apart (cause not analysed).
-inacircle 1082216 822056
+# x86_64 baseline of the final hardening code.
+# Measured locally with scripts/check-sizes.sh on the reference desktop,
+# built from commit 420a714 (clean tree), rustc 1.98.1 from
+# rust-toolchain.toml, release profile (fat LTO, codegen-units=1,
+# panic=abort, strip). Later commits on the branch change only tests,
+# scripts and docs, no shipped source. A second build after touching the
+# sources gave the same sha256, so the build is reproducible in place.
+# The native x86_64 CI runner builds the same code (commit 431d8df, run
+# 40895881758) to inacircle 1103200 / 839096 and inacircle-text 695048 /
+# 397298, a few bytes apart from the local build (cause not analysed).
+# The per-area account of the growth over the Plan 7 baseline
+# (inacircle 900352 671864) is in docs/benchmarks/binary-size.md.
+inacircle 1103168 839112
 inacircle-text 695000 397314
