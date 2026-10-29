@@ -1495,6 +1495,22 @@ pub(crate) mod tests {
         assert_eq!(step_deadline(now + Duration::from_secs(1), now), None);
     }
 
+    /// The pids still running a command line with any of `markers`, after
+    /// a bounded wait for 3 empty samples in a row 50 ms apart (5 s at most).
+    /// A process that was sent SIGKILL stays in /proc until the kernel has
+    /// torn it down, which takes longer on a loaded machine; one that
+    /// escaped the kill never goes, and shows in the result.
+    fn left_after_kill(markers: &[&str]) -> Vec<u32> {
+        let until = Instant::now() + Duration::from_secs(5);
+        let (mut quiet, mut left) = (0, Vec::new());
+        while quiet < 3 && Instant::now() < until {
+            left = markers.iter().flat_map(|m| procs_with(m)).collect();
+            quiet = if left.is_empty() { quiet + 1 } else { 0 };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if quiet >= 3 { Vec::new() } else { left }
+    }
+
     /// Pids whose command line mentions `marker` (a unique fixture path).
     pub(crate) fn procs_with(marker: &str) -> Vec<u32> {
         let mut found = Vec::new();
@@ -1543,8 +1559,7 @@ pub(crate) mod tests {
         // The sleep, not just the shell, must be gone: the shell's command
         // line holds the fixture dir (scripts run by path), the sleep's its
         // unique duration.
-        let mut left = procs_with(&d.to_string_lossy());
-        left.extend(procs_with(&sleep_marker));
+        let left = left_after_kill(&[&d.to_string_lossy(), &sleep_marker]);
         assert!(left.is_empty(), "children left alive: {left:?}");
         // Not cached: the next load retries them (each with its own 2 s).
         let c = Catalog::load_from(&dirs, &f.cache());
@@ -1692,8 +1707,7 @@ pub(crate) mod tests {
         for id in ["x.a", "x.early", "x.lingers", "x.late"] {
             assert!(c.get(id).is_none(), "{id} was taken");
         }
-        let mut left = procs_with(&token);
-        left.extend(procs_with(&wait));
+        let left = left_after_kill(&[&token, &wait]);
         assert!(left.is_empty(), "descendants left alive: {left:?}");
     }
 
@@ -1740,7 +1754,7 @@ pub(crate) mod tests {
             t.elapsed()
         );
         assert!(c.get("x.a").is_none());
-        let left = procs_with(token);
+        let left = left_after_kill(&[token]);
         assert!(left.is_empty(), "left alive: {left:?}");
         (seen.join().unwrap(), c)
     }
@@ -1842,7 +1856,7 @@ pub(crate) mod tests {
                 Fail::Transient(m) | Fail::Deterministic(m) => m,
             })
         );
-        assert!(procs_with(&token).is_empty());
+        assert!(left_after_kill(&[&token]).is_empty());
     }
 
     /// The early "no stdout" exit also reaps the killed members, so none
@@ -1910,7 +1924,7 @@ pub(crate) mod tests {
         crate::exec::tests::WAITID_ERRNO.set(None);
         assert!(seen.join().unwrap(), "the descendant never ran");
         assert!(c.get("x.a").is_none());
-        let left = procs_with(&token);
+        let left = left_after_kill(&[&token]);
         assert!(left.is_empty(), "survived the load: {left:?}");
     }
 
