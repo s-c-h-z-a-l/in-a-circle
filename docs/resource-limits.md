@@ -125,7 +125,7 @@ the source; the reason column is why that number.
 |---|---|---|
 | Text input (`txt` <-> `md`) | 8 MiB | A book-length text is 1-3 MiB; the longest real text measured was 0.65 MiB. Past it the input fails with its own message. |
 | Text structure nodes | 524,288 | Densest real text 15.9 B/node would hit 131,072 at about 2 MiB, contradicting the input limit; 2^19 holds 8 MiB at that density for about 100-200 MB peak, a fifth of the smallest `RLIMIT_DATA`. |
-| Text owned text, text output | 32 MiB each | Worst measured escape expansion is 4.8x (spaces to `&#32;`), so a hostile 8 MiB input fails the output budget cleanly. |
+| Text owned text, text output | 32 MiB each | Worst-case escape expansion is 5x (one space becomes `&#32;`, 1 -> 5 bytes, from the escaping rule in `crates/doc`), so a hostile 8 MiB input fails the output budget cleanly. |
 | Catalog cache file | 256 KiB; 128 binaries, 1024 actions, 1152 records, 32 fields per record, 12,288 fields, 32 KiB per line | A realistic cache is about 160 KB at the maximum shape. Over a limit the cache is rejected loudly and rebuilt. |
 | Action folder scan | 512 entries per folder, 129 binaries held | `cache_bins` x 4 spare; past it the folder is refused whole, loudly, never trimmed. |
 | Manifest | 64 KiB stdout, 256 records, 32 fields per record, 4096 fields, 32 KiB per line | 2.4x the 256-record maximum shape; checked before parsing. |
@@ -135,7 +135,7 @@ the source; the reason column is why that number.
 | Running-jobs registry | 128 entries examined, 4096 B and 16 fields per entry | A real machine has a few. Past a limit it is an error, never a shorter list. |
 | Trash | 64 name attempts, 16,384 B `.trashinfo`, 32,768 B recovery intent, 4 path-resolve attempts, 4096 B path | 64 attempts cost about 18 us; 8 would refuse the 9th Undo of an equal name. The byte limits are the percent-encoded 4096 B path plus fixed fields, with 1.1-1.3x room. |
 | `user-dirs.dirs` | 64 KiB | A normal file is under 1 KiB. Followed if it is a symlink (the user's own configuration), but opened non-blocking and size-checked. |
-| Wheel start | 2000 ms wall (own clock, from the connection to the first commit) | 2 s of room over the largest measured commit marker of 7.96 ms; a policy bound, not a confidence bound. |
+| Wheel start | 2000 ms wall (own clock, from the connection to the first commit) | 2 s is 400 times the normal start on the fake compositor (first commit 5.3 ms p50, see [wheel-startup-deadlines.md](benchmarks/wheel-startup-deadlines.md)); a policy bound, not a confidence bound. |
 | Wheel teardown | 1000 ms wall | Its own bound; the old observer's 5 s and the historic 30 s anomaly say nothing about a 1 s distribution. |
 | Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update | One shared frame for the whole open; the wait never holds the desktop. |
 | User waits | 30 s per stage, 500 ms drop pipe, 500 ms soft margin | Unchanged from before; separate from the start clock. |

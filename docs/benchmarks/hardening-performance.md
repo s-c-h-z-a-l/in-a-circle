@@ -1,4 +1,4 @@
-# Hardening performance acceptance (T13a)
+# Hardening performance acceptance
 
 Method and the numbers that exist now. Gates and rules:
 [acceptance.md](acceptance.md). Status of each gate is stated plainly: a
@@ -112,7 +112,7 @@ median of the per-run maxima is:
 |---|---|---|---|
 | A (`169163b`, before the hardening) | 17 us | 37 us | 102 us (90-122) |
 | `86a9b4a` (before the render change) | 18 us | 37 us | 105 us (95-158) |
-| B (this branch, T12 render change) | 17 us | 37 us | 109 us (85-186) |
+| B (this branch, with the render change) | 17 us | 37 us | 109 us (85-186) |
 
 The maximum is in the first events after a stage swap (about 85-110 us
 for the first two, then about 20 us). With a 20 ms pause between a buffer
@@ -122,7 +122,7 @@ B, but single runs still reach 138 / 113 / 169 us. So the maximum is at or
 above 100 us in the **A build too**: not a hardening regression, but the
 100 us per-event maximum is not shown to hold, and whether the delivery
 pattern of the fake compositor or the real compositor decides it is
-**open: T13b, on the real niri, decides it**. Until then the gate is open,
+**open: a run on the real niri decides it**. Until then the gate is open,
 not passed, and the integration proposal has to state the outcome. (The
 harness and its raw files are not part of the repository.)
 
@@ -139,7 +139,7 @@ kernel and power state below were read again.
 | Microcode | 0xa201213 | 0xf8 |
 | Cache | L1d 256 KiB, L1i 256 KiB, L2 4 MiB (8 inst.), L3 32 MiB | L1d 128 KiB, L2 1 MiB, L3 6 MiB |
 | Frequency | max 4665 MHz, min 562 MHz; `amd-pstate-epp` active, governor `performance`, EPP `performance`, policy 1742-4665 MHz; boost enabled | 800-3300 MHz; `intel_pstate` active, governor `powersave`, EPP `balance_performance`, turbo allowed |
-| RAM | 94 GiB visible (MemTotal 98,744,132 kB); owner-reported DDR4-3200 dual channel; speed and slots not read (needs root) | 7.6 GiB visible (8,008,172 kB); speed and slots not read (needs root) |
+| RAM | 94 GiB visible (MemTotal 98,744,132 kB); user-reported DDR4-3200 dual channel; speed and slots not read (needs root) | 7.6 GiB visible (8,008,172 kB); speed and slots not read (needs root) |
 | Board / firmware | ASUS ROG STRIX B550-F GAMING WIFI II, AMI BIOS 3621 (2025-01-13) | Lenovo 10MUS1P70L (ThinkCentre M910q), BIOS M1AKT59A (2023-10-27) |
 | OS / kernel | CachyOS, 7.2.9-1-cachyos, `PREEMPT_DYNAMIC` (`PREEMPT`), HZ 1000; `CONFIG_SCHED_BORE` is not in the running config, so the default EEVDF applies (scheduler debugfs not readable) | Arch Linux, 7.2.11-arch1-1, `PREEMPT_DYNAMIC`, HZ 1000, EEVDF |
 | Mitigations | **`mitigations=off`**, `split_lock_detect=off`, `nowatchdog`, `tsc=reliable clocksource=tsc`; spectre_v2, spec_store_bypass, spec_rstack_overflow, tsa and vmscape report "Vulnerable" | defaults: PTI, IBRS, MDS clear-buffers, retbleed IBRS, vmscape IBPB |
@@ -179,15 +179,15 @@ stripped release at each area's last commit, is in
 
 | Item | State |
 |---|---|
-| Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; T13b on the real niri decides |
-| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: T13b, owner present (`scripts/measure-desktop-t13b.sh --i-am-present`) |
+| Hover maximum (100 us per event) | OPEN budget question: 85-186 us per-run maxima on the fake compositor, in the A build too; a run on the real niri decides |
+| Desktop (reference) A/A and A/B-B/A, early-list / drop / choice | OPEN: needs the reference desktop with a user present (`scripts/measure-desktop-t13b.sh --i-am-present`) |
 | X280 Plasma A/B | OPEN: machine unavailable; not a pass, not a baseline reset |
-| ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; cold is T13c |
+| ThinkCentre cold condition, early-list, drop, choice, hover workloads | OPEN: only the plain warm startup ran; the cold condition has not been run |
 | ThinkCentre with a real output | OPEN: nested niri only (no monitor attached) |
-| U-01: choice-to-action entry with real clicks | OPEN: needs a real pointer session (T13b) |
+| U-01: choice-to-action entry with real clicks | OPEN: needs a real pointer session |
 | Physical ARM desktop performance | OPEN; ARM VM results are emulated, functional only |
 | Native ARM CI / own ARM VM | Native CI green on `c84f4ad` (run 40835264396). Own ARM VM hardening suite 31/31 on `b696450` (emulated, functional only), not re-run on the final commit |
-| Engine/supervisor and Undo-window memory phases | OPEN: T13c (headless, after the last code change) |
+| Engine/supervisor and Undo-window memory phases | OPEN: not yet measured (headless, to be run after the last code change) |
 
 Reproduce: copy two release directories and the two scripts to the target,
 inside a niri session run

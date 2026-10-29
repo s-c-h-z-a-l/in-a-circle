@@ -39,7 +39,7 @@ not stock**, which matters for some results:
 
 | | |
 |---|---|
-| CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), owner-reported **all-core OC 4650 MHz @ 1.1 V**, `performance` governor; clock residency was not measured |
+| CPU | AMD Ryzen 7 5700X (Zen 3, 8C/16T), user-reported **all-core OC 4650 MHz @ 1.1 V**, `performance` governor; clock residency was not measured |
 | RAM | 96 GB DDR4-3200, dual channel |
 | GPU | NVIDIA RTX 3080 Ti Founders Edition, 12 GB; **`nvidia-open` kernel module 615.71.09**; power limit 280 W (stock 350 W), +75 MHz core, +500 MHz memory |
 | OS | CachyOS (Arch-based), kernel 7.2.9-cachyos: EEVDF (`CONFIG_SCHED_BORE` is not in the running config, read 2026-10-29), `PREEMPT_DYNAMIC`, packages built for x86-64-v3 |

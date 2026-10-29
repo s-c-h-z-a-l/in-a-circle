@@ -150,11 +150,11 @@ open below.
 | Own aarch64 guest (kernel 7.0.0-38-generic, ABI 8, TCG) | Hardening tests 31/31 on `b696450` | Functional only; emulated; not re-run on the final commit |
 | ThinkCentre M910q (kernel 7.2.11-arch1-1, ABI 10) | Qualification; the performance series | See [hardening-performance.md](hardening-performance.md) |
 | ThinkPad X280 (Plasma) | Earlier qualification only | OPEN: machine unavailable, no Plasma run |
-| Manual niri check (conversions, hover, Esc, Undo, Trash restore in Nautilus) | Checklist handed to the owner | OPEN: pending the owner's run on the final candidate |
+| Manual niri check (conversions, hover, Esc, Undo, Trash restore in Nautilus) | Written checklist | OPEN: not yet run by hand on the final candidate |
 | Manual Plasma and Dolphin check | | OPEN: no Plasma machine |
 
 Time-limited mutation runs and fuzz targets were run on the changed code;
 surviving mutants are individually justified (equivalent, or needing fault
-injection such as a failing `fsync`) in the private reports. Landlock ABI 6
+injection such as a failing `fsync`) in the maintainer's working notes. Landlock ABI 6
 and 7 kernels, filesystems other than ext4, Btrfs and tmpfs, physical ARM
 hardware, a power cut and third-party converters are **untested**.
