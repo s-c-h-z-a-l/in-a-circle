@@ -778,7 +778,10 @@ fn level1_from_the_early_list_within_budget() {
         .unwrap_or_else(|| panic!("no list_to_level1_cpu_us in {err:?}"))
         .parse()
         .unwrap();
-    eprintln!("list_to_level1_cpu_us={us}");
+    // The whole line, for benchmark runs that collect it.
+    if let Some(line) = err.lines().find(|l| l.contains("measure wheel")) {
+        eprintln!("{line}");
+    }
     assert!(us >= 0, "never measured: {err}");
     // The phases report CPU and wall separately; the queued commit and the
     // flush that sent it are two points, in that order.
@@ -806,6 +809,39 @@ fn level1_from_the_early_list_within_budget() {
     if !cfg!(debug_assertions) {
         assert!(us <= 1000, "{us} us");
     }
+}
+
+/// The wait for the drag source's list takes buffer 1's first touch: the
+/// level-1 wheel painted into it after the list pays no page faults for it
+/// (a fresh 480x480 buffer is 225 of them). The list comes well after the
+/// first commit, so the wheel is idle in between.
+#[test]
+fn level1_from_a_late_list_pays_no_first_touch() {
+    let root = Root::new("level1-touch");
+    root.markdown_action_cached();
+    let list = root.files(1);
+    let (mut c, child) = start(&root, true);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    // `Drop here` is on the screen; the source answers later.
+    c.attached(1, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(50));
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    let err = finish(c, child);
+    if let Some(line) = err.lines().find(|l| l.contains("measure wheel")) {
+        eprintln!("{line}");
+    }
+    let flt: i64 = err
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("list_to_level1_minflt="))
+        .unwrap_or_else(|| panic!("no list_to_level1_minflt in {err:?}"))
+        .parse()
+        .unwrap();
+    // Below one buffer's 225 pages: the paint's own allocations stay
+    // under 20 on the reference machine.
+    assert!(flt < 100, "{flt} faults: {err}");
 }
 
 // Bounded startup and teardown (hardening task 11). The fake compositor's

@@ -128,6 +128,50 @@ outside the window). The hover maximum (about 100 µs, the full paint of a
 just-released stale buffer in the first events after a swap) is unchanged
 within noise; it is not a result of that change.
 
+#### The second buffer's first touch moved into the wait
+
+The traces later showed what moved to the swap: not a paint (the level-1
+wheel is a full paint into buffer 1 before and after the change, since it
+depends on the list), but the first touch of buffer 1's 225 pages, one
+minor fault each (`main_to_commit_minflt`, `list_to_level1_minflt`). On
+the i5-7500T a fault costs about 4 µs, so the move cost about 0.9 ms there.
+
+Buffer 1 is now faulted in (`MADV_POPULATE_WRITE`, a store per page on a
+kernel without it) after the first commit's flush, in the wait for the
+early list, the drop or the first hover, and only when `poll` with a zero
+timeout finds nothing ready: an input already there is handled first, and
+the faults then stay in its window (measured, not hidden). A buffer the
+compositor holds or one already painted is never touched. Release binary
+against the fake compositor, 50 alternating runs per build, p50 / p95 /
+max:
+
+| machine, build | main → commit CPU | faults | list → level 1 CPU | faults |
+|---|---|---|---|---|
+| desktop, before the startup change | 689 / 751 / 785 µs | 459 | 154 / 174 / 178 µs | 15 |
+| desktop, before this change | 398 / 432 / 462 µs | 234 | 387 / 422 / 437 µs | 240 |
+| desktop, after | 400 / 424 / 439 µs | 234 | 153 / 186 / 188 µs | 15 |
+| i5-7500T, before the startup change | 2695 / 2714 / 2741 µs | 457 | 536 / 547 / 550 µs | 15 |
+| i5-7500T, before this change | 1489 / 1502 / 1538 µs | 231 | 1439 / 1449 / 1453 µs | 241 |
+| i5-7500T, after | 1497 / 1510 / 1510 µs | 231 | 531 / 537 / 538 µs | 16 |
+
+With the list written 50 ms after the first commit (an idle wait for
+certain), list → level 1 is 599 / 622 / 652 µs after, 1500 / 1515 / 1526
+µs before, on the i5-7500T. Total wheel CPU per run fell (desktop median
+1255 → 1209 µs, i5-7500T 4822 → 4572 µs): one `madvise` is cheaper than
+225 fault entries. The hover series (10 alternating runs, 122 events)
+is unchanged: p95 28-34 µs and the maximum 80-129 µs in both builds.
+
+What each order pays: without a drag, the prepaint after the first commit
+paints buffer 1 in full and nothing else happens. A list that arrives
+before the first commit makes level 1 the first frame (buffer 0) and
+buffer 1 is prepainted after it. A list that arrives during the touch
+waits for it, but its level-1 commit is not later than without the touch,
+which its paint would have paid. An Esc already queued closes first; one
+that comes during the touch waits for it (the touch takes about 0.2 ms
+on the desktop and 0.7 ms on the i5-7500T, derived from the totals above) and the touched pages are not used: that CPU lands in the
+session total, in no waiting point, and resident memory gains the 900 KB
+buffer, as it did before the startup change.
+
 Before `main`, the niri bind's `sh -c` cost ~2.2 ms of CPU charged to the
 same PID (it `exec`s us); from a terminal that part is ~0.5 ms. A bind
 without a shell avoids it. A 1024-file drop takes ~3 ms from the drop to

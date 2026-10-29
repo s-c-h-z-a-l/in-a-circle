@@ -168,6 +168,14 @@ observations.
   change (no obsolete full paint before the first commit; the second buffer
   is painted after the first flush). There is no phase breakdown that
   isolates it. Total wheel CPU moves less than the commit interval.
+- Measured later with fault counters: the same change moved buffer 1's
+  first touch (225 minor faults, about 0.9 ms of CPU on the ThinkCentre)
+  from the startup into the early list → level 1 point, which then
+  measured 1.4-2.1 ms there. Buffer 1 is now faulted in while the wheel
+  waits after its first commit; on the fake compositor list → level 1 is
+  back to 531 / 537 / 538 µs (p50 / p95 / max, 50 runs) on the
+  ThinkCentre, with main → commit unchanged
+  ([wheel.md](wheel.md#the-second-buffers-first-touch-moved-into-the-wait)).
 
 ## Hover maximum (open budget question)
 

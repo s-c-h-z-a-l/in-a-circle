@@ -10,7 +10,9 @@
 //! the subsurface position waits for the pointer. Buffer 1 is painted only
 //! for a wheel that is on the screen (`prepaint`, after the first commit
 //! left): the pointer or the drag decides the first wheel, and a second
-//! buffer painted before that would be for a wheel nobody sees.
+//! buffer painted before that would be for a wheel nobody sees. Its pages
+//! are faulted in while the wheel waits after that commit
+//! (`populate_second`), so the swap to the next wheel pays only the paint.
 //!
 //! Globals are bound at the version our requests need, or treated as
 //! absent: a `wl_data_device_manager` older than v3 (no `set_actions`)
@@ -53,6 +55,10 @@ const POOL: usize = 2 * FRAME + 4;
 /// `MAP_POPULATE` no cheaper than the faults it saves
 /// (docs/benchmarks/wire-protocol.md); to be re-measured on the real path.
 const MAP_FLAGS: libc::c_int = libc::MAP_SHARED; // | libc::MAP_POPULATE
+/// Stride of the fallback first touch of buffer 1 (`Shm::populate`): the
+/// smallest Linux page size, so every page gets a store; on larger pages
+/// some stores land in the same page, which costs a few ns, not a fault.
+const TOUCH_STRIDE: usize = 4096;
 /// Longest wait for the drag source to write and close the URI list.
 const READ_DROP: Duration = Duration::from_millis(500);
 /// One read from the drop pipe.
@@ -234,6 +240,32 @@ impl Shm {
         // (not attached, or released).
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(i * FRAME), FRAME) }
     }
+
+    /// Faults wheel buffer `i` in (allocates its pages) without changing
+    /// its bytes: the first paint of a fresh buffer otherwise pays one
+    /// minor fault per page (225 for the wheel) inside a measured wait.
+    /// The caller guarantees the compositor does not hold it.
+    fn populate(&mut self, i: usize) {
+        assert!(i < 2);
+        // SAFETY: the range is buffer i inside our own POOL-byte mapping
+        // (i < 2); MADV_POPULATE_WRITE only faults pages in, it neither
+        // changes their contents nor the mapping. A kernel without it
+        // (before 5.14) says EINVAL and the touch below does the same work.
+        let r = unsafe {
+            libc::madvise(
+                self.ptr.add(i * FRAME).cast(),
+                FRAME,
+                libc::MADV_POPULATE_WRITE,
+            )
+        };
+        if r != 0 {
+            // An unpainted buffer is all zero (a fresh memfd), so storing
+            // a zero per page keeps its bytes.
+            for b in self.canvas(i).iter_mut().step_by(TOUCH_STRIDE) {
+                *b = 0;
+            }
+        }
+    }
 }
 
 impl Drop for Shm {
@@ -391,6 +423,8 @@ struct Surface {
     /// What a buffer was repainted with since its last commit, ahead of
     /// time (`prepaint`); its next commit damages this too.
     prepainted: [Rect; 2],
+    /// Buffer 1's pages were faulted in by `populate_second`.
+    populated: bool,
     /// What the screen shows; `None` before the wheel's first commit.
     shown: Painted,
     screen: Screen,
@@ -512,6 +546,7 @@ impl Surface {
             busy: [false; 2],
             painted: [None; 2],
             prepainted: [Rect::EMPTY; 2],
+            populated: false,
             shown: None,
             screen: Screen::new(),
             pending: false,
@@ -1324,6 +1359,26 @@ impl Surface {
         }
     }
 
+    /// Whether buffer 1 is still fresh (never painted, pages not faulted
+    /// in) while the wheel is on the screen, so the wait before the next
+    /// input can take its first touch (`populate_second`).
+    fn second_is_fresh(&self) -> bool {
+        self.shown.is_some() && !self.populated && self.painted[1].is_none() && !self.busy[1]
+    }
+
+    /// Buffer 1's first touch, done while the wheel waits: the next wheel
+    /// (level 1 from the early list, stage 2 from the drop, or a hover)
+    /// goes into it, and its paint then pays no page faults. Not before
+    /// the first commit (it would add to main-to-commit), never on a buffer
+    /// the compositor holds or one already painted.
+    fn populate_second(&mut self) {
+        if !self.second_is_fresh() {
+            return;
+        }
+        self.shm.as_mut().expect("built in setup").populate(1);
+        self.populated = true;
+    }
+
     fn event_loop(&mut self, m: &mut Machine) -> Result<Chosen, StartupError> {
         loop {
             self.dispatch(m)?;
@@ -1365,6 +1420,16 @@ impl Surface {
                 pollfd(self.reading.as_ref().map_or(-1, |r| r.read.fd.as_raw_fd())),
                 pollfd(self.early.as_ref().map_or(-1, |r| r.read.fd.as_raw_fd())),
             ];
+            // Only in a real wait: an input already there (the early list,
+            // Esc) is handled first, and a later pass touches the buffer
+            // if it is still fresh.
+            if self.second_is_fresh() {
+                // SAFETY: three valid pollfds (a negative fd is ignored).
+                if unsafe { libc::poll(pfds.as_mut_ptr(), 3, 0) } == 0 {
+                    self.populate_second();
+                }
+            }
+            let now = Instant::now();
             let left = until.saturating_duration_since(now);
             let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
             // SAFETY: three valid pollfds (a negative fd is ignored).
@@ -1865,6 +1930,67 @@ mod tests {
         assert_eq!(commits[0].0, s.id.bufs[0]);
         assert!(s.shm.as_mut().unwrap().canvas(0) != &held[0][..]);
         assert!(s.shm.as_mut().unwrap().canvas(1) == &held[1][..]);
+    }
+
+    /// Pages of wheel buffer `i` the process has in memory (`mincore`).
+    fn resident_pages(s: &mut Surface, i: usize) -> usize {
+        let page = 4096;
+        let canvas = s.shm.as_mut().unwrap().canvas(i);
+        let mut v = vec![0u8; canvas.len().div_ceil(page)];
+        // SAFETY: the canvas is page aligned (the mapping's start plus a
+        // multiple of 4096) and `v` has one byte per page of its length.
+        let r = unsafe { libc::mincore(canvas.as_mut_ptr().cast(), canvas.len(), v.as_mut_ptr()) };
+        assert_eq!(r, 0, "{}", io::Error::last_os_error());
+        v.iter().filter(|&&b| b & 1 != 0).count()
+    }
+
+    /// Buffer 1 is faulted in while the wheel waits after its first commit
+    /// (here: for the early list), before the stage-1 swap paints into it;
+    /// not before that commit, and its bytes do not change.
+    #[test]
+    fn the_second_buffer_is_populated_in_the_wait_before_the_swap() {
+        let (mut s, _server) = render_surface();
+        let mut m = Machine::with_menus(two_lit, empty_targets);
+        m.wheel()
+            .paint_full(s.shm.as_mut().unwrap().canvas(0), None);
+        s.painted[0] = Some((m.generation(), None));
+        m.on(Input::Configured(1920, 1080));
+        m.on(Input::DragEnter {
+            x: 960.0,
+            y: 540.0,
+            mimes: vec![URI_LIST.into()],
+        });
+        // Before the first commit: nothing to do (main-to-commit pays it).
+        s.populate_second();
+        assert_eq!(resident_pages(&mut s, 1), 0);
+        s.render(&m).unwrap(); // `Drop here` on buffer 0
+        assert_eq!(resident_pages(&mut s, 1), 0, "fresh before the wait");
+        s.populate_second();
+        let pages = FRAME.div_ceil(4096);
+        assert_eq!(resident_pages(&mut s, 1), pages);
+        assert!(s.shm.as_mut().unwrap().canvas(1).iter().all(|&b| b == 0));
+        assert!(!s.second_is_fresh());
+        // The swap then paints into it.
+        m.on(Input::DragList(1, Ok(b"a".to_vec())));
+        s.render(&m).unwrap();
+        assert_eq!(s.painted[1], Some((m.generation(), m.hover())));
+    }
+
+    /// The first touch never writes into a buffer the compositor holds or
+    /// one that was already painted.
+    #[test]
+    fn the_second_buffer_is_not_populated_when_held_or_painted() {
+        let (mut s, _server) = render_surface();
+        s.shown = Some((1, None));
+        s.busy[1] = true;
+        assert!(!s.second_is_fresh());
+        s.populate_second();
+        assert_eq!(resident_pages(&mut s, 1), 0);
+        s.busy[1] = false;
+        s.painted[1] = Some((1, None));
+        assert!(!s.second_is_fresh());
+        s.populate_second();
+        assert_eq!(resident_pages(&mut s, 1), 0);
     }
 
     /// Pixels covered by `rects` (`[x, y, w, h]`), overlaps counted once.
