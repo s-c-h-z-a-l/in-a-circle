@@ -777,9 +777,7 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     // The reason the run itself failed (timed out, too large, unreadable)
     // is the cause; the descendants that outlived it are its consequence.
     // Either way nothing is accepted.
-    if let Err(e) = result {
-        return Err(e);
-    }
+    result?;
     if left_behind {
         return Err(t("left processes behind"));
     }
