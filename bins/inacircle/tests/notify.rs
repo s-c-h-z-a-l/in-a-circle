@@ -1892,10 +1892,16 @@ fn memory_phases(name: &str, e: &Env, args: &[&OsStr], phases_wanted: usize) {
         "MEMORY {name}: total samples={} worst_pss_B={worst} vm_hwm_B={hwm} cadence={SAMPLE_EVERY:?}",
         samples.len()
     );
-    assert!(
-        hwm > 0 && hwm <= PSS_CEILING_BYTES,
-        "{name}: peak RSS {hwm} B outside 1..={PSS_CEILING_BYTES} B"
-    );
+    // Reported, not gated: the ceiling is a PSS ceiling, and RSS counts the
+    // shared libc and loader pages in full (the x86_64 CI runner's 1024-input
+    // run: PSS 3.6 MB, peak RSS 5.6 MB). A peak RSS at or under the ceiling
+    // would prove the PSS peak; above it proves nothing.
+    assert!(hwm > 0, "{name}: peak RSS missing");
+    if hwm <= PSS_CEILING_BYTES {
+        eprintln!(
+            "MEMORY {name}: peak RSS {hwm} B is under the ceiling, so every PSS value is too"
+        );
+    }
     assert!(worst > 0, "{name}: no PSS observation: incomplete evidence");
     assert!(
         worst <= PSS_CEILING_BYTES,
