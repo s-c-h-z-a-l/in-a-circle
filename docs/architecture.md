@@ -64,13 +64,19 @@ are in `CLAUDE.md`.
 - **Across families:** shared crates at build time (deflate, zip, png,
   xml, the document tree). An edge lives in the family that does the hard
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
+  As a fallback, the planner chains two edges through a lossless
+  intermediate file, mostly for external tools.
 - **`pages`** (`inacircle-pages`): page-image books to PDF. Today one
   action, `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
-  CBZ, one PDF, all or nothing. It sits in the **Book** category.
-  As a fallback, the planner chains two edges through a lossless
-  intermediate file, mostly for external tools.
+  CBZ, one PDF, all or nothing. It sits in the **Book** category. It is
+  `lossy=yes`: it leaves out entries that are not images (such as
+  `ComicInfo.xml`), ignores the Exif orientation and does not embed ICC
+  profiles, and reports each as a warning, which the notification shows.
+  A PNG is checked down to its scanlines; a JPEG is passed through
+  without checking its scan data, so a JPEG truncated inside its entropy
+  data is not detected and shows as a grey or partial page in the reader.
 
 ## Manifest
 
@@ -138,7 +144,7 @@ are in `CLAUDE.md`.
 inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
-action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=no	batch=yes
+action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
@@ -882,14 +888,19 @@ inacircle cancel <job-id>
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, action, doc (planned: toml)
+crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
+          probe, pdf (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
-          and text; the shipped `inacircle` links them, never `doc`)
+          and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
+          `inacircle-pages`; the shipped `inacircle` links wire, dbus, ui,
+          engine, manifest and action, never `doc`, `flate`, `zip`,
+          `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,
           inacircle-testaction (test-only)
-tools/    gen-entities, bake-atlas (dev tools; bake-atlas alone uses
-          `fontdue`, kept out of the shipped binaries)
+tools/    gen-entities, bake-atlas, testzip (dev tools; bake-atlas alone
+          uses `fontdue`, testzip alone uses `miniz_oxide` to build test
+          archives; both are kept out of the shipped binaries)
 scripts/  checks and helpers
 spikes/   measurements, not product code
 ```

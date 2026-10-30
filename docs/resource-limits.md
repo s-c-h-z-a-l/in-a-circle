@@ -61,7 +61,7 @@ Reference: Pillow warns above 89 MP and rejects above 179 MP ("decompression
 bomb"). The planned pixel limit of the image actions (180 MP) follows it.
 
 The other families stream and stay small: cbz to pdf one page plus the
-entry list (< 72 MB, see the pages family below); md/epub one chapter tree
+entry list (< 80 MB, see the pages family below); md/epub one chapter tree
 (< 100 MB); archives a 32 KB window plus about 300 B per file (about 60 MB at 200 000 files); office
 streamed XML (< 100 MB); audio (< 10 MB). json <-> toml needs the whole
 tree (about 5-10x the file), so those actions get a file size limit.
@@ -73,28 +73,41 @@ its pixels:
 | Limit | Value | Why, and what happens past it |
 |---|---|---|
 | entries | 12,000 | twice the 5,000-page case measured, with room for folder entries; about 200 B per record, 2.4 MB at the limit; `CBZ has more than 12000 entries` |
-| page file | 64 MiB | a 180 MP scan is 20-40 MB as JPEG; it is the one buffer held whole and the inflate output limit (the `inflate` fuzz target uses the same value); `page <name> is larger than 64 MiB` |
+| page file | 64 MiB | a 180 MP scan is 20-40 MB as JPEG; it is the one buffer held whole and the inflate output limit (the `inflate` fuzz target runs with small limits for speed; the 64 MiB boundary is covered by unit tests); `page <name> is larger than 64 MiB` |
 | ratio | 1032 | the most a deflate stream can reach (258 bytes per two bits), so every valid stream passes, a blank page stored as an uncompressed PNG (about 1000:1) included; a header claiming more is refused before inflating; a bomb is bounded by the page file limit, not by the ratio |
 | name | 512 B | twice the 255-byte file name limit; at most 6 MB for 12,000 names; `damaged CBZ: an entry name is too long` |
 | pages | 10,000 | below the entry limit so the message is reachable; an omnibus is a few thousand pages; about 100 B per page for the order and the PDF offsets; `CBZ has more than 10000 pages` |
 | pixels | 180 MP | the image pixel limit above; `page <name> is larger than 180 megapixels` |
 
 Measured (release build, reference machine): 5,000 small pages peak at
-3.7-4.0 MB `VmHWM` (about 1.7 MB process baseline plus 2.2 MB for the entry
-list, order and offsets); one 42 MB page peaks at 43.6 MB. So the bound is
-the page file limit plus about 4 MB: under 72 MB. Reading and checking a
-42 MB page into a PDF takes about 0.18 s. The PDF is about the sum of the
-page files plus about 130 B per page, so the output is bounded by the
-engine's `RLIMIT_FSIZE` (16 x the input, 256 MiB to 16 GiB), and the action
-checks it itself first. It reads its own `RLIMIT_FSIZE` (a failure to read
-it fails the input), and before the output is created it sums the declared
-page sizes plus 2,560 B of PDF structure per page and 1,024 B per file (the
-object text, a 256-entry palette, the xref entries and the Kids list, an
-upper bound derived from the writer). Over the cap the input fails with
-`PDF would be larger than <N> MiB` (N rounded down), nothing is created and
-no page is inflated. A running count of the bytes written is the second
-check; the half-written PDF is removed. So a CBZ of deflated flat pages
-cannot expand past the limit.
+3.7-4.0 MB `VmHWM` (about 1.7 MB process baseline plus 2.2 MB for the
+entry list, order and offsets); one 42 MB page peaks at 43.6 MB. The
+derived worst case is the page file limit (64 MiB, 67.1 MB) plus the
+entry list at its limits (12,000 records of about 200 B including a
+typical name, plus up to 512 B per name for long ones: at most 8.5 MB)
+plus the 1.7 MB baseline: about 77 MB. That is not measured, because no
+real CBZ comes near it, and it is far below the smallest `RLIMIT_DATA`
+net (1 GiB). Reading and checking a 42 MB page into a PDF takes about
+0.18 s.
+
+The PDF is about the sum of the page files plus, typically, about 130 B
+per page; the bound is 2,560 B per page (below). So the output is bounded
+by the engine's `RLIMIT_FSIZE` (16 x the input, 256 MiB to 16 GiB), and
+the action checks it itself first. It reads its own `RLIMIT_FSIZE` (a
+failure to read it fails the input), and before the output is created it
+sums the declared page sizes plus 2,560 B of PDF structure per page and
+1,024 B per file (the object text, a 256-entry palette, the xref entries
+and the Kids list, an upper bound derived from the writer). Over the cap
+the input fails with `PDF would be larger than <N> MiB` (N rounded down),
+nothing is created and no page is inflated. A running count of the bytes
+written is the second check; the half-written PDF is removed. So a CBZ of
+deflated flat pages cannot expand past the limit.
+
+A PNG page is inflated once into a counter to prove it holds exactly the
+scanlines its header promises. A JPEG page is passed through without
+checking its scan data: the probe reads the markers, not the entropy
+stream, so a JPEG truncated or damaged inside its entropy data is not
+detected and shows as a grey or partial page in the reader.
 
 Entries under `__MACOSX/` and files whose name starts with `.` (Finder
 resource forks such as `._1.jpg`) are not pages; they count in the
