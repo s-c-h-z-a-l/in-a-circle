@@ -42,9 +42,46 @@ pub const NOTHING: &str = "Nothing to do";
 /// (`HUB_TEXT_W`) and would cut it to "too many file…"; this one is 101 px
 /// (a test keeps it whole and in the atlas). The limit is in the docs.
 pub const TOO_MANY: &str = "too many files";
-/// The read's error for a list past `uri::MAX_BYTES`: it ends in the same
-/// hub text as a list with too many URIs.
-pub const LIST_TOO_BIG: &str = "URI list over the byte limit";
+/// Why a list's read gave no bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListError {
+    /// The list passed `uri::MAX_BYTES`: it ends in the same hub text as
+    /// a list with too many URIs.
+    TooBig,
+    /// Anything else (no offer, timeout, I/O error): the wheel falls back.
+    Failed(String),
+}
+
+impl From<&str> for ListError {
+    fn from(s: &str) -> Self {
+        ListError::Failed(s.to_owned())
+    }
+}
+
+impl From<String> for ListError {
+    fn from(s: String) -> Self {
+        ListError::Failed(s)
+    }
+}
+
+impl std::fmt::Display for ListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListError::TooBig => f.write_str("URI list over the byte limit"),
+            ListError::Failed(s) => f.write_str(s),
+        }
+    }
+}
+
+/// Whether the wheel refuses this read's result for its size (a list past
+/// the byte or the URI limit): the drop is not taken, so the source must
+/// see a cancel, not a `finish`, whichever limit was passed.
+pub fn list_refused(r: &Result<Vec<u8>, ListError>) -> bool {
+    match r {
+        Ok(bytes) => crate::uri::too_many(bytes),
+        Err(e) => *e == ListError::TooBig,
+    }
+}
 /// Stage 2 before the catalog was ever cached: nothing can be offered.
 pub const NO_ACTIONS: &str = "No actions yet";
 
@@ -67,12 +104,12 @@ pub enum Input {
     DragLeave,
     Drop,
     /// The dropped `text/uri-list`, or why it could not be read.
-    DropData(Result<Vec<u8>, String>),
+    DropData(Result<Vec<u8>, ListError>),
     /// The early read's `text/uri-list` (started at `enter`), or why it
     /// could not be read, tagged with the `ReadEarly` tag it was started
     /// with; one that is not the latest is ignored. Not used after the
     /// drop.
-    DragList(u32, Result<Vec<u8>, String>),
+    DragList(u32, Result<Vec<u8>, ListError>),
     /// The stage's deadline passed.
     Deadline,
     /// The compositor closed the surface or the connection failed.
@@ -458,11 +495,13 @@ impl Machine {
     /// A list past the limits shows `TOO_MANY` with nothing lit (fail
     /// closed: no truncated selection), like an empty one shows `Nothing
     /// to do`.
-    fn show_list(&mut self, r: Result<Vec<u8>, String>) -> bool {
+    fn show_list(&mut self, r: Result<Vec<u8>, ListError>) -> bool {
+        if list_refused(&r) {
+            self.show_refused();
+            return true;
+        }
         match r {
-            Ok(bytes) if !crate::uri::too_many(&bytes) => self.show_groups(bytes),
-            Ok(_) => self.show_refused(),
-            Err(e) if e == LIST_TOO_BIG => self.show_refused(),
+            Ok(bytes) => self.show_groups(bytes),
             Err(_) => return false,
         }
         true
@@ -1456,7 +1495,7 @@ mod tests {
         let many: Vec<u8> = (0..=crate::uri::MAX_URIS)
             .flat_map(|i| format!("file:///f{i}\n").into_bytes())
             .collect();
-        for r in [Ok(many), Err(LIST_TOO_BIG.to_owned())] {
+        for r in [Ok(many), Err(ListError::TooBig)] {
             let mut m = dragging();
             let fx = m.on(Input::DragList(1, r.clone()));
             assert_eq!(fx, [Effect::Draw, Effect::Accept(false)]);
@@ -1475,6 +1514,11 @@ mod tests {
             m.on(Input::DropData(Err("timed out".into()))),
             [Effect::Close]
         );
+        // The same words as a different failure are not the refusal: the
+        // error is typed, not matched by its text.
+        let mut m = reading();
+        let same_text = ListError::Failed(ListError::TooBig.to_string());
+        assert_eq!(m.on(Input::DropData(Err(same_text))), [Effect::Close]);
     }
 
     #[test]

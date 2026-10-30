@@ -211,7 +211,7 @@ fn a_symlink_at_the_lock_path_fails() {
 
 /// A private root for a wheel driven by the fake compositor: XDG dirs,
 /// an actions dir, and `f/` for dropped files. Short (under `/tmp`), so
-/// 1024 file URIs fit in a drop's 64 KiB.
+/// 1024 file URIs make a short list, well under the byte limit.
 struct Root(PathBuf);
 
 impl Root {
@@ -2100,11 +2100,13 @@ impl PssSampler {
 
 impl Peaks {
     /// The gate's observations for the first `n` phases, each labelled;
-    /// a phase without a sample is missing evidence (PSS 0).
+    /// a phase without a sample is missing evidence: it fails here, in
+    /// every build (the gate itself runs in the release build only).
     fn observations(&self, label: &str, n: usize) -> Vec<(String, u64)> {
         (0..n)
             .map(|k| {
                 let s = self.samples[k];
+                assert!(s > 0, "{label}: no PSS sample in phase {}", PHASES[k]);
                 (format!("{label}, {} ({s} samples)", PHASES[k]), self.pss[k])
             })
             .collect()
