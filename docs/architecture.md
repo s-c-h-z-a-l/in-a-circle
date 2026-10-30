@@ -75,7 +75,7 @@ are in `CLAUDE.md`.
   When none can be taken nothing is written. If the PDF as a whole would
   pass the output size limit, no input is taken and each fails. It is
   `lossy=yes` for the same reasons as the other action.
-  `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
+  `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
   CBZ, one PDF, all or nothing. It sits in the **Book** category. It is
