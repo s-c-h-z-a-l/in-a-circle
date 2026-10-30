@@ -246,6 +246,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "testzip"
+version = "0.0.0"
+dependencies = [
+ "miniz_oxide",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -269,6 +276,14 @@ name = "wire"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "zip"
+version = "0.0.0"
+dependencies = [
+ "flate",
+ "testzip",
 ]
 
 [[package]]

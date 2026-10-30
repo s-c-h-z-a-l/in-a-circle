@@ -86,6 +86,7 @@ dependencies = [
  "libfuzzer-sys",
  "manifest",
  "wire",
+ "zip",
 ]
 
 [[package]]
@@ -135,4 +136,11 @@ name = "wire"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "zip"
+version = "0.0.0"
+dependencies = [
+ "flate",
 ]

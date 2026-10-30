@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -116,6 +116,21 @@ limits() {
         # 16 KiB buffer whatever the input says, so any larger allocation is
         # a bug (~330x the fixed use); 1024 MB RSS ceiling.
         inflate) echo "1048576 2 16 1024" ;;
+        # 1 MiB: the whole file the target writes out and opens; it holds
+        # a full 65535-byte end-record comment, a long directory and
+        # deflate entries large enough to reach every block type. 2 s: the
+        # worst input constructed, measured under the fuzz build (ASan)
+        # with -timeout=2: 8 entries of 4 MiB zeros each (the target's
+        # LIMITS.entries and entry_bytes; 32 MiB of output from ~33 KiB of
+        # input, so inflate, CRC-32 and the copy into the Vec all run) took
+        # 0.67 s, three runs. The first choice, 16 x 8 MiB (128 MiB), took
+        # 2.7 s and timed out, so the target's limits were cut to what keeps
+        # 3x headroom. 16 MB malloc limit: open allocates a 64 KiB tail
+        # buffer, up to 8 names of at most 256 bytes and a 64 KiB chunk
+        # buffer; read reserves at most entry_bytes = 4 MiB for one entry,
+        # so 16 MB is 4x the largest legitimate allocation; 1024 MB RSS
+        # ceiling.
+        zip_reader) echo "1048576 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

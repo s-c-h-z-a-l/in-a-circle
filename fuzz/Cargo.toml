@@ -15,6 +15,7 @@ dbus = { path = "../crates/dbus" }
 engine = { path = "../crates/engine" }
 wire = { path = "../crates/wire" }
 flate = { path = "../crates/flate" }
+zip = { path = "../crates/zip" }
 
 # Not part of the root workspace (it is excluded there): the fuzz crate
 # builds on a pinned nightly and must not touch the shipped dependency tree.
@@ -72,6 +73,13 @@ bench = false
 [[bin]]
 name = "inflate"
 path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_reader"
+path = "fuzz_targets/zip_reader.rs"
 test = false
 doc = false
 bench = false
