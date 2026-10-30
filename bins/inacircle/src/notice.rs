@@ -248,6 +248,13 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
             body.push(DOWNLOADS_LINE.to_owned());
         }
         name_of(out)
+    } else if let Some(j) = s.join.filter(|j| j.taken > 0 && s.unknown_count > 0) {
+        // The one result was published but its place is not proved: one
+        // file, however many inputs it holds (the 1:1 wording, "done", plus
+        // the sticky lines below).
+        body.push(format!("{} / {} files", j.taken, j.total));
+        problem_lines(s, &mut body);
+        "1 done".to_owned()
     } else if let ([(_, out)], 1, 0, 0) = (&s.done[..], s.done_count, s.skipped, s.failed) {
         if s.to_downloads {
             body.push(DOWNLOADS_LINE.to_owned());
@@ -270,12 +277,16 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
     };
     // Sticky: converted, kept, but not where (or not as) it was proved.
     if s.unknown_count > 0 {
-        for (name, why, op) in s.unknown.iter().take(PROBLEM_LINES) {
+        // A join has one file, so one line however many inputs it took.
+        let (lines, files) = match s.join {
+            Some(j) if j.taken > 0 => (1, 1),
+            _ => (PROBLEM_LINES, s.unknown_count),
+        };
+        for (name, why, op) in s.unknown.iter().take(lines) {
             body.push(format!("{name}: {why} (op {op})"));
         }
         body.push(format!(
-            "{} not confirmed where it was saved; Undo unavailable.",
-            s.unknown_count
+            "{files} not confirmed where it was saved; Undo unavailable."
         ));
     }
     // Why Undo is not offered (the unknown lines above already say so).
@@ -1221,6 +1232,53 @@ mod tests {
                 "… and 2 more",
                 "Saved to Downloads (source folder is read-only)"
             ]
+        );
+    }
+
+    /// A published join whose place is not proved is one file, reported as
+    /// done and not confirmed, never as "Nothing converted".
+    #[test]
+    fn notice_join_published_unknown_counts_files() {
+        use engine::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+        let unknown = |i: &str| Outcome::PublishedUnknown {
+            input: i.into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                last_unverified_path: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 1,
+                    object_ino: 3,
+                    leaf: "d".into(),
+                    op: OperationId(0xcd),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Synced,
+        };
+        let mut s = summary(&[
+            unknown("/d/a.jpg"),
+            unknown("/d/b.jpg"),
+            unknown("/d/c.jpg"),
+        ]);
+        s.join = Some(JoinNote {
+            taken: 3,
+            total: 3,
+            downloads: false,
+        });
+        s.set_counts((3, 0, 0, 3));
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "1 done");
+        let l = lines(&body);
+        assert_eq!(l.len(), 3, "{body}");
+        assert_eq!(l[0], "3 / 3 files");
+        assert!(l[1].starts_with("a.jpg: converted, but"), "{body}");
+        assert_eq!(
+            l[2],
+            "1 not confirmed where it was saved; Undo unavailable."
         );
     }
 
