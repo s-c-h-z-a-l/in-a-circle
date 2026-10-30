@@ -398,6 +398,13 @@ fn direct_action_runs_a_join_action() {
         "{}",
         o.stderr
     );
+    // A lone preset id is a preset with no files, not a bare flag.
+    let o = e.run(&["run", "pdf"]);
+    assert!(
+        o.stderr.contains("no files") && !o.stderr.contains("needs an action id"),
+        "{}",
+        o.stderr
+    );
 }
 
 /// An action whose tool is missing fails the inputs it would take, with the
