@@ -186,21 +186,40 @@ fn count_of<'t>(tally: &Tally, types: impl IntoIterator<Item = &'t str>) -> usiz
     types.into_iter().map(|m| tally.of(m).0).sum()
 }
 
-/// The runnable join action of a preset: it accepts every type of the
-/// preset's join set and makes its output. Cheapest first, id breaks ties.
-fn join_action<'c>(cat: &'c Catalog, p: &Preset) -> Option<&'c Action> {
-    if p.join.is_empty() {
+/// Files `a` would take from `tally`, as a join action.
+fn join_count(a: &Action, tally: &Tally) -> usize {
+    a.join
+        .as_ref()
+        .map_or(0, |j| count_of(tally, j.types.iter().map(String::as_str)))
+}
+
+/// The join actions of a preset: they accept every type of the preset's
+/// join set and make its output. Type check only, no tool lookups.
+fn join_candidates<'c>(cat: &'c Catalog, p: &Preset) -> impl Iterator<Item = &'c Action> {
+    let (output, set) = (p.output, p.join);
+    cat.joins().filter(move |a| {
+        !set.is_empty()
+            && a.output == output
+            && a.join
+                .as_ref()
+                .is_some_and(|j| set.iter().all(|m| j.types.iter().any(|t| t == m)))
+    })
+}
+
+/// The runnable join action of a preset, cheapest first (id breaks ties),
+/// with the files it takes. The cheap checks (type set, a file of its types
+/// in the selection) come before `missing_tools`, which stats `PATH`: this
+/// runs on the drop to stage-2 path.
+fn join_action<'c>(cat: &'c Catalog, p: &Preset, tally: &Tally) -> Option<(&'c Action, usize)> {
+    if !join_candidates(cat, p).any(|a| join_count(a, tally) > 0) {
         return None;
     }
-    cat.joins()
-        .filter(|a| {
-            a.output == p.output
-                && missing_tools(a).is_empty()
-                && a.join
-                    .as_ref()
-                    .is_some_and(|j| p.join.iter().all(|m| j.types.iter().any(|t| t == m)))
-        })
-        .min_by(|a, b| (a.cost, &a.id).cmp(&(b.cost, &b.id)))
+    let a = join_candidates(cat, p)
+        .filter(|a| missing_tools(a).is_empty())
+        .min_by(|a, b| (a.cost, &a.id).cmp(&(b.cost, &b.id)))?;
+    let n = join_count(a, tally);
+    let min = a.join.as_ref().map_or(0, |j| j.min);
+    (n > 0 && n >= usize::try_from(min).unwrap_or(usize::MAX)).then_some((a, n))
 }
 
 /// What a preset runs for a selection and for how many of its files, `None`
@@ -215,11 +234,7 @@ pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(C
     } else {
         None
     };
-    let join = join_action(cat, preset).and_then(|a| {
-        let j = a.join.as_ref()?;
-        let n = count_of(tally, j.types.iter().map(String::as_str));
-        (n > 0 && n >= usize::try_from(j.min).unwrap_or(usize::MAX)).then_some((a, n))
-    });
+    let join = join_action(cat, preset, tally);
     match (route, join) {
         (Some(r), Some((_, n))) if one >= n => Some((Choice::Route(r), one)),
         (_, Some((a, n))) => Some((Choice::Join(a), n)),
@@ -253,13 +268,7 @@ fn disabled_reason(cat: &Catalog, p: &Preset, tally: &Tally) -> Option<String> {
     }
     // The side the files are on: the join set when it has more files.
     if count_of(tally, p.join.iter().copied()) > tally.of(p.input).0 {
-        let all = |a: &&Action| {
-            a.output == p.output
-                && a.join
-                    .as_ref()
-                    .is_some_and(|j| p.join.iter().all(|m| j.types.iter().any(|t| t == m)))
-        };
-        let mut joins = cat.joins().filter(all).peekable();
+        let mut joins = join_candidates(cat, p).peekable();
         if joins.peek().is_none() {
             return Some("no action installed".into());
         }
@@ -980,6 +989,19 @@ mod tests {
             Some("no action installed")
         );
         assert!(choose(&cat, pdf_preset(), &t).is_none());
+    }
+
+    #[test]
+    fn lone_png_without_join_action_dims_pdf_and_names_the_file() {
+        let cat = pdf_catalog(false);
+        let t = tally(&[("a.png", "image/png")]);
+        let o = offer_tally(&cat, &t);
+        assert_eq!(o.hub, "a.png");
+        let s = pdf_slice(&o);
+        assert_eq!(
+            (s.applicable, s.disabled.as_deref()),
+            (1, Some("no action installed"))
+        );
     }
 
     #[test]

@@ -328,8 +328,8 @@ Every action runs sandboxed, set up in the child between `fork` and
 - **Planned, not built yet:** zip containers are looked into: ODF and
   EPUB declare their type in the `mimetype` entry; OOXML is told apart by
   the central directory at the end of the file (`word/document.xml`,
-  `xl/workbook.xml`, …). Today the binary signatures give a label but no
-  type, so no action is offered for them.
+  `xl/workbook.xml`, …). Today the remaining binary signatures (PDF, GIF, ZIP,
+  gzip) give a label but no type, so no action is offered for them.
 - Text: no magic and valid UTF-8 without NUL bytes means text; the exact
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
   content cannot tell them apart. Today that is plain text and Markdown;
