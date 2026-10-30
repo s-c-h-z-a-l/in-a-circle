@@ -615,3 +615,125 @@ fn rejects_bytes_after_the_deflate_stream() {
         Err(ZipError::SizeMismatch)
     ));
 }
+
+#[test]
+fn every_encryption_flag_marks_the_entry_encrypted() {
+    // Bit 0 (traditional), bit 6 (strong), bit 13 (masked directory).
+    for bit in [0u16, 6, 13] {
+        let mut b = two();
+        for at in [central(&b, 0) + 8, local(&b, 0) + 6] {
+            put16(&mut b, at, 1 << bit);
+        }
+        let f = file(&b);
+        let a = open(&f, BIG).unwrap();
+        assert!(a.entries()[0].encrypted, "bit {bit}");
+        assert!(!a.entries()[1].encrypted);
+    }
+    // Flag bits that do not mean encryption (bit 1, bit 11 UTF-8) do not.
+    let mut b = two();
+    for at in [central(&b, 0) + 8, local(&b, 0) + 6] {
+        put16(&mut b, at, (1 << 1) | (1 << 11));
+    }
+    assert!(!open(&file(&b), BIG).unwrap().entries()[0].encrypted);
+}
+
+#[test]
+fn rejects_flag_disagreement_between_headers() {
+    // The central header says "data descriptor" or "encrypted", the local
+    // header says nothing: the two disagree on how the data is read.
+    for bit in [0u16, 3, 6, 13] {
+        let mut b = two();
+        let c = central(&b, 0);
+        put16(&mut b, c + 8, 1 << bit);
+        assert!(
+            matches!(open_err(&b, BIG), ZipError::HeaderMismatch("flags")),
+            "bit {bit}"
+        );
+    }
+}
+
+#[test]
+fn rejects_each_local_size_or_crc_mismatch_alone() {
+    // crc (14), compressed size (18), size (22): each one wrong while the
+    // other two agree with the central record.
+    for at in [14, 18, 22] {
+        let mut b = two();
+        let l = local(&b, 0);
+        let v = u32_at(&b, l + at);
+        put32(&mut b, l + at, v ^ 1);
+        assert!(
+            matches!(open_err(&b, BIG), ZipError::HeaderMismatch("sizes or crc")),
+            "local offset {at}"
+        );
+    }
+}
+
+#[test]
+fn central_records_with_extra_field_and_comment_are_walked() {
+    let mut b = zip(&[
+        (b"first", b"one one one one", Store::Stored),
+        (b"second", b"two two two two", Store::Stored),
+        (b"third", b"three three three", Store::Stored),
+    ]);
+    // Entry 1 gets 3 extra bytes and 5 comment bytes, behind its name.
+    let c = central(&b, 1);
+    let at = c + 46 + u16_at(&b, c + 28) as usize;
+    b.splice(at..at, [0xAA; 8]);
+    put16(&mut b, c + 30, 3);
+    put16(&mut b, c + 32, 5);
+    let e = eocd(&b);
+    let size = u32_at(&b, e + 12);
+    put32(&mut b, e + 12, size + 8);
+    let f = file(&b);
+    let a = open(&f, BIG).unwrap();
+    let names: Vec<&[u8]> = a.entries().iter().map(|e| &e.name[..]).collect();
+    assert_eq!(names, [&b"first"[..], b"second", b"third"]);
+    let mut v = Vec::new();
+    a.read(2, &mut v).unwrap();
+    assert_eq!(v, b"three three three");
+}
+
+#[test]
+fn an_entry_with_an_empty_name_is_the_smallest_record() {
+    // The central record is exactly 46 bytes: the directory ends right at
+    // the record's last byte.
+    let f = file(&zip(&[(b"", b"data", Store::Stored)]));
+    let a = open(&f, BIG).unwrap();
+    assert_eq!(a.entries().len(), 1);
+    assert!(a.entries()[0].name.is_empty());
+    let mut v = Vec::new();
+    a.read(0, &mut v).unwrap();
+    assert_eq!(v, b"data");
+}
+
+#[test]
+fn stored_entries_are_delivered_in_chunks_of_64_kib() {
+    let data = pseudo(3 * 64 * 1024 + 100);
+    let f = file(&zip(&[(b"s", &data, Store::Stored)]));
+    let a = open(&f, BIG).unwrap();
+    let mut sizes = Vec::new();
+    a.read_to(0, &mut |c| {
+        sizes.push(c.len());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(sizes, [65536, 65536, 65536, 100]);
+}
+
+#[test]
+fn a_range_that_cuts_the_stream_fails_in_the_decoder() {
+    // One byte short of the real stream, with that byte still in the file
+    // right behind the range: the decoder must stop at the range's end and
+    // report the stream as truncated, not read the byte and compare sizes.
+    let mut b = two();
+    let (c, l) = (central(&b, 1), local(&b, 1));
+    let cs = u32_at(&b, c + 20);
+    put32(&mut b, c + 20, cs - 1);
+    put32(&mut b, l + 18, cs - 1);
+    let f = file(&b);
+    let a = open(&f, BIG).unwrap();
+    assert!(matches!(
+        a.read(1, &mut Vec::new()),
+        Err(ZipError::Inflate(_))
+    ));
+}
