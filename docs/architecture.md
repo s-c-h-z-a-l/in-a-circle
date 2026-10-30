@@ -73,7 +73,9 @@ are in `CLAUDE.md`.
   reported: unsupported ones (alpha, interlaced, 16-bit PNG, unusual JPEG)
   as `skip`, damaged or over-limit ones as `fail`; the rest is joined.
   When none can be taken nothing is written. If the PDF as a whole would
-  pass the output size limit, no input is taken and each fails. It is
+  pass the output size limit, nothing is written; the inputs already taken
+  and those not yet examined fail with the size copy, while those already
+  skipped or failed keep their own outcome. It is
   `lossy=yes` for the same reasons as the other action.
   `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one

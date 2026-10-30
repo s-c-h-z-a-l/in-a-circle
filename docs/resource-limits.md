@@ -114,8 +114,9 @@ test ceiling is 8 MB. The output ceiling is the same estimate as above,
 kept as a running sum over the accepted images (image size + 2,560 B per
 page + 1,024 B per file) and checked before each page is written, with the
 count of bytes actually written as the second check. Past it no input is
-taken, every input fails with `PDF would be larger than <N> MiB`, and the
-half-written PDF is removed.
+taken: the inputs already taken and those not yet examined fail with
+`PDF would be larger than <N> MiB` (inputs already skipped or failed keep
+their own outcome), nothing is written, and the half-written PDF is removed.
 
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
