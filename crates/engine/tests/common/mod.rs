@@ -95,6 +95,7 @@ pub fn action(bin: &Path, ext: &str) -> Action {
         cost: 1,
         lossy: false,
         batch: true,
+        join: None,
         requires: Vec::new(),
         builtin: true,
     }

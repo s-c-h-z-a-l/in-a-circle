@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	j.wide	family=f	in=a/x1,a/x2,a/x3,a/x4,a/x5,a/x6,a/x7,a/x8,a/x9,a/x10,a/x11,a/x12,a/x13,a/x14,a/x15,a/x16,a/x17	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes

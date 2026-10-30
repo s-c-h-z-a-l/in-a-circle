@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 use manifest::Line;
 
+pub mod order;
+pub use order::natural_cmp;
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_FAILED: i32 = 1;
 /// Contract or invocation error (ours, not the file's).

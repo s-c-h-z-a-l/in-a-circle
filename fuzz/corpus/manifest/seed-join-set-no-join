@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	j.set	family=f	in=a/a,b/b	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes

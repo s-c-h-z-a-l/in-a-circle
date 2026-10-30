@@ -1,4 +1,4 @@
-//! Page order: natural sort on the whole entry name, as raw bytes.
+//! Natural order, shared by the engine and the pages family: natural sort on the whole entry name, as raw bytes.
 
 use std::cmp::Ordering;
 

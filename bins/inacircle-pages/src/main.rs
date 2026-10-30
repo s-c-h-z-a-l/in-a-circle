@@ -5,8 +5,6 @@
 //! page that cannot be taken makes the whole input `skip` or `fail` and the
 //! half-written PDF is removed.
 
-mod order;
-
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -15,8 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use action::{Command, Events, Invocation, parse_args};
-use order::natural_cmp;
+use action::{Command, Events, Invocation, natural_cmp, parse_args};
 use probe::{Image, ProbeError, Unsupported};
 
 // ---------------------------------------------------------------------

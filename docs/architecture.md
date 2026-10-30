@@ -125,6 +125,17 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- A join action turns many inputs into one output (`join=yes`; absent
+  means `no`). It may take a set of input types: `in=` is then a
+  comma-separated MIME set of at most 16 members (the roadmap's image
+  types and a document-with-assets role both stay far below; the menu
+  matches a member at a time), none empty, none repeated. `min=<n>` is the
+  fewest accepted inputs a run needs, 1 to 1024 (the invocation's input
+  limit; absent means 1). `min` and a type set are valid only with
+  `join=yes`; any other value or combination rejects the line
+  ("invalid action line ignored"). For display the engine takes the set's
+  first member as the action's input type. The catalog cache stores the
+  manifest lines verbatim, so its format does not change.
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
   the action reports it (blank lines at the start or end of the text and
@@ -145,6 +156,7 @@ inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 ```
 
 ## Invocation

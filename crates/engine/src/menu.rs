@@ -333,6 +333,7 @@ mod tests {
             cost,
             lossy,
             batch: false,
+            join: None,
             requires: vec![],
             builtin: true,
         }

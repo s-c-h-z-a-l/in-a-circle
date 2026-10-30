@@ -2475,6 +2475,7 @@ pub(crate) mod tests {
             cost: 1,
             lossy: false,
             batch: true,
+            join: None,
             requires: Vec::new(),
             builtin: true,
         }

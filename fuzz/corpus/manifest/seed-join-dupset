@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	j.dup	family=f	in=image/png,image/png	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes

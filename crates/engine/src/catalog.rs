@@ -203,8 +203,17 @@ pub struct Action {
     pub cost: u32,
     pub lossy: bool,
     pub batch: bool,
+    pub join: Option<Join>,
     pub requires: Vec<String>,
     pub builtin: bool,
+}
+
+/// A many-inputs-to-one-output action: the MIME types it takes and the
+/// fewest accepted inputs a run needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Join {
+    pub types: Vec<String>,
+    pub min: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,6 +368,11 @@ impl Catalog {
             }
         }
         Catalog { actions }
+    }
+
+    /// The join actions (many inputs, one output).
+    pub fn joins(&self) -> impl Iterator<Item = &Action> {
+        self.actions.iter().filter(|a| a.join.is_some())
     }
 
     pub fn get(&self, id: &str) -> Option<&Action> {
@@ -518,11 +532,41 @@ fn parse_action(l: &Line) -> Option<Action> {
         _ => None,
     };
     let text = |k: &str| l.get(k).filter(|v| !v.is_empty()).map(str::to_owned);
+    let input = text("in")?;
+    // `join` is absent (= no), `yes` or `no`; anything else rejects the line.
+    let is_join = match l.get("join") {
+        None => false,
+        Some(_) => yes_no("join")?,
+    };
+    let join = if is_join {
+        let types = mime_set(&input)?;
+        // `min` is the fewest accepted inputs a run needs; absent means 1.
+        // Its ceiling is the invocation's input limit: a larger `min` could
+        // never be met.
+        let min = match l.get("min") {
+            None => 1,
+            Some(v) => v.parse::<u32>().ok()?,
+        };
+        if min == 0 || min as usize > action::INPUT_COUNT {
+            return None;
+        }
+        Some(Join { types, min })
+    } else if l.get("min").is_some() || input.contains(',') {
+        // `min` and a MIME set are meaningful only for a join action.
+        return None;
+    } else {
+        None
+    };
+    // A join action's `input` is the set's first member, for display only.
+    let input = match &join {
+        Some(j) => j.types[0].clone(),
+        None => input,
+    };
     Some(Action {
         id: l.bare_at(0).filter(|v| !v.is_empty())?.to_owned(),
         family: text("family")?,
         bin: PathBuf::new(),
-        input: text("in")?,
+        input,
         output: text("out")?,
         ext: text("ext")?,
         label: text("label")?,
@@ -539,8 +583,30 @@ fn parse_action(l: &Line) -> Option<Action> {
                     .collect()
             })
             .unwrap_or_default(),
+        join,
         builtin: false,
     })
+}
+
+/// The most members an `in=` set may have. Derived from the formats the
+/// roadmap names for a joined document (JPEG, PNG, GIF, TIFF, HEIC, WebP)
+/// plus a document-and-assets role, both far below 16; the menu matches an
+/// input against the set member by member, so the cost is linear in it.
+/// Past it the line is rejected whole (a set that wide is a malformed line,
+/// not an action we know).
+const JOIN_TYPES_MAX: usize = 16;
+
+/// A comma-separated MIME set: 1 to `JOIN_TYPES_MAX` members, none empty,
+/// none repeated.
+fn mime_set(v: &str) -> Option<Vec<String>> {
+    let types: Vec<String> = v.split(',').map(str::to_owned).collect();
+    if types.len() > JOIN_TYPES_MAX
+        || types.iter().any(String::is_empty)
+        || (1..types.len()).any(|i| types[..i].contains(&types[i]))
+    {
+        return None;
+    }
+    Some(types)
 }
 
 /// Why a manifest run failed. Transient failures (the binary may work next
@@ -2355,9 +2421,112 @@ pub(crate) mod tests {
             lossy: false,
             batch: false,
             requires: vec!["sh".into(), "no-such-tool-inacircle".into()],
+            join: None,
             builtin: true,
         };
         assert_eq!(missing_tools(&act), ["no-such-tool-inacircle"]);
+    }
+
+    // ---- join actions ----
+
+    const PDF_LINE: &str = "action\tpages.images-to-pdf\tfamily=pages\tin=image/jpeg,image/png\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1";
+
+    fn parsed(line: &str) -> Option<Action> {
+        parse_action(&manifest::parse_line(line).unwrap())
+    }
+
+    #[test]
+    fn join_action_parses() {
+        let a = parsed(PDF_LINE).unwrap();
+        assert_eq!(
+            a.join,
+            Some(Join {
+                types: vec!["image/jpeg".into(), "image/png".into()],
+                min: 1
+            })
+        );
+        assert_eq!(a.input, "image/jpeg");
+    }
+
+    #[test]
+    fn join_defaults_to_no() {
+        let l = "action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=g\tcost=10\tlossy=no\tbatch=yes";
+        let a = parsed(l).unwrap();
+        assert_eq!(a.join, None);
+        assert_eq!(a.input, "text/plain");
+        // An explicit `join=no` is the same.
+        assert_eq!(parsed(&format!("{l}\tjoin=no")).unwrap().join, None);
+    }
+
+    #[test]
+    fn rejects_bad_join_lines() {
+        let base = |extra: &str, inp: &str| {
+            format!(
+                "action\tj.a\tfamily=f\tin={inp}\tout=application/pdf\text=pdf\tlabel=L\tgroup=g\tcost=10\tlossy=no\tbatch=yes{extra}"
+            )
+        };
+        let seventeen = (0..17)
+            .map(|i| format!("image/x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sixteen = (0..16)
+            .map(|i| format!("image/x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let bad = [
+            base("\tjoin=maybe", "image/png"),
+            base("\tjoin=yes\tmin=0", "image/png"),
+            base("\tjoin=yes\tmin=1025", "image/png"),
+            base("\tmin=2", "image/png"),
+            base("\tjoin=no\tmin=2", "image/png"),
+            base("", "a/a,b/b"),
+            base("\tjoin=no", "a/a,b/b"),
+            base("\tjoin=yes\tmin=1", "image/jpeg,,image/png"),
+            base("\tjoin=yes\tmin=1", "image/png,image/png"),
+            base("\tjoin=yes\tmin=1", &seventeen),
+            base("\tjoin=yes\tmin=x", "image/png"),
+            base("\tjoin=yes\tmin=", "image/png"),
+        ];
+        for l in &bad {
+            assert!(parsed(l).is_none(), "{l}");
+        }
+        // The limits themselves are taken.
+        assert!(parsed(&base("\tjoin=yes\tmin=1024", &sixteen)).is_some());
+        assert!(
+            parsed(&base("\tjoin=yes", "image/png")).is_some(),
+            "min defaults to 1"
+        );
+        assert_eq!(
+            parsed(&base("\tjoin=yes", "image/png"))
+                .unwrap()
+                .join
+                .unwrap()
+                .min,
+            1
+        );
+    }
+
+    #[test]
+    fn joins_lists_only_join_actions() {
+        let one = parsed(PDF_LINE).unwrap();
+        let mut plain = one.clone();
+        plain.id = "t.plain".into();
+        plain.join = None;
+        let c = Catalog {
+            actions: vec![plain, one],
+        };
+        let j: Vec<&str> = c.joins().map(|a| a.id.as_str()).collect();
+        assert_eq!(j, ["pages.images-to-pdf"]);
+    }
+
+    /// The cache stores manifest lines verbatim, so a join line survives a
+    /// cache round trip with no format change.
+    #[test]
+    fn join_line_survives_the_cache() {
+        let l = manifest::parse_line(PDF_LINE).unwrap();
+        let text = manifest::write_line(&l);
+        let back = manifest::parse_line(text.trim_end_matches('\n')).unwrap();
+        assert_eq!(parse_action(&back), parse_action(&l));
     }
 
     // ---- bounded cache and manifest ----
