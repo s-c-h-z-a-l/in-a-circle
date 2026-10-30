@@ -17,6 +17,9 @@
 # grew 40472 B (file) and the pages family 13352 B (file, 12432 B of .text), both under the
 # 100 KB explanation threshold; the shipped inacircle still does not link
 # the zip, flate, probe or pdf crates.
-inacircle 1147120 880312
+# Refreshed after the wheel drop-list and memory work (list limit, paths held
+# once, owned uri-list parser), same toolchain and profile: inacircle grew
+# 3592 B (file, 3024 B of .text); the other two binaries are unchanged.
+inacircle 1150712 883336
 inacircle-text 695000 397314
 inacircle-pages 464592 372211
