@@ -1842,6 +1842,42 @@ fn join_skips_and_still_publishes() {
         |o| matches!(o, Outcome::Skipped { input, reason } if *input == ins[1] && reason == "has alpha")
     ));
     assert_eq!(new_entries(&t, &ins).len(), 1);
+    // A skipped input is settled by its skip: it is not failed as well.
+    assert!(failed(&r).is_empty(), "{:?}", r.outcomes);
+}
+
+#[test]
+fn skip_then_take_of_one_input_is_a_violation() {
+    rejects(
+        "join-skip-take",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         in=$(head -n1 \"$6\"); printf 'skip\\t%s\\tno\\n' \"$in\"; printf 'take\\t%s\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+}
+
+#[test]
+fn skipped_input_is_not_also_failed_when_the_run_is_refused() {
+    let t = Tmp::new("join-skip-refused");
+    let ins = three_images(&t);
+    let bin = t.script(
+        "join",
+        "in=$(head -n1 \"$6\"); printf 'skip\\t%s\\tno\\n' \"$in\"; exit 1",
+    );
+    let (r, _rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert!(
+        r.outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Skipped { input, .. } if *input == ins[0])),
+        "{:?}",
+        r.outcomes
+    );
+    assert!(
+        failed(&r).iter().all(|(p, _)| *p != ins[0]),
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(failed(&r).len(), 2, "{:?}", r.outcomes);
 }
 
 #[test]
