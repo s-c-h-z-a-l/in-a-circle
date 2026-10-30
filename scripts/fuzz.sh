@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -131,6 +131,17 @@ limits() {
         # so 16 MB is 4x the largest legitimate allocation; 1024 MB RSS
         # ceiling.
         zip_reader) echo "1048576 2 16 1024" ;;
+        # 1 MiB: an image entry of that size holds a full IDAT bomb (the
+        # target's MAX_PIXELS, 12 million) and many chunks. 2 s: the worst
+        # input constructed, measured under the fuzz build (ASan): a
+        # 3464 x 3464 RGB bomb (35 KB of input, 36 MB expanded) 0.56 s, the
+        # gray one 0.20 s. The first choice, the shipped 180-million-pixel
+        # limit, took 8.3 s (RGB, 540 MB expanded) and 2.6 s (gray, 169 MB)
+        # and timed out, so the target's limit was cut to keep ~3x headroom.
+        # 16 MB malloc limit: the probe allocates a Vec of at most 65536
+        # ranges (1 MiB) and the inflate a 32 KiB window and a 16 KiB
+        # buffer; any larger allocation is a bug; 1024 MB RSS ceiling.
+        image_probe) echo "1048576 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

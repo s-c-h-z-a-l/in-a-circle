@@ -85,6 +85,7 @@ dependencies = [
  "flate",
  "libfuzzer-sys",
  "manifest",
+ "probe",
  "wire",
  "zip",
 ]
@@ -118,6 +119,13 @@ dependencies = [
 [[package]]
 name = "manifest"
 version = "0.0.0"
+
+[[package]]
+name = "probe"
+version = "0.0.0"
+dependencies = [
+ "flate",
+]
 
 [[package]]
 name = "r-efi"
