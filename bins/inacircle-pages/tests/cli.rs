@@ -10,7 +10,7 @@ use std::process::{Command, Output, Stdio};
 use testzip::Store::{Deflated, Stored};
 
 const MANIFEST: &str = "inacircle-manifest 0\n\
-action\tpages.cbz-to-pdf\tfamily=pages\tin=application/vnd.comicbook+zip\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=no\tbatch=yes\n";
+action\tpages.cbz-to-pdf\tfamily=pages\tin=application/vnd.comicbook+zip\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -556,6 +556,22 @@ fn limits_fail_with_their_copy() {
     let input = cbz(&t, "mp.cbz", &[(b"1.png", &huge, Stored)]);
     let (_, f) = one_input(&t, "fail", &input);
     assert_eq!(f[2], "page 1.png is larger than 180 megapixels");
+
+    // MAX_IDAT_CHUNKS + 1 data chunks: a valid 1x1 PNG whose IDAT is
+    // followed by empty IDAT chunks (about 786 KB, well inside the page
+    // limit). The copy names the real cause, not the pixel limit.
+    let mut many = rgb_png(1, 1);
+    many.truncate(many.len() - 12); // drop IEND
+    let mut empty = 0u32.to_be_bytes().to_vec();
+    empty.extend_from_slice(b"IDAT");
+    empty.extend_from_slice(&testzip::crc32(b"IDAT").to_be_bytes());
+    for _ in 0..probe::MAX_IDAT_CHUNKS {
+        many.extend_from_slice(&empty);
+    }
+    many.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]);
+    let input = cbz(&t, "chunks.cbz", &[(b"1.png", &many, Deflated)]);
+    let (_, f) = one_input(&t, "fail", &input);
+    assert_eq!(f[2], "page 1.png: PNG has more than 65536 data chunks");
 }
 
 /// Run with the child's `RLIMIT_FSIZE` set to `bytes` (soft and hard), the

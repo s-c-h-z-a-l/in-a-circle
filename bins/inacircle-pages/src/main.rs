@@ -38,9 +38,10 @@ const ENTRIES: usize = 12_000;
 /// data is passed through): 64 MiB. The page is the one thing held whole
 /// (`docs/resource-limits.md`: one page plus the entry list). A 180
 /// megapixel scan is around 20-40 MB as JPEG, and a flat 180 MP PNG far
-/// less; 64 MiB covers them with room, and with the entry list stays near
-/// 70 MB. The fuzz target `inflate` runs with the same output limit. Past
-/// it: `page <name> is larger than 64 MiB`. It is also the inflate output
+/// less; 64 MiB covers them with room, and with the entry list stays under
+/// 80 MB (about 77 MB worst case). The fuzz target `inflate` runs with a
+/// small limit for speed; the 64 MiB boundary is covered by unit tests.
+/// Past it: `page <name> is larger than 64 MiB`. It is also the inflate output
 /// limit, so a lying size cannot produce more.
 const ENTRY_BYTES: u64 = 64 << 20;
 
@@ -157,7 +158,7 @@ fn manifest_text() -> String {
             .pair("label", "PDF")
             .pair("group", "book")
             .pair("cost", "10")
-            .pair("lossy", "no")
+            .pair("lossy", "yes")
             .pair("batch", "yes"),
     ));
     s
@@ -230,6 +231,10 @@ fn probe_stop<T>(name: &str, e: ProbeError) -> Result<T, Stop> {
         ProbeError::TooLarge => fail(format!(
             "page {name} is larger than {} megapixels",
             MAX_PIXELS / 1_000_000
+        )),
+        ProbeError::TooManyChunks => fail(format!(
+            "page {name}: PNG has more than {} data chunks",
+            probe::MAX_IDAT_CHUNKS
         )),
         ProbeError::Unsupported(Unsupported::JpegComponents(n)) => {
             // The probe's text is number-free here; the count is ours.

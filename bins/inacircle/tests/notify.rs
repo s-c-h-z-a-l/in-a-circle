@@ -25,7 +25,10 @@ mod fake_compositor;
 use fake_compositor::{Compositor, Delay, KEYBOARD, POINTER, Script};
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
-const ACTIONS: [&str; 2] = ["inacircle-text", "inacircle-testaction"];
+const ACTIONS: [&str; 3] = ["inacircle-text", "inacircle-testaction", "inacircle-pages"];
+/// What `Env::new` installs: the pages action stays out so the other
+/// scenarios keep their one-family catalog.
+const DEFAULT_ACTIONS: [&str; 2] = ["inacircle-text", "inacircle-testaction"];
 const IFACE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const OWNER: &str = ":1.7";
@@ -60,6 +63,10 @@ struct Env {
 
 impl Env {
     fn new(name: &str) -> Env {
+        Env::with(name, &DEFAULT_ACTIONS)
+    }
+
+    fn with(name: &str, actions: &[&str]) -> Env {
         let root =
             std::env::temp_dir().join(format!("inacircle-notify-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -69,7 +76,7 @@ impl Env {
             fs::create_dir_all(root.join(d)).unwrap();
         }
         fs::set_permissions(root.join("runtime"), fs::Permissions::from_mode(0o700)).unwrap();
-        for a in ACTIONS {
+        for a in actions {
             symlink(action_bin(a), root.join("actions").join(a)).unwrap();
         }
         Env { root }
@@ -80,6 +87,12 @@ impl Env {
     }
 
     fn file(&self, rel: &str, content: &str) -> PathBuf {
+        let p = self.files().join(rel);
+        fs::write(&p, content).unwrap();
+        p
+    }
+
+    fn bytes(&self, rel: &str, content: &[u8]) -> PathBuf {
         let p = self.files().join(rel);
         fs::write(&p, content).unwrap();
         p
@@ -472,6 +485,53 @@ fn final_notice_says_formatting_was_lost_when_it_was() {
     // The close ended the Undo window at once.
     assert!(r.elapsed < Duration::from_secs(5), "{:?}", r.elapsed);
     assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+}
+
+/// `pages.cbz-to-pdf` leaves non-image entries out and says so; it is
+/// `lossy=yes`, so that warning reaches the notification (a warning of a
+/// lossless action is recorded and never shown).
+#[test]
+fn final_notice_shows_what_the_pages_action_left_out() {
+    let e = Env::with("final-pages", &["inacircle-pages"]);
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let page = testzip::png(8, 8, 0, None, false, false, &rows);
+    let cbz = testzip::zip(&[
+        (b"1.png", &page, testzip::Store::Stored),
+        (b"ComicInfo.xml", b"<ComicInfo/>", testzip::Store::Stored),
+    ]);
+    e.bytes("book.cbz", &cbz);
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    let (fake, rx) = server(move |p, g| {
+        std::thread::sleep(Duration::from_millis(50));
+        let out = seen2.lock().unwrap().clone();
+        assert!(out.lines().any(|l| l.starts_with("done\t")), "{out}");
+        close(p, g.id);
+    });
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "pdf", "book.cbz"],
+    );
+    c.env("INACIRCLE_UNDO_WAIT_MS", "20000");
+    let r = run(c, &seen);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert!(
+        r.lines("warn")
+            .iter()
+            .any(|l| l.ends_with("1 non-image entries left out")),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].summary, "book.pdf");
+    assert!(
+        n[0].body.starts_with("Formatting was lost."),
+        "{:?} {}",
+        n[0].body,
+        r.stdout
+    );
 }
 
 #[test]
