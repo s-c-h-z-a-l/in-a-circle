@@ -555,3 +555,182 @@ fn unsupported_text_is_the_planned_copy() {
     );
     assert_eq!(t(&Unsupported::Lossless), "lossless JPEG is not supported");
 }
+
+/// A JPEG with an Exif APP1 whose IFD0 holds the given `(tag, value)`
+/// SHORT entries, in the given byte order, followed by a SOF segment.
+fn jpeg_with_exif(little: bool, entries: &[(u16, u16)]) -> Vec<u8> {
+    let w16 = |v: u16| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let w32 = |v: u32| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let mut body = b"Exif\0\0".to_vec();
+    body.extend_from_slice(if little { b"II*\0" } else { b"MM\0*" });
+    body.extend_from_slice(&w32(8));
+    body.extend_from_slice(&w16(entries.len() as u16));
+    for &(tag, value) in entries {
+        body.extend_from_slice(&w16(tag));
+        body.extend_from_slice(&w16(3)); // SHORT
+        body.extend_from_slice(&w32(1));
+        body.extend_from_slice(&w16(value));
+        body.extend_from_slice(&[0, 0]);
+    }
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    v.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+    v.extend_from_slice(&body);
+    v.extend_from_slice(&jpeg_sof(0xC0, 8, 8, 3)[2..]);
+    v
+}
+
+#[test]
+fn exif_orientation_in_either_byte_order_and_any_entry() {
+    for little in [false, true] {
+        let first = jpeg_with_exif(little, &[(0x0112, 6)]);
+        assert!(probe(&first, MAX).unwrap().orientation_ignored, "{little}");
+        // The orientation is not the first entry.
+        let third = jpeg_with_exif(little, &[(0x010F, 1), (0x011A, 72), (0x0112, 8)]);
+        assert!(probe(&third, MAX).unwrap().orientation_ignored, "{little}");
+        // Orientation 1 is normal, and no orientation at all is normal.
+        let normal = jpeg_with_exif(little, &[(0x010F, 1), (0x0112, 1)]);
+        assert!(!probe(&normal, MAX).unwrap().orientation_ignored);
+        let none = jpeg_with_exif(little, &[(0x010F, 1), (0x011A, 72)]);
+        assert!(!probe(&none, MAX).unwrap().orientation_ignored);
+    }
+}
+
+#[test]
+fn jpeg_stuffed_zero_outside_entropy_data_is_damaged() {
+    // FF 00 is not a marker; read as one with a 2-byte "segment" it would
+    // be skipped and the file would probe fine.
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0x00, 0x00, 0x02];
+    v.extend_from_slice(&jpeg_sof(0xC0, 8, 8, 3)[2..]);
+    assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged);
+}
+
+#[test]
+fn jpeg_sof_segment_sizes_around_the_fixed_part() {
+    // A SOF segment of exactly the 6 fixed bytes names zero components.
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 8, 8, 0, 8, 0, 8, 0];
+    v.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
+    assert_eq!(
+        probe(&v, MAX).unwrap_err(),
+        ProbeError::Unsupported(Unsupported::JpegComponents(0))
+    );
+    // Shorter than that is damaged, never a read past the segment.
+    for body in 0..6u16 {
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xC0];
+        v.extend_from_slice(&(body + 2).to_be_bytes());
+        v.extend(std::iter::repeat_n(8u8, usize::from(body)));
+        v.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
+        assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged, "{body}");
+    }
+}
+
+/// A PNG chunk header (length, type) with nothing behind it.
+fn bare_chunk_header(len: u32) -> Vec<u8> {
+    let mut v = png_gray(5, 3)[..33].to_vec();
+    v.extend_from_slice(&len.to_be_bytes());
+    v.extend_from_slice(b"IDAT");
+    v
+}
+
+#[test]
+fn png_chunk_length_limit_is_2_pow_31_minus_1() {
+    // The largest legal length is cut short by the file; one more is damaged.
+    assert_eq!(
+        probe(&bare_chunk_header(0x7FFF_FFFF), MAX).unwrap_err(),
+        ProbeError::Truncated
+    );
+    for len in [0x8000_0000, 0xFFFF_FFFF] {
+        assert_eq!(
+            probe(&bare_chunk_header(len), MAX).unwrap_err(),
+            ProbeError::Damaged,
+            "{len:#x}"
+        );
+    }
+}
+
+#[test]
+fn png_ihdr_must_be_unique_and_13_bytes() {
+    let ok = png_gray(5, 3);
+    // A second IHDR.
+    let v = insert_after_ihdr(ok.clone(), &ok[8..33]);
+    assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged);
+    // An IHDR of 14 bytes (CRC fixed) is the wrong size even when the first
+    // 13 bytes are fine.
+    let mut data = ok[16..29].to_vec();
+    data.push(0);
+    let mut v = ok[..8].to_vec();
+    v.extend_from_slice(&chunk(b"IHDR", &data));
+    v.extend_from_slice(&ok[33..]);
+    assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged);
+}
+
+#[test]
+fn png_palette_size_and_count_rules() {
+    let palette = |entries: usize| {
+        let plte = vec![9u8; 3 * entries];
+        testzip::png(4, 2, 3, Some(&plte), false, false, &raw_rows(4, 2, 1))
+    };
+    // 1 to 256 entries are fine; 257 entries do not fit 8-bit indices.
+    for n in [1, 255, 256] {
+        assert!(probe(&palette(n), MAX).is_ok(), "{n} entries");
+    }
+    assert_eq!(probe(&palette(257), MAX).unwrap_err(), ProbeError::Damaged);
+    assert_eq!(probe(&palette(0), MAX).unwrap_err(), ProbeError::Damaged);
+    // A second PLTE before the image data.
+    let base = testzip::png(4, 2, 3, Some(&[1, 2, 3]), false, false, &raw_rows(4, 2, 1));
+    let v = insert_after_ihdr(base, &chunk(b"PLTE", &[4, 5, 6]));
+    assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged);
+}
+
+#[test]
+fn png_ihdr_method_fields_are_each_checked() {
+    for field in [10usize, 11, 12] {
+        let v = patch_ihdr(png_gray(5, 3), |h| h[field] = 2);
+        assert_eq!(probe(&v, MAX).unwrap_err(), ProbeError::Damaged, "{field}");
+    }
+}
+
+#[test]
+fn png_pixel_limit_is_inclusive() {
+    let png = png_gray(5, 3);
+    assert!(probe(&png, 15).is_ok());
+    assert_eq!(probe(&png, 14).unwrap_err(), ProbeError::TooLarge);
+}
+
+#[test]
+fn png_filter_byte_is_checked_at_the_start_of_every_row() {
+    // 101-byte rows: the inflate output chunks end in the middle of a row,
+    // and the next chunk starts with the rest of it. The bad filter byte
+    // is the first byte of a row that starts in the second chunk.
+    let (w, h) = (100usize, 400usize);
+    let mut rows = raw_rows(w, h, 1);
+    let bad_row = 32_768 / 101 + 1;
+    rows[bad_row * 101] = 9;
+    let png = testzip::png(w as u32, h as u32, 0, None, false, false, &rows);
+    assert_eq!(
+        check_png_data(&png, &info_of(&png)).unwrap_err(),
+        ProbeError::Damaged
+    );
+    // The same image with valid filter bytes passes.
+    let png = testzip::png(
+        w as u32,
+        h as u32,
+        0,
+        None,
+        false,
+        false,
+        &raw_rows(w, h, 1),
+    );
+    check_png_data(&png, &info_of(&png)).unwrap();
+}
