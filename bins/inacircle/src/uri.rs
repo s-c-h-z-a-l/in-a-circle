@@ -47,12 +47,20 @@ pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
 
 /// How many bytes of a consumed list may stay allocated past what is
 /// still unparsed before they are given back: 64 KiB, 1/16 of `MAX_BYTES`.
-/// The list at its limit is then released in at most 16 steps (a
-/// `realloc` that shrinks in place: an `mremap` for a large buffer, no
-/// copy), and the list and its paths overlap by at most this much, 1.3% of
+/// The list at its limit is then released in at most 16 steps (on glibc a
+/// `realloc` that shrinks is done in place: an `mremap` for a large
+/// buffer, a split of the chunk on the heap, no copy), and the list and its paths overlap by at most this much, 1.3% of
 /// the 5,000,000 B memory budget. Smaller costs more calls for no
 /// measurable gain; larger keeps more of the list beside its paths.
+#[cfg(not(fuzzing))]
 const RELEASE_STEP: usize = 64 * 1024;
+
+/// The fuzz build's step: 64 B, so that every fuzz input a few hundred
+/// bytes long reaches the shrink (libFuzzer's inputs stay far below 64 KiB
+/// by default, and the corpus is small). The step moves no logic: it only
+/// decides when the same `shrink_to_fit` runs.
+#[cfg(fuzzing)]
+const RELEASE_STEP: usize = 64;
 
 /// [`parse_uri_list`] on a list it consumes: the same paths in the same
 /// order, but the list is decoded from its end and its bytes are given

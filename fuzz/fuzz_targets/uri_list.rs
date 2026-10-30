@@ -1,6 +1,6 @@
 #![no_main]
-//! `parse_uri_list` and `parse_uri_list_owned` (checked equal) on
-//! arbitrary bytes: the `text/uri-list` another application puts in a drag.
+//! `parse_uri_list` and `parse_uri_list_owned` (checked equal) and
+//! `too_many` on arbitrary bytes: the `text/uri-list` another application puts in a drag.
 //! The shipped source is included as is (it is std-only), so the fuzzed
 //! code is the shipped code.
 
@@ -13,6 +13,11 @@ mod uri;
 fuzz_target!(|data: &[u8]| {
     // The caller reads at most MAX_BYTES (1 MiB); keep -max_len at or below it.
     let paths = uri::parse_uri_list(data);
+    // The wheel's refusal pass over the same foreign bytes: it must agree
+    // with the parse (a list it passes yields at most MAX_URIS paths).
+    if !uri::too_many(data) {
+        assert!(paths.len() <= uri::MAX_URIS);
+    }
     // The wheel's consuming parse must give the same paths.
     assert_eq!(uri::parse_uri_list_owned(data.to_vec()), paths);
 });
