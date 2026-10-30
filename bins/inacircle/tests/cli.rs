@@ -287,6 +287,83 @@ fn cbz_to_pdf_end_to_end() {
     assert!(o.stdout.contains("preset=pdf"), "{}", o.stdout);
 }
 
+/// A PNG page for the image-join tests: 8x8, 8-bit gray, no alpha.
+fn gray_png() -> Vec<u8> {
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    testzip::png(8, 8, 0, None, false, false, &rows)
+}
+
+/// A JPEG page for the image-join tests (a probe fixture, not duplicated).
+fn rgb_jpeg() -> Vec<u8> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// Two images and a text file through the real `inacircle-pages` under the
+/// real sandbox: one PDF of two pages in the folder-named wrapper, one
+/// history group, the text file skipped, and Undo trashes the wrapper.
+#[test]
+fn images_to_pdf_end_to_end() {
+    let e = Env::with_actions("img2pdf", &["inacircle-pages"]);
+    let jpg = rgb_jpeg();
+    let png = gray_png();
+    e.file("Nyaralás/1.jpg", &jpg);
+    e.file("Nyaralás/2.png", &png);
+    e.file("Nyaralás/jegyzet.txt", b"nem kep\n");
+    let o = e.run(&[
+        "run",
+        "pdf",
+        "Nyaralás/1.jpg",
+        "Nyaralás/2.png",
+        "Nyaralás/jegyzet.txt",
+    ]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let wrapper = e.files().join("Nyaralás/Nyaralás");
+    let out = wrapper.join("Nyaralás.pdf");
+    assert_eq!(o.summary(), (2, 1, 0), "{}", o.stdout);
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| Path::new(p) == out), "{done:?}");
+    assert_eq!(
+        o.pairs("skip"),
+        [(
+            e.files().join("Nyaralás/jegyzet.txt"),
+            "unsupported".to_owned()
+        )]
+    );
+    let pdf = fs::read(&out).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    // Two pages: one `/Type /Page ` object per image (`/Pages` is the tree).
+    let pages = pdf.windows(12).filter(|w| w == b"/Type /Page ").count();
+    assert_eq!(pages, 2, "page objects in the PDF");
+
+    let job = o.job();
+    let h = e.history();
+    let mine: Vec<&str> = h.lines().filter(|l| l.contains(&job)).collect();
+    let count = |kind: &str| {
+        mine.iter()
+            .filter(|l| l.split('\t').next() == Some(kind))
+            .count()
+    };
+    assert_eq!(count("group-begin"), 1, "{h}");
+    assert_eq!(count("publish-commit"), 1, "{h}");
+    assert_eq!(count("skip"), 1, "{h}");
+    assert!(
+        mine.iter()
+            .any(|l| l.starts_with("skip\t") && l.contains("reason=unsupported")),
+        "{h}"
+    );
+
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    let trash = e.root.join("home/.local/share/Trash/files");
+    assert!(!wrapper.exists(), "the wrapper is still there");
+    assert!(trash.join("Nyaralás/Nyaralás.pdf").is_file());
+    // The inputs are untouched.
+    assert_eq!(fs::read(e.files().join("Nyaralás/1.jpg")).unwrap(), jpg);
+    assert_eq!(fs::read(e.files().join("Nyaralás/2.png")).unwrap(), png);
+}
+
 // ---- text conversions through the real inacircle-text ----
 
 #[test]

@@ -486,6 +486,61 @@ fn wheel_offers_and_runs_cbz_to_pdf() {
     assert_eq!(fs::read(&src).unwrap(), cbz, "the source changed");
 }
 
+/// Real `inacircle-pages` on the wheel: three images and a text file are
+/// dropped, Book (east) lights, the PDF slice (north) is clicked, and one
+/// PDF of the three images appears; the hub counts `3 / 4 files`.
+#[test]
+fn wheel_offers_and_runs_images_to_pdf() {
+    let root = Root::new("img2pdf");
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let png = testzip::png(8, 8, 0, None, false, false, &rows);
+    let jpg_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    let jpg = fs::read(&jpg_path).unwrap();
+    root.real_action_cached("inacircle-pages", ("primer.png", &png), "pdf");
+    let dir = root.0.join("f/Nyaralás");
+    fs::create_dir_all(&dir).unwrap();
+    let mut list = Vec::new();
+    for (name, data) in [
+        ("1.jpg", &jpg),
+        ("2.png", &png),
+        ("3.png", &png),
+        ("jegyzet.txt", &b"nem kep\n".to_vec()),
+    ] {
+        let p = dir.join(name);
+        fs::write(&p, data).unwrap();
+        list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+    }
+    // The hub text the wheel shows for this set (the same classification
+    // and count as the drop's): 3 of the 4 files apply to the PDF slice.
+    let offer = root
+        .cmd()
+        .arg("offer")
+        .args(["1.jpg", "2.png", "3.png", "jegyzet.txt"].map(|n| dir.join(n)))
+        .output()
+        .unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(
+        offer.contains("preset=pdf") && offer.contains("hub\t3 / 4 files"),
+        "{offer}"
+    );
+    // Book is east of the center, PDF is its north slice.
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (960, 390));
+    assert_eq!(code, Some(0));
+    let pdf = fs::read(dir.join("Nyaralás/Nyaralás.pdf")).expect("no PDF written");
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert_eq!(
+        pdf.windows(12).filter(|w| w == b"/Type /Page ").count(),
+        3,
+        "one page per image"
+    );
+    assert_eq!(
+        fs::read(dir.join("1.jpg")).unwrap(),
+        jpg,
+        "the source changed"
+    );
+}
+
 /// The same path with `inacircle-text`: Document (north), Markdown (north).
 /// Until now no test ran an action chosen on the wheel.
 #[test]
