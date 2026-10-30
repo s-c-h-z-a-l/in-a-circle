@@ -1,2 +1,0 @@
-inacircle-manifest 0
-action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=maybe

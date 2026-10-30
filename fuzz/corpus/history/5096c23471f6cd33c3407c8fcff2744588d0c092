@@ -1,5 +1,0 @@
-inacircle-history 0
-out	job=10-1	in=/i	patino=5
-dir	job=10-0	ip	job=10-1	in=/i=
-dir	job=10-0	path=/osid=10-1	tijob=10-ev=4	in'=5
-dir	job=10-0	*ath10-1fail	job=10-1	i0-d0

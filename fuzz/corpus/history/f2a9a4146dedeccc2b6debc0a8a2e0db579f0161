@@ -1,7 +1,0 @@
-inacircle-history 0
-out	job=10-1	in=/i	path=/o/a	size=2	mtime=2	ctime=3	dev=4	ino=5	undo=no
-garbagetory 0
-out	job=10-1	in=/i	path=/o/a	size=1	mtime=2	ctime=3	dev=4	ino=5	undo=no
-g0
-out	job=10-1	in=/i	path=/o/a	size=1	mtime=2	ctime=3	dev=4	ino=5	undo=no
-garb———m

@@ -1,7 +1,0 @@
-inacircle-history 0
-s
-f:ih	job=10
-f:ih	job=10-1	i/ts
-
-job2	id=10-is
-f:ih	job=10
