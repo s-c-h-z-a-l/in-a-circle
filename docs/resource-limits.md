@@ -182,8 +182,14 @@ holds for a run, inside the `inacircle` budget (5,000,000 B PSS: wheel,
 engine and supervisor). It holds each input path once: the steps' inputs,
 the groups and the join's anchor borrow from the run's one list; the
 `--inputs-from` file is streamed to disk, not built in memory; the
-history's per-input tally keys an input by a 128-bit keyed hash of its
-path, not by a copy.
+history's per-input tally keys an input by two hashes of its path under
+one random key of std's keyed default hasher (128 bits), not by a copy.
+Two inputs share both with a probability below n^2 / 2^129 (about 2^-109
+at 1024 inputs); they would then count as one, which can change the
+tally's counts and what is derived from them, the history job line's
+`status` (`partial` read as `done`) and the notice's summary. What is
+published, the per-input history lines and the refusal to undo a run
+with an unknown publication do not depend on the tally's keys.
 `inacircle run` takes its arguments over, so its argv on the heap becomes
 the list (the kernel's copy on the stack stays). The wheel decodes a
 dropped list from its end and gives its bytes back as they become paths

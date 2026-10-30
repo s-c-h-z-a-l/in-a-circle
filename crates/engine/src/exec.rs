@@ -116,13 +116,18 @@ pub enum Outcome {
 /// entry per input, never per outcome.
 ///
 /// An input is known by two domain-separated hashes of its path under one
-/// random SipHash key (128 bits), not by a copy of the path: a run's
-/// inputs can be 1 MiB of paths (`action::INPUT_TOTAL_PATH_BYTES`), and a
-/// copy here would put the run over the 5 MB memory budget. The hash
-/// follows path equality, as a path key did. Two of `n` inputs share both
-/// hashes with a probability below n^2 / 2^129 (about 2^-109 at the
-/// invocation's 1024, `action::INPUT_COUNT`); only a count would be off
-/// then, never what is published.
+/// random key of std's keyed default hasher (`RandomState`; 128 bits), not
+/// by a copy of the path: a run's inputs can be 1 MiB of paths
+/// (`action::INPUT_TOTAL_PATH_BYTES`), and a copy here would put the run
+/// over the 5 MB memory budget. The hash follows path equality, as a path
+/// key did. Two of `n` inputs share both hashes with a probability below
+/// n^2 / 2^129 (about 2^-109 at the invocation's 1024,
+/// `action::INPUT_COUNT`). They would then count as one, with the stronger
+/// outcome: the counts could be off, and with them what is derived from
+/// them, the history job line's `status` (`partial` read as `done`) and
+/// the notice's summary. Never what is published, the per-input history
+/// lines (written from each outcome) or the refusal to undo a run with an
+/// unknown publication (`unknown` stays at least 1).
 #[derive(Debug, Default)]
 pub struct Tally {
     key: RandomState,
@@ -2820,6 +2825,38 @@ pub(crate) mod tests {
         violation(p("progress\tlots"));
         violation(p("progress"));
         violation(p("progress\t0.5\t0.6"));
+    }
+
+    /// The `--inputs-from` list the engine streams reads back, through the
+    /// action side's own parser, as exactly the paths written: a tab, a
+    /// newline, a carriage return and a backslash (alone, and before an
+    /// escape letter) survive the escaping, as do a space and non-ASCII.
+    #[test]
+    fn the_streamed_input_list_reads_back_identically() {
+        let t = Tmp::new("list");
+        let list = t.0.join("inputs");
+        let paths: Vec<PathBuf> = [
+            "/tab\there.md",
+            "/new\nline/x.md",
+            "/cr\r.md",
+            "/back\\slash\\n.md",
+            "/ends\\",
+            "/with space/á.md",
+            "/plain.md",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let borrowed: Vec<Cow<Path>> = paths.iter().map(|p| Cow::Borrowed(p.as_path())).collect();
+        write_list(&list, &borrowed).unwrap();
+        let args = ["run", "a", "--work", "/w", "--inputs-from"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .chain([list.into_os_string(), "--".into()]);
+        let Ok(action::Command::Run(inv)) = action::parse_args(args) else {
+            panic!("the list does not parse");
+        };
+        assert_eq!(inv.inputs, paths);
     }
 
     /// Per input its strongest outcome, each input once: the tally keys an
