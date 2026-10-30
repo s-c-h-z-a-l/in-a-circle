@@ -13,7 +13,7 @@ const MAX: u64 = 180_000_000;
 // ---------- inputs ----------
 
 fn jpeg_fixture(name: &str) -> Vec<u8> {
-    // The JPEG fixtures live only in crates/probe/tests/data (ruling P9-D-02).
+    // The JPEG fixtures live only in crates/probe/tests/data, so they are not duplicated.
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../probe/tests/data")
         .join(name);
