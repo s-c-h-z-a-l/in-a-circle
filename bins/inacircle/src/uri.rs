@@ -10,21 +10,36 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
-/// Most bytes read from a drop.
-pub const MAX_BYTES: usize = 64 * 1024;
-/// Most URIs (comments and blank lines aside) looked at in a drop, dropped
-/// entries included; later ones are ignored. The path is kept as given:
-/// non-UTF-8 bytes and `..` stay, as on the command line.
+/// Most bytes read from a drop: 1 MiB, the most an action invocation
+/// accepts as its path list (`action::INPUT_LIST_BYTES`; a test keeps the
+/// two equal; a literal here because the fuzz target includes this file
+/// on its own). A list is turned into that invocation, so reading more
+/// than it takes would only fail later. Over it the wheel says "too many
+/// files" and offers nothing.
+pub const MAX_BYTES: usize = 1_048_576;
+/// Most URIs (comments and blank lines aside) in a drop, dropped entries
+/// included: the invocation's input count (`action::INPUT_COUNT`). More
+/// than this and the wheel says "too many files" and offers nothing,
+/// rather than silently working on a truncated selection. The path is kept
+/// as given: non-UTF-8 bytes and `..` stay, as on the command line.
 pub const MAX_URIS: usize = 1024;
 
-/// The local paths of a URI list, in order.
-pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
+/// The non-comment, non-blank lines of a list.
+fn entries(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     data.split(|&b| b == b'\n')
         .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
         .filter(|l| !l.is_empty() && !l.starts_with(b"#"))
-        .take(MAX_URIS)
-        .filter_map(path_of)
-        .collect()
+}
+
+/// Whether the list has more than `MAX_URIS` entries.
+pub fn too_many(data: &[u8]) -> bool {
+    entries(data).nth(MAX_URIS).is_some()
+}
+
+/// The local paths of a URI list, in order; at most `MAX_URIS` entries
+/// are looked at (the wheel refuses a longer list before this).
+pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
+    entries(data).take(MAX_URIS).filter_map(path_of).collect()
 }
 
 fn path_of(uri: &[u8]) -> Option<PathBuf> {
@@ -112,15 +127,29 @@ mod tests {
                 PathBuf::from("/enc?a#b"),
             ]
         );
-        // At most MAX_URIS entries.
+        // At most MAX_URIS entries are parsed; `too_many` tells the rest.
+        assert!(!too_many(
+            (0..MAX_URIS)
+                .map(|i| format!("file:///f{i}\n"))
+                .collect::<String>()
+                .as_bytes()
+        ));
         let many: String = (0..MAX_URIS + 1)
             .map(|i| format!("file:///f{i}\r\n"))
             .collect();
         let paths = parse_uri_list(many.as_bytes());
+        assert!(too_many(many.as_bytes()));
         assert_eq!(paths.len(), MAX_URIS);
         assert_eq!(
             paths.last(),
             Some(&PathBuf::from(format!("/f{}", MAX_URIS - 1)))
         );
+    }
+
+    /// The read limits are the invocation's.
+    #[test]
+    fn limits_match_the_invocation() {
+        assert_eq!(MAX_BYTES, action::INPUT_LIST_BYTES);
+        assert_eq!(MAX_URIS, action::INPUT_COUNT);
     }
 }

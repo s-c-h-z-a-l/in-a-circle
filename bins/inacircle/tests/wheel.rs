@@ -312,6 +312,16 @@ fn pss_kb(pid: u32) -> u64 {
     rollup_kb(pid, "Pss:")
 }
 
+/// The peak resident set (`VmHWM`) of a live process, in kB.
+fn vm_hwm_kb(pid: u32) -> u64 {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.split_whitespace().next()?.parse().ok())
+        .unwrap()
+}
+
 /// The anonymous memory (`Anonymous`) of a live process, in kB: its heap
 /// and stacks, which no other process shares, so what a drop adds to it
 /// does not depend on how many wheels run beside it.
@@ -724,6 +734,147 @@ fn a_large_drop_stays_within_the_memory_budget() {
         if let Err(why) = pss_gate(&samples) {
             panic!("{why}");
         }
+    }
+}
+
+impl Root {
+    /// `n` PNGs in `f/` whose paths are about 62 bytes (a long-ish real
+    /// path), their URI list, and the `inacircle-pages` action cached so
+    /// that Book (east) is lit for them.
+    fn png_list(&self, n: usize) -> Vec<u8> {
+        let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+        let png = testzip::png(8, 8, 0, None, false, false, &rows);
+        self.real_action_cached("inacircle-pages", ("primer.png", &png), "pdf");
+        let dir = self.0.join("f");
+        let width = 62usize.saturating_sub(dir.as_os_str().len() + 1 + 4);
+        let mut list = Vec::new();
+        for i in 0..n {
+            let p = dir.join(format!("{i:_<width$}.png"));
+            fs::write(&p, &png).unwrap();
+            assert!(p.as_os_str().len() >= 60, "{}", p.display());
+            list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+        }
+        list
+    }
+}
+
+/// Book is east of the center.
+const BOOK: (u32, u32) = (1110, 540);
+
+/// The 1000-image drag that used to do nothing: its URI list is over the
+/// old 64 KiB read limit. Early: level 1 comes with Book lit and the drop
+/// reaches stage 2. Peak memory is reported against the 5 MB PSS budget
+/// (checked in a release build).
+#[test]
+fn a_thousand_image_list_over_64_kib_reaches_stage_2() {
+    let root = Root::new("big1000");
+    let list = root.png_list(1000);
+    assert!(list.len() > 64 * 1024, "{} bytes", list.len());
+    let mut child = None;
+    let mut c = Compositor::serve(&root.0.join("runtime"), Duration::from_secs(2), || {
+        child = Some(
+            root.cmd()
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    });
+    let mut child = child.unwrap();
+    c.mapped(Duration::from_secs(2));
+    drag_to_category(&mut c, &list, BOOK);
+    let (pss, hwm) = (pss_kb(child.id()), vm_hwm_kb(child.id()));
+    eprintln!("1000-path drag at stage 2: PSS {pss} kB, VmHWM {hwm} kB");
+    if !cfg!(debug_assertions) {
+        assert!(pss * 1024 <= 5_000_000, "{pss} kB PSS");
+    }
+    c.close();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).code(),
+        Some(0)
+    );
+}
+
+/// The same list through the fallback: no early answer, the drop's own
+/// read, then level 1 with Book lit (a click would open stage 2).
+#[test]
+fn a_thousand_image_list_over_64_kib_is_read_after_the_drop() {
+    let root = Root::new("big1000drop");
+    let list = root.png_list(1000);
+    let (mut c, child) = start(&root, false);
+    let silent = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("early receive");
+    c.pump(Duration::from_millis(900));
+    assert!(reader_gone(&silent));
+    c.drop_it();
+    let w = c
+        .next_receive(0, Duration::from_secs(2))
+        .expect("the drop's own read");
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    finish(c, child);
+}
+
+/// A list past the limits (1025 URIs, or over 1 MiB) is refused with the
+/// hub text and nothing is offered: the early wheel shows it, the drop on
+/// it is rejected and closes, and the fallback shows it after the drop.
+#[test]
+fn a_list_over_the_limits_offers_nothing() {
+    // Real text files, so the old truncation to 1024 would have lit
+    // Document and taken the drop (the test fails without the refusal).
+    let files_root = Root::new("refuse-files");
+    let many = files_root.files(1025);
+    let huge: Vec<u8> = (0..200)
+        .flat_map(|i| format!("file:///{i}/{}\r\n", "a".repeat(6000)).into_bytes())
+        .collect();
+    assert!(huge.len() > 1_048_576);
+    for (name, list) in [("many", many), ("huge", huge)] {
+        let root = Root::new(&format!("refuse-{name}"));
+        root.markdown_action_cached();
+        // Early: the refusal wheel replaces `Drop here`; the drop on a
+        // slice is rejected, so the wheel closes with no stage 2.
+        let (mut c, mut child) = start(&root, false);
+        let w = c
+            .drag_enters(0, Duration::from_secs(2))
+            .expect("early receive");
+        // The wheel stops reading past the limit: a closed pipe is fine.
+        std::thread::spawn({
+            let list = list.clone();
+            move || {
+                let _ = std::io::Write::write_all(&mut std::fs::File::from(w), &list);
+            }
+        });
+        c.attached(2, Duration::from_secs(5));
+        c.release_held();
+        // North: Document, which the truncated list would have lit.
+        c.drag_motion(960, 390);
+        c.pump(Duration::from_millis(200));
+        c.drop_it();
+        assert_eq!(
+            wait_exit(&mut child, Duration::from_secs(5)).code(),
+            Some(0),
+            "{name}"
+        );
+        assert_eq!(c.attaches(), 2, "{name}: no stage 2");
+        drop(c);
+        // After the drop: the refusal wheel stays up (a click closes it).
+        let root = Root::new(&format!("refuse-drop-{name}"));
+        root.markdown_action_cached();
+        let (mut c, child) = start(&root, false);
+        let silent = c
+            .drag_enters(0, Duration::from_secs(2))
+            .expect("early receive");
+        c.pump(Duration::from_millis(900));
+        assert!(reader_gone(&silent));
+        c.drop_it();
+        let w = c
+            .next_receive(0, Duration::from_secs(2))
+            .expect("the drop's own read");
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut std::fs::File::from(w), &list);
+        });
+        c.attached(2, Duration::from_secs(5));
+        finish(c, child);
     }
 }
 

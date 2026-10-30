@@ -46,7 +46,7 @@ use wire::{Arg::*, Conn, DISPLAY, Event, Iface, op};
 
 use crate::measure::Meter;
 use crate::uri::MAX_BYTES;
-use crate::wheel::{Effect, Input, KEY_ESC, Machine, STAGE, URI_LIST};
+use crate::wheel::{Effect, Input, KEY_ESC, LIST_TOO_BIG, Machine, STAGE, URI_LIST};
 
 const FRAME: usize = (BOX * BOX * 4) as usize;
 /// Both wheel buffers, then the 1x1 background pixel.
@@ -303,10 +303,9 @@ impl Reading {
         Reading {
             fd,
             offer,
-            // Room for the limit and one more read: never regrown (a
-            // doubling would hold two copies). Pages are touched only as
-            // data arrives.
-            data: Vec::with_capacity(MAX_BYTES + READ_CHUNK),
+            // Grows with the data (doubling): a normal drag of a few files
+            // costs one chunk, not the 1 MiB limit.
+            data: Vec::with_capacity(READ_CHUNK),
             until,
         }
     }
@@ -324,7 +323,7 @@ impl Reading {
                 n if n > 0 => {
                     self.data.extend_from_slice(&buf[..n as usize]);
                     if self.data.len() > MAX_BYTES {
-                        return Some(Err(format!("URI list over {MAX_BYTES} bytes")));
+                        return Some(Err(LIST_TOO_BIG.into()));
                     }
                 }
                 _ => {
@@ -1705,8 +1704,9 @@ mod tests {
         let r = pump_all(MAX_BYTES).expect("the limit itself is fine");
         assert_eq!(r.len(), MAX_BYTES);
         let r = pump_all(MAX_BYTES + 1);
-        assert!(r.as_ref().is_err_and(|e| e.contains("bytes")), "{r:?}");
-        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
+        assert_eq!(r.as_ref().err().map(String::as_str), Some(LIST_TOO_BIG));
+        // Said on the hub, not a silent close.
+        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Draw]);
     }
 
     /// A `poll` that returns at one of our own deadlines (the stage's, or

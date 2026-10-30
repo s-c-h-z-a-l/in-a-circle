@@ -36,6 +36,14 @@ pub const URI_LIST: &str = "text/uri-list";
 
 pub const DROP_HERE: &str = "Drop here";
 pub const NOTHING: &str = "Nothing to do";
+/// The hub text for a drop list past the byte or URI limit. Short on
+/// purpose: "too many files (max 1024)" is 184 px, the hub shows 108
+/// (`HUB_TEXT_W`) and would cut it to "too many file…"; this one is 101 px
+/// (a test keeps it whole and in the atlas). The limit is in the docs.
+pub const TOO_MANY: &str = "too many files";
+/// The read's error for a list past `uri::MAX_BYTES`: it ends in the same
+/// hub text as a list with too many URIs.
+pub const LIST_TOO_BIG: &str = "URI list over the byte limit";
 /// Stage 2 before the catalog was ever cached: nothing can be offered.
 pub const NO_ACTIONS: &str = "No actions yet";
 
@@ -367,14 +375,12 @@ impl Machine {
                 if let (Phase::Dragging { .. }, Early::Pending) = (self.phase, self.early)
                     && seq == self.early_seq
                 {
-                    match r {
-                        Ok(bytes) => {
-                            self.show_groups(&bytes);
-                            self.early = Early::Ready;
-                            self.settle(&mut fx, true);
-                            self.update_accept(&mut fx);
-                        }
-                        Err(_) => self.early = Early::Failed,
+                    if self.show_list(r) {
+                        self.early = Early::Ready;
+                        self.settle(&mut fx, true);
+                        self.update_accept(&mut fx);
+                    } else {
+                        self.early = Early::Failed;
                     }
                 }
             }
@@ -402,13 +408,11 @@ impl Machine {
             },
             Input::DropData(r) => {
                 if self.phase == Phase::Reading {
-                    match r {
-                        Ok(bytes) => {
-                            self.show_groups(&bytes);
-                            self.phase = Phase::Grouping;
-                            self.settle(&mut fx, true);
-                        }
-                        Err(_) => self.close(&mut fx),
+                    if self.show_list(r) {
+                        self.phase = Phase::Grouping;
+                        self.settle(&mut fx, true);
+                    } else {
+                        self.close(&mut fx);
                     }
                 }
             }
@@ -440,6 +444,33 @@ impl Machine {
     /// Whether the early list was accepted and level 1 is built from it.
     pub fn early_ready(&self) -> bool {
         self.early == Early::Ready
+    }
+
+    /// Level 1 from a read's result; false if the list could not be read.
+    /// A list past the limits shows `TOO_MANY` with nothing lit (fail
+    /// closed: no truncated selection), like an empty one shows `Nothing
+    /// to do`.
+    fn show_list(&mut self, r: Result<Vec<u8>, String>) -> bool {
+        match r {
+            Ok(bytes) if !crate::uri::too_many(&bytes) => self.show_groups(&bytes),
+            Ok(_) => self.show_refused(),
+            Err(e) if e == LIST_TOO_BIG => self.show_refused(),
+            Err(_) => return false,
+        }
+        true
+    }
+
+    /// Level 1 with nothing on offer and `TOO_MANY` in the hub.
+    fn show_refused(&mut self) {
+        let gm = GroupMenu {
+            paths: Vec::new(),
+            slices: Default::default(),
+            hub: TOO_MANY.into(),
+            tally: Tally::default(),
+            catalog: None,
+        };
+        self.set_wheel(group_wheel(&gm), gm.hub.clone());
+        self.groups = Some(gm);
     }
 
     /// Level 1 from the list, onto the wheel.
@@ -1407,6 +1438,41 @@ mod tests {
         m.on(Input::Click(BTN_LEFT));
         assert_eq!(m.stage(), Stage::Choosing);
         assert_eq!(m.hover(), Some(0));
+    }
+
+    /// A list past the limits (bytes, or more than 1024 URIs) says why and
+    /// offers nothing, early and after the drop; it never offers a
+    /// truncated selection.
+    #[test]
+    fn a_list_over_the_limits_is_refused_with_a_reason() {
+        let many: Vec<u8> = (0..=crate::uri::MAX_URIS)
+            .flat_map(|i| format!("file:///f{i}\n").into_bytes())
+            .collect();
+        for r in [Ok(many), Err(LIST_TOO_BIG.to_owned())] {
+            let mut m = dragging();
+            let fx = m.on(Input::DragList(1, r.clone()));
+            assert_eq!(fx, [Effect::Draw, Effect::Accept(false)]);
+            assert_eq!(m.hub(), TOO_MANY);
+            assert_eq!(m.on(Input::Drop), [Effect::Close]);
+            // After the drop: the reason stays until a click closes.
+            let mut m = reading();
+            assert_eq!(m.on(Input::DropData(r)), [Effect::Draw]);
+            assert_eq!(m.hub(), TOO_MANY);
+            assert_eq!(m.on(Input::PointerAt(HUB.0, HUB.1)), []);
+            assert_eq!(m.on(Input::Click(BTN_LEFT)), [Effect::Close]);
+        }
+        // Another read error is not this: the fallback / close as before.
+        let mut m = reading();
+        assert_eq!(
+            m.on(Input::DropData(Err("timed out".into()))),
+            [Effect::Close]
+        );
+    }
+
+    #[test]
+    fn the_refusal_text_fits_the_hub_whole() {
+        assert_eq!(ui::text::fit(TOO_MANY, ui::wheel::HUB_TEXT_W), TOO_MANY);
+        assert!(ui::atlas::get().has_all(TOO_MANY));
     }
 
     #[test]

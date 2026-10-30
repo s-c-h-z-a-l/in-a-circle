@@ -692,7 +692,7 @@ compositor.
   the category's label. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
-  it into a pipe at once, read in the `poll` loop (500 ms, 64 KiB, 1024
+  it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
   URIs). The result carries the tag (seq) of the `enter` that started it; a
   new `enter` (another offer, or out and back in) closes the pipe and the
   machine ignores an older tag, so an old list never shows. When the list
@@ -727,7 +727,10 @@ compositor.
   beyond it, `Outside`. `Hub` is a drop target and ignores clicks;
   `Outside` closes on click.
 - A `text/uri-list` read (early or after the drop) goes through a pipe with
-  a 500 ms deadline, at most 64 KiB and 1024 URIs. A source that never
+  a 500 ms deadline, at most 1 MiB (the action invocation's path-list
+  limit) and 1024 URIs (its input count). A list over either shows `too many
+  files` in the hub and offers nothing (no truncated selection), early and
+  after the drop. A source that never
   writes or never closes times out. A failed early read falls back; a
   failed read after the drop closes the wheel.
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`

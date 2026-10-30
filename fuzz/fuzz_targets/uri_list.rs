@@ -10,6 +10,6 @@ use libfuzzer_sys::fuzz_target;
 mod uri;
 
 fuzz_target!(|data: &[u8]| {
-    // The caller reads at most MAX_BYTES; the fuzzer's -max_len matches it.
+    // The caller reads at most MAX_BYTES (1 MiB); keep -max_len at or below it.
     let _ = uri::parse_uri_list(data);
 });

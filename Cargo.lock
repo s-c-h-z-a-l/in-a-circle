@@ -112,6 +112,7 @@ dependencies = [
 name = "inacircle"
 version = "0.0.0"
 dependencies = [
+ "action",
  "dbus",
  "engine",
  "libc",
