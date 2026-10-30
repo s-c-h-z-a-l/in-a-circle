@@ -437,6 +437,14 @@ impl Compositor {
         self.send(p, op::wl_pointer::MOTION, &words(&[0, x * 256, y * 256]));
     }
 
+    /// A button press on the pointer (`button` is the evdev code; the left
+    /// button is `0x110`), with a fresh serial like `key`.
+    pub fn pointer_button(&mut self, button: u32) {
+        self.serial += 1;
+        let (p, s) = (self.pointer, self.serial);
+        self.send(p, op::wl_pointer::BUTTON, &words(&[s, 0, button, 1]));
+    }
+
     /// A key press (`key` is the evdev code; Esc is 1).
     pub fn key(&mut self, key: u32) {
         self.serial += 1;
