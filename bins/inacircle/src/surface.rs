@@ -1751,6 +1751,49 @@ mod tests {
         writer.join().unwrap();
     }
 
+    /// The read buffer grows only when the next chunk does not fit, and
+    /// then to exactly double (`Vec::capacity` is deterministic for our own
+    /// `reserve_exact`): a chunk that fits exactly, or a small one with room
+    /// left, does not grow it.
+    #[test]
+    fn read_capacity_doubles_only_when_the_chunk_does_not_fit() {
+        let (r, w) = drop_pipe().unwrap();
+        let mut rd = reading(r);
+        let send = |n: usize| {
+            // SAFETY: writing n bytes from a live buffer to a valid fd.
+            let buf = vec![b'a'; n];
+            assert_eq!(
+                unsafe { libc::write(w.as_raw_fd(), buf.as_ptr().cast(), n) },
+                n as isize
+            );
+        };
+        let now = Instant::now();
+        // One byte into 4096 free: room left, no growth.
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!((rd.data.len(), rd.data.capacity()), (1, READ_CHUNK));
+        // Fills the buffer exactly (free == n): still no growth.
+        send(READ_CHUNK - 1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(
+            (rd.data.len(), rd.data.capacity()),
+            (READ_CHUNK, READ_CHUNK)
+        );
+        // One byte more with none free: doubled.
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 2 * READ_CHUNK);
+        // Fill to the doubled size exactly, then one more: doubled again,
+        // from a non-zero length (the `cap - len` size is the new room).
+        send(READ_CHUNK - 1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 2 * READ_CHUNK);
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 4 * READ_CHUNK);
+        assert_eq!(rd.data.len(), 2 * READ_CHUNK + 1);
+    }
+
     /// A `poll` that returns at one of our own deadlines (the stage's, or
     /// the drop read's) is not an idle wakeup; one with nothing ready
     /// before them is.

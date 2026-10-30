@@ -258,6 +258,68 @@ mod tests {
         assert_eq!(parse_uri_list_owned(big.into_bytes()).len(), MAX_URIS);
     }
 
+    /// Counts, per thread, the reallocations that give bytes back: what
+    /// `shrink_to_fit` does to a non-empty `Vec`, the observable of
+    /// `RELEASE_STEP` (the capacity is private to the parser).
+    struct Counting;
+    thread_local! {
+        static SHRINKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    // SAFETY: every method forwards to `System` with the arguments it got;
+    // the only addition is a counter in a const-initialized thread-local
+    // that needs no allocation.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+            unsafe { std::alloc::System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+            if n < l.size() {
+                let _ = SHRINKS.try_with(|c| c.set(c.get() + 1));
+            }
+            unsafe { std::alloc::System.realloc(p, l, n) }
+        }
+    }
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    fn shrinks_of(list: Vec<u8>) -> usize {
+        let before = SHRINKS.with(|c| c.get());
+        let _ = parse_uri_list_owned(list);
+        SHRINKS.with(|c| c.get()) - before
+    }
+
+    /// The consumed list is given back in `RELEASE_STEP` pieces: a small
+    /// list is never shrunk, a list of about 1 MiB is shrunk once per step
+    /// consumed (the step is at least `RELEASE_STEP`, and overshoots by less
+    /// than one line), not per line and not in tiny pieces.
+    #[test]
+    fn the_consumed_list_is_given_back_in_steps() {
+        let small: String = (0..100).map(|i| format!("file:///f{i}\r\n")).collect();
+        assert!(small.len() < RELEASE_STEP / 4);
+        assert_eq!(shrinks_of(small.into_bytes()), 0);
+
+        let long = "x".repeat(1000);
+        let big: String = (0..MAX_URIS)
+            .map(|i| format!("file:///{i}{long}\r\n"))
+            .collect();
+        let len = big.len();
+        assert!(len > 8 * RELEASE_STEP && len <= MAX_BYTES);
+        let n = shrinks_of(big.into_bytes());
+        // Each shrink needs RELEASE_STEP more bytes consumed, plus less
+        // than one line (about 1 KB) of overshoot.
+        assert!(
+            n <= len.div_ceil(RELEASE_STEP),
+            "{n} shrinks, too many for {len} B"
+        );
+        assert!(
+            n >= len / (RELEASE_STEP + 2000),
+            "{n} shrinks, too few for {len} B"
+        );
+    }
+
     /// The read limits are the invocation's.
     #[test]
     fn limits_match_the_invocation() {
