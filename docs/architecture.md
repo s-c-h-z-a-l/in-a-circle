@@ -292,13 +292,15 @@ Every action runs sandboxed, set up in the child between `fork` and
   for is useless anyway.
 - Binary formats: magic bytes in the first few KB decide; content beats a
   wrong extension.
-- Zip containers are looked into: ODF and EPUB declare their type in the
-  `mimetype` entry; OOXML is told apart by the central directory at the
-  end of the file (`word/document.xml`, `xl/workbook.xml`, …).
+- **Planned, not built yet:** zip containers are looked into: ODF and
+  EPUB declare their type in the `mimetype` entry; OOXML is told apart by
+  the central directory at the end of the file (`word/document.xml`,
+  `xl/workbook.xml`, …). Today the binary signatures give a label but no
+  type, so no action is offered for them.
 - Text: no magic and valid UTF-8 without NUL bytes means text; the exact
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
-  content cannot tell them apart. HTML and JSON are also recognised by
-  content.
+  content cannot tell them apart. Today that is plain text and Markdown;
+  recognising HTML and JSON by content is planned.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
@@ -318,9 +320,9 @@ Every action runs sandboxed, set up in the child between `fork` and
 - At most eight slices per ring and at most one sub-level, used only when
   the presets do not fit; then the first ring holds the target groups.
 - **Mixed selections** offer the presets of the most common type (ties
-  broken by a fixed type order) plus actions that make sense for many files
-  ("all into one archive"). The other files are skipped, and the hub says
-  so ("15 / 20").
+  broken by a fixed type order). The other files are skipped, and the hub
+  says so ("15 / 20"). Actions that make sense for many files ("all into
+  one archive") are planned; they need the many-to-one contract.
 
 ## Executor and supervisor
 
@@ -856,6 +858,8 @@ inacircle cancel <job-id>
 
 ## Configuration
 
+**Planned, not built yet.** Today the built-in defaults always apply.
+
 - `$XDG_CONFIG_HOME/inacircle/config.toml`, full **TOML 1.0** with a parser
   of our own (shared with the data family, tested against `toml-test`).
   Without a file, built-in defaults apply.
@@ -867,7 +871,7 @@ inacircle cancel <job-id>
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, action, toml, doc
+crates/   wire, dbus, ui, engine, manifest, action, doc (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; the shipped `inacircle` links them, never `doc`)
