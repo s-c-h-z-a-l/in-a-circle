@@ -103,6 +103,20 @@ nothing is created and no page is inflated. A running count of the bytes
 written is the second check; the half-written PDF is removed. So a CBZ of
 deflated flat pages cannot expand past the limit.
 
+The join action `pages.images-to-pdf` reads one image file at a time
+(bounded read, at most 64 MiB, `image is larger than 64 MiB`), checks it
+like a CBZ page (180 MP, PNG data walked once) and writes its page; the
+buffer is dropped before the next one. It keeps only the list of accepted
+inputs (a path each, at most 1,024 by the invocation limit) and the PDF
+writer's page offsets (about 100 B per page). 1,000 small images peak at
+3.3 MB `VmHWM` (debug build; the process baseline is about 1.7 MB); the
+test ceiling is 8 MB. The output ceiling is the same estimate as above,
+kept as a running sum over the accepted images (image size + 2,560 B per
+page + 1,024 B per file) and checked before each page is written, with the
+count of bytes actually written as the second check. Past it no input is
+taken, every input fails with `PDF would be larger than <N> MiB`, and the
+half-written PDF is removed.
+
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
 checking its scan data: the probe reads the markers, not the entropy

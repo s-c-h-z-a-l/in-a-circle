@@ -3,7 +3,10 @@
 //! order, JPEG and PNG data passed through unchanged (lossless). Contract
 //! v0 (docs/architecture.md). One CBZ gives one PDF, all or nothing: any
 //! page that cannot be taken makes the whole input `skip` or `fail` and the
-//! half-written PDF is removed.
+//! half-written PDF is removed. `pages.images-to-pdf` is a join action: any
+//! number of JPEG and PNG files become one PDF, one page per file in the
+//! given order; a file that cannot be taken is left out (`skip` or `fail`)
+//! and the rest is joined.
 
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
@@ -158,6 +161,21 @@ fn manifest_text() -> String {
             .pair("lossy", "yes")
             .pair("batch", "yes"),
     ));
+    s.push_str(&manifest::write_line(
+        &manifest::Line::new("action")
+            .bare("pages.images-to-pdf")
+            .pair("family", "pages")
+            .pair("in", "image/jpeg,image/png")
+            .pair("out", "application/pdf")
+            .pair("ext", "pdf")
+            .pair("label", "PDF")
+            .pair("group", "book")
+            .pair("cost", "10")
+            .pair("lossy", "yes")
+            .pair("batch", "yes")
+            .pair("join", "yes")
+            .pair("min", "1"),
+    ));
     s
 }
 
@@ -218,28 +236,33 @@ fn lossy(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-/// The `skip` or `fail` of a probe error on the page `name`.
-fn probe_stop<T>(name: &str, e: ProbeError) -> Result<T, Stop> {
+/// The `skip` or `fail` of a probe error on the page `name`. With `None`
+/// (a join input, whose path the event already names) the copy has no page
+/// prefix.
+fn probe_stop<T>(name: Option<&str>, e: ProbeError) -> Result<T, Stop> {
+    let with = |rest: String| match name {
+        Some(n) => format!("page {n}: {rest}"),
+        None => rest,
+    };
     match e {
-        ProbeError::NotImage => fail(format!("page {name}: not a JPEG or PNG")),
-        ProbeError::Truncated | ProbeError::Damaged => {
-            fail(format!("page {name}: damaged image data"))
+        ProbeError::NotImage => fail(with("not a JPEG or PNG".into())),
+        ProbeError::Truncated | ProbeError::Damaged => fail(with("damaged image data".into())),
+        ProbeError::TooLarge => {
+            let mp = MAX_PIXELS / 1_000_000;
+            fail(match name {
+                Some(n) => format!("page {n} is larger than {mp} megapixels"),
+                None => format!("image is larger than {mp} megapixels"),
+            })
         }
-        ProbeError::TooLarge => fail(format!(
-            "page {name} is larger than {} megapixels",
-            MAX_PIXELS / 1_000_000
-        )),
-        ProbeError::TooManyChunks => fail(format!(
-            "page {name}: PNG has more than {} data chunks",
+        ProbeError::TooManyChunks => fail(with(format!(
+            "PNG has more than {} data chunks",
             probe::MAX_IDAT_CHUNKS
-        )),
+        ))),
         ProbeError::Unsupported(Unsupported::JpegComponents(n)) => {
             // The probe's text is number-free here; the count is ours.
-            skip(format!(
-                "page {name}: JPEG with {n} components is not supported"
-            ))
+            skip(with(format!("JPEG with {n} components is not supported")))
         }
-        ProbeError::Unsupported(u) => skip(format!("page {name}: {}", probe::unsupported_text(&u))),
+        ProbeError::Unsupported(u) => skip(with(probe::unsupported_text(&u).into())),
     }
 }
 
@@ -424,12 +447,12 @@ fn convert(
         }
         let probed = match probe::probe(&buf, MAX_PIXELS) {
             Ok(p) => p,
-            Err(err) => return probe_stop(&name, err),
+            Err(err) => return probe_stop(Some(&name), err),
         };
         if let Image::Png(info) = &probed.image
             && let Err(err) = probe::check_png_data(&buf, info)
         {
-            return probe_stop(&name, err);
+            return probe_stop(Some(&name), err);
         }
         if probed.orientation_ignored {
             notes.orientation += 1;
@@ -515,6 +538,237 @@ fn run(inv: &Invocation) -> u8 {
     }
 }
 
+/// Why the whole join stopped: every input taken so far, and every one not
+/// yet looked at, fails with the same reason and nothing is published.
+struct Whole(String);
+
+/// The one output of a join in progress.
+struct JoinOut {
+    writer: pdf::Writer<BufWriter<Capped<File>>>,
+    /// Removes the half-written PDF on every way out but a finished join.
+    partial: Partial,
+    /// Upper bound of the file size so far (see `PAGE_OVERHEAD`).
+    estimate: u64,
+}
+
+/// What became of one join input that did not fail the whole join.
+#[derive(Clone, Copy, PartialEq)]
+enum Fate {
+    Taken,
+    Skipped,
+    Failed,
+}
+
+/// Add one image to the join. The input's own `skip` or `fail` is reported
+/// here and the join goes on; `Err` fails the whole join.
+fn join_one(
+    inv: &Invocation,
+    input: &Path,
+    cap: Option<u64>,
+    tripped: &Rc<Cell<bool>>,
+    out: &mut Option<JoinOut>,
+    ev: &mut Events<impl Write>,
+) -> Result<Fate, Whole> {
+    let too_large = |c: u64| Whole(format!("PDF would be larger than {} MiB", c >> 20));
+    // One image at a time, read whole and bounded: memory is the largest
+    // image, not the sum. `read_file_bounded` never waits on a FIFO.
+    let buf = match action::read_file_bounded(input, ENTRY_BYTES as usize) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            ev.fail(
+                input,
+                &format!("image is larger than {} MiB", ENTRY_BYTES >> 20),
+            );
+            return Ok(Fate::Failed);
+        }
+        Err(e) => {
+            ev.fail(input, &e.to_string());
+            return Ok(Fate::Failed);
+        }
+    };
+    let probed = match probe::probe(&buf, MAX_PIXELS) {
+        Ok(p) => p,
+        Err(e) => return Ok(report(input, probe_stop(None, e), ev)),
+    };
+    if let Image::Png(info) = &probed.image
+        && let Err(e) = probe::check_png_data(&buf, info)
+    {
+        return Ok(report(input, probe_stop(None, e), ev));
+    }
+
+    // The output ceiling: the sum of the image sizes plus the PDF structure
+    // is the file size at the worst, checked before the page is written.
+    let add = (buf.len() as u64).saturating_add(PAGE_OVERHEAD);
+    let before = out.as_ref().map_or(FILE_OVERHEAD, |o| o.estimate);
+    let estimate = before.saturating_add(add);
+    if let Some(c) = cap
+        && estimate > c
+    {
+        return Err(too_large(c));
+    }
+    if out.is_none() {
+        // Created on the first image that can be taken, so a join with
+        // nothing to take leaves no file and no `join/` folder behind.
+        let path = action::join_path(&inv.work, "pdf");
+        if let Some(dir) = path.parent()
+            && let Err(e) = fs::create_dir_all(dir)
+        {
+            return Err(Whole(format!("cannot create output: {e}")));
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| Whole(format!("cannot create output: {e}")))?;
+        let partial = Partial { path, armed: true };
+        let capped = Capped {
+            inner: file,
+            cap,
+            written: 0,
+            tripped: Rc::clone(tripped),
+        };
+        let writer =
+            pdf::Writer::new(BufWriter::new(capped)).map_err(|e| write_whole(e, cap, tripped))?;
+        *out = Some(JoinOut {
+            writer,
+            partial,
+            estimate: FILE_OVERHEAD,
+        });
+    }
+    let o = out.as_mut().expect("created above");
+    o.writer
+        .add_page(&buf, &probed.image)
+        .map_err(|e| write_whole(e, cap, tripped))?;
+    o.estimate = estimate;
+    if probed.orientation_ignored {
+        ev.warn(input, "orientation ignored");
+    }
+    if probed.profile_ignored {
+        ev.warn(input, "colour profile not embedded");
+    }
+    Ok(Fate::Taken)
+}
+
+/// Report a stopped input as its `skip` or `fail`.
+fn report(input: &Path, stop: Result<(), Stop>, ev: &mut Events<impl Write>) -> Fate {
+    match stop {
+        Err(Stop::Skip(r)) => {
+            ev.skip(input, &r);
+            Fate::Skipped
+        }
+        Err(Stop::Fail(r)) => {
+            ev.fail(input, &r);
+            Fate::Failed
+        }
+        Ok(()) => Fate::Taken,
+    }
+}
+
+/// A write error as the reason the whole join fails: the size ceiling by
+/// its own copy, anything else as an I/O error.
+fn write_whole(e: io::Error, cap: Option<u64>, tripped: &Rc<Cell<bool>>) -> Whole {
+    match cap {
+        Some(c) if tripped.get() => Whole(format!("PDF would be larger than {} MiB", c >> 20)),
+        _ => Whole(format!("cannot write output: {e}")),
+    }
+}
+
+/// `pages.images-to-pdf`. Events: `take` per image, `skip`/`fail`/`warn`
+/// per image, `joined` once. Exit: 0 with a `joined`; 3 when nothing was
+/// taken and every input was `skip`ped; else 1.
+fn run_join(inv: &Invocation) -> u8 {
+    if !inv.work.is_dir() {
+        eprintln!("work directory does not exist: {}", inv.work.display());
+        return action::EXIT_FAILED as u8;
+    }
+    let mut ev = Events::new(io::stdout().lock());
+    let n = inv.inputs.len();
+    ev.progress(0.0);
+    // Takes are reported only once the PDF is finished: a join that fails
+    // as a whole must not have announced inputs as taken.
+    let mut taken: Vec<&Path> = Vec::new();
+    let mut any_fail = false;
+    let mut whole: Option<Whole> = None;
+    let mut out: Option<JoinOut> = None;
+    let tripped = Rc::new(Cell::new(false));
+    let cap = match output_cap() {
+        Ok(c) => c,
+        Err(e) => {
+            whole = Some(Whole(format!("cannot read the output size limit: {e}")));
+            None
+        }
+    };
+    let mut next = 0;
+    if whole.is_none() {
+        for (i, input) in inv.inputs.iter().enumerate() {
+            if input.to_str().is_none() {
+                ev.skip(input, "non-UTF-8 path");
+                ev.progress((i + 1) as f32 / n as f32);
+                continue;
+            }
+            match join_one(inv, input, cap, &tripped, &mut out, &mut ev) {
+                Ok(Fate::Taken) => taken.push(input.as_path()),
+                Ok(Fate::Failed) => any_fail = true,
+                Ok(Fate::Skipped) => {}
+                Err(w) => {
+                    // The input that tripped it and all after it.
+                    next = i;
+                    whole = Some(w);
+                    break;
+                }
+            }
+            ev.progress((i + 1) as f32 / n as f32);
+        }
+    }
+
+    if let Some(Whole(reason)) = whole {
+        // Dropping `out` removes the half-written PDF.
+        drop(out);
+        for input in taken
+            .iter()
+            .copied()
+            .chain(inv.inputs[next..].iter().map(PathBuf::as_path))
+        {
+            ev.fail(input, &reason);
+        }
+        return action::EXIT_FAILED as u8;
+    }
+    let Some(JoinOut {
+        writer,
+        mut partial,
+        ..
+    }) = out
+    else {
+        // Nothing taken: 3 when every input was a `skip`, else 1.
+        return if any_fail {
+            action::EXIT_FAILED as u8
+        } else {
+            action::EXIT_UNSUPPORTED as u8
+        };
+    };
+    let finished = writer
+        .finish()
+        .and_then(|mut w| w.flush())
+        .map_err(|e| write_whole(e, cap, &tripped));
+    if let Err(Whole(reason)) = finished {
+        drop(partial);
+        for input in &taken {
+            ev.fail(input, &reason);
+        }
+        return action::EXIT_FAILED as u8;
+    }
+    partial.armed = false;
+    for input in &taken {
+        ev.take(input);
+    }
+    let rel = partial
+        .path
+        .strip_prefix(&inv.work)
+        .unwrap_or(&partial.path);
+    ev.joined(rel);
+    action::EXIT_OK as u8
+}
+
 fn main() -> ExitCode {
     let inv = match parse_args(std::env::args_os().skip(1)) {
         Ok(Command::Manifest) => {
@@ -527,11 +781,14 @@ fn main() -> ExitCode {
             return ExitCode::from(action::EXIT_USAGE as u8);
         }
     };
-    if inv.action != "pages.cbz-to-pdf" {
-        eprintln!("inacircle-pages: unknown action {}", inv.action);
-        return ExitCode::from(action::EXIT_USAGE as u8);
+    match inv.action.as_str() {
+        "pages.cbz-to-pdf" => ExitCode::from(run(&inv)),
+        "pages.images-to-pdf" => ExitCode::from(run_join(&inv)),
+        _ => {
+            eprintln!("inacircle-pages: unknown action {}", inv.action);
+            ExitCode::from(action::EXIT_USAGE as u8)
+        }
     }
-    ExitCode::from(run(&inv))
 }
 
 #[cfg(test)]

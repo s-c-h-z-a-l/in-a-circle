@@ -66,8 +66,16 @@ are in `CLAUDE.md`.
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
   As a fallback, the planner chains two edges through a lossless
   intermediate file, mostly for external tools.
-- **`pages`** (`inacircle-pages`): page-image books to PDF. Today one
-  action, `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
+- **`pages`** (`inacircle-pages`): page-image books to PDF. Two
+  actions. `pages.images-to-pdf` is a join action: any number of JPEG and
+  PNG files (the same image rules as below) become one PDF, one page per
+  file in the given order. An image that cannot be taken is left out and
+  reported: unsupported ones (alpha, interlaced, 16-bit PNG, unusual JPEG)
+  as `skip`, damaged or over-limit ones as `fail`; the rest is joined.
+  When none can be taken nothing is written. If the PDF as a whole would
+  pass the output size limit, no input is taken and each fails. It is
+  `lossy=yes` for the same reasons as the other action.
+  `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
   CBZ, one PDF, all or nothing. It sits in the **Book** category. It is

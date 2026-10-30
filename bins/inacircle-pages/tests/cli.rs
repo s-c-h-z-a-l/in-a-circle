@@ -10,7 +10,8 @@ use std::process::{Command, Output, Stdio};
 use testzip::Store::{Deflated, Stored};
 
 const MANIFEST: &str = "inacircle-manifest 0\n\
-action\tpages.cbz-to-pdf\tfamily=pages\tin=application/vnd.comicbook+zip\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n";
+action\tpages.cbz-to-pdf\tfamily=pages\tin=application/vnd.comicbook+zip\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
+action\tpages.images-to-pdf\tfamily=pages\tin=image/jpeg,image/png\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -202,7 +203,7 @@ fn one_input(t: &Tmp, kind: &str, input: &Path) -> (Output, Vec<String>) {
 // ---------- tests ----------
 
 #[test]
-fn manifest_line_is_exact() {
+fn manifest_lists_both_actions() {
     let o = Command::new(env!("CARGO_BIN_EXE_inacircle-pages"))
         .arg("--manifest")
         .output()
@@ -1010,4 +1011,214 @@ fn a_fifo_input_fails_without_blocking() {
     let f = lines(&out, "fail");
     assert_eq!(f.len(), 1, "{out}");
     assert_eq!(f[0][2], "not a regular file");
+}
+
+// ---------- pages.images-to-pdf (join) ----------
+
+fn join_command(work: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_inacircle-pages"));
+    c.args(["run", "pages.images-to-pdf", "--work"])
+        .arg(work)
+        .arg("--");
+    c
+}
+
+/// Write `data` as `name` in the test's `in` folder and return the path.
+fn image_file(t: &Tmp, name: &str, data: &[u8]) -> PathBuf {
+    fs::create_dir_all(t.join("in")).unwrap();
+    let p = t.join("in").join(name);
+    fs::write(&p, data).unwrap();
+    p
+}
+
+fn run_join(work: &Path, inputs: &[PathBuf]) -> Output {
+    join_command(work).args(inputs).output().unwrap()
+}
+
+fn no_join_output(work: &Path) {
+    assert_no_pdf(work);
+    assert!(!work.join("join/out.pdf").exists(), "output left in join/");
+}
+
+#[test]
+fn images_to_pdf_joins_in_given_order() {
+    let t = tmp("join-order");
+    // The given order, not the name order: b before a.
+    let ins = [
+        image_file(&t, "b.jpg", &jpeg_fixture("rgb.jpg")), // 32 x 24
+        image_file(&t, "a.png", &rgb_png(20, 20)),
+        image_file(&t, "c.png", &rgb_png(50, 10)),
+    ];
+    let work = t.join("work");
+    let o = run_join(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.starts_with("progress\t0\n"), "{out}");
+    let takes = lines(&out, "take");
+    assert_eq!(takes.len(), 3, "{out}");
+    for (tk, i) in takes.iter().zip(&ins) {
+        assert_eq!(tk[1], i.to_str().unwrap());
+    }
+    let j = lines(&out, "joined");
+    assert_eq!(j.len(), 1, "{out}");
+    assert_eq!(j[0][1], "join/out.pdf");
+    assert!(lines(&out, "done").is_empty(), "{out}");
+    let pdf = work.join("join/out.pdf");
+    assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+    if let Some(sizes) = page_sizes(&t, &pdf, 3) {
+        assert_eq!(sizes, [(32, 24), (20, 20), (50, 10)]);
+    }
+}
+
+#[test]
+fn unsupported_image_is_skipped_rest_joined() {
+    let t = tmp("join-skip");
+    let ins = [
+        image_file(&t, "1.png", &rgb_png(20, 20)),
+        image_file(&t, "2.png", &flat_png(8, 8, 6)),
+        image_file(&t, "3.png", &rgb_png(50, 10)),
+    ];
+    let work = t.join("work");
+    let o = run_join(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let s = lines(&out, "skip");
+    assert_eq!(s.len(), 1, "{out}");
+    assert_eq!(s[0][1], ins[1].to_str().unwrap());
+    assert_eq!(s[0][2], "PNG with alpha needs the image family");
+    assert_eq!(lines(&out, "take").len(), 2, "{out}");
+    assert_eq!(lines(&out, "joined").len(), 1, "{out}");
+    if let Some(sizes) = page_sizes(&t, &work.join("join/out.pdf"), 2) {
+        assert_eq!(sizes, [(20, 20), (50, 10)]);
+    }
+}
+
+#[test]
+fn damaged_image_fails_rest_joined() {
+    let t = tmp("join-damaged");
+    let short = testzip::png(8, 8, 2, None, false, false, &[0u8; 3 * (1 + 8 * 3)]);
+    let ins = [
+        image_file(&t, "1.png", &rgb_png(20, 20)),
+        image_file(&t, "2.png", &short),
+        image_file(&t, "3.png", &rgb_png(50, 10)),
+    ];
+    let work = t.join("work");
+    let o = run_join(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 1, "{out}");
+    assert_eq!(f[0][1], ins[1].to_str().unwrap());
+    assert_eq!(f[0][2], "damaged image data");
+    assert_eq!(lines(&out, "take").len(), 2, "{out}");
+    assert_eq!(lines(&out, "joined").len(), 1, "{out}");
+    if let Some(sizes) = page_sizes(&t, &work.join("join/out.pdf"), 2) {
+        assert_eq!(sizes, [(20, 20), (50, 10)]);
+    }
+}
+
+#[test]
+fn nothing_acceptable_writes_nothing() {
+    let t = tmp("join-none");
+    let ins = [
+        image_file(&t, "1.png", &flat_png(8, 8, 6)),
+        image_file(&t, "2.png", &flat_png(9, 9, 6)),
+    ];
+    let work = t.join("work");
+    let o = run_join(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(3), "{out}");
+    assert_eq!(lines(&out, "skip").len(), 2, "{out}");
+    assert!(lines(&out, "take").is_empty(), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    no_join_output(&work);
+}
+
+#[test]
+fn too_large_total_fails_whole() {
+    let t = tmp("join-fsize");
+    // Two incompressible ~750 KB PNGs: one fits in 1 MiB, two do not.
+    let (w, h) = (500usize, 500usize);
+    let mut x = 0x2545_F491u32;
+    let mut rows = Vec::with_capacity(h * (1 + 3 * w));
+    for _ in 0..h {
+        rows.extend_from_slice(&[0]); // filter type 0
+        for _ in 0..3 * w {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            rows.push((x >> 24) as u8);
+        }
+    }
+    let png = testzip::png(w as u32, h as u32, 2, None, false, false, &rows);
+    let a = image_file(&t, "a.png", &png);
+    let b = image_file(&t, "b.png", &png);
+    let work = t.join("work");
+    let fsize = |ins: &[PathBuf]| {
+        use std::os::unix::process::CommandExt;
+        let mut c = join_command(&work);
+        c.args(ins);
+        // SAFETY: only `setrlimit` (async-signal-safe) on a local struct
+        // runs between fork and exec.
+        unsafe {
+            c.pre_exec(|| {
+                let rl = libc::rlimit {
+                    rlim_cur: 1 << 20,
+                    rlim_max: 1 << 20,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        c.output().unwrap()
+    };
+    // Positive control: one image under the cap joins.
+    let o = fsize(std::slice::from_ref(&a));
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(lines(&stdout(&o), "joined").len(), 1);
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    let o = fsize(&[a.clone(), b.clone()]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 2, "{out}");
+    for (fl, i) in f.iter().zip([&a, &b]) {
+        assert_eq!(fl[1], i.to_str().unwrap());
+        assert_eq!(fl[2], "PDF would be larger than 1 MiB");
+    }
+    assert!(lines(&out, "take").is_empty(), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    no_join_output(&work);
+}
+
+#[test]
+fn many_images_stay_within_memory() {
+    let t = tmp("join-many");
+    let png = rgb_png(64, 64);
+    let ins: Vec<PathBuf> = (0..1000)
+        .map(|i| image_file(&t, &format!("{i:04}.png"), &png))
+        .collect();
+    let work = t.join("work");
+    let mut child = join_command(&work)
+        .args(&ins)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (peak_kb, text) = peak_kb(&mut child);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{text}");
+    assert_eq!(lines(&text, "take").len(), 1000, "{text}");
+    assert_eq!(lines(&text, "joined").len(), 1, "{text}");
+    println!("many_images_stay_within_memory: 1000 images, VmHWM {peak_kb} kB");
+    // Ceiling 8 MB: the baseline plus one image plus ~100 B per page and
+    // the accepted-input list (docs/resource-limits.md); per-image
+    // retention (1000 x the image) would be far above.
+    assert!(peak_kb <= 8 * 1024, "VmHWM {peak_kb} kB");
+    if let Some(s) = page_sizes(&t, &work.join("join/out.pdf"), 1000) {
+        assert_eq!(s.len(), 1000);
+    }
 }
