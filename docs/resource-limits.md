@@ -193,13 +193,14 @@ with an unknown publication do not depend on the tally's keys.
 `inacircle run` takes its arguments over, so its argv on the heap becomes
 the list (the kernel's copy on the stack stays). The wheel decodes a
 dropped list from its end and gives its bytes back as they become paths
-(in 64 KiB steps), so the list's bytes and its paths never add up.
+(in 64 KiB steps), so the list's bytes and its paths overlap by at most
+64 KiB.
 
 Measured (release, reference machine, 1024 inputs with ~1 KiB paths, the
 list at its 1 MiB limit, one batch process, PSS sampled every 200 us
 until exit): `inacircle run` 3.4-3.9 MB (8.9 MB while the engine held the
-paths about seven times over). The wheel peaks at 4.1 MB (4095 kB at
-most over three runs), within the 5,000,000 B budget with 16% to spare, at
+paths about seven times over). The wheel peaks at 4.2 MB (4095 kB, i.e.
+4,193,280 B, at most over three runs), within the 5,000,000 B budget with 16% to spare, at
 every phase: level 1 while the list becomes paths, stage 2, and the run
 after the click; its stage 2 holds the paths once. Before the list was
 given back as it was decoded, level 1 held the bytes and the paths
@@ -237,4 +238,5 @@ the source; the reason column is why that number.
 | Wheel start | 2000 ms wall (own clock, from the connection to the first commit) | 2 s is 400 times the normal start on the fake compositor (first commit 5.3 ms p50, see [wheel-startup-deadlines.md](benchmarks/wheel-startup-deadlines.md)); a policy bound, not a confidence bound. |
 | Wheel teardown | 1000 ms wall | Its own bound; the old observer's 5 s and the historic 30 s anomaly say nothing about a 1 s distribution. |
 | Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update; the wheel's start-failure notice: 500 ms to open plus 500 ms for its one call, under a 2 s `alarm` | One shared frame for the whole open; the wait never holds the desktop. |
+| Drop list (wheel) | 1 MiB read, 1024 URIs | The invocation's own limits (`INPUT_LIST_BYTES`, `INPUT_COUNT`): a longer list could not run anyway. Past either, the wheel shows "too many files" with nothing lit, accepts no drop and sends the source a cancel, never a truncated selection. The read is bounded to the limit plus one 4 KiB chunk. Memory at the limit: see the measurement above. |
 | User waits | 30 s per stage, 500 ms drop pipe, 500 ms soft margin | Unchanged from before; separate from the start clock. |

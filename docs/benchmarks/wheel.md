@@ -186,7 +186,7 @@ mapped, so a large drop is the memory worst case. Measured by
 since replaced by the largest-list tests below):
 the release binary against a fake compositor (Unix socket, registry,
 layer-shell configure, data device), 1024 small text files dropped as one
-`text/uri-list` (~31 KB, under the 64 KiB cap), the catalog cache primed
+`text/uri-list` (~31 KB; the read limit was then 64 KiB, now 1 MiB), the catalog cache primed
 with one action; `Pss` read from `/proc/<pid>/smaps_rollup` once stage 2
 is drawn (the cloud runs below read `VmHWM`, before the budget moved to
 PSS; on the reference machine: PSS 2281 kB for 1 file, 2403 kB for 1024). Five runs, cloud VM (not the reference machine), so the absolute
