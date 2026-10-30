@@ -189,6 +189,10 @@ impl Huffman {
     /// only with at most one symbol (RFC 1951: a single distance code of
     /// one bit; an empty distance tree for literal-only blocks), like the
     /// reference decoders; decoding an unassigned code is `BadCode`.
+    /// This is broader than zlib, which accepts an incomplete code only as
+    /// a single 1-bit code and never for the code-length code; it matches
+    /// miniz (the differential reference). No table index can go out of
+    /// range either way (the counts sum to at most the table size).
     fn new(lengths: &[u8]) -> Result<Self, InflateError> {
         let mut h = Huffman {
             count: [0; MAX_BITS + 1],
@@ -346,7 +350,8 @@ impl Window<'_> {
     }
 }
 
-/// `limit` check helper for stored blocks happens in `stored`.
+/// Stored block (RFC 1951 3.2.4): checks LEN against NLEN, then reserves LEN
+/// bytes of the output limit before any data byte is read.
 fn stored<R: Read>(bits: &mut Bits<R>, w: &mut Window) -> Result<(), InflateError> {
     bits.align();
     let len = bits.bits(16)?;
@@ -475,13 +480,21 @@ pub(crate) fn run<R: Read>(
         limit,
         out,
     };
+    // The fixed tables never change: built at the first fixed block only,
+    // so a stream of many empty fixed blocks costs O(1) per block, not a
+    // table construction (~1 KiB of state, bounded).
+    let mut fixed: Option<(Huffman, Huffman)> = None;
     loop {
         let last = bits.bits(1)? == 1;
         match bits.bits(2)? {
             0 => stored(bits, &mut w)?,
             1 => {
-                let (l, d) = fixed_tables()?;
-                codes(bits, &mut w, &l, &d)?;
+                if fixed.is_none() {
+                    fixed = Some(fixed_tables()?);
+                }
+                if let Some((l, d)) = &fixed {
+                    codes(bits, &mut w, l, d)?;
+                }
             }
             2 => {
                 let (l, d) = dynamic_tables(bits)?;

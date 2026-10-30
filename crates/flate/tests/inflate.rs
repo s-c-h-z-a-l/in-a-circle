@@ -195,8 +195,8 @@ fn rejects_truncated_stream() {
 
 #[test]
 fn rejects_oversubscribed_code() {
-    // Dynamic block, HCLEN = 4: the code length code gets three symbols
-    // (16, 17, 18) of length 1 each, which over-subscribes it.
+    // Dynamic block, HCLEN = 4: the code length code gets four symbols
+    // (16, 17, 18, 0) of length 1 each, which over-subscribes it.
     let mut w = BitW::default();
     w.bits(1, 1);
     w.bits(2, 2);
@@ -352,4 +352,28 @@ fn trailing_bytes_are_not_part_of_the_stream() {
     let (r, out) = run(&s, 1 << 20);
     assert_eq!(r.unwrap().in_bytes, n);
     assert_eq!(out, b"hello hello hello");
+}
+
+/// 1 MiB (the fuzz target's max_len) of empty fixed blocks, 10 bits each:
+/// per-block cost must not include building the fixed tables. Decodes to
+/// nothing and consumes every input byte. (Timing is guarded by the fuzz
+/// timeout and the seed `empty_fixed_blocks`; this pins the result.)
+#[test]
+fn many_empty_fixed_blocks() {
+    let mut w = BitW::default();
+    let blocks = (1usize << 20) * 8 / 10 - 1;
+    for _ in 0..blocks {
+        w.bits(0, 1); // BFINAL
+        w.bits(1, 2); // BTYPE fixed
+        w.bits(0, 7); // end of block
+    }
+    w.bits(1, 1);
+    w.bits(1, 2);
+    w.bits(0, 7);
+    let (r, out) = run(&w.bytes, 0);
+    let r = r.unwrap();
+    assert!(out.is_empty());
+    assert_eq!(r.out_bytes, 0);
+    assert_eq!(r.in_bytes, w.bytes.len() as u64);
+    assert_eq!(w.bytes.len(), 1_048_575);
 }

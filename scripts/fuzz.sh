@@ -107,11 +107,14 @@ limits() {
         # 1 MiB: a ZIP entry or PNG stream of that size reaches every block
         # type, a dynamic header and long matches, and is the compressed
         # size where a 64 MiB output limit (the target's LIMIT) can fire
-        # (258 bytes per ~12 bits). 2 s: both entry points each decode up
-        # to 64 MiB of output under ASan; measured 0.17 s for
-        # both on a 100 MiB zero bomb (0.66 MB of input). 16 MB malloc limit: inflate allocates only a 32 KiB
-        # window and a 16 KiB buffer whatever the input says, so any larger
-        # allocation is a bug (~330x the fixed use); 1024 MB RSS ceiling.
+        # (258 bytes per ~12 bits). 2 s: the worst inputs known, measured
+        # under the fuzz build (ASan) with -timeout=2: 1 MiB of empty fixed
+        # blocks (839k blocks, tables built once per stream) 0.26 s (before
+        # the fix: over 2 s, a timeout);
+        # a 100 MiB zero bomb (0.66 MB of input, both entry points) 0.17 s.
+        # 16 MB malloc limit: inflate allocates only a 32 KiB window and a
+        # 16 KiB buffer whatever the input says, so any larger allocation is
+        # a bug (~330x the fixed use); 1024 MB RSS ceiling.
         inflate) echo "1048576 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
