@@ -1020,6 +1020,33 @@ mod tests {
     }
 
     #[test]
+    fn join_candidates_need_a_join_set_and_all_its_types() {
+        let cat = pdf_catalog(true);
+        let none = Preset {
+            join: &[],
+            ..*pdf_preset()
+        };
+        assert_eq!(join_candidates(&cat, &none).count(), 0);
+        assert_eq!(join_candidates(&cat, pdf_preset()).count(), 1);
+        let mut gif = pdf_catalog(true);
+        gif.actions[1].join.as_mut().unwrap().types = vec!["image/gif".into()];
+        assert_eq!(join_candidates(&gif, pdf_preset()).count(), 0);
+    }
+
+    #[test]
+    fn tie_between_sides_reports_the_one_to_one_reason() {
+        let mut cat = pdf_catalog(true);
+        cat.actions[1].join.as_mut().unwrap().min = 3;
+        cat.actions.remove(0);
+        let t = tally_of(&[many(CBZ, 1, "cbz"), many("image/png", 1, "png")]);
+        assert!(choose(&cat, pdf_preset(), &t).is_none());
+        assert_eq!(
+            disabled_reason(&cat, pdf_preset(), &t).as_deref(),
+            Some("no action installed")
+        );
+    }
+
+    #[test]
     fn offer_empty() {
         let o = offer(&two_way(), &[]);
         assert!(o.slices.iter().all(Option::is_none));
