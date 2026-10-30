@@ -1583,7 +1583,10 @@ fn join_plugin(e: &Env) {
         "#!/bin/sh\n\
          if [ \"$1\" = --manifest ]; then\n\
          printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
-         exit 0\nfi\nexit 1\n",
+         exit 0\nfi\n\
+         work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'\n",
     )
     .unwrap();
     let tmp = e.root.join("actions").join(".joiner.tmp");
@@ -1612,14 +1615,45 @@ fn offer_images_shows_join_count() {
         o.stdout,
         "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\nhub\t2 / 3 files\n"
     );
-    // The run of a join choice is not built yet: a clear error, no job.
-    let o = e.run(&["run", "pdf", "a.jpg", "b.png"]);
-    assert_eq!(o.code, Some(1), "{}", o.stdout);
-    assert!(
-        o.stderr.contains("join actions are not supported yet"),
-        "{}",
-        o.stderr
+}
+
+/// The preset runs the join action once over every image of its set, in
+/// natural order, and publishes one result; the text file is unsupported.
+#[test]
+fn run_join_preset_publishes_one_result() {
+    let e = Env::with_actions("run-join", &[]);
+    join_plugin(&e);
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["run", "pdf", "b.png", "a.jpg", "c.txt"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 1, 0));
+    let done = o.pairs("done");
+    let ins: Vec<_> = done.iter().map(|(i, _)| i.clone()).collect();
+    assert_eq!(ins, [e.files().join("a.jpg"), e.files().join("b.png")]);
+    assert_eq!(done[0].1, done[1].1, "one result for both");
+    let mut want = b"\xff\xd8\xff\xe0 jpeg".to_vec();
+    want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
+    assert_eq!(fs::read(&done[0].1).unwrap(), want);
+    assert_eq!(
+        o.pairs("skip"),
+        [(e.files().join("c.txt"), "unsupported".to_owned())]
     );
+}
+
+/// `run --action` with a join action takes the join path too.
+#[test]
+fn run_join_action_by_id() {
+    let e = Env::with_actions("run-join-id", &[]);
+    join_plugin(&e);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.jpg", b"\xff\xd8\xff\xe0 two");
+    let o = e.run(&["run", "--action", "p.images-to-pdf", "a.jpg", "b.jpg"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert_eq!(done[0].1, done[1].1, "one result for both");
 }
 
 #[test]

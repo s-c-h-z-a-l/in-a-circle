@@ -195,6 +195,17 @@ action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
   paths are out of scope for v0.
 
+  A join action (`join=yes`) reports per input `take<TAB><input>` (the
+  input went into its one result), `skip`, `fail` or `warn`, and once, at
+  the end, `joined<TAB>join/<file>`: its one result, written directly in
+  `<work>/join/` (`<work>/join/out.<ext>` by convention). It never writes
+  `done`; a one-to-one action never writes `take` or `joined`. Each of
+  these is a contract violation, and so are a second `take` of an input,
+  a `take` of an input it was not given, a `joined` before any `take`, a
+  second `joined`, a `take`, `skip` or `fail` after `joined`, and a
+  `joined` path that is not a regular file directly in `join/` (reached
+  through no symlink).
+
   An action may open with `progress<TAB>0.00` before any input work
   (`inacircle-text run` always does), so a script that parses stdout must
   not take the first `progress` line for the end of a run.
@@ -204,7 +215,17 @@ action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/
   the file's), 3 unsupported input. For a batch: 0 if at least one input
   produced `done`; otherwise 1 if any input produced `fail`; 3 only when
   every input was unsupported. Exit 1 also covers a batch that cannot run
-  at all (`--work` missing or not writable).
+  at all (`--work` missing or not writable). A join action exits 0 if it
+  reported `joined`; 3 if it took nothing and skipped every input;
+  otherwise 1.
+- A join action's result is published only if it reported `joined`, took
+  at least `min` inputs, broke no rule of the contract, exited 0, and no
+  cancel came before the commit. Otherwise nothing reaches the user's
+  folder: every input it did not settle with its own `skip` or `fail`
+  fails (with the violation, the exit status, "action reported fewer
+  inputs than its minimum", or "cancelled"). An input it said nothing of
+  fails ("no result reported") even when the result is published. Once
+  published, every input it took is done, with the same one output.
 - Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
   later; the engine removes the temp dir either way.
 - If the supervisor itself dies abnormally (`SIGKILL`, an abort), nobody
@@ -216,7 +237,8 @@ action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/
   no longer see them. A cgroup would bound that; it is not used (no
   systemd dependency).
 - Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
-  writes at 16 × the total input size, clamped to 256 MiB – 16 GiB
+  writes at 16 × the total input size (all the inputs of that one
+  process, a join's included), clamped to 256 MiB – 16 GiB
   (archive bombs, with no plugin code; many files can still fill a disk);
   `RLIMIT_CORE` is 0.
 - The supervisor caps what it accepts: at most 16 `warn` per input (then
@@ -376,7 +398,12 @@ Every action runs sandboxed, set up in the child between `fork` and
 - **One process per target folder** of a batch (each folder gets its own
   temp dir, so the final move stays an atomic `rename`); actions declaring
   `batch=no` run per file, one after the other (parallel runs may come
-  later). A two-step route runs both steps in the same temp dir; only the
+  later). A **join** action runs once over every accepted input, whatever
+  folders they come from and whatever its `batch=` says, in natural order
+  (`natural_cmp` on the file name's bytes, then on the whole path), in one
+  temp dir in its result's target folder (for now the first input's), and
+  its one result is published as one group by the same staging and
+  no-replace rename as any other output. A two-step route runs both steps in the same temp dir; only the
   last step's outputs are placed. Step 1's outputs are checked again once
   its whole group is gone (a regular file, no symlink on the way), so an
   action cannot swap one for a link before step 2 reads it.

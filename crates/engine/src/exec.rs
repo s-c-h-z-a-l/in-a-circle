@@ -158,6 +158,20 @@ pub struct Report {
     /// Whether the sandbox gate passed ([`sandbox::ready`]); without it no
     /// action ran.
     pub sandboxed: bool,
+    /// The join of a [`run_join`]; `None` for a [`run`].
+    pub joined: Option<Joined>,
+}
+
+/// What a join run made of its inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Joined {
+    /// Inputs in the published result; 0 when nothing was published.
+    pub taken: usize,
+    /// Inputs given to the run (each once).
+    pub total: usize,
+    /// The one result, committed (its place may still be unknown: see
+    /// the inputs' outcomes); `None` when nothing was published.
+    pub publication: Option<Publication>,
 }
 
 /// Live feedback while a route runs.
@@ -332,7 +346,9 @@ pub fn run(
             sink.fail(i, reason.to_owned());
         }
     };
-    if route.is_empty() || route.len() > 2 {
+    // A join action runs only through `run_join`: here it would get one
+    // process per folder and speak events this path refuses.
+    if route.is_empty() || route.len() > 2 || route.iter().any(|a| a.join.is_some()) {
         all(&mut sink, "invalid route");
         // The gate's own result: a bad route is not a missing sandbox, and
         // the notice must not say it is.
@@ -342,20 +358,7 @@ pub fn run(
         all(&mut sink, &format!("sandbox unavailable: {e}"));
         return sink.report(false);
     }
-    let mut ok = Vec::new();
-    for (i, p) in uniq.iter().enumerate() {
-        if !p.is_absolute() {
-            sink.fail(i, "input path is not absolute".to_owned());
-        } else if p.to_str().is_none() {
-            sink.skip(i, "non-UTF-8 path".to_owned());
-        } else {
-            match fs::metadata(p) {
-                Ok(m) if m.is_file() => ok.push(i),
-                Ok(_) => sink.fail(i, "not a regular file".to_owned()),
-                Err(e) => sink.fail(i, format!("cannot read input: {e}")),
-            }
-        }
-    }
+    let mut ok = admit(&mut sink);
     let batch = route.iter().all(|a| a.batch);
     // Target folder per source folder; an input without one fails.
     let mut targets: HashMap<PathBuf, Result<PathBuf, String>> = HashMap::new();
@@ -396,6 +399,180 @@ pub fn run(
         sink.end_group();
     }
     sink.report(true)
+}
+
+/// The inputs an action may be given: absolute, UTF-8, regular files.
+/// The others are settled here.
+fn admit(sink: &mut Sink) -> Vec<usize> {
+    let mut ok = Vec::new();
+    for (i, p) in sink.inputs.iter().enumerate() {
+        if !p.is_absolute() {
+            sink.fail(i, "input path is not absolute".to_owned());
+        } else if p.to_str().is_none() {
+            sink.skip(i, "non-UTF-8 path".to_owned());
+        } else {
+            match fs::metadata(p) {
+                Ok(m) if m.is_file() => ok.push(i),
+                Ok(_) => sink.fail(i, "not a regular file".to_owned()),
+                Err(e) => sink.fail(i, format!("cannot read input: {e}")),
+            }
+        }
+    }
+    ok
+}
+
+/// The order a join action gets its inputs in: [`action::natural_cmp`] on
+/// the file name (the last component's bytes), then on the whole path, so
+/// equal names in different folders keep one stable order.
+fn join_order(a: &Path, b: &Path) -> std::cmp::Ordering {
+    fn name(p: &Path) -> &[u8] {
+        p.file_name().map_or(&[][..], |n| n.as_bytes())
+    }
+    action::natural_cmp(name(a), name(b))
+        .then_with(|| action::natural_cmp(a.as_os_str().as_bytes(), b.as_os_str().as_bytes()))
+}
+
+/// Where a join's one result goes, and its name: for now the target of
+/// the first input's folder and that input's stem.
+fn join_place(first: &Path) -> Result<(PathBuf, String), String> {
+    let dir = first.parent().unwrap_or(Path::new("/"));
+    let target = output::writable_target(dir).map_err(|e| e.to_string())?;
+    Ok((target, stem_of(first)))
+}
+
+/// An input's file stem as an output name; `output` if it has none.
+fn stem_of(p: &Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "output".to_owned())
+}
+
+/// Runs the join action `action` once over every input and publishes its
+/// one result, made of the inputs it took. The inputs (each once) go to
+/// the action in [`join_order`]; the caller has already settled those
+/// outside the action's type set. Never panics on a misbehaving action;
+/// every input ends with at least one outcome.
+///
+/// The result is published only if the action reported `joined` after at
+/// least `min` `take`s, broke no rule of the contract, exited 0, and no
+/// cancel came before the commit. Otherwise nothing reaches the folder and
+/// every input the action did not settle with its own `skip` or `fail`
+/// fails.
+pub fn run_join(
+    action: &Action,
+    inputs: &[PathBuf],
+    obs: &mut dyn Observer,
+    cancel: &CancelToken,
+) -> Report {
+    let gate = sandbox::ready();
+    let mut seen = HashSet::new();
+    let mut uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
+    uniq.sort_by(|a, b| join_order(a, b));
+    let mut joined = Joined {
+        taken: 0,
+        total: uniq.len(),
+        publication: None,
+    };
+    let mut sink = Sink::new(obs, &uniq);
+    let all = |sink: &mut Sink, ins: &[usize], reason: &str| {
+        for &i in ins {
+            sink.fail(i, reason.to_owned());
+        }
+    };
+    let every: Vec<usize> = (0..uniq.len()).collect();
+    let end = |sink: &mut Sink, sandboxed: bool, joined: Joined| Report {
+        joined: Some(joined),
+        ..sink.report(sandboxed)
+    };
+    let Some(min) = action.join.as_ref().map(|j| j.min as usize) else {
+        all(&mut sink, &every, "invalid route");
+        return end(&mut sink, gate.is_ok(), joined);
+    };
+    if let Err(e) = gate {
+        all(&mut sink, &every, &format!("sandbox unavailable: {e}"));
+        return end(&mut sink, false, joined);
+    }
+    let ok = admit(&mut sink);
+    let Some(&first) = ok.first() else {
+        return end(&mut sink, true, joined);
+    };
+    let (target, stem) = match join_place(&uniq[first]) {
+        Ok(p) => p,
+        Err(e) => {
+            all(&mut sink, &ok, &format!("no folder for the output: {e}"));
+            return end(&mut sink, true, joined);
+        }
+    };
+    sink.begin_group(ok.len());
+    if sink.is_cancelled(cancel) {
+        all(&mut sink, &ok, "cancelled");
+    } else {
+        // The download fallback may not exist yet.
+        let _ = fs::create_dir_all(&target);
+        output::clean_stale(&target);
+        if let Some((taken, p)) = join_group(action, &ok, min, &target, &stem, cancel, &mut sink) {
+            joined.taken = taken;
+            joined.publication = Some(p);
+        }
+    }
+    sink.end_group();
+    end(&mut sink, true, joined)
+}
+
+/// One process over `members`, in their own work dir in `target`; then
+/// the one result, if every condition holds. Returns the inputs in it and
+/// its publication.
+fn join_group(
+    action: &Action,
+    members: &[usize],
+    min: usize,
+    target: &Path,
+    stem: &str,
+    cancel: &CancelToken,
+    sink: &mut Sink,
+) -> Option<(usize, Publication)> {
+    let work = match output::make_work_dir(target) {
+        Ok(w) => w,
+        Err(e) => {
+            for &i in members {
+                sink.fail(i, format!("cannot create work directory: {e}"));
+            }
+            return None;
+        }
+    };
+    sink.steps = 1;
+    sink.step = 0;
+    let step_in = StepIn {
+        paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
+        origin: members.to_vec(),
+        intermediate: false,
+        join: Some(min),
+    };
+    let dir = work.path.join("step1");
+    let list = work.path.join("step1.inputs");
+    if let Err(e) = fs::create_dir(&dir) {
+        for &i in members {
+            sink.fail(i, format!("cannot create work directory: {e}"));
+        }
+        return None;
+    }
+    // `None`: cancelled, every unsettled input failed.
+    let outputs = run_step(
+        action, &step_in, None, &dir, &list, &work.path, cancel, sink,
+    )?;
+    // The supervisor hands back the one result under each input it took,
+    // and only when every condition held (see `Supervisor::settle_join`).
+    let taken: Vec<usize> = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| !o.is_empty())
+        .map(|(j, _)| step_in.origin[j])
+        .collect();
+    let rel = outputs.into_iter().find(|o| !o.is_empty())?;
+    let p = publish(&dir, &rel, target, stem, &action.ext, &taken, cancel, sink)?;
+    // `work` is dropped on return: the work dir is removed through its fd.
+    Some((taken.len(), p))
 }
 
 /// Forwards outcomes to the observer, tracks progress.
@@ -548,7 +725,10 @@ impl<'a> Sink<'a> {
                 self.emit(Outcome::Warned { input, message });
             }
         }
-        Report { sandboxed }
+        Report {
+            sandboxed,
+            joined: None,
+        }
     }
 }
 
@@ -587,6 +767,9 @@ struct StepIn {
     origin: Vec<usize>,
     /// The paths are the previous step's outputs, not the user's inputs.
     intermediate: bool,
+    /// `Some(min)`: a join action's process, whose one result needs at
+    /// least `min` taken inputs; `None`: one-to-one.
+    join: Option<usize>,
 }
 
 fn run_group(
@@ -610,6 +793,7 @@ fn run_group(
         paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
         origin: members.to_vec(),
         intermediate: false,
+        join: None,
     };
     // The next step's ruleset, with the intermediate outputs' rules.
     let mut pre = None;
@@ -685,6 +869,7 @@ fn run_group(
             paths: Vec::new(),
             origin: Vec::new(),
             intermediate: true,
+            join: None,
         };
         for (j, outs) in outputs.iter().enumerate() {
             let o = step_in.origin[j];
@@ -738,69 +923,96 @@ fn place_outputs(
         per[at].1.extend(outs);
     }
     for (o, rels) in per {
-        if sink.is_cancelled(cancel) {
-            sink.fail(o, "cancelled".to_owned());
-            continue;
+        let stem = stem_of(&sink.inputs[o]);
+        publish(dir, &rels, target, &stem, &action.ext, &[o], cancel, sink);
+    }
+}
+
+/// Publishes `rels` (beneath `dir`) as one group in `target` for the
+/// inputs `settle`, which are all settled here: `Done` for each file whose
+/// place the postcheck proved, `PublishedUnknown` for a committed group
+/// that cannot be proved (never removed), `Failed` when nothing was
+/// published. A cancel is honoured up to the commit. Returns the
+/// publication once committed.
+#[allow(clippy::too_many_arguments)]
+fn publish(
+    dir: &Path,
+    rels: &[PathBuf],
+    target: &Path,
+    stem: &str,
+    ext: &str,
+    settle: &[usize],
+    cancel: &CancelToken,
+    sink: &mut Sink,
+) -> Option<Publication> {
+    let fail = |sink: &mut Sink, reason: String| {
+        for &o in settle {
+            sink.fail(o, reason.clone());
         }
-        let src = &sink.inputs[o];
-        let stem = src
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "output".to_owned());
-        let mut cancelled = false;
-        let published = {
-            let mut before = |g: &OutputGroup, private: &Path| -> io::Result<()> {
-                #[cfg(test)]
-                tests::BEFORE_PREPARE.with_borrow_mut(|f| f.as_mut().map(|f| f()));
-                // Before the group is prepared (a later journal keeps a
-                // durable intent for it), so a cancel that came in during
-                // the copy leaves nothing behind but the private staging.
-                if sink.is_cancelled(cancel) {
-                    cancelled = true;
-                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-                }
-                sink.obs.prepare_group(g, private)?;
-                // And again right before the commit: preparing may take time.
-                if sink.is_cancelled(cancel) {
-                    cancelled = true;
-                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-                }
-                Ok(())
-            };
-            output::publish_beneath(dir, &rels, target, &stem, &action.ext, &mut before)
-        };
-        let p = match published {
-            Ok(p) => p,
-            Err(_) if cancelled => {
-                sink.fail(o, "cancelled".to_owned());
-                continue;
+    };
+    if sink.is_cancelled(cancel) {
+        fail(sink, "cancelled".to_owned());
+        return None;
+    }
+    let mut cancelled = false;
+    let published = {
+        let mut before = |g: &OutputGroup, private: &Path| -> io::Result<()> {
+            #[cfg(test)]
+            tests::BEFORE_PREPARE.with_borrow_mut(|f| f.as_mut().map(|f| f()));
+            // Before the group is prepared (a later journal keeps a
+            // durable intent for it), so a cancel that came in during
+            // the copy leaves nothing behind but the private staging.
+            if sink.is_cancelled(cancel) {
+                cancelled = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
-            Err(e) => {
-                sink.fail(o, format!("cannot publish output: {e}"));
-                continue;
+            sink.obs.prepare_group(g, private)?;
+            // And again right before the commit: preparing may take time.
+            if sink.is_cancelled(cancel) {
+                cancelled = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
+            Ok(())
         };
-        #[cfg(test)]
-        tests::AFTER_PUBLISH.with_borrow_mut(|f| f.as_mut().map(|f| f(&p)));
-        let checked = output::postcheck(&p);
-        let mut location = p.location.clone();
-        if checked == Err(PublicationReason::AncestorChanged) {
-            location.path_at_check = None;
+        output::publish_beneath(dir, rels, target, stem, ext, &mut before)
+    };
+    let p = match published {
+        Ok(p) => p,
+        Err(_) if cancelled => {
+            fail(sink, "cancelled".to_owned());
+            return None;
         }
-        sink.obs.group(&p.group, &location, &p.durability);
-        match checked {
-            Ok(files) => {
-                if let Durability::Unconfirmed(why) = &p.durability {
-                    sink.warn(o, format!("saved, but not confirmed on disk: {why}"));
-                }
-                for (path, id) in files {
-                    sink.placed(o, path, id);
+        Err(e) => {
+            fail(sink, format!("cannot publish output: {e}"));
+            return None;
+        }
+    };
+    #[cfg(test)]
+    tests::AFTER_PUBLISH.with_borrow_mut(|f| f.as_mut().map(|f| f(&p)));
+    let checked = output::postcheck(&p);
+    let mut location = p.location.clone();
+    if checked == Err(PublicationReason::AncestorChanged) {
+        location.path_at_check = None;
+    }
+    sink.obs.group(&p.group, &location, &p.durability);
+    match checked {
+        Ok(files) => {
+            if let (Durability::Unconfirmed(why), Some(&o)) = (&p.durability, settle.first()) {
+                sink.warn(o, format!("saved, but not confirmed on disk: {why}"));
+            }
+            for &o in settle {
+                for (path, id) in &files {
+                    sink.placed(o, path.clone(), *id);
                 }
             }
-            Err(reason) => sink.unknown(o, p, location, reason),
+        }
+        Err(reason) => {
+            for &o in settle {
+                sink.unknown(o, p.clone(), location.clone(), reason);
+            }
         }
     }
+    Some(p)
 }
 
 /// One parsed, validated event line. Indices are into the process's inputs.
@@ -824,11 +1036,21 @@ enum Event {
         index: usize,
         message: String,
     },
+    /// A join action took the input into its one result.
+    Take {
+        index: usize,
+    },
+    /// A join action's one result, `join/<name>` under `--work`.
+    Joined {
+        rel: PathBuf,
+    },
 }
 
-/// Parses and validates one stdout line (without its newline). `Err` is a
+/// Parses and validates one stdout line (without its newline) of a
+/// one-to-one action, or of a join action with `join`: each speaks only
+/// its own result events (`done`, or `take` and `joined`). `Err` is a
 /// contract violation, described.
-fn parse_event(line: &str, inputs: &[PathBuf], work: &Path) -> Result<Event, String> {
+fn parse_event(line: &str, inputs: &[PathBuf], work: &Path, join: bool) -> Result<Event, String> {
     let l = manifest::parse_line(line).map_err(|e| format!("bad event line: {}", e.msg))?;
     let mut fields = Vec::with_capacity(l.items.len());
     for item in &l.items {
@@ -839,13 +1061,27 @@ fn parse_event(line: &str, inputs: &[PathBuf], work: &Path) -> Result<Event, Str
             }
         }
     }
-    let want = if l.kind == "progress" { 1 } else { 2 };
+    let want = if matches!(l.kind.as_str(), "progress" | "take" | "joined") {
+        1
+    } else {
+        2
+    };
     let known = matches!(
         l.kind.as_str(),
-        "progress" | "done" | "skip" | "fail" | "warn"
+        "progress" | "done" | "skip" | "fail" | "warn" | "take" | "joined"
     );
     if !known {
         return Err(format!("unknown event kind {}", l.kind));
+    }
+    match (l.kind.as_str(), join) {
+        ("done", true) => return Err("done event from a join action".to_owned()),
+        ("take" | "joined", false) => {
+            return Err(format!(
+                "{} event from an action that does not join",
+                l.kind
+            ));
+        }
+        _ => {}
     }
     if fields.len() != want {
         return Err(format!(
@@ -875,9 +1111,20 @@ fn parse_event(line: &str, inputs: &[PathBuf], work: &Path) -> Result<Event, Str
                     "done output {rel} is not under the index of {input}"
                 ));
             }
-            regular_beneath(work, Path::new(rel))?;
+            regular_beneath(work, Path::new(rel), "done output")?;
             Event::Done {
                 index,
+                rel: PathBuf::from(rel),
+            }
+        }
+        "take" => Event::Take {
+            index: index_of(fields[0])?,
+        },
+        "joined" => {
+            let rel = fields[0];
+            joined_rel(rel)?;
+            regular_beneath(work, Path::new(rel), "joined output")?;
+            Event::Joined {
                 rel: PathBuf::from(rel),
             }
         }
@@ -924,15 +1171,33 @@ fn done_index(rel: &str, n: usize) -> Result<usize, String> {
     }
 }
 
+/// A `joined` output path: exactly `join/<name>`, the name a plain one
+/// (not empty, `.` or `..`).
+fn joined_rel(rel: &str) -> Result<(), String> {
+    let plain = rel
+        .strip_prefix(action::JOIN_DIR)
+        .and_then(|r| r.strip_prefix('/'))
+        .is_some_and(|name| !name.is_empty() && name != "." && name != ".." && !name.contains('/'));
+    if plain {
+        Ok(())
+    } else {
+        Err(format!(
+            "joined output {rel:?} is not a file directly in {}/",
+            action::JOIN_DIR
+        ))
+    }
+}
+
 /// `rel` names a regular file beneath `work`, reached through real
-/// directories only (no symlink anywhere on the way).
-fn regular_beneath(work: &Path, rel: &Path) -> Result<(), String> {
+/// directories only (no symlink anywhere on the way). `what` names it in
+/// the error.
+fn regular_beneath(work: &Path, rel: &Path, what: &str) -> Result<(), String> {
     let mut at = work.to_path_buf();
     let mut parts = rel.components().peekable();
     while let Some(c) = parts.next() {
         at.push(c);
         let meta =
-            fs::symlink_metadata(&at).map_err(|e| format!("done output {}: {e}", rel.display()))?;
+            fs::symlink_metadata(&at).map_err(|e| format!("{what} {}: {e}", rel.display()))?;
         let ok = if parts.peek().is_some() {
             meta.is_dir()
         } else {
@@ -940,7 +1205,7 @@ fn regular_beneath(work: &Path, rel: &Path) -> Result<(), String> {
         };
         if !ok {
             return Err(format!(
-                "done output {} is not a regular file in the work directory",
+                "{what} {} is not a regular file in the work directory",
                 rel.display()
             ));
         }
@@ -999,10 +1264,10 @@ fn unreported_reason(
 const TOO_MANY: &str = "too many outputs";
 
 /// The input a malformed event line is about, if its first field names
-/// one of `inputs` (for `done`, `skip`, `fail` and `warn` lines).
+/// one of `inputs` (for `done`, `skip`, `fail`, `warn` and `take` lines).
 fn offender_of(line: &str, inputs: &[PathBuf]) -> Option<usize> {
     let l = manifest::parse_line(line).ok()?;
-    if !matches!(l.kind.as_str(), "done" | "skip" | "fail" | "warn") {
+    if !matches!(l.kind.as_str(), "done" | "skip" | "fail" | "warn" | "take") {
         return None;
     }
     let first = l.bare_at(0)?;
@@ -1193,7 +1458,8 @@ fn run_step(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reported {
     Nothing,
-    /// One or more `done` (several outputs are allowed).
+    /// One or more `done` (several outputs are allowed); for a join
+    /// action, its one `take`.
     Done,
     /// `skip` or `fail`: nothing may follow.
     Final,
@@ -1224,6 +1490,10 @@ struct Supervisor<'a> {
     /// Hashes of `outputs`' paths, for the duplicate check.
     output_hashes: HashSet<u64>,
     output_bytes: usize,
+    /// A join action's `joined` output, once reported.
+    joined: Option<PathBuf>,
+    /// A join action's `take`s so far.
+    taken: usize,
     violation: Option<String>,
     /// The input whose event caused the violation, and its failure reason:
     /// it fails and nothing of it is placed.
@@ -1486,6 +1756,8 @@ impl<'a> Supervisor<'a> {
             outputs: Vec::new(),
             output_hashes: HashSet::new(),
             output_bytes: 0,
+            joined: None,
+            taken: 0,
             violation: None,
             offender: None,
             cancelled: false,
@@ -1709,7 +1981,8 @@ impl<'a> Supervisor<'a> {
             self.violate("event line is not UTF-8".to_owned());
             return;
         };
-        let ev = match parse_event(line, &self.step_in.paths, self.dir) {
+        let join = self.step_in.join.is_some();
+        let ev = match parse_event(line, &self.step_in.paths, self.dir, join) {
             Ok(ev) => ev,
             Err(what) => {
                 let index = offender_of(line, &self.step_in.paths);
@@ -1750,6 +2023,20 @@ impl<'a> Supervisor<'a> {
                     self.reported[index] = Reported::Done;
                 }
             }
+            // `joined` is a join action's last result event.
+            Event::Take { index } | Event::Skip { index, .. } | Event::Fail { index, .. }
+                if self.joined.is_some() =>
+            {
+                let what = format!(
+                    "result for {} after joined",
+                    self.step_in.paths[index].display()
+                );
+                self.violate_by(Some(index), what, None);
+            }
+            Event::Take { index } if self.reported[index] == Reported::Done => {
+                let what = format!("second take of {}", self.step_in.paths[index].display());
+                self.violate_by(Some(index), what, None);
+            }
             Event::Skip { index, reason } | Event::Fail { index, reason }
                 if self.reported[index] != Reported::Nothing =>
             {
@@ -1764,6 +2051,20 @@ impl<'a> Supervisor<'a> {
                 self.reported[index] = Reported::Final;
                 sink.fail(origin[index], reason);
             }
+            Event::Take { index } if self.reported[index] == Reported::Final => {
+                self.violate_by(Some(index), again(&self.step_in.paths, index), None);
+            }
+            Event::Take { index } => {
+                self.reported[index] = Reported::Done;
+                self.taken += 1;
+            }
+            Event::Joined { .. } if self.joined.is_some() => {
+                self.violate("second joined event".to_owned());
+            }
+            Event::Joined { .. } if self.taken == 0 => {
+                self.violate("joined without a take".to_owned());
+            }
+            Event::Joined { rel } => self.joined = Some(rel),
             Event::Warn { index, message } => sink.warn(origin[index], message),
         }
     }
@@ -1919,6 +2220,9 @@ impl<'a> Supervisor<'a> {
             }
             return None;
         }
+        if let Some(min) = self.step_in.join {
+            return Some(self.settle_join(sink, end, min));
+        }
         // The offending input fails, and none of its outputs (nor those of
         // other fan-out parts of the same original input) is placed.
         if let Some((j, why)) = self.offender.take() {
@@ -1942,6 +2246,46 @@ impl<'a> Supervisor<'a> {
             per[index].push(rel);
         }
         Some(per)
+    }
+
+    /// Settles a join action's inputs once its whole group is gone and its
+    /// pipes are read: the one result goes back under each input it took,
+    /// only if the action reported `joined`, took at least `min` inputs,
+    /// broke no rule and exited 0. Otherwise every input it did not settle
+    /// itself (`skip`, `fail`) fails, and nothing is returned to publish.
+    /// An input it said nothing of fails either way.
+    fn settle_join(&mut self, sink: &mut Sink, end: End, min: usize) -> Vec<Vec<PathBuf>> {
+        let origin = &self.step_in.origin;
+        let mut per = vec![Vec::new(); origin.len()];
+        if let Some((j, why)) = self.offender.take() {
+            self.reported[j] = Reported::Final;
+            sink.fail(origin[j], why);
+        }
+        let unreported =
+            |s: &Self, end| unreported_reason(s.violation.as_deref(), end, &s.tail, s.data_limit);
+        let refused = match (&self.violation, end, &self.joined) {
+            (Some(_), ..) | (None, End::Signal(_) | End::Exit(action::EXIT_USAGE), _) => {
+                Some(unreported(self, end))
+            }
+            (None, _, None) => Some(unreported(self, end)),
+            (None, End::Exit(c), Some(_)) if c != action::EXIT_OK => {
+                Some(format!("action exited with status {c}"))
+            }
+            (None, End::Exit(_), Some(_)) if self.taken < min => {
+                Some("action reported fewer inputs than its minimum".to_owned())
+            }
+            (None, End::Exit(_), Some(_)) => None,
+        };
+        let silent = unreported(self, end);
+        for (j, &o) in origin.iter().enumerate() {
+            match (self.reported[j], &refused, &self.joined) {
+                (Reported::Final, ..) => {}
+                (_, Some(why), _) => sink.fail(o, why.clone()),
+                (Reported::Done, None, Some(rel)) => per[j].push(rel.clone()),
+                _ => sink.fail(o, silent.clone()),
+            }
+        }
+        per
     }
 }
 
@@ -2227,7 +2571,7 @@ pub(crate) mod tests {
         std::os::unix::fs::symlink(outside.join("secret"), work.join("0/link.md")).unwrap();
         std::os::unix::fs::symlink(&outside, work.join("1/up")).unwrap();
         let inputs = [PathBuf::from("/in/a.txt"), PathBuf::from("/in/b.txt")];
-        let parse = |l: &str| parse_event(l, &inputs, &work);
+        let parse = |l: &str| parse_event(l, &inputs, &work, false);
 
         assert_eq!(
             parse(&done_line("/in/a.txt", "0/a.md")),
@@ -2306,10 +2650,106 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn validates_join_events() {
+        let t = Tmp::new("joined");
+        let work = t.0.join("work");
+        fs::create_dir_all(work.join("join/sub")).unwrap();
+        fs::create_dir_all(work.join("0")).unwrap();
+        fs::write(work.join("join/out.pdf"), "x").unwrap();
+        fs::write(work.join("join/sub/x.pdf"), "x").unwrap();
+        fs::write(work.join("0/a.pdf"), "x").unwrap();
+        fs::write(work.join("top.pdf"), "x").unwrap();
+        fs::create_dir(work.join("join/dir.pdf")).unwrap();
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), work.join("join/link.pdf")).unwrap();
+        let inputs = [PathBuf::from("/in/a.jpg"), PathBuf::from("/in/b.jpg")];
+        let join = |l: &str| parse_event(l, &inputs, &work, true);
+        let one = |l: &str| parse_event(l, &inputs, &work, false);
+
+        assert_eq!(join("take\t/in/b.jpg"), Ok(Event::Take { index: 1 }));
+        assert_eq!(
+            join("joined\tjoin/out.pdf"),
+            Ok(Event::Joined {
+                rel: PathBuf::from("join/out.pdf")
+            })
+        );
+        // The shared events are the same in both modes.
+        assert_eq!(
+            join("skip\t/in/a.jpg\thas alpha"),
+            one("skip\t/in/a.jpg\thas alpha")
+        );
+        for rel in [
+            "join",             // the folder itself
+            "join/",            // no name
+            "join/.",           // .
+            "join/..",          // ..
+            "join/sub/x.pdf",   // not directly in join/
+            "join//out.pdf",    // empty component
+            "./join/out.pdf",   // leading .
+            "/w/join/out.pdf",  // absolute
+            "0/a.pdf",          // a done-style path
+            "top.pdf",          // beside join/
+            "joinx/out.pdf",    // a prefix of the name only
+            "join/missing.pdf", // does not exist
+            "join/dir.pdf",     // not a regular file
+            "join/link.pdf",    // symlink
+            "",                 // empty
+        ] {
+            let e = violation(join(&format!("joined\t{rel}")));
+            assert!(!e.is_empty(), "{rel}");
+        }
+        for l in [
+            "take",                        // no input
+            "take\t/in/a.jpg\textra",      // two fields
+            "take\t/in/c.jpg",             // not an input
+            "take\tk=/in/a.jpg",           // a pair
+            "joined",                      // no path
+            "joined\tjoin/out.pdf\textra", // two fields
+            "done\t/in/a.jpg\t0/a.pdf",    // a one-to-one result
+        ] {
+            assert!(!violation(join(l)).is_empty(), "{l}");
+        }
+        // A one-to-one action speaks neither join event.
+        for l in ["take\t/in/a.jpg", "joined\tjoin/out.pdf"] {
+            assert!(violation(one(l)).contains("does not join"), "{l}");
+        }
+        // A malformed `take` blames the input it names.
+        assert_eq!(offender_of("take\t/in/b.jpg\tx", &inputs), Some(1));
+    }
+
+    #[test]
+    fn join_order_is_natural_by_name_then_by_path() {
+        let mut v: Vec<PathBuf> = [
+            "/z/b10.jpg",
+            "/a/b2.jpg",
+            "/y/a.jpg",
+            "/x/a.jpg",
+            "/b/B1.jpg",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        v.sort_by(|a, b| join_order(a, b));
+        let want: Vec<PathBuf> = [
+            "/b/B1.jpg",
+            "/x/a.jpg",
+            "/y/a.jpg",
+            "/a/b2.jpg",
+            "/z/b10.jpg",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(v, want);
+    }
+
+    #[test]
     fn progress_clamped_and_nan_dropped() {
         let inputs = [PathBuf::from("/in/a.txt")];
         let work = Path::new("/nonexistent");
-        let p = |l: &str| parse_event(l, &inputs, work);
+        let p = |l: &str| parse_event(l, &inputs, work, false);
         assert_eq!(p("progress\t0.42"), Ok(Event::Progress(Some(0.42))));
         assert_eq!(p("progress\tNaN"), Ok(Event::Progress(None)));
         assert_eq!(p("progress\t-3"), Ok(Event::Progress(Some(0.0))));
@@ -3389,6 +3829,7 @@ pub(crate) mod tests {
             paths: vec![t.0.join("in.txt")],
             origin: vec![0],
             intermediate: false,
+            join: None,
         }
     }
 

@@ -367,6 +367,14 @@ fn cmd_run(args: &[OsString]) -> u8 {
     run(target, files, notify, cancel)
 }
 
+/// The input types `a` takes: its join set, else its one input type.
+fn join_types(a: &Action) -> Vec<&str> {
+    match &a.join {
+        Some(j) => j.types.iter().map(String::as_str).collect(),
+        None => vec![a.input.as_str()],
+    }
+}
+
 /// Runs `target` on `files` (absolute, each once): the shared tail of `run`
 /// and the wheel.
 fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -> u8 {
@@ -396,8 +404,15 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             (f, c)
         })
         .collect();
-    // The input type, the route, and why a matching input cannot run.
-    let (mime, route, blocked): (&str, Vec<&Action>, Option<String>) = match (target, preset) {
+    // The input types, the route (or the join action), and why a matching
+    // input cannot run.
+    type Plan<'c> = (
+        Vec<&'c str>,
+        Vec<&'c Action>,
+        Option<&'c Action>,
+        Option<String>,
+    );
+    let (accept, route, join, blocked): Plan = match (target, preset) {
         (Target::Preset(_), Some(p)) => {
             let mut tally = menu::Tally::default();
             for (f, c) in &classified {
@@ -406,26 +421,29 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 }
             }
             match menu::choose(&cat, p, &tally) {
-                Some((menu::Choice::Route(r), _)) => (p.input, r, None),
-                Some((menu::Choice::Join(_), _)) => {
-                    eprintln!("inacircle: join actions are not supported yet");
-                    return EXIT_FAILED;
-                }
-                None => (p.input, Vec::new(), Some(String::new())),
+                Some((menu::Choice::Route(r), _)) => (vec![p.input], r, None, None),
+                Some((menu::Choice::Join(a), _)) => (join_types(a), Vec::new(), Some(a), None),
+                None => (vec![p.input], Vec::new(), None, Some(String::new())),
             }
         }
         (Target::Action(id), _) => {
             let Some(a) = cat.get(id) else {
                 return usage(&format!("unknown action `{id}`"));
             };
+            let (route, join) = match a.join {
+                Some(_) => (Vec::new(), Some(a)),
+                None => (vec![a], None),
+            };
             match missing_tools(a).first() {
-                None => (&a.input, vec![a], None),
-                Some(t) => (&a.input, Vec::new(), Some(format!("needs {t}"))),
+                None => (join_types(a), route, join, None),
+                Some(t) => (join_types(a), Vec::new(), None, Some(format!("needs {t}"))),
             }
         }
         (Target::Preset(_), None) => unreachable!("preset resolved above"),
     };
-    let name: String = route
+    // What runs: the route's steps, or the join action alone.
+    let steps: Vec<&Action> = join.map_or_else(|| route.clone(), |a| vec![a]);
+    let name: String = steps
         .iter()
         .map(|a| a.id.as_str())
         .collect::<Vec<_>>()
@@ -448,17 +466,19 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 input: f,
                 reason: format!("cannot read: {e}"),
             }),
-            Ok(Classified::File(k)) if k.mime.as_deref() == Some(mime) => match &blocked {
-                None => inputs.push(f),
-                Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
-                    input: f,
-                    reason: why.clone(),
-                }),
-                Some(_) => pre.push(Outcome::Skipped {
-                    input: f,
-                    reason: "unsupported".into(),
-                }),
-            },
+            Ok(Classified::File(k)) if k.mime.as_deref().is_some_and(|m| accept.contains(&m)) => {
+                match &blocked {
+                    None => inputs.push(f),
+                    Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
+                        input: f,
+                        reason: why.clone(),
+                    }),
+                    Some(_) => pre.push(Outcome::Skipped {
+                        input: f,
+                        reason: "unsupported".into(),
+                    }),
+                }
+            }
             Ok(Classified::File(_)) => pre.push(Outcome::Skipped {
                 input: f,
                 reason: "unsupported".into(),
@@ -470,8 +490,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // `lossy` is only the gate (a warning of a lossless route says
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
-        let label = route.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
+        let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
+        Notifier::new(label, steps.iter().any(|a| a.lossy), inputs.len())
     });
 
     mark("classify");
@@ -498,7 +518,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             last: None,
             entry: measure_on.then(Entry::default),
         };
-        let sandboxed = exec::run(&route, &inputs, &mut obs, &cancel).sandboxed;
+        let report = match join {
+            Some(a) => exec::run_join(a, &inputs, &mut obs, &cancel),
+            None => exec::run(&route, &inputs, &mut obs, &cancel),
+        };
+        let sandboxed = report.sandboxed;
         entry = obs.entry.take();
         sandboxed
     };
