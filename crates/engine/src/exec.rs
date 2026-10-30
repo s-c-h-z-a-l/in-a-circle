@@ -172,6 +172,10 @@ pub struct Joined {
     /// The one result, committed (its place may still be unknown: see
     /// the inputs' outcomes); `None` when nothing was published.
     pub publication: Option<Publication>,
+    /// The result went to the download folder: its anchor folder
+    /// ([`output::anchor`]) was not writable. `false` when nothing was
+    /// published.
+    pub downloads: bool,
 }
 
 /// Live feedback while a route runs.
@@ -432,14 +436,6 @@ fn join_order(a: &Path, b: &Path) -> std::cmp::Ordering {
         .then_with(|| action::natural_cmp(a.as_os_str().as_bytes(), b.as_os_str().as_bytes()))
 }
 
-/// Where a join's one result goes, and its name: for now the target of
-/// the first input's folder and that input's stem.
-fn join_place(first: &Path) -> Result<(PathBuf, String), String> {
-    let dir = first.parent().unwrap_or(Path::new("/"));
-    let target = output::writable_target(dir).map_err(|e| e.to_string())?;
-    Ok((target, stem_of(first)))
-}
-
 /// An input's file stem as an output name; `output` if it has none.
 fn stem_of(p: &Path) -> String {
     p.file_stem()
@@ -452,7 +448,9 @@ fn stem_of(p: &Path) -> String {
 /// one result, made of the inputs it took. The inputs (each once) go to
 /// the action in [`join_order`]; the caller has already settled those
 /// outside the action's type set. Never panics on a misbehaving action;
-/// every input ends with at least one outcome.
+/// every input ends with at least one outcome. The result's place and name
+/// are its [`output::anchor`] over the admitted inputs, and it is published
+/// once, as one group, like any other output.
 ///
 /// The result is published only if the action reported `joined` after at
 /// least `min` `take`s, broke no rule of the contract, exited 0, and no
@@ -473,6 +471,7 @@ pub fn run_join(
         taken: 0,
         total: uniq.len(),
         publication: None,
+        downloads: false,
     };
     let mut sink = Sink::new(obs, &uniq);
     let all = |sink: &mut Sink, ins: &[usize], reason: &str| {
@@ -494,11 +493,15 @@ pub fn run_join(
         return end(&mut sink, false, joined);
     }
     let ok = admit(&mut sink);
-    let Some(&first) = ok.first() else {
+    if ok.is_empty() {
         return end(&mut sink, true, joined);
-    };
-    let (target, stem) = match join_place(&uniq[first]) {
-        Ok(p) => p,
+    }
+    // A copy for the anchor only, dropped before the action runs.
+    let accepted: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
+    let placed = output::anchor(&accepted);
+    drop(accepted);
+    let anchor = match placed {
+        Ok(a) => a,
         Err(e) => {
             all(&mut sink, &ok, &format!("no folder for the output: {e}"));
             return end(&mut sink, true, joined);
@@ -509,9 +512,11 @@ pub fn run_join(
         all(&mut sink, &ok, "cancelled");
     } else {
         // The download fallback may not exist yet.
-        let _ = fs::create_dir_all(&target);
-        output::clean_stale(&target);
-        if let Some((taken, p)) = join_group(action, &ok, min, &target, &stem, cancel, &mut sink) {
+        let _ = fs::create_dir_all(&anchor.target);
+        output::clean_stale(&anchor.target);
+        let (target, name) = (&anchor.target, &anchor.name);
+        if let Some((taken, p)) = join_group(action, &ok, min, target, name, cancel, &mut sink) {
+            joined.downloads = anchor.downloads;
             joined.taken = taken;
             joined.publication = Some(p);
         }

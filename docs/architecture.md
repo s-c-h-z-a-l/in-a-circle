@@ -401,9 +401,10 @@ Every action runs sandboxed, set up in the child between `fork` and
   later). A **join** action runs once over every accepted input, whatever
   folders they come from and whatever its `batch=` says, in natural order
   (`natural_cmp` on the file name's bytes, then on the whole path), in one
-  temp dir in its result's target folder (for now the first input's), and
-  its one result is published as one group by the same staging and
-  no-replace rename as any other output. A two-step route runs both steps in the same temp dir; only the
+  temp dir in its result's target folder (its anchor, see
+  [Output policy](#output-policy)), and its one result is published once,
+  as one group, by the same staging and no-replace rename as any other
+  output. A two-step route runs both steps in the same temp dir; only the
   last step's outputs are placed. Step 1's outputs are checked again once
   its whole group is gone (a regular file, no symlink on the way), so an
   action cannot swap one for a link before step 2 reads it.
@@ -447,7 +448,12 @@ Every action runs sandboxed, set up in the child between `fork` and
   same text is the CLI's stderr warning. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. An output whose lossy action reported a
   loss (a `warn` for an input that has an output) starts the body with
-  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  `Formatting was lost.`; a run that lost nothing does not say it. A join
+  run that published its result: the result's file name, then `<taken> /
+  <total> files` (the inputs in the result, of every file of the run) and
+  the same problem lines, plus the Downloads line when its anchor folder
+  was read-only; a join that published nothing reads like any run that
+  converted nothing. A run
   the sandbox gate refused ends it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
@@ -534,7 +540,17 @@ In the engine, in one place:
    at most four). A published group renamed to that pattern holds its
    outputs' names and is never removed. An output folder never takes that
    pattern.
-7. Undo never deletes. It moves each input's output group (the wrapper
+7. A join action's one result has one place and one name, its anchor:
+   the target (rule 1) of the folder that holds the most of its accepted
+   inputs (those of its type set), on a tie the folder of the input that
+   comes first in its order. Its name is that folder's name for two or
+   more inputs (`Nyaralás/Nyaralás/Nyaralás.pdf`), the input's stem for
+   one; a folder without a usable name (the root, or a hidden one, which
+   would hide the result) gives `images`. The wrapper and a taken name
+   (`Nyaralás (1)/`) follow rule 3; inputs from other folders change
+   nothing. It goes to the download folder only when the anchor folder is
+   not writable.
+8. Undo never deletes. It moves each input's output group (the wrapper
    folder, whole) into the freedesktop.org Trash with one
    `renameat2(RENAME_NOREPLACE)`: the home Trash
    (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
@@ -815,7 +831,12 @@ No daemon:
   (`history.v0`, `history.v0.1`, …, never overwritten) under the
   history's lock by the first run that writes; its jobs are refused with
   the reason, their outputs kept. A run that dies midway leaves its
-  complete groups, which undo still finds. Nothing of a run is kept in
+  complete groups, which undo still finds. A join run is one group like
+  any other (its result's wrapper); the inputs it did not take have their
+  usual `skip`/`fail` lines, and which inputs went into the result is not
+  recorded (undo does not need it): undo moves that one wrapper to the
+  Trash, the inputs are never touched. The format is the same as before
+  join actions, and older jobs still undo. Nothing of a run is kept in
   memory per outcome;
 - state files (history, registry entries, the catalog cache) are created
   exclusively under random names, never through a symlink, in a folder
@@ -892,7 +913,10 @@ inacircle cancel <job-id>
   the whole run, and ends with `summary done=… skipped=… failed=…`,
   counted per input.
 - `run` exits by the batch rule above. A cancel fails the inputs not yet
-  finished (`cancelled`), then the same rule applies.
+  finished (`cancelled`), then the same rule applies. A join run exits 0
+  once its result is published (each input in it gets its `done` line,
+  with the one result's path); otherwise the same rule (1 if an input
+  failed, 3 if every one was skipped).
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
 - `undo` of a job that is still running is refused (exit 1): cancel it

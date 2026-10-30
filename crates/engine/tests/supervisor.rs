@@ -2040,6 +2040,107 @@ fn cancel_after_joined_before_publish_publishes_nothing() {
     assert_nothing_published(&t, &ins, &obs.ran, &rep, "cancelled");
 }
 
+/// A join action that takes the first input, reports `joined`, then sends
+/// `late` about the second input (`$b`).
+fn late_after_joined(late: &str) -> String {
+    format!(
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         {{ read -r a; read -r b; }} < \"$6\"\n\
+         printf 'take\\t%s\\n' \"$a\"; printf 'joined\\tjoin/out.pdf\\n'\n{late}"
+    )
+}
+
+/// `joined` is the last result event: a `take`, `skip` or `fail` after it
+/// is a contract violation, and nothing is published.
+#[test]
+fn result_after_joined_is_a_violation() {
+    for (tag, late) in [
+        ("join-late-take", "printf 'take\\t%s\\n' \"$b\""),
+        ("join-late-skip", "printf 'skip\\t%s\\tlate\\n' \"$b\""),
+        ("join-late-fail", "printf 'fail\\t%s\\tlate\\n' \"$b\""),
+    ] {
+        rejects(tag, &late_after_joined(late));
+    }
+}
+
+/// A `take` after `joined` never counts toward the minimum: with a minimum
+/// of two, the run is refused as a violation, not published with two.
+#[test]
+fn late_take_never_counts_toward_min() {
+    let t = Tmp::new("join-late-min");
+    let ins = three_images(&t);
+    let bin = t.script("join", &late_after_joined("printf 'take\\t%s\\n' \"$b\""));
+    let (r, rep) = run_join(&join_action(&bin, 2), &ins, None);
+    assert_nothing_published(&t, &ins, &r, &rep, "contract violation: ");
+}
+
+/// After `joined`, an invocation error (exit 2) and a death by signal
+/// publish nothing either.
+#[test]
+fn exit_2_or_signal_after_joined_publishes_nothing() {
+    for (tag, extra, reason) in [
+        ("join-exit2", "exit 2", "action invocation error"),
+        ("join-signal", "kill -KILL $$", "killed by signal 9"),
+    ] {
+        let t = Tmp::new(tag);
+        let ins = three_images(&t);
+        let bin = t.script("join", &join_then(extra));
+        let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+        assert_nothing_published(&t, &ins, &r, &rep, reason);
+    }
+}
+
+/// Three images in `<tmp>/Nyaralás`: the result is named after the folder
+/// and wrapped like any output, `Nyaralás/Nyaralás/Nyaralás.pdf`; a second
+/// run gets the next free wrapper name.
+#[test]
+fn join_output_lands_as_folder_folder_pdf() {
+    let t = Tmp::new("join-anchor");
+    let dir = t.0.join("Nyaralás");
+    std::fs::create_dir(&dir).unwrap();
+    let ins: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|n| {
+            let p = dir.join(format!("{n}.jpg"));
+            std::fs::write(&p, n).unwrap();
+            p
+        })
+        .collect();
+    let bin = t.script("join", JOIN_ALL);
+    for want in ["Nyaralás/Nyaralás.pdf", "Nyaralás (1)/Nyaralás.pdf"] {
+        let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+        let j = rep.joined.unwrap();
+        assert!(!j.downloads);
+        let d = done_pairs(&r);
+        assert_eq!(d.len(), 3, "{:?}", r.outcomes);
+        assert!(d.iter().all(|(_, o)| *o == dir.join(want)), "{d:?}");
+        assert_eq!(std::fs::read_to_string(dir.join(want)).unwrap(), "abc");
+    }
+}
+
+/// The publication fails right before its commit (no space left, as the
+/// observer's last step before the rename): nothing reaches the folder, no
+/// group is reported, and every input fails.
+#[test]
+fn publish_failure_leaves_nothing() {
+    let t = Tmp::new("join-enospc");
+    let ins = three_images(&t);
+    let bin = t.script("join", JOIN_ALL);
+    let tok = engine::exec::CancelToken::install().unwrap();
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(|_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+        })),
+        ..Pub::default()
+    };
+    let rep = engine::exec::run_join(&join_action(&bin, 1), &ins, &mut obs, &tok);
+    assert_eq!(obs.prepared.len(), 1, "the failure came before the commit");
+    assert!(obs.groups.is_empty());
+    assert!(obs.ran.dirs.is_empty());
+    assert_nothing_published(&t, &ins, &obs.ran, &rep, "cannot publish output: ");
+    assert_eq!(failed(&obs.ran).len(), 3);
+}
+
 #[test]
 fn join_inputs_arrive_sorted() {
     let t = Tmp::new("join-sorted");

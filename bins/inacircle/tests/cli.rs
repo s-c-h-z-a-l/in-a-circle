@@ -1575,18 +1575,27 @@ fn offer_pdfs_and_one_txt() {
 }
 
 /// A `#!/bin/sh` plugin that declares the image join action (its manifest
-/// line is the shipped one); it is never run here. Installed like `plugin`.
+/// line is the shipped one) and runs [`JOIN_ALL`]. Installed like `plugin`.
 fn join_plugin(e: &Env) {
+    join_plugin_with(e, JOIN_ALL);
+}
+
+/// Takes every input into `<work>/join/out.pdf` and reports `joined` once.
+const JOIN_ALL: &str = "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+     while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+     printf 'joined\\tjoin/out.pdf\\n'";
+
+/// [`join_plugin`] running `body` (`$4` the work dir, `$6` the input list).
+fn join_plugin_with(e: &Env, body: &str) {
     let src = e.root.join("joiner.src");
     fs::write(
         &src,
-        "#!/bin/sh\n\
-         if [ \"$1\" = --manifest ]; then\n\
-         printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
-         exit 0\nfi\n\
-         work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
-         while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
-         printf 'joined\\tjoin/out.pdf\\n'\n",
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --manifest ]; then\n\
+             printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
+             exit 0\nfi\n{body}\n"
+        ),
     )
     .unwrap();
     let tmp = e.root.join("actions").join(".joiner.tmp");
@@ -1654,6 +1663,107 @@ fn run_join_action_by_id() {
     let done = o.pairs("done");
     assert_eq!(done.len(), 2, "{}", o.stdout);
     assert_eq!(done[0].1, done[1].1, "one result for both");
+}
+
+/// A join run exits 0 once its result is published (one input skipped
+/// by the action or not), 3 when every input was skipped, 1 when one
+/// failed and nothing was published.
+#[test]
+fn images_to_pdf_exit_codes() {
+    let e = Env::with_actions("join-exit", &[]);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    let run = || e.run(&["run", "--action", "p.images-to-pdf", "a.jpg", "b.png"]);
+    join_plugin(&e);
+    let o = run();
+    if skip_no_sandbox("images_to_pdf_exit_codes", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 0, 0));
+    // Every input skipped by the action: nothing published, exit 3.
+    join_plugin_with(
+        &e,
+        "while IFS= read -r in; do printf 'skip\\t%s\\thas alpha\\n' \"$in\"; done < \"$6\"; exit 3",
+    );
+    let o = run();
+    assert_eq!(o.code, Some(3), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 2, 0));
+    // One skipped, one failed, no result: exit 1.
+    join_plugin_with(
+        &e,
+        "{ read -r a; read -r b; } < \"$6\"\n\
+         printf 'skip\\t%s\\thas alpha\\n' \"$a\"; printf 'fail\\t%s\\tbroken\\n' \"$b\"; exit 1",
+    );
+    let o = run();
+    assert_eq!(o.code, Some(1), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 1, 1));
+}
+
+/// A join is one group in the history; the inputs it did not take keep
+/// their `skip` lines. Undo moves the one wrapper to the Trash and leaves
+/// every input as it was.
+#[test]
+fn join_history_has_one_group_and_undoes() {
+    let e = Env::with_actions("join-history", &[]);
+    join_plugin_with(
+        &e,
+        "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do case \"$in\" in\n\
+         *b.png) printf 'skip\\t%s\\thas alpha\\n' \"$in\";;\n\
+         *) cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\";;\n\
+         esac; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let ins = [
+        e.file("a.jpg", b"\xff\xd8\xff\xe0 a"),
+        e.file("b.png", b"\x89PNG\r\n\x1a\n...."),
+        e.file("c.jpg", b"\xff\xd8\xff\xe0 c"),
+    ];
+    let o = e.run(&["run", "pdf", "a.jpg", "b.png", "c.jpg"]);
+    if skip_no_sandbox("join_history_has_one_group_and_undoes", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 1, 0));
+    // Named after the folder of the inputs (`files`).
+    let wrapper = e.files().join("files");
+    let result = wrapper.join("files.pdf");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| Path::new(p) == result), "{done:?}");
+    let job = o.job();
+    let h = e.history();
+    let mine: Vec<&str> = h.lines().filter(|l| l.contains(&job)).collect();
+    let count = |kind: &str| {
+        mine.iter()
+            .filter(|l| l.split('\t').next() == Some(kind))
+            .count()
+    };
+    assert_eq!(count("group-begin"), 1, "{h}");
+    assert_eq!(count("publish-commit"), 1, "{h}");
+    assert_eq!(count("skip"), 1, "{h}");
+    assert!(
+        mine.iter().any(|l| l.starts_with("skip\t")
+            && l.contains("b.png")
+            && l.contains("reason=has alpha")),
+        "{h}"
+    );
+    let before: Vec<Vec<u8>> = ins.iter().map(|p| fs::read(p).unwrap()).collect();
+
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    let trash = e.root.join("home/.local/share/Trash/files");
+    let moved: Vec<String> = u
+        .kind("moved")
+        .iter()
+        .map(|l| l.bare_at(0).unwrap().to_owned())
+        .collect();
+    assert_eq!(moved, [trash.join("files").display().to_string()]);
+    assert!(!wrapper.exists());
+    assert!(trash.join("files/files.pdf").is_file());
+    let after: Vec<Vec<u8>> = ins.iter().map(|p| fs::read(p).unwrap()).collect();
+    assert_eq!(before, after, "an input changed");
 }
 
 #[test]

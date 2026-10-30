@@ -16,7 +16,8 @@
 //! ends with `summary done=<n> skipped=<n> failed=<n>`, counted per input.
 //! Its exit code follows the batch rule: 0 if any input is done, else 1 if
 //! any failed, else 3 (all unsupported). A cancel fails the inputs that had
-//! not finished (`cancelled`); the batch rule then applies as usual.
+//! not finished (`cancelled`); the batch rule then applies as usual. A
+//! join run exits 0 once its one result is published.
 //! An invocation error (unknown subcommand, preset or action, no files, an
 //! empty path) is a message on stderr and exit 2, with nothing on stdout.
 //! The same file (by canonical path) given more than once counts once; the
@@ -495,6 +496,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     });
 
     mark("classify");
+    let pre_count = pre.len();
     let job = journal::new_job_id();
     let mut running = Running::start(&job, &name, inputs.len());
     let mut rec = Recorder::open(&job, &name);
@@ -507,7 +509,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             n.event(&o);
         }
     }
+    // Every file of the run, those settled above included: a join's
+    // notice counts its result against them.
+    let files = pre_count + inputs.len();
     let mut entry = None;
+    let mut joined = None;
     let sandboxed = if inputs.is_empty() {
         engine::sandbox::ready().is_ok()
     } else {
@@ -522,9 +528,9 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             Some(a) => exec::run_join(a, &inputs, &mut obs, &cancel),
             None => exec::run(&route, &inputs, &mut obs, &cancel),
         };
-        let sandboxed = report.sandboxed;
         entry = obs.entry.take();
-        sandboxed
+        joined = report.joined;
+        report.sandboxed
     };
     mark("exec");
     // Read now: a cancel after this point stopped nothing.
@@ -569,6 +575,9 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // ends the window, not the process.
     if let Some(mut n) = notifier {
         n.record_warning(closed.warning.as_deref());
+        if let Some(j) = &joined {
+            n.record_join(j.taken, files, j.downloads);
+        }
         n.finish(
             &job,
             sandboxed,
@@ -583,7 +592,10 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // are already failed, so the batch rule covers a cancelled run too.
     let _ = cancel.is_cancelled();
     drop(cancel);
-    if done > 0 {
+    // A join that published its result is done (its inputs are `done`
+    // too); one that did not falls to the rule below like any run.
+    let published = joined.is_some_and(|j| j.publication.is_some());
+    if done > 0 || published {
         EXIT_DONE
     } else if failed > 0 {
         EXIT_FAILED
