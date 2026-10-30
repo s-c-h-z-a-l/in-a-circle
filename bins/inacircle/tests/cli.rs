@@ -364,6 +364,34 @@ fn images_to_pdf_end_to_end() {
     assert_eq!(fs::read(e.files().join("Nyaralás/2.png")).unwrap(), png);
 }
 
+/// An action whose tool is missing fails the inputs it would take, with the
+/// missing tool named; an input it does not take is still skipped.
+#[test]
+fn missing_tool_fails_matching_inputs() {
+    let e = Env::with_actions("needy", &[]);
+    let bin = e.root.join("actions/needy");
+    fs::write(
+        &bin,
+        "#!/bin/sh\n\
+         printf 'inacircle-manifest 0\\naction\\tp.needy\\tfamily=p\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=n\\tgroup=p\\tcost=1\\tlossy=no\\tbatch=yes\\trequires=no-such-tool-inacircle\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let t = e.file("doc.txt", b"text\n");
+    let o = e.run(&["run", "--action", "p.needy", "doc.txt"]);
+    if skip_unsandboxed("missing_tool_fails_matching_inputs", &o) {
+        return;
+    }
+    assert_eq!(
+        o.pairs("fail"),
+        [(t, "needs no-such-tool-inacircle".to_owned())],
+        "{}{}",
+        o.stdout,
+        o.stderr
+    );
+    assert!(o.pairs("skip").is_empty(), "{}", o.stdout);
+}
+
 // ---- text conversions through the real inacircle-text ----
 
 #[test]
