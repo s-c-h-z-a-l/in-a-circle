@@ -7,11 +7,13 @@
 
 mod order;
 
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use action::{Command, Events, Invocation, parse_args};
 use order::natural_cmp;
@@ -78,6 +80,71 @@ const PAGES: usize = 10_000;
 /// megapixels`.
 const MAX_PIXELS: u64 = 180_000_000;
 
+/// Bytes of PDF structure around the page data, per page: 2,560. Derived
+/// from `crates/pdf`: a page is three objects. The image object has
+/// `N 0 obj\n`, a dictionary of about 300 B (a palette PNG adds its
+/// `/Indexed` table, at most 256 entries as 1,536 hex digits plus about
+/// 30 B), `/Length`, `stream\n` and `\nendstream\nendobj\n`, together about
+/// 1,900 B at the worst. The content stream (`q w 0 0 h 0 0 cm /Im0 Do Q`
+/// in its object) is about 100 B and the page object (MediaBox, Resources,
+/// Parent, Contents) about 200 B. The cross-reference table takes 20 B per
+/// object, 60 B per page, and the Kids list `N 0 R ` at most 11 B per page.
+/// The sum, about 2,270 B, is rounded up to 2,560 (2.5 KiB). Past the
+/// estimate the total is still checked against the bytes actually written.
+const PAGE_OVERHEAD: u64 = 2_560;
+
+/// Bytes of PDF structure once per file: 1,024. The header (15 B), the
+/// Pages node and Catalog (about 100 B plus the Kids list, counted per
+/// page), the `xref` heading with its free entry (about 50 B) and the
+/// trailer (about 80 B) come to about 250 B; 1,024 is generous.
+const FILE_OVERHEAD: u64 = 1_024;
+
+/// The soft `RLIMIT_FSIZE` of this process, the largest file it may write
+/// (the engine sets it to 16 x the input, 256 MiB to 16 GiB). `None` is
+/// unlimited. A failing `getrlimit` is an error, so the caller fails
+/// closed instead of writing without a ceiling. `getrlimit` on itself is
+/// allowed by the sandbox's seccomp policy.
+fn output_cap() -> io::Result<Option<u64>> {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `rl` is a valid, writable `rlimit` for the whole call, and
+    // RLIMIT_FSIZE is a valid resource; the call only writes into `rl`.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut rl) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((rl.rlim_cur != libc::RLIM_INFINITY).then_some(rl.rlim_cur))
+}
+
+/// A writer that refuses to pass `cap` bytes: the write that would cross
+/// it fails first and sets `tripped`, so the caller can tell the ceiling
+/// from an I/O error.
+struct Capped<W: Write> {
+    inner: W,
+    cap: Option<u64>,
+    written: u64,
+    tripped: Rc<Cell<bool>>,
+}
+
+impl<W: Write> Write for Capped<W> {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        let next = self.written.saturating_add(b.len() as u64);
+        if self.cap.is_some_and(|c| next > c) {
+            self.tripped.set(true);
+            return Err(io::Error::other("output size limit"));
+        }
+        let n = self.inner.write(b)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn manifest_text() -> String {
     let mut s = manifest::header("inacircle-manifest", 0);
     s.push_str(&manifest::write_line(
@@ -137,6 +204,15 @@ fn kind_of(name: &[u8]) -> Option<Kind> {
     } else {
         None
     }
+}
+
+/// Metadata a Finder-made zip carries beside the pages: anything under
+/// `__MACOSX/` and any file whose last path component starts with `.`
+/// (`._1.jpg` resource forks, a bare `.png`). Not pages, even with an image
+/// extension.
+fn is_metadata(name: &[u8]) -> bool {
+    let base = name.rsplit(|&c| c == b'/').next().unwrap_or(name);
+    name.split(|&c| c == b'/').next() == Some(b"__MACOSX") || base.starts_with(b".")
 }
 
 /// The page name for messages: lossy where the bytes are not UTF-8.
@@ -239,7 +315,7 @@ fn convert(
         if e.is_dir() {
             continue;
         }
-        if kind_of(&e.name).is_some() {
+        if !is_metadata(&e.name) && kind_of(&e.name).is_some() {
             pages.push(idx);
         } else {
             notes.non_image += 1;
@@ -274,6 +350,25 @@ fn convert(
         }
     }
 
+    // The output ceiling, before the output exists: the declared sizes are
+    // true upper bounds on the page bytes (the reader enforces that the
+    // bytes produced equal the declared size), so their sum plus the PDF
+    // structure is the file size at the worst.
+    let cap = match output_cap() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("cannot read the output size limit: {e}")),
+    };
+    let too_large = |c: u64| Stop::Fail(format!("PDF would be larger than {} MiB", c >> 20));
+    if let Some(c) = cap {
+        let total = pages.iter().fold(FILE_OVERHEAD, |t, &idx| {
+            t.saturating_add(entries[idx].size)
+                .saturating_add(PAGE_OVERHEAD)
+        });
+        if total > c {
+            return Err(too_large(c));
+        }
+    }
+
     let out_path = match action::output_path(&inv.work, i, input, "pdf") {
         Ok(p) => p,
         Err(e) => return fail(format!("cannot create output: {e}")),
@@ -290,8 +385,18 @@ fn convert(
         path: out_path,
         armed: true,
     };
-    let write_err = |e: io::Error| Stop::Fail(format!("cannot write output: {e}"));
-    let mut writer = pdf::Writer::new(BufWriter::new(out_file)).map_err(write_err)?;
+    let tripped = Rc::new(Cell::new(false));
+    let write_err = |e: io::Error| match cap {
+        Some(c) if tripped.get() => too_large(c),
+        _ => Stop::Fail(format!("cannot write output: {e}")),
+    };
+    let capped = Capped {
+        inner: out_file,
+        cap,
+        written: 0,
+        tripped: Rc::clone(&tripped),
+    };
+    let mut writer = pdf::Writer::new(BufWriter::new(capped)).map_err(write_err)?;
 
     // One page at a time: the buffer is reused, so memory is the largest
     // page, not the sum.
@@ -425,4 +530,47 @@ fn main() -> ExitCode {
         return ExitCode::from(action::EXIT_USAGE as u8);
     }
     ExitCode::from(run(&inv))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_stops_before_the_write_that_crosses_the_cap() {
+        let tripped = Rc::new(Cell::new(false));
+        let mut w = Capped {
+            inner: Vec::new(),
+            cap: Some(10),
+            written: 0,
+            tripped: Rc::clone(&tripped),
+        };
+        w.write_all(b"0123456789").unwrap();
+        assert!(!tripped.get(), "exactly the cap is allowed");
+        assert!(w.write_all(b"x").is_err());
+        assert!(tripped.get());
+        assert_eq!(w.inner, b"0123456789", "nothing past the cap is written");
+    }
+
+    #[test]
+    fn capped_without_a_cap_passes_everything() {
+        let mut w = Capped {
+            inner: Vec::new(),
+            cap: None,
+            written: 0,
+            tripped: Rc::new(Cell::new(false)),
+        };
+        w.write_all(&[1; 100]).unwrap();
+        assert_eq!(w.inner.len(), 100);
+    }
+
+    #[test]
+    fn metadata_names() {
+        assert!(is_metadata(b"__MACOSX/._1.jpg"));
+        assert!(is_metadata(b"__MACOSX/a/2.png"));
+        assert!(is_metadata(b"a/._1.jpg"));
+        assert!(is_metadata(b".png"));
+        assert!(!is_metadata(b"a/1.png"));
+        assert!(!is_metadata(b"__MACOSXX/1.png"));
+    }
 }

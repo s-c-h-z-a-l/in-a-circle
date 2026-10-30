@@ -61,8 +61,8 @@ Reference: Pillow warns above 89 MP and rejects above 179 MP ("decompression
 bomb"). The planned pixel limit of the image actions (180 MP) follows it.
 
 The other families stream and stay small: cbz to pdf one page plus the
-entry list (< 72 MB, see the pages family below); md/epub one chapter tree (< 100 MB); archives a 32 KB
-window plus about 300 B per file (about 60 MB at 200 000 files); office
+entry list (< 72 MB, see the pages family below); md/epub one chapter tree
+(< 100 MB); archives a 32 KB window plus about 300 B per file (about 60 MB at 200 000 files); office
 streamed XML (< 100 MB); audio (< 10 MB). json <-> toml needs the whole
 tree (about 5-10x the file), so those actions get a file size limit.
 
@@ -84,9 +84,21 @@ Measured (release build, reference machine): 5,000 small pages peak at
 list, order and offsets); one 42 MB page peaks at 43.6 MB. So the bound is
 the page file limit plus about 4 MB: under 72 MB. Reading and checking a
 42 MB page into a PDF takes about 0.18 s. The PDF is about the sum of the
-page files plus 130 B per page, so the output is bounded by the engine's
-`RLIMIT_FSIZE` (16 x the input, 256 MiB to 16 GiB); a CBZ of deflated flat
-pages can expand beyond it and then ends with `output too large`.
+page files plus about 130 B per page, so the output is bounded by the
+engine's `RLIMIT_FSIZE` (16 x the input, 256 MiB to 16 GiB), and the action
+checks it itself first. It reads its own `RLIMIT_FSIZE` (a failure to read
+it fails the input), and before the output is created it sums the declared
+page sizes plus 2,560 B of PDF structure per page and 1,024 B per file (the
+object text, a 256-entry palette, the xref entries and the Kids list, an
+upper bound derived from the writer). Over the cap the input fails with
+`PDF would be larger than <N> MiB` (N rounded down), nothing is created and
+no page is inflated. A running count of the bytes written is the second
+check; the half-written PDF is removed. So a CBZ of deflated flat pages
+cannot expand past the limit.
+
+Entries under `__MACOSX/` and files whose name starts with `.` (Finder
+resource forks such as `._1.jpg`) are not pages; they count in the
+`non-image entries left out` warning.
 
 The text family (txt <-> md) is held by structure budgets charged while it
 builds, not after: 8 MiB input, 524,288 nodes, 32 MiB of owned text, 32 MiB

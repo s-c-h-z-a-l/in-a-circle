@@ -558,6 +558,146 @@ fn limits_fail_with_their_copy() {
     assert_eq!(f[2], "page 1.png is larger than 180 megapixels");
 }
 
+/// Run with the child's `RLIMIT_FSIZE` set to `bytes` (soft and hard), the
+/// way the engine's sandbox bounds an action's output, but small enough to
+/// reach with little data.
+fn run_with_fsize(work: &Path, input: &Path, bytes: u64) -> Output {
+    use std::os::unix::process::CommandExt;
+    let mut c = command(work);
+    c.arg(input);
+    // SAFETY: the closure runs between fork and exec and only calls
+    // `setrlimit`, which is async-signal-safe, on a local struct; it
+    // touches no memory of the parent and takes no lock.
+    unsafe {
+        c.pre_exec(move || {
+            let rl = libc::rlimit {
+                rlim_cur: bytes as libc::rlim_t,
+                rlim_max: bytes as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn pages_over_the_output_size_limit_fail_with_their_copy() {
+    let t = tmp("fsize");
+    // Each page is an incompressible RGB PNG (pseudo-random rows, filter 0)
+    // of about 750 KB, so one page fits in 1 MiB and two do not.
+    let (w, h) = (500usize, 500usize);
+    let mut x = 0x2545_F491u32;
+    let mut rows = Vec::with_capacity(h * (1 + 3 * w));
+    for _ in 0..h {
+        rows.extend_from_slice(&[0]); // filter type 0
+        for _ in 0..3 * w {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            rows.push((x >> 24) as u8);
+        }
+    }
+    let png = testzip::png(w as u32, h as u32, 2, None, false, false, &rows);
+    assert!(png.len() > 750_000 && png.len() < 800_000, "{}", png.len());
+    let work = t.join("work");
+
+    // Positive control: one page under the cap succeeds.
+    let one = cbz(&t, "one.cbz", &[(b"1.png", &png, Stored)]);
+    let o = run_with_fsize(&work, &one, 1 << 20);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(files_with_ext(&work, "pdf").len(), 1);
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    // Two pages: the declared sizes already exceed the cap.
+    let two = cbz(
+        &t,
+        "two.cbz",
+        &[(b"1.png", &png, Stored), (b"2.png", &png, Stored)],
+    );
+    let o = run_with_fsize(&work, &two, 1 << 20);
+    assert_eq!(o.status.code(), Some(1));
+    let out = stdout(&o);
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 1, "{out}");
+    assert_eq!(f[0][2], "PDF would be larger than 1 MiB");
+    assert_no_pdf(&work);
+
+    // The cap in MiB is rounded down.
+    let o = run_with_fsize(&work, &two, (1 << 20) + 200_000);
+    assert_eq!(
+        lines(&stdout(&o), "fail")[0][2],
+        "PDF would be larger than 1 MiB"
+    );
+    assert_no_pdf(&work);
+}
+
+#[test]
+fn macos_metadata_entries_are_not_pages() {
+    let t = tmp("macos");
+    let png = rgb_png(5, 5);
+    let input = cbz(
+        &t,
+        "m.cbz",
+        &[
+            (b"__MACOSX/", b"", Stored),
+            (b"__MACOSX/._1.jpg", b"\x00\x05\x16\x07 not a jpeg", Stored),
+            (b"__MACOSX/sub/2.png", b"junk", Stored),
+            (b"._x.jpg", b"junk", Stored),
+            (b"sub/.png", b"junk", Stored),
+            (b"1.png", &png, Stored),
+            (b"2.png", &png, Stored),
+        ],
+    );
+    let work = t.join("work");
+    let o = run(&work, &[&input]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        lines(&out, "warn"),
+        [vec![
+            "warn",
+            input.to_str().unwrap(),
+            "4 non-image entries left out"
+        ]]
+    );
+    let pdf = files_with_ext(&work, "pdf");
+    assert_eq!(pdf.len(), 1);
+    page_sizes(&t, &pdf[0], 2);
+}
+
+#[test]
+fn name_and_ratio_limits_fail_with_their_copy() {
+    let t = tmp("zipshape");
+    // A 513-byte name (the limit is 512).
+    let long = format!("{}.png", "a".repeat(509));
+    assert_eq!(long.len(), 513);
+    let input = cbz(&t, "name.cbz", &[(long.as_bytes(), b"x", Stored)]);
+    let (_, f) = one_input(&t, "fail", &input);
+    assert_eq!(f[2], "damaged CBZ: an entry name is too long");
+
+    // A deflated entry of 4 KiB whose header is forged to claim 1 GiB: the
+    // ratio is far over 1032, and the header is refused before inflating.
+    let png = rgb_png(5, 5);
+    let mut z = testzip::zip(&[(b"1.png", &png, Deflated)]);
+    let forged = (1u32 << 30).to_le_bytes();
+    // Uncompressed size: offset 24 of the central directory header and 22
+    // of the local header.
+    let cd = z.windows(4).rposition(|w| w == b"PK\x01\x02").unwrap();
+    z[cd + 24..cd + 28].copy_from_slice(&forged);
+    z[22..26].copy_from_slice(&forged);
+    let input = t.join("ratio.cbz");
+    fs::write(&input, z).unwrap();
+    let (_, f) = one_input(&t, "fail", &input);
+    assert_eq!(
+        f[2],
+        "damaged CBZ: an entry's compression ratio is too high"
+    );
+}
+
 #[test]
 fn batch_rule() {
     let t = tmp("batch");
