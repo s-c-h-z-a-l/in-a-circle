@@ -1574,6 +1574,54 @@ fn offer_pdfs_and_one_txt() {
     );
 }
 
+/// A `#!/bin/sh` plugin that declares the image join action (its manifest
+/// line is the shipped one); it is never run here. Installed like `plugin`.
+fn join_plugin(e: &Env) {
+    let src = e.root.join("joiner.src");
+    fs::write(
+        &src,
+        "#!/bin/sh\n\
+         if [ \"$1\" = --manifest ]; then\n\
+         printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
+         exit 0\nfi\nexit 1\n",
+    )
+    .unwrap();
+    let tmp = e.root.join("actions").join(".joiner.tmp");
+    assert!(
+        Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, e.root.join("actions").join("joiner")).unwrap();
+}
+
+#[test]
+fn offer_images_shows_join_count() {
+    let e = Env::with_actions("offer-images", &[]);
+    join_plugin(&e);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["offer", "a.jpg", "b.png", "c.txt"]);
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert_eq!(
+        o.stdout,
+        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\nhub\t2 / 3 files\n"
+    );
+    // The run of a join choice is not built yet: a clear error, no job.
+    let o = e.run(&["run", "pdf", "a.jpg", "b.png"]);
+    assert_eq!(o.code, Some(1), "{}", o.stdout);
+    assert!(
+        o.stderr.contains("join actions are not supported yet"),
+        "{}",
+        o.stderr
+    );
+}
+
 #[test]
 fn offer_unknown_file() {
     let e = Env::new("offer-unknown");

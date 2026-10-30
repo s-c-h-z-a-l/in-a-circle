@@ -321,6 +321,10 @@ Every action runs sandboxed, set up in the child between `fork` and
   `Comic book`. Only the head already read and the name decide; the engine
   does not open the archive. Any other ZIP stays a label ("ZIP") without a
   type.
+- **Images:** a PNG or JPEG signature gives `image/png` or `image/jpeg`
+  (the join action `images-to-pdf` takes them). Whether a given file is one
+  the action can place (a PNG with alpha, say) is the action's call, not the
+  classifier's.
 - **Planned, not built yet:** zip containers are looked into: ODF and
   EPUB declare their type in the `mimetype` entry; OOXML is told apart by
   the central directory at the end of the file (`word/document.xml`,
@@ -348,10 +352,19 @@ Every action runs sandboxed, set up in the child between `fork` and
   point. The actual layout is a design decision.
 - At most eight slices per ring and at most one sub-level, used only when
   the presets do not fit; then the first ring holds the target groups.
-- **Mixed selections** offer the presets of the most common type (ties
-  broken by a fixed type order). The other files are skipped, and the hub
-  says so ("15 / 20"). Actions that make sense for many files ("all into
-  one archive") are planned; they need the many-to-one contract.
+- **Mixed selections** offer the presets of the most common source (ties
+  broken by the fixed preset order). The other files are skipped, and the
+  hub says so ("15 / 20").
+- **Join presets.** A preset may name a set of MIME types (`Preset.join`);
+  the `pdf` preset names JPEG and PNG. `menu::choose` decides what a preset
+  runs for a selection: the 1:1 route (for the preset's own input) or a join
+  action, which is a catalog action whose type set covers the preset's set,
+  with the preset's output, runnable, and with at least its `min` files in
+  the selection. The two compete on how many files each takes; the larger
+  wins and a tie goes to the 1:1 route. The count is the slice's
+  `applicable` and the hub's N. The wheel's levels, the flat offer and the
+  run all ask `choose`, so they cannot disagree. A join action is never a
+  step of a chain: the planner skips it.
 
 ## Executor and supervisor
 

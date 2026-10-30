@@ -387,12 +387,33 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     };
     let cat = Catalog::load();
     mark("catalog");
+    // Classify once: the preset choice needs the selection's types, and the
+    // per-input verdicts below reuse the result.
+    let classified: Vec<(PathBuf, io::Result<Classified>)> = files
+        .into_iter()
+        .map(|f| {
+            let c = classify(&f);
+            (f, c)
+        })
+        .collect();
     // The input type, the route, and why a matching input cannot run.
     let (mime, route, blocked): (&str, Vec<&Action>, Option<String>) = match (target, preset) {
-        (Target::Preset(_), Some(p)) => match menu::route(&cat, p.input, p.output) {
-            Some(r) => (p.input, r, None),
-            None => (p.input, Vec::new(), Some(String::new())),
-        },
+        (Target::Preset(_), Some(p)) => {
+            let mut tally = menu::Tally::default();
+            for (f, c) in &classified {
+                if let Ok(Classified::File(k)) = c {
+                    tally.add(&lossy(f.file_name().map_or(f.as_path(), Path::new)), k);
+                }
+            }
+            match menu::choose(&cat, p, &tally) {
+                Some((menu::Choice::Route(r), _)) => (p.input, r, None),
+                Some((menu::Choice::Join(_), _)) => {
+                    eprintln!("inacircle: join actions are not supported yet");
+                    return EXIT_FAILED;
+                }
+                None => (p.input, Vec::new(), Some(String::new())),
+            }
+        }
         (Target::Action(id), _) => {
             let Some(a) = cat.get(id) else {
                 return usage(&format!("unknown action `{id}`"));
@@ -417,8 +438,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // Classify before routing.
     let mut pre = Vec::new();
     let mut inputs = Vec::new();
-    for f in files {
-        match classify(&f) {
+    for (f, c) in classified {
+        match c {
             Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
                 input: f,
                 reason: "not a regular file".into(),
