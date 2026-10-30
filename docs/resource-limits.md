@@ -61,10 +61,32 @@ Reference: Pillow warns above 89 MP and rejects above 179 MP ("decompression
 bomb"). The planned pixel limit of the image actions (180 MP) follows it.
 
 The other families stream and stay small: cbz to pdf one page plus the
-entry list (< 60 MB); md/epub one chapter tree (< 100 MB); archives a 32 KB
+entry list (< 72 MB, see the pages family below); md/epub one chapter tree (< 100 MB); archives a 32 KB
 window plus about 300 B per file (about 60 MB at 200 000 files); office
 streamed XML (< 100 MB); audio (< 10 MB). json <-> toml needs the whole
 tree (about 5-10x the file), so those actions get a file size limit.
+
+The pages family (cbz to pdf) holds one page file whole plus the entry
+list. The images are passed through, so memory follows the page file, not
+its pixels:
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| entries | 12,000 | twice the 5,000-page case measured, with room for folder entries; about 200 B per record, 2.4 MB at the limit; `CBZ has more than 12000 entries` |
+| page file | 64 MiB | a 180 MP scan is 20-40 MB as JPEG; it is the one buffer held whole and the inflate output limit (the `inflate` fuzz target uses the same value); `page <name> is larger than 64 MiB` |
+| ratio | 1032 | the most a deflate stream can reach (258 bytes per two bits), so every valid stream passes, a blank page stored as an uncompressed PNG (about 1000:1) included; a header claiming more is refused before inflating; a bomb is bounded by the page file limit, not by the ratio |
+| name | 512 B | twice the 255-byte file name limit; at most 6 MB for 12,000 names; `damaged CBZ: an entry name is too long` |
+| pages | 10,000 | below the entry limit so the message is reachable; an omnibus is a few thousand pages; about 100 B per page for the order and the PDF offsets; `CBZ has more than 10000 pages` |
+| pixels | 180 MP | the image pixel limit above; `page <name> is larger than 180 megapixels` |
+
+Measured (release build, reference machine): 5,000 small pages peak at
+3.7-4.0 MB `VmHWM` (about 1.7 MB process baseline plus 2.2 MB for the entry
+list, order and offsets); one 42 MB page peaks at 43.6 MB. So the bound is
+the page file limit plus about 4 MB: under 72 MB. Reading and checking a
+42 MB page into a PDF takes about 0.18 s. The PDF is about the sum of the
+page files plus 130 B per page, so the output is bounded by the engine's
+`RLIMIT_FSIZE` (16 x the input, 256 MiB to 16 GiB); a CBZ of deflated flat
+pages can expand beyond it and then ends with `output too large`.
 
 The text family (txt <-> md) is held by structure budgets charged while it
 builds, not after: 8 MiB input, 524,288 nodes, 32 MiB of owned text, 32 MiB

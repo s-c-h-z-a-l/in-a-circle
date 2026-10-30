@@ -1,0 +1,19 @@
+[package]
+name = "inacircle-pages"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+action = { path = "../../crates/action" }
+libc = "0.2"
+manifest = { path = "../../crates/manifest" }
+pdf = { path = "../../crates/pdf" }
+probe = { path = "../../crates/probe" }
+zip = { path = "../../crates/zip" }
+
+[dev-dependencies]
+testzip = { path = "../../tools/testzip" }

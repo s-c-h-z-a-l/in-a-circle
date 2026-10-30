@@ -121,6 +121,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "inacircle-pages"
+version = "0.0.0"
+dependencies = [
+ "action",
+ "libc",
+ "manifest",
+ "pdf",
+ "probe",
+ "testzip",
+ "zip",
+]
+
+[[package]]
 name = "inacircle-testaction"
 version = "0.0.0"
 dependencies = [
