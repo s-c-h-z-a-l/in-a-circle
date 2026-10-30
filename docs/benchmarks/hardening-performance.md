@@ -47,8 +47,9 @@ Every observation is gated at 5,000,000 B as a maximum (PSS from
 `smaps_rollup`, KiB times 1024). PSS has no kernel-kept peak, so the
 numbers below are **sampled maxima** unless a row says otherwise.
 
-**Wheel (stage 2 after a drop).** `a_large_drop_stays_within_the_memory_budget`,
-3 invocations, 12 observations, PSS sampled once after stage 2:
+**Wheel (stage 2 after a drop).** `a_large_drop_stays_within_the_memory_budget`
+(since replaced by `the_largest_drop_stays_within_the_memory_budget`, see
+[wheel.md](wheel.md)), 3 invocations, 12 observations, PSS sampled once after stage 2:
 
 | Workload | N | Max PSS | Gate |
 |---|---|---|---|

@@ -16,7 +16,8 @@ ui = { path = "../../crates/ui" }
 wire = { path = "../../crates/wire" }
 
 [dev-dependencies]
-# Only a unit test, that the drop's read limits equal the invocation's.
+# Tests only: the drop's read limits equal the invocation's, and the
+# wheel's memory tests build the largest list those limits accept.
 action = { path = "../../crates/action" }
 # Builds the CBZ fixtures of the end-to-end tests. Test-only: never in a
 # shipped binary (scripts/check-shipped-deps.sh checks normal dependencies).

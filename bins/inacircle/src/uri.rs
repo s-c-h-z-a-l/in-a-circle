@@ -27,8 +27,8 @@ pub const MAX_URIS: usize = 1024;
 /// The non-comment, non-blank lines of a list.
 fn entries(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     data.split(|&b| b == b'\n')
-        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
-        .filter(|l| !l.is_empty() && !l.starts_with(b"#"))
+        .filter(|l| is_entry(l))
+        .map(strip_cr)
 }
 
 /// Whether the list has more than `MAX_URIS` entries.
@@ -37,9 +37,70 @@ pub fn too_many(data: &[u8]) -> bool {
 }
 
 /// The local paths of a URI list, in order; at most `MAX_URIS` entries
-/// are looked at (the wheel refuses a longer list before this).
+/// are looked at (the wheel refuses a longer list before this). The wheel
+/// uses [`parse_uri_list_owned`]; this one is the reference the tests and
+/// the fuzz target check it against.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
     entries(data).take(MAX_URIS).filter_map(path_of).collect()
+}
+
+/// How many bytes of a consumed list may stay allocated past what is
+/// still unparsed before they are given back: 64 KiB, 1/16 of `MAX_BYTES`.
+/// The list at its limit is then released in at most 16 steps (a
+/// `realloc` that shrinks in place: an `mremap` for a large buffer, no
+/// copy), and the list and its paths overlap by at most this much, 1.3% of
+/// the 5,000,000 B memory budget. Smaller costs more calls for no
+/// measurable gain; larger keeps more of the list beside its paths.
+const RELEASE_STEP: usize = 64 * 1024;
+
+/// [`parse_uri_list`] on a list it consumes: the same paths in the same
+/// order, but the list is decoded from its end and its bytes are given
+/// back as they are decoded, so at no point are the whole list and all of
+/// its paths held together (at the 1 MiB limit that pair alone would be
+/// about 2 MiB, 40% of the wheel's memory budget).
+pub fn parse_uri_list_owned(mut data: Vec<u8>) -> Vec<PathBuf> {
+    // The same entries as `parse_uri_list`: the list ends after its
+    // `MAX_URIS`-th entry.
+    let mut seen = 0;
+    let mut start = 0;
+    for line in data.split(|&b| b == b'\n') {
+        let end = start + line.len();
+        if is_entry(line) {
+            seen += 1;
+            if seen == MAX_URIS {
+                data.truncate(end);
+                break;
+            }
+        }
+        start = end + 1;
+    }
+    let mut paths = Vec::new();
+    while !data.is_empty() {
+        let at = data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        if is_entry(&data[at..])
+            && let Some(p) = path_of(strip_cr(&data[at..]))
+        {
+            paths.push(p);
+        }
+        // The line and its `\n` are done.
+        data.truncate(at.saturating_sub(1));
+        if data.capacity() - data.len() >= RELEASE_STEP {
+            data.shrink_to_fit();
+        }
+    }
+    paths.reverse();
+    paths
+}
+
+fn strip_cr(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Whether a line (its `\n` cut off) is a URI: not blank, not a comment.
+fn is_entry(line: &[u8]) -> bool {
+    let l = strip_cr(line);
+    !l.is_empty() && !l.starts_with(b"#")
 }
 
 fn path_of(uri: &[u8]) -> Option<PathBuf> {
@@ -144,6 +205,48 @@ mod tests {
             paths.last(),
             Some(&PathBuf::from(format!("/f{}", MAX_URIS - 1)))
         );
+    }
+
+    /// The consuming parser gives what the borrowing one gives, on every
+    /// list above and on one large enough to be released in steps.
+    #[test]
+    fn the_consuming_parse_matches() {
+        let same = |list: &[u8]| {
+            assert_eq!(
+                parse_uri_list_owned(list.to_vec()),
+                parse_uri_list(list),
+                "{}",
+                String::from_utf8_lossy(list)
+            );
+        };
+        for list in [
+            &b""[..],
+            b"\n",
+            b"\r\n",
+            b"\n\n#c\n",
+            b"file:///a",
+            b"file:///a\n",
+            b"\nfile:///a\r\n\r\nfile:///b\r",
+            b"file:///a\r\r\nfile:///%zz\n#file:///c\nfile:///d%20e",
+            b"# from a file manager\r\nfile:///home/u/a%20b.txt\r\n\
+              file://localhost/tmp/%C3%A1.md\nhttps://example.com/x\n\
+              file:///nul%00x\nfile:///last",
+        ] {
+            same(list);
+        }
+        // Past MAX_URIS (the cut counts comments and blanks out), and a
+        // list of ~1 MiB, given back in RELEASE_STEP pieces.
+        let many: String = (0..MAX_URIS + 3)
+            .map(|i| format!("#c\n\nfile:///f{i}\r\n"))
+            .collect();
+        same(many.as_bytes());
+        let long = "x".repeat(1000);
+        let big: String = (0..MAX_URIS)
+            .map(|i| format!("file:///{i}{long}\r\n"))
+            .collect();
+        assert!(big.len() > 8 * RELEASE_STEP && big.len() <= MAX_BYTES);
+        same(big.as_bytes());
+        assert_eq!(parse_uri_list_owned(big.into_bytes()).len(), MAX_URIS);
     }
 
     /// The read limits are the invocation's.

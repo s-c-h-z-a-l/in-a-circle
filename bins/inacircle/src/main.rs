@@ -942,7 +942,9 @@ fn cmd_wheel() -> u8 {
     match chosen {
         Ok(Some((files, preset))) => {
             // Unique now (the machine is dropped): moved out, not copied.
-            // The fallback copy cannot happen, and is only a copy if so.
+            // The fallback copy cannot happen, and is only a copy if so;
+            // a debug build catches a change that keeps a second owner.
+            debug_assert_eq!(Rc::strong_count(&files), 1, "the path list is shared");
             let files = Rc::try_unwrap(files).unwrap_or_else(|shared| (*shared).clone());
             run_choice(files, &preset)
         }
@@ -1074,12 +1076,14 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 }
 
 /// Level 1 for a `text/uri-list` (early or dropped). The list's bytes are
-/// freed by the caller after this; the catalog comes from the cache alone,
-/// loaded once here and kept in the menu for level 2: no action binary
-/// runs while the overlay is up (the cache is refreshed once the wheel is
-/// gone).
-fn group_menu(list: &[u8]) -> wheel::GroupMenu {
-    group_menu_for(dedup(uri::parse_uri_list(list)), Catalog::load_cached())
+/// given back as they become paths, before the catalog is loaded: the
+/// list, its paths and the catalog are never all held at once. The catalog
+/// comes from the cache alone, loaded once here and kept in the menu for
+/// level 2: no action binary runs while the overlay is up (the cache is
+/// refreshed once the wheel is gone).
+fn group_menu(list: Vec<u8>) -> wheel::GroupMenu {
+    let paths = dedup(uri::parse_uri_list_owned(list));
+    group_menu_for(paths, Catalog::load_cached())
 }
 
 /// Level 1 for `paths` (absolute, each once) with catalog `cat` (`None`:

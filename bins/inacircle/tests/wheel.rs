@@ -361,7 +361,7 @@ fn find_sleeper(secs: u32) -> Option<i32> {
 /// moves onto the Document slice (north of the center) and drops; returns
 /// once stage 2 is on the wheel.
 fn drag_to_stage2(c: &mut Compositor, list: &[u8]) {
-    drag_to_category(c, list, (960, 390));
+    drag_to_category(c, list, DOCUMENT);
 }
 
 /// Like [`drag_to_stage2`], onto the category slice at `at`.
@@ -672,66 +672,95 @@ fn the_pss_gate_rejects_missing_or_zero_evidence() {
     assert!(pss_gate(&[("a", 2500), ("b", 0)]).is_err());
 }
 
-/// A drop of 1024 files stays within the 5 MB PSS ceiling at stage 2. All
-/// four observations (two runs of 1 file, two of 1024) are kept and each
-/// must pass `pss_gate`: no minimum, no 5120 KiB smoke limit. The budget
-/// is for the optimized binary (`cargo test --release`); a debug build,
-/// larger by itself, checks that the drop adds little over a one-file drop
-/// instead. The PSS is taken once, after stage 2 has painted (a sampled
-/// value, not a transient peak: acceptance.md).
+/// The largest list the wheel accepts stays within the 5 MB PSS ceiling
+/// at every phase up to the choice: on the early path through stage 2,
+/// and on the fallback (no early answer, the drop's own read) through
+/// level 1, where its bytes become paths. Two one-file drops are the
+/// baseline. Every observation (each run's sampled peak per phase and its
+/// PSS where it stops) is kept and must pass `pss_gate`: no minimum, no
+/// 5120 KiB smoke limit. The budget is for the optimized binary (`cargo
+/// test --release`); a debug build, larger by itself, checks instead that
+/// the largest drop adds about its paths once over a one-file drop.
 #[test]
-fn a_large_drop_stays_within_the_memory_budget() {
-    let peak = |name: &str, n: usize| -> (u64, u64) {
+fn the_largest_drop_stays_within_the_memory_budget() {
+    // `late`: the early read is left unanswered and the list comes with
+    // the drop; the run ends at level 1. Else it ends at stage 2.
+    let peak = |name: &str, largest: bool, late: bool| -> (Vec<(String, u64)>, u64) {
         let root = Root::new(name);
         root.markdown_action_cached();
-        let list = root.files(n);
-        assert!(list.len() <= 64 * 1024, "{} bytes", list.len());
-        let mut child = None;
-        let mut c = Compositor::serve(&root.0.join("runtime"), Duration::from_secs(2), || {
-            child = Some(
-                root.cmd()
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            );
-        });
-        let mut child = child.unwrap();
-        c.mapped(Duration::from_secs(2));
-        drag_to_stage2(&mut c, &list);
-        let kb = (pss_kb(child.id()), anon_kb(child.id()));
+        let list = if largest {
+            root.largest_list().1
+        } else {
+            root.files(1)
+        };
+        let (mut c, mut child) = start(&root, false);
+        let pid = child.id();
+        let sampler = PssSampler::start(pid);
+        let label = format!("{name} ({} B)", list.len());
+        let mut obs = Vec::new();
+        if late {
+            let silent = c
+                .drag_enters(0, Duration::from_secs(2))
+                .expect("early receive");
+            // Past the early read's 500 ms deadline, so the drop reads.
+            c.pump(Duration::from_millis(900));
+            assert!(reader_gone(&silent));
+            c.drop_it();
+            let w = c
+                .next_receive(0, Duration::from_secs(2))
+                .expect("the drop's own read");
+            source_writes(w, &list);
+            c.attached(2, Duration::from_secs(5));
+            obs.push((format!("{label}, at level 1"), pss_kb(pid)));
+        } else {
+            drag_to_stage2(&mut c, &list);
+            obs.push((format!("{label}, at stage 2"), pss_kb(pid)));
+        }
+        let anon = anon_kb(pid);
+        let peaks = sampler.finish();
+        obs.extend(peaks.observations(&label, 1));
         c.close();
         assert_eq!(
             wait_exit(&mut child, Duration::from_secs(5)).code(),
             Some(0)
         );
-        kb
+        (obs, anon)
     };
     let runs = [
-        ("1 file, run a", peak("rss1a", 1), 1usize),
-        ("1 file, run b", peak("rss1b", 1), 1),
-        ("1024 files, run a", peak("rss1024a", 1024), 1024),
-        ("1024 files, run b", peak("rss1024b", 1024), 1024),
+        (1, peak("rss1a", false, false)),
+        (1, peak("rss1b", false, false)),
+        (2, peak("rss-largest", true, false)),
+        (2, peak("rss-largest-late", true, true)),
     ];
-    for (label, (pss, anon), _) in &runs {
-        eprintln!("PSS at stage 2, {label}: {pss} kB (anonymous {anon} kB)");
+    for (_, (obs, anon)) in &runs {
+        for (label, kb) in obs {
+            eprintln!("PSS {label}: {kb} kB");
+        }
+        eprintln!("  anonymous at the end: {anon} kB");
     }
     if cfg!(debug_assertions) {
-        // Debug builds allocate more per file; the drop's own growth is its
-        // anonymous memory (measured 160 kB). PSS is not the measure
-        // here: it divides the shared pages among the processes alive at
-        // that moment, so beside other tests' wheels the runs differ by
-        // more than the drop adds. The budget itself is the release
-        // assertion below. Worst against best, so no run is hidden.
-        let anon = |n: usize| runs.iter().filter(move |r| r.2 == n).map(|r| (r.1).1);
+        // PSS is not the measure here: it divides the shared pages among
+        // the processes alive at that moment, so beside other tests'
+        // wheels the runs differ by more than the drop adds. The drop's own
+        // growth is its anonymous memory: the paths, held once (the list's
+        // size in KiB), plus the 512 kB a small drop was allowed before.
+        // A second copy of the paths would add another 1024 kB and fail.
+        // Worst against best, so no run is hidden.
+        let anon = |k: u8| runs.iter().filter(move |r| r.0 == k).map(|r| (r.1).1);
         let one = anon(1).min().unwrap();
-        let many = anon(1024).max().unwrap();
+        let many = anon(2).max().unwrap();
+        let paths = (action::INPUT_LIST_BYTES / 1024) as u64;
         assert!(
-            many <= one + 512,
-            "1 file {one} kB, 1024 files {many} kB anonymous"
+            many <= one + paths + 512,
+            "1 file {one} kB, the largest list {many} kB anonymous"
         );
     } else {
-        let samples: Vec<(&str, u64)> = runs.iter().map(|r| (r.0, (r.1).0)).collect();
-        if let Err(why) = pss_gate(&samples) {
+        let obs: Vec<(&str, u64)> = runs
+            .iter()
+            .flat_map(|r| (r.1).0.iter())
+            .map(|(l, kb)| (l.as_str(), *kb))
+            .collect();
+        if let Err(why) = pss_gate(&obs) {
             panic!("{why}");
         }
     }
@@ -1950,105 +1979,210 @@ fn proc_field_kb(path: String, key: &str) -> Option<u64> {
         .and_then(|v| v.split_whitespace().next()?.parse().ok())
 }
 
-/// Longest path of the invocation's own limit: a Linux `PATH_MAX` of 4096
-/// would be the extreme, ~1 KiB is the plan's worst realistic case that
-/// still fits 1024 of them in the 1 MiB list limit (1024 x ~1 KiB URIs).
-const LONG_PATH_LINE: usize = 1023;
+/// Linux's `NAME_MAX`: the most bytes in one path component. A longer
+/// one cannot be created, so the largest list is built from several.
+const NAME_MAX: usize = 255;
 
-/// Peak PSS of the wheel process through a whole choice (the drop, stage
-/// 2, the click, the run) for 1024 dropped paths of ~1 KiB each, sampled
-/// from `smaps_rollup` every 200 us until exit, the samples from the click
-/// on (the engine and the supervisor) apart from those before it (the
-/// wheel). Asserted: the choice completes with one output group per path,
-/// and, in the optimized build the budget is for, stage 2 and the whole
-/// run after the click stay within the 5 MB budget (the run held the paths
-/// about seven times over and peaked at 8.3-8.7 MB before it held them
-/// once). The peak before the click is reported: while the dropped list
-/// becomes paths, its bytes and its paths are both held.
+/// Bytes of each line of the largest list the wheel accepts: the byte
+/// limit shared out over the URI limit (1 MiB / 1024 = 1024 B, with its
+/// `file://` and CRLF), so 1024 such lines fill the limit exactly.
+const LARGEST_LINE: usize = action::INPUT_LIST_BYTES / action::INPUT_COUNT;
+
+/// The shortest file name a line ends in: `0000.txt`, its index and type.
+const SHORTEST_NAME: usize = "0000.txt".len();
+
+impl Root {
+    /// The largest list the wheel accepts: `action::INPUT_COUNT` text
+    /// files under `f/`, each line `LARGEST_LINE` bytes, so the list is
+    /// `action::INPUT_LIST_BYTES` to the byte (the wheel's own limit, which
+    /// a unit test keeps equal). Every path component stays within
+    /// `NAME_MAX` whatever the temp root's length. The files' directory
+    /// and the list.
+    fn largest_list(&self) -> (PathBuf, Vec<u8>) {
+        let path_len = LARGEST_LINE - "file://".len() - "\r\n".len();
+        let mut dir = self.0.join("f");
+        assert!(dir.as_os_str().len() + 1 + SHORTEST_NAME <= path_len);
+        loop {
+            let name = path_len - dir.as_os_str().len() - 1;
+            if name <= NAME_MAX {
+                break;
+            }
+            // A directory, leaving at least the shortest name after it.
+            dir = dir.join("d".repeat((name - 1 - SHORTEST_NAME).min(NAME_MAX)));
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let name = path_len - dir.as_os_str().len() - 1;
+        let mut list = Vec::with_capacity(action::INPUT_LIST_BYTES);
+        for i in 0..action::INPUT_COUNT {
+            let pad = "_".repeat(name - SHORTEST_NAME);
+            let p = dir.join(format!("{i:04}{pad}.txt"));
+            fs::write(&p, "w\n").unwrap();
+            assert!(p.components().all(|c| c.as_os_str().len() <= NAME_MAX));
+            list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+        }
+        assert_eq!(list.len(), action::INPUT_LIST_BYTES);
+        (dir, list)
+    }
+}
+
+/// The phases of a wheel the memory tests tell apart: level 1 (from the
+/// start through the dropped list's conversion), stage 2, and the run
+/// after the click (the engine and the supervisor in the same process).
+const PHASES: [&str; 3] = ["stage 1", "stage 2", "the run"];
+
+/// Peak PSS of a live process per phase, from `smaps_rollup`, on a
+/// thread of the test (the wheel pays nothing for it).
+struct PssSampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    phase: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    thread: std::thread::JoinHandle<Peaks>,
+}
+
+/// What a sampler saw: the peak PSS (kB) and the sample count per phase,
+/// and `VmHWM` (kB), the exact resident peak a sample could miss.
+struct Peaks {
+    pss: [u64; PHASES.len()],
+    samples: [u64; PHASES.len()],
+    hwm: u64,
+}
+
+/// Time between two samples: 200 us. The wheel's steps on the largest
+/// list (classifying 1024 paths, a paint, the run) take milliseconds, so
+/// each is sampled several times; a shorter transient is bounded by
+/// `VmHWM`, which is reported beside the samples.
+const SAMPLE_EVERY: Duration = Duration::from_micros(200);
+
+impl PssSampler {
+    fn start(pid: u32) -> PssSampler {
+        use std::sync::atomic::Ordering::Relaxed;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let thread = std::thread::spawn({
+            let (stop, phase) = (stop.clone(), phase.clone());
+            move || {
+                let mut p = Peaks {
+                    pss: [0; PHASES.len()],
+                    samples: [0; PHASES.len()],
+                    hwm: 0,
+                };
+                while !stop.load(Relaxed) {
+                    // Read before the sample: a sample taken after a phase
+                    // began always counts for it.
+                    let k = phase.load(Relaxed);
+                    if let Some(kb) = proc_field_kb(format!("/proc/{pid}/smaps_rollup"), "Pss:") {
+                        p.pss[k] = p.pss[k].max(kb);
+                        p.samples[k] += 1;
+                    }
+                    let hwm = proc_field_kb(format!("/proc/{pid}/status"), "VmHWM:");
+                    p.hwm = p.hwm.max(hwm.unwrap_or(0));
+                    std::thread::sleep(SAMPLE_EVERY);
+                }
+                p
+            }
+        });
+        PssSampler {
+            stop,
+            phase,
+            thread,
+        }
+    }
+
+    /// The samples from now on count for `PHASES[k]`.
+    fn enter(&self, k: usize) {
+        self.phase.store(k, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn finish(self) -> Peaks {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.join().unwrap()
+    }
+}
+
+impl Peaks {
+    /// The gate's observations for the first `n` phases, each labelled;
+    /// a phase without a sample is missing evidence (PSS 0).
+    fn observations(&self, label: &str, n: usize) -> Vec<(String, u64)> {
+        (0..n)
+            .map(|k| {
+                let s = self.samples[k];
+                (format!("{label}, {} ({s} samples)", PHASES[k]), self.pss[k])
+            })
+            .collect()
+    }
+}
+
+/// Where the Document category is: 150 px north of the center of the
+/// 1920x1080 output, inside its slice's ring.
+const DOCUMENT: (u32, u32) = (960, 390);
+
+/// The most a test waits for the wheel to hang up after the click: 60 s.
+/// The overlay goes before the run starts, so this is a stuck teardown's
+/// limit, with room for a loaded machine running the whole suite; a stuck
+/// wheel fails here, not in the harness.
+const RUN_HANGUP: Duration = Duration::from_secs(60);
+
+/// The most a test waits for the process to exit after the hang-up: 120 s
+/// for the run of 1024 text files (well under a second here, release; a
+/// debug build under a loaded suite is many times slower), its supervisor
+/// teardown and the catalog refresh. A stuck run fails here, not in the
+/// harness.
+const RUN_EXIT: Duration = Duration::from_secs(120);
+
+/// PSS of the wheel process through a whole choice (the drop, stage 2,
+/// the click, the run) for the largest list it accepts (1024 paths of
+/// ~1 KiB, the list at its 1 MiB limit), sampled per phase. Asserted: the
+/// choice completes with one output group per path, and, in the optimized
+/// build the budget is for, every phase stays within the 5,000,000 B PSS
+/// budget: level 1 (where the list's bytes become paths), stage 2 and the
+/// run. Before the list was given back as it was decoded, level 1 held
+/// the bytes and the paths together and peaked at 4.9-5.0 MB.
 #[test]
-fn a_large_drop_through_the_choice_reports_its_peak() {
+fn the_largest_drop_through_the_choice_stays_within_the_budget() {
     let root = Root::new("through1024");
     root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "markdown");
-    let mut dir = root.0.join("f");
-    for c in ['a', 'b', 'c', 'd'] {
-        dir = dir.join(c.to_string().repeat(240));
-    }
-    fs::create_dir_all(&dir).unwrap();
-    let mut list = Vec::new();
-    for i in 0..1024 {
-        let plen = dir.join(format!("{i:04}")).as_os_str().len() + 4;
-        let pad = LONG_PATH_LINE.saturating_sub(9).saturating_sub(plen);
-        let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
-        fs::write(&p, "w\n").unwrap();
-        list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
-    }
-    assert!(list.len() <= 1_048_576, "{} bytes", list.len());
+    let (dir, list) = root.largest_list();
     let (mut c, mut child) = start(&root, false);
     let pid = child.id();
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-    let stop = std::sync::Arc::new(AtomicBool::new(false));
-    let clicked = std::sync::Arc::new(AtomicBool::new(false));
-    let sampler = std::thread::spawn({
-        let (stop, clicked) = (stop.clone(), clicked.clone());
-        move || {
-            let (mut wheel, mut run, mut hwm, mut n) = (0u64, 0u64, 0u64, 0u64);
-            while !stop.load(Relaxed) {
-                // Read before the sample: a sample taken after the click
-                // always counts for the run.
-                let after = clicked.load(Relaxed);
-                let roll = format!("/proc/{pid}/smaps_rollup");
-                if let Some(kb) = proc_field_kb(roll, "Pss:") {
-                    let peak = if after { &mut run } else { &mut wheel };
-                    *peak = (*peak).max(kb);
-                    n += u64::from(after);
-                }
-                let status = format!("/proc/{pid}/status");
-                hwm = hwm.max(proc_field_kb(status, "VmHWM:").unwrap_or(0));
-                std::thread::sleep(Duration::from_micros(200));
-            }
-            (wheel, run, hwm, n)
-        }
-    });
+    let sampler = PssSampler::start(pid);
     c.seat_caps(POINTER | KEYBOARD);
     c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
     c.pointer_enters();
-    drag_to_category(&mut c, &list, (960, 390));
+    drag_to_category(&mut c, &list, DOCUMENT);
+    sampler.enter(1);
     let stage2 = pss_kb(pid);
+    // Stage 2 settles (its buffers released, the wheel idle) before the
+    // pointer moves: a few frames' time, far below the stage deadline.
     c.pump(Duration::from_millis(300));
     c.release_held();
-    c.pointer_motion(960, 390);
+    c.pointer_motion(DOCUMENT.0, DOCUMENT.1);
+    // The motion is handled before the button (events are in order; this
+    // is margin for the hover's repaint).
     c.pump(Duration::from_millis(50));
-    clicked.store(true, Relaxed);
+    sampler.enter(2);
     c.pointer_button(0x110);
-    let _ = c.hangs_up(Duration::from_secs(60));
-    let st = wait_exit(&mut child, Duration::from_secs(120));
-    stop.store(true, Relaxed);
-    let (wheel, run, hwm, samples) = sampler.join().unwrap();
+    let _ = c.hangs_up(RUN_HANGUP);
+    let st = wait_exit(&mut child, RUN_EXIT);
+    let peaks = sampler.finish();
     let groups = fs::read_dir(&dir)
         .unwrap()
         .filter(|e| e.as_ref().unwrap().path().is_dir())
         .count();
+    let mut obs = peaks.observations("largest list", PHASES.len());
+    obs.push(("largest list, at stage 2".into(), stage2));
+    for (label, kb) in &obs {
+        eprintln!("PSS {label}: {kb} kB");
+    }
     eprintln!(
-        "1024 x ~1 KiB paths: stage 2 PSS {stage2} kB, sampled max PSS before the click \
-         {wheel} kB, from the click to exit {run} kB ({samples} samples), VmHWM {hwm} kB; \
-         exit {:?}, {groups} output groups",
+        "largest list: VmHWM {} kB; exit {:?}, {groups} output groups",
+        peaks.hwm,
         st.code()
     );
     assert_eq!(st.code(), Some(0));
-    assert_eq!(groups, 1024, "one output group per path");
-    assert!(
-        samples > 0,
-        "no PSS sample after the click: incomplete evidence"
-    );
+    assert_eq!(groups, action::INPUT_COUNT, "one output group per path");
     if !cfg!(debug_assertions) {
-        // 5,000,000 B (CLAUDE.md), `Pss` is in KiB: multiply by 1024.
-        assert!(
-            stage2 * 1024 <= 5_000_000,
-            "stage 2 PSS {stage2} kB over the budget"
-        );
-        assert!(
-            run * 1024 <= 5_000_000,
-            "PSS {run} kB through the run over the budget"
-        );
+        let obs: Vec<(&str, u64)> = obs.iter().map(|(l, kb)| (l.as_str(), *kb)).collect();
+        if let Err(why) = pss_gate(&obs) {
+            panic!("{why}");
+        }
     }
 }

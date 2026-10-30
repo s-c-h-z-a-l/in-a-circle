@@ -160,9 +160,10 @@ pub struct Menu {
     pub hub: String,
 }
 
-/// Builds level 1 from a `text/uri-list`. The real one classifies files;
-/// tests pass a pure one.
-pub type GroupsFn = fn(&[u8]) -> GroupMenu;
+/// Builds level 1 from a `text/uri-list`, which it consumes (the real one
+/// frees the list's bytes as it decodes them). The real one classifies
+/// files; tests pass a pure one.
+pub type GroupsFn = fn(Vec<u8>) -> GroupMenu;
 
 /// Builds level 2 for one category of level 1.
 pub type TargetsFn = fn(&GroupMenu, &str) -> Menu;
@@ -459,7 +460,7 @@ impl Machine {
     /// to do`.
     fn show_list(&mut self, r: Result<Vec<u8>, String>) -> bool {
         match r {
-            Ok(bytes) if !crate::uri::too_many(&bytes) => self.show_groups(&bytes),
+            Ok(bytes) if !crate::uri::too_many(&bytes) => self.show_groups(bytes),
             Ok(_) => self.show_refused(),
             Err(e) if e == LIST_TOO_BIG => self.show_refused(),
             Err(_) => return false,
@@ -481,7 +482,7 @@ impl Machine {
     }
 
     /// Level 1 from the list, onto the wheel.
-    fn show_groups(&mut self, list: &[u8]) {
+    fn show_groups(&mut self, list: Vec<u8>) {
         let gm = (self.groups_fn)(list);
         self.set_wheel(group_wheel(&gm), gm.hub.clone());
         self.groups = Some(gm);
@@ -719,7 +720,7 @@ mod tests {
 
     /// Empty: nothing. Else one file; category `g0` at 0 is lit, `g4` at 4
     /// is dim.
-    fn fake_groups(bytes: &[u8]) -> GroupMenu {
+    fn fake_groups(bytes: Vec<u8>) -> GroupMenu {
         let mut slices: [Option<GroupChoice>; 8] = Default::default();
         if bytes.is_empty() {
             return GroupMenu {
@@ -765,7 +766,7 @@ mod tests {
 
     /// Two files; categories: 3 lit (`g3`), 1 dim (`g1`). `g3` runs `p3`
     /// at 3 and has a dim `p1` at 1.
-    fn two_groups(_: &[u8]) -> GroupMenu {
+    fn two_groups(_: Vec<u8>) -> GroupMenu {
         let mut slices: [Option<GroupChoice>; 8] = Default::default();
         slices[3] = group("Three", "g3", true);
         slices[1] = group("One", "g1", false);
@@ -823,8 +824,8 @@ mod tests {
     }
 
     /// A group menu with files, none of its categories lit.
-    fn dim_groups(_: &[u8]) -> GroupMenu {
-        let mut gm = fake_groups(b"a");
+    fn dim_groups(_: Vec<u8>) -> GroupMenu {
+        let mut gm = fake_groups(b"a".to_vec());
         gm.slices[0] = group("Zero", "g0", false);
         gm
     }

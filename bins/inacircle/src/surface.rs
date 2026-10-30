@@ -1627,7 +1627,7 @@ mod tests {
 
     /// Whatever the data, stage 2 has nothing: only the read's result
     /// matters here.
-    fn empty_groups(_: &[u8]) -> GroupMenu {
+    fn empty_groups(_: Vec<u8>) -> GroupMenu {
         GroupMenu {
             paths: PathList::default(),
             slices: Default::default(),
@@ -1805,8 +1805,8 @@ mod tests {
     }
 
     /// Two lit categories (north and south).
-    fn two_lit(_: &[u8]) -> GroupMenu {
-        let mut gm = empty_groups(b"");
+    fn two_lit(_: Vec<u8>) -> GroupMenu {
+        let mut gm = empty_groups(Vec::new());
         for (k, name) in [(0, "North"), (4, "South")] {
             gm.slices[k] = Some(crate::wheel::GroupChoice {
                 label: name.into(),
@@ -2462,7 +2462,7 @@ mod tests {
     }
 
     /// Level 1 that burns measurable CPU, like a real classification.
-    fn slow_groups(b: &[u8]) -> GroupMenu {
+    fn slow_groups(b: Vec<u8>) -> GroupMenu {
         let t = crate::cpu_us(libc::RUSAGE_SELF);
         while crate::cpu_us(libc::RUSAGE_SELF) - t < 5000 {
             std::hint::spin_loop();

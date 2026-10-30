@@ -183,18 +183,25 @@ engine and supervisor). It holds each input path once: the steps' inputs,
 the groups and the join's anchor borrow from the run's one list; the
 `--inputs-from` file is streamed to disk, not built in memory; the
 history's per-input tally keys an input by a 128-bit keyed hash of its
-path, not by a copy. `inacircle run` takes its arguments over, so its argv
-on the heap becomes the list (the kernel's copy on the stack stays).
+path, not by a copy.
+`inacircle run` takes its arguments over, so its argv on the heap becomes
+the list (the kernel's copy on the stack stays). The wheel decodes a
+dropped list from its end and gives its bytes back as they become paths
+(in 64 KiB steps), so the list's bytes and its paths never add up.
 
-Measured (release, reference machine, 1024 inputs with ~1 KiB paths, one
-batch process, PSS sampled every 200 us until exit): `inacircle run`
-3.4-3.9 MB (8.9 MB while the engine held the paths about seven times over);
-the wheel from the click to exit at most 4.1 MB, which is its stage 2
-with the dropped list held once. Before the click, while the dropped list
-becomes paths, the wheel holds its bytes and its paths together and peaks
-at about 5.0 MB. Tests: `many_long_paths_stay_within_the_pss_budget`
-(CLI) and `a_large_drop_through_the_choice_reports_its_peak` (wheel, from
-the click on), both gated in the release build.
+Measured (release, reference machine, 1024 inputs with ~1 KiB paths, the
+list at its 1 MiB limit, one batch process, PSS sampled every 200 us
+until exit): `inacircle run` 3.4-3.9 MB (8.9 MB while the engine held the
+paths about seven times over). The wheel peaks at 4.1 MB (4095 kB at
+most over three runs), within the 5,000,000 B budget with 16% to spare, at
+every phase: level 1 while the list becomes paths, stage 2, and the run
+after the click; its stage 2 holds the paths once. Before the list was
+given back as it was decoded, level 1 held the bytes and the paths
+together and peaked at 4.9-5.1 MB, over the budget. Tests:
+`many_long_paths_stay_within_the_pss_budget` (CLI),
+`the_largest_drop_through_the_choice_stays_within_the_budget` and
+`the_largest_drop_stays_within_the_memory_budget` (wheel, early and after
+the drop), all gated in the release build on every phase.
 
 ## Limits added by the hardening
 

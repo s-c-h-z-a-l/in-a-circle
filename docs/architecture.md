@@ -734,7 +734,10 @@ compositor.
   files` in the hub and offers nothing (no truncated selection), early and
   after the drop. A source that never
   writes or never closes times out. A failed early read falls back; a
-  failed read after the drop closes the wheel.
+  failed read after the drop closes the wheel. The list is decoded from
+  its end and its bytes are given back as they become paths, so the
+  wheel never holds a whole list and all of its paths at once (see
+  `docs/resource-limits.md`).
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`
   decodes to bytes; a non-`file` URI, another host, a bad escape or a
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
