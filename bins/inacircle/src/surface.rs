@@ -37,7 +37,6 @@
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ui::damage::Screen;
@@ -46,7 +45,7 @@ use wire::{Arg::*, Conn, DISPLAY, Event, Iface, op};
 
 use crate::measure::Meter;
 use crate::uri::MAX_BYTES;
-use crate::wheel::{Effect, Input, KEY_ESC, LIST_TOO_BIG, Machine, STAGE, URI_LIST};
+use crate::wheel::{Effect, Input, KEY_ESC, LIST_TOO_BIG, Machine, PathList, STAGE, URI_LIST};
 
 const FRAME: usize = (BOX * BOX * 4) as usize;
 /// Both wheel buffers, then the 1x1 background pixel.
@@ -101,7 +100,7 @@ const SEAT_POINTER: u32 = 1;
 const SEAT_KEYBOARD: u32 = 2;
 
 /// The files and preset chosen, or `None` if the wheel closed without one.
-pub type Chosen = Option<(Vec<PathBuf>, String)>;
+pub type Chosen = Option<(PathList, String)>;
 
 /// Why the wheel did not open (or broke on the way). A cancel, a close by
 /// the compositor and a second instance are not errors.
@@ -1630,7 +1629,7 @@ mod tests {
     /// matters here.
     fn empty_groups(_: &[u8]) -> GroupMenu {
         GroupMenu {
-            paths: Vec::new(),
+            paths: PathList::default(),
             slices: Default::default(),
             hub: NOTHING.into(),
             tally: Default::default(),
@@ -1640,7 +1639,7 @@ mod tests {
 
     fn empty_targets(_: &GroupMenu, _: &str) -> Menu {
         Menu {
-            paths: Vec::new(),
+            paths: PathList::default(),
             slices: Default::default(),
             hub: NOTHING.into(),
         }
@@ -2484,8 +2483,11 @@ mod tests {
             crate::cpu_us(libc::RUSAGE_SELF),
             crate::monotonic_us().unwrap(),
         );
-        s.apply(Effect::Run(vec![], "p".into()), &Machine::new())
-            .unwrap();
+        s.apply(
+            Effect::Run(PathList::default(), "p".into()),
+            &Machine::new(),
+        )
+        .unwrap();
         let (cpu1, mono1) = (
             crate::cpu_us(libc::RUSAGE_SELF),
             crate::monotonic_us().unwrap(),

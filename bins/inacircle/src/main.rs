@@ -60,6 +60,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
@@ -911,6 +912,10 @@ fn cmd_wheel() -> u8 {
     };
     let mut machine = wheel::Machine::new();
     let chosen = surface::run(&mut machine, &mut meter);
+    // The wheel is done with the list: the surface and its buffers went
+    // with `run`; the machine goes now, so the choice below holds the only
+    // copy of the paths and the supervisor phase does not carry the wheel.
+    drop(machine);
     // The surface is gone (its connection closed); free the hotkey.
     drop(lock);
     if let Some(meter) = meter {
@@ -927,7 +932,12 @@ fn cmd_wheel() -> u8 {
     // deadline and group kill). A choice's run loads the catalog itself,
     // which is that refresh.
     match chosen {
-        Ok(Some((files, preset))) => run_choice(files, &preset),
+        Ok(Some((files, preset))) => {
+            // Unique now (the machine is dropped): moved out, not copied.
+            // The fallback copy cannot happen, and is only a copy if so.
+            let files = Rc::try_unwrap(files).unwrap_or_else(|shared| (*shared).clone());
+            run_choice(files, &preset)
+        }
         Ok(None) => {
             Catalog::load();
             EXIT_DONE
@@ -1071,7 +1081,7 @@ fn group_menu(list: &[u8]) -> wheel::GroupMenu {
 /// draw it), or the count.
 fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu {
     let mut gm = wheel::GroupMenu {
-        paths: Vec::new(),
+        paths: wheel::PathList::default(),
         slices: Default::default(),
         hub: String::new(),
         tally: menu::Tally::default(),
@@ -1109,7 +1119,7 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
         }
         _ => gm.tally.source_text(),
     };
-    gm.paths = paths;
+    gm.paths = Rc::new(paths);
     gm.catalog = Some(cat);
     gm
 }
@@ -1122,7 +1132,7 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
     let mut slices: [Option<wheel::Choice>; 8] = Default::default();
     let Some(cat) = &gm.catalog else {
         return wheel::Menu {
-            paths: Vec::new(),
+            paths: wheel::PathList::default(),
             slices,
             hub: wheel::NO_ACTIONS.into(),
         };
@@ -1137,7 +1147,7 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
         });
     }
     wheel::Menu {
-        paths: gm.paths.clone(),
+        paths: Rc::clone(&gm.paths),
         slices,
         hub: offer.hub,
     }
@@ -1275,7 +1285,7 @@ mod tests {
             "file://{}/%E6%97%A5%E6%9C%AC.txt\n",
             dir.display()
         ));
-        assert_eq!(g.paths, [file]);
+        assert_eq!(*g.paths, [file]);
         assert_eq!(g.hub, "1 file · text");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1293,7 +1303,7 @@ mod tests {
                 .replace(' ', "%20")
                 .replace('ő', "%C5%91")
         ));
-        assert_eq!(g.paths, std::slice::from_ref(&file), "the same file once");
+        assert_eq!(*g.paths, std::slice::from_ref(&file), "the same file once");
         assert_eq!(g.hub, "notes ő.txt");
         let doc = g.slices[0].as_ref().expect("documents point north");
         assert_eq!(
@@ -1317,7 +1327,7 @@ mod tests {
         let (dir, file) = text_file("targets", "a.txt");
         let g = group_menu_for(vec![file.clone()], Some(md_catalog()));
         let m = target_menu(&g, "document");
-        assert_eq!(m.paths, std::slice::from_ref(&file));
+        assert_eq!(*m.paths, std::slice::from_ref(&file));
         assert_eq!(m.hub, "Document");
         let north = m.slices[0].as_ref().expect("markdown points north");
         assert_eq!(

@@ -1939,3 +1939,95 @@ fn startup_teardown_leaves_when_its_sync_is_answered() {
     let after = c.since_ack().expect("the fake answered");
     assert!(after < TEARDOWN / 2, "{after:?}");
 }
+
+/// The largest of a `/proc` field's values seen so far (`None` while the
+/// file is unreadable, e.g. the process just exited).
+fn proc_field_kb(path: String, key: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix(key))
+        .and_then(|v| v.split_whitespace().next()?.parse().ok())
+}
+
+/// Longest path of the invocation's own limit: a Linux `PATH_MAX` of 4096
+/// would be the extreme, ~1 KiB is the plan's worst realistic case that
+/// still fits 1024 of them in the 1 MiB list limit (1024 x ~1 KiB URIs).
+const LONG_PATH_LINE: usize = 1023;
+
+/// Peak PSS of the wheel process through a whole choice (stage 2, the click,
+/// the run) for 1024 dropped paths of ~1 KiB each, sampled from
+/// `smaps_rollup` every 200 us until exit. This step guarantees the wheel
+/// holds the list once and lets go of itself before the run; the run's own
+/// copies (the supervisor, the engine) are a later step, so the
+/// through-the-run figure is reported, not gated on the 5 MB budget yet.
+/// Asserted: the choice completes with one output group per path, and (in
+/// the optimized build the budget is for) stage 2 is within the budget
+/// (before this step the wheel's copies put it at 5.03-5.17 MB).
+#[test]
+fn a_large_drop_through_the_choice_reports_its_peak() {
+    let root = Root::new("through1024");
+    root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "markdown");
+    let mut dir = root.0.join("f");
+    for c in ['a', 'b', 'c', 'd'] {
+        dir = dir.join(c.to_string().repeat(240));
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let mut list = Vec::new();
+    for i in 0..1024 {
+        let plen = dir.join(format!("{i:04}")).as_os_str().len() + 4;
+        let pad = LONG_PATH_LINE.saturating_sub(9).saturating_sub(plen);
+        let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
+        fs::write(&p, "w\n").unwrap();
+        list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+    }
+    assert!(list.len() <= 1_048_576, "{} bytes", list.len());
+    let (mut c, mut child) = start(&root, false);
+    let pid = child.id();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let (mut pss, mut hwm) = (0u64, 0u64);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let roll = format!("/proc/{pid}/smaps_rollup");
+                pss = pss.max(proc_field_kb(roll, "Pss:").unwrap_or(0));
+                let status = format!("/proc/{pid}/status");
+                hwm = hwm.max(proc_field_kb(status, "VmHWM:").unwrap_or(0));
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            (pss, hwm)
+        }
+    });
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    drag_to_category(&mut c, &list, (960, 390));
+    let stage2 = pss_kb(pid);
+    c.pump(Duration::from_millis(300));
+    c.release_held();
+    c.pointer_motion(960, 390);
+    c.pump(Duration::from_millis(50));
+    c.pointer_button(0x110);
+    let _ = c.hangs_up(Duration::from_secs(60));
+    let st = wait_exit(&mut child, Duration::from_secs(120));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (through, hwm) = sampler.join().unwrap();
+    let groups = fs::read_dir(&dir)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().is_dir())
+        .count();
+    eprintln!(
+        "1024 x ~1 KiB paths: stage 2 PSS {stage2} kB, through the run: sampled max PSS {through} kB, VmHWM {hwm} kB; exit {:?}, {groups} output groups",
+        st.code()
+    );
+    assert_eq!(st.code(), Some(0));
+    assert_eq!(groups, 1024, "one output group per path");
+    if !cfg!(debug_assertions) {
+        // 5,000,000 B (CLAUDE.md), `Pss` is in KiB: multiply by 1024.
+        assert!(
+            stage2 * 1024 <= 5_000_000,
+            "stage 2 PSS {stage2} kB over the budget"
+        );
+    }
+}

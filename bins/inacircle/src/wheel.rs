@@ -18,6 +18,7 @@
 //! output-local too. The wheel is placed once, at the first position known.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use engine::catalog::Catalog;
@@ -107,7 +108,7 @@ pub enum Effect {
     /// Tear down and exit, no action.
     Close,
     /// Tear down, then run preset `.1` on the files.
-    Run(Vec<PathBuf>, String /* preset id */),
+    Run(PathList, String /* preset id */),
 }
 
 /// One level-1 slice.
@@ -120,10 +121,16 @@ pub struct GroupChoice {
     pub lit: bool,
 }
 
+/// The dropped files, held once: levels 1 and 2, the click's effect and the
+/// machine share one list (a clone is a count, not a copy of up to a
+/// mebibyte of paths). Once the machine is dropped the list is unique, and
+/// `Rc::try_unwrap` hands the vector to the run without a copy.
+pub type PathList = Rc<Vec<PathBuf>>;
+
 /// Level 1, made from the early or the dropped list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMenu {
-    pub paths: Vec<PathBuf>,
+    pub paths: PathList,
     /// By wheel slice index: the compass, 0 = north, clockwise.
     pub slices: [Option<GroupChoice>; 8],
     /// The source: a name, or the count.
@@ -147,7 +154,7 @@ pub struct Choice {
 /// Level 2, the targets of one category.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
-    pub paths: Vec<PathBuf>,
+    pub paths: PathList,
     /// By wheel slice index: the compass, 0 = north, clockwise.
     pub slices: [Option<Choice>; 8],
     pub hub: String,
@@ -463,7 +470,7 @@ impl Machine {
     /// Level 1 with nothing on offer and `TOO_MANY` in the hub.
     fn show_refused(&mut self) {
         let gm = GroupMenu {
-            paths: Vec::new(),
+            paths: PathList::default(),
             slices: Default::default(),
             hub: TOO_MANY.into(),
             tally: Tally::default(),
@@ -618,7 +625,7 @@ impl Machine {
                 if let Some(c) = &menu.slices[usize::from(k)]
                     && c.applicable
                 {
-                    let run = Effect::Run(menu.paths.clone(), c.preset.clone());
+                    let run = Effect::Run(Rc::clone(&menu.paths), c.preset.clone());
                     self.phase = Phase::Done;
                     fx.push(run);
                 }
@@ -716,7 +723,7 @@ mod tests {
         let mut slices: [Option<GroupChoice>; 8] = Default::default();
         if bytes.is_empty() {
             return GroupMenu {
-                paths: Vec::new(),
+                paths: PathList::default(),
                 slices,
                 hub: NOTHING.into(),
                 tally: Tally::default(),
@@ -726,7 +733,7 @@ mod tests {
         slices[0] = group("Zero", "g0", true);
         slices[4] = group("Four", "g4", false);
         GroupMenu {
-            paths: vec![PathBuf::from("/x")],
+            paths: vec![PathBuf::from("/x")].into(),
             slices,
             hub: "x".into(),
             tally: Tally::default(),
@@ -750,7 +757,7 @@ mod tests {
             });
         }
         Menu {
-            paths: gm.paths.clone(),
+            paths: Rc::clone(&gm.paths),
             slices,
             hub: "Zero".into(),
         }
@@ -763,7 +770,7 @@ mod tests {
         slices[3] = group("Three", "g3", true);
         slices[1] = group("One", "g1", false);
         GroupMenu {
-            paths: vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+            paths: vec![PathBuf::from("/a"), PathBuf::from("/b c")].into(),
             slices,
             hub: "2 files".into(),
             tally: Tally::default(),
@@ -784,7 +791,7 @@ mod tests {
             applicable: false,
         });
         Menu {
-            paths: gm.paths.clone(),
+            paths: Rc::clone(&gm.paths),
             slices,
             hub: "Three".into(),
         }
@@ -930,7 +937,7 @@ mod tests {
         assert_eq!(m.on(Input::DragLeave), []);
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         assert_eq!(m.stage(), Stage::Done);
         assert_eq!(m.on(Input::Deadline), []);
@@ -976,7 +983,7 @@ mod tests {
         assert_eq!((m.stage(), m.hub()), (Stage::Choosing, "Zero"));
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         assert_eq!(m.on(Input::Click(BTN_LEFT)), []);
     }
@@ -997,7 +1004,7 @@ mod tests {
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
             [Effect::Run(
-                vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+                vec![PathBuf::from("/a"), PathBuf::from("/b c")].into(),
                 "p3".into()
             )]
         );
@@ -1210,7 +1217,7 @@ mod tests {
         assert_eq!(m.stage(), Stage::Choosing);
         assert_eq!(
             m.on_at(ms(1500), Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         // The guard does not delay closing outside the wheel.
         let mut m = fake_machine();
