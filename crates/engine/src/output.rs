@@ -429,8 +429,8 @@ pub struct Anchor {
 /// it has none, or one starting with a dot), and the input's stem for one.
 /// The only filesystem access is [`writable_target`]'s probe of the
 /// anchor folder. `accepted` empty is `InvalidInput`.
-pub fn anchor(accepted: &[PathBuf]) -> io::Result<Anchor> {
-    let Some(first) = accepted.first() else {
+pub fn anchor<P: AsRef<Path>>(accepted: &[P]) -> io::Result<Anchor> {
+    let Some(first) = accepted.first().map(AsRef::as_ref) else {
         return Err(invalid("no input for the result"));
     };
     fn folder(p: &Path) -> &Path {
@@ -441,7 +441,7 @@ pub fn anchor(accepted: &[PathBuf]) -> io::Result<Anchor> {
     let mut count: std::collections::HashMap<&Path, (usize, usize)> =
         std::collections::HashMap::new();
     for (i, p) in accepted.iter().enumerate() {
-        count.entry(folder(p)).or_insert((0, i)).0 += 1;
+        count.entry(folder(p.as_ref())).or_insert((0, i)).0 += 1;
     }
     // The most inputs; among equals, the smallest first index.
     let dir = count
@@ -3605,7 +3605,7 @@ pub(crate) mod tests {
     #[test]
     fn anchor_of_nothing_is_an_error() {
         let t = Tmp::new("anchor-none");
-        let e = anchor_env(&t, || anchor(&[])).unwrap_err();
+        let e = anchor_env(&t, || anchor::<PathBuf>(&[])).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }

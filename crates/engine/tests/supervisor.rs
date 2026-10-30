@@ -1512,7 +1512,7 @@ fn publication_cancel_stops_before_the_next_commit() {
     };
     engine::exec::run(
         &[&action(&bin, "md")],
-        &[a.clone(), b.clone()],
+        vec![a.clone(), b.clone()],
         &mut obs,
         &tok,
     );
@@ -2069,7 +2069,7 @@ fn cancel_after_joined_before_publish_publishes_nothing() {
         })),
         ..Pub::default()
     };
-    let rep = engine::exec::run_join(&join_action(&bin, 1), &ins, &mut obs, &tok);
+    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
     assert!(tok.is_cancelled());
     assert_eq!(obs.prepared.len(), 1);
     assert!(obs.groups.is_empty());
@@ -2169,7 +2169,7 @@ fn publish_failure_leaves_nothing() {
         })),
         ..Pub::default()
     };
-    let rep = engine::exec::run_join(&join_action(&bin, 1), &ins, &mut obs, &tok);
+    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
     assert_eq!(obs.prepared.len(), 1, "the failure came before the commit");
     assert!(obs.groups.is_empty());
     assert!(obs.ran.dirs.is_empty());
@@ -2283,7 +2283,7 @@ fn helper_join_kill_run() {
     let act = join_action(std::path::Path::new(&bin), 1);
     let tok = engine::exec::CancelToken::install().unwrap();
     let mut obs = Say(common::Ran::default());
-    engine::exec::run_join(&act, &ins, &mut obs, &tok);
+    engine::exec::run_join(&act, ins.clone(), &mut obs, &tok);
 }
 
 /// The supervisor is killed with `SIGKILL` after the action's `joined`,

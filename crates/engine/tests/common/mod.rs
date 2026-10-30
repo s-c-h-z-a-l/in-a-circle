@@ -142,7 +142,7 @@ pub fn run_join(act: &Action, inputs: &[PathBuf], cancel_after: Option<Duration>
         })
     });
     let mut obs = Ran::default();
-    let report = exec::run_join(act, inputs, &mut obs, &tok);
+    let report = exec::run_join(act, inputs.to_vec(), &mut obs, &tok);
     if let Some(h) = sent {
         h.join().unwrap();
     }
@@ -206,7 +206,7 @@ pub fn run(
         })
     });
     let mut obs = Ran::default();
-    exec::run(route, inputs, &mut obs, &tok);
+    exec::run(route, inputs.to_vec(), &mut obs, &tok);
     let end = Instant::now();
     let from = sent.map_or(start, |h| h.join().unwrap());
     (obs, end.saturating_duration_since(from))
@@ -217,7 +217,7 @@ pub fn run(
 pub fn run_with(route: &[&Action], inputs: &[PathBuf], obs: &mut dyn Observer) -> Duration {
     let tok = CancelToken::install().unwrap();
     let start = Instant::now();
-    exec::run(route, inputs, obs, &tok);
+    exec::run(route, inputs.to_vec(), obs, &tok);
     start.elapsed()
 }
 

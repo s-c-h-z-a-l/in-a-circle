@@ -180,6 +180,8 @@ action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/
   temp dir. Very long input lists go through `--inputs-from <file>`; the
   list (read bounded: 1 MiB, 8 KiB per encoded line) and argv together
   hold at most 1024 paths of at most 4096 bytes each and 1 MiB in all.
+  The engine writes the list streamed and holds each input path once for
+  the whole run (see `docs/resource-limits.md`).
 - **An action writes only into the temp dir.** Once its whole process
   group is gone, the engine copies each input's results into fresh files
   of its own and publishes them with one atomic no-replace `rename` (see

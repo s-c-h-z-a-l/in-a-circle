@@ -175,6 +175,27 @@ until they end (see [architecture.md](architecture.md), Invocation)
 ([sandbox-hardening.md](benchmarks/sandbox-hardening.md)). That limits how
 long a runaway tree lives, not how much memory it takes meanwhile.
 
+## The engine's own memory at the input limits
+
+The input limits (1024 paths, 1 MiB of paths) are also what the engine
+holds for a run, inside the `inacircle` budget (5,000,000 B PSS: wheel,
+engine and supervisor). It holds each input path once: the steps' inputs,
+the groups and the join's anchor borrow from the run's one list; the
+`--inputs-from` file is streamed to disk, not built in memory; the
+history's per-input tally keys an input by a 128-bit keyed hash of its
+path, not by a copy. `inacircle run` takes its arguments over, so its argv
+on the heap becomes the list (the kernel's copy on the stack stays).
+
+Measured (release, reference machine, 1024 inputs with ~1 KiB paths, one
+batch process, PSS sampled every 200 us until exit): `inacircle run`
+3.4-3.9 MB (8.9 MB while the engine held the paths about seven times over);
+the wheel from the click to exit at most 4.1 MB, which is its stage 2
+with the dropped list held once. Before the click, while the dropped list
+becomes paths, the wheel holds its bytes and its paths together and peaks
+at about 5.0 MB. Tests: `many_long_paths_stay_within_the_pss_budget`
+(CLI) and `a_large_drop_through_the_choice_reports_its_peak` (wheel, from
+the click on), both gated in the release build.
+
 ## Limits added by the hardening
 
 Every wait and every read of foreign or on-disk state is bounded while it

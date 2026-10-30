@@ -104,11 +104,15 @@ fn main() -> ExitCode {
     // SAFETY: prctl with integer arguments only; no pointers, no memory
     // is touched.
     let _ = unsafe { libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0) };
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let command = args.first().and_then(|a| a.to_str()).map(str::to_owned);
+    // `run` and `offer` take their arguments over: the paths are held
+    // once, not here and again as files.
+    let owned = |args: &mut Vec<OsString>| args.split_off(1);
     let rest = args.get(1..).unwrap_or_default();
-    let code = match args.first().and_then(|a| a.to_str()) {
-        Some("run") => cmd_run(rest),
-        Some("offer") => cmd_offer(rest),
+    let code = match command.as_deref() {
+        Some("run") => cmd_run(owned(&mut args)),
+        Some("offer") => cmd_offer(owned(&mut args)),
         Some("undo") => cmd_undo(rest),
         Some("jobs") => cmd_jobs(rest),
         Some("cancel") => cmd_cancel(rest),
@@ -187,7 +191,9 @@ fn absolute(p: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
 
 /// The files of a command as absolute paths, each file (by canonical path)
 /// once, first spelling kept; `None` after reporting an invocation error.
-fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
+/// Each argument is let go as soon as its path is made, so the paths are
+/// held once.
+fn files_of(args: Vec<OsString>) -> Option<Vec<PathBuf>> {
     if args.is_empty() {
         usage("no files");
         return None;
@@ -199,7 +205,7 @@ fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     let cwd = std::env::current_dir().ok();
     let mut files = Vec::with_capacity(args.len());
     for a in args {
-        match absolute(Path::new(a), cwd.as_deref()) {
+        match absolute(Path::new(&a), cwd.as_deref()) {
             Some(p) => files.push(p),
             None => {
                 usage("relative path without a current directory");
@@ -335,7 +341,7 @@ impl Observer for Printer<'_> {
     }
 }
 
-fn cmd_run(args: &[OsString]) -> u8 {
+fn cmd_run(mut args: Vec<OsString>) -> u8 {
     // First, before anything that could start a thread: a thread without
     // SIGTERM blocked would take a cancel as a kill.
     let cancel = match CancelToken::install() {
@@ -345,24 +351,26 @@ fn cmd_run(args: &[OsString]) -> u8 {
             return EXIT_FAILED;
         }
     };
-    let (notify, args) = match args {
-        [flag, rest @ ..] if flag == "--notify" => (true, rest),
-        _ => (false, args),
-    };
-    let (target, rest) = match args {
-        [flag, id, rest @ ..] if flag == "--action" => (id, rest),
+    let notify = args.first().is_some_and(|f| f == "--notify");
+    if notify {
+        args.remove(0);
+    }
+    let (action, id) = match args.as_slice() {
+        [flag, id, ..] if flag == "--action" => (true, id),
         [flag] if flag == "--action" => return usage("--action needs an action id"),
-        [id, rest @ ..] => (id, rest),
+        [id, ..] => (false, id),
         [] => return usage("run needs a preset id"),
     };
-    let Some(id) = target.to_str() else {
+    let Some(id) = id.to_str().map(str::to_owned) else {
         return usage("invalid id");
     };
-    let target = if args[0] == "--action" {
-        Target::Action(id)
+    let target = if action {
+        Target::Action(&id)
     } else {
-        Target::Preset(id)
+        Target::Preset(&id)
     };
+    // The paths, taken over (see `files_of`).
+    let rest = args.split_off(if action { 2 } else { 1 });
     let Some(files) = files_of(rest) else {
         return EXIT_USAGE;
     };
@@ -526,8 +534,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             entry: measure_on.then(Entry::default),
         };
         let report = match join {
-            Some(a) => exec::run_join(a, &inputs, &mut obs, &cancel),
-            None => exec::run(&route, &inputs, &mut obs, &cancel),
+            Some(a) => exec::run_join(a, inputs, &mut obs, &cancel),
+            None => exec::run(&route, inputs, &mut obs, &cancel),
         };
         entry = obs.entry.take();
         joined = report.joined;
@@ -658,11 +666,11 @@ fn measure() {
     );
 }
 
-fn cmd_offer(args: &[OsString]) -> u8 {
-    let (groups, args) = match args.split_first() {
-        Some((a, rest)) if a == "--groups" => (true, rest),
-        _ => (false, args),
-    };
+fn cmd_offer(mut args: Vec<OsString>) -> u8 {
+    let groups = args.first().is_some_and(|a| a == "--groups");
+    if groups {
+        args.remove(0);
+    }
     let Some(files) = files_of(args) else {
         return EXIT_USAGE;
     };
@@ -980,7 +988,7 @@ fn wheel_failed(e: &surface::StartupError) -> u8 {
 /// Runs the wheel's choice exactly as `inacircle run --notify <preset>
 /// <files…>`: the same function, so the same checks, output and exit code.
 fn run_choice(files: Vec<PathBuf>, preset: &str) -> u8 {
-    cmd_run(&choice_args(files, preset))
+    cmd_run(choice_args(files, preset))
 }
 
 /// The `run` arguments for a choice. The paths are absolute (from

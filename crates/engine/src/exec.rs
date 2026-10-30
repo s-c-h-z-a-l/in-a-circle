@@ -22,11 +22,13 @@ pub use crate::output::{
     AnchorHint, CheckPoint, ChildBaseline, DirectoryId, Durability, FileId, GroupId,
     LocationEvidence, NodeKind, OperationId, OutputGroup, Publication, PublicationReason,
 };
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
-use std::io::{self, Read};
+use std::hash::{BuildHasher, RandomState};
+use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -112,30 +114,44 @@ pub enum Outcome {
 /// publication whose place is unknown: the conversion happened), else
 /// failed, else skipped; an input with only warnings is not counted. One
 /// entry per input, never per outcome.
+///
+/// An input is known by two domain-separated hashes of its path under one
+/// random SipHash key (128 bits), not by a copy of the path: a run's
+/// inputs can be 1 MiB of paths (`action::INPUT_TOTAL_PATH_BYTES`), and a
+/// copy here would put the run over the 5 MB memory budget. The hash
+/// follows path equality, as a path key did. Two of `n` inputs share both
+/// hashes with a probability below n^2 / 2^129 (about 2^-109 at the
+/// invocation's 1024, `action::INPUT_COUNT`); only a count would be off
+/// then, never what is published.
 #[derive(Debug, Default)]
 pub struct Tally {
-    rank: HashMap<PathBuf, u8>,
+    key: RandomState,
+    rank: HashMap<(u64, u64), u8>,
     /// Inputs with a `PublishedUnknown`, once each however often it is seen.
-    unknown: HashSet<PathBuf>,
+    unknown: HashSet<(u64, u64)>,
 }
 
 impl Tally {
+    fn key(&self, input: &Path) -> (u64, u64) {
+        (
+            self.key.hash_one((0u8, input)),
+            self.key.hash_one((1u8, input)),
+        )
+    }
+
     pub fn add(&mut self, o: &Outcome) {
-        if let Outcome::PublishedUnknown { input, .. } = o {
-            self.unknown.insert(input.clone());
-        }
         let (input, rank) = match o {
             Outcome::Done { input, .. } | Outcome::PublishedUnknown { input, .. } => (input, 3),
             Outcome::Failed { input, .. } => (input, 2),
             Outcome::Skipped { input, .. } => (input, 1),
             Outcome::Warned { input, .. } => (input, 0),
         };
-        match self.rank.get_mut(input.as_path()) {
-            Some(r) => *r = (*r).max(rank),
-            None => {
-                self.rank.insert(input.clone(), rank);
-            }
+        let key = self.key(input);
+        if let Outcome::PublishedUnknown { .. } = o {
+            self.unknown.insert(key);
         }
+        let r = self.rank.entry(key).or_insert(rank);
+        *r = (*r).max(rank);
     }
 
     /// Inputs published where it could not be confirmed (counted in
@@ -334,7 +350,7 @@ impl Drop for CancelToken {
 /// misbehaving action; every input ends with at least one outcome.
 pub fn run(
     route: &[&Action],
-    inputs: &[PathBuf],
+    inputs: Vec<PathBuf>,
     obs: &mut dyn Observer,
     cancel: &CancelToken,
 ) -> Report {
@@ -342,8 +358,7 @@ pub fn run(
     // sandbox, built-in or not, whether the catalog knows it from a fresh
     // manifest run or from its cache.
     let gate = sandbox::ready();
-    let mut seen = HashSet::new();
-    let uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
+    let uniq = unique(inputs);
     let mut sink = Sink::new(obs, &uniq);
     let all = |sink: &mut Sink, reason: &str| {
         for i in 0..sink.inputs.len() {
@@ -379,9 +394,9 @@ pub fn run(
             }
         }
     });
-    let ok_paths: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
-    let groups = group_by_target(&ok_paths, batch, |dir| match &targets[dir] {
-        Ok(t) => t.clone(),
+    let ok_paths = ok.iter().map(|&i| uniq[i].as_path());
+    let groups = group_by_target(ok_paths, batch, |dir| match &targets[dir] {
+        Ok(t) => t.as_path(),
         Err(_) => unreachable!("inputs without a target were dropped"),
     });
     let mut cleaned = HashSet::new();
@@ -393,16 +408,28 @@ pub fn run(
                 sink.fail(i, "cancelled".to_owned());
             }
         } else {
-            if cleaned.insert(g.target.clone()) {
+            if cleaned.insert(g.target) {
                 // The download fallback may not exist yet.
-                let _ = fs::create_dir_all(&g.target);
-                output::clean_stale(&g.target);
+                let _ = fs::create_dir_all(g.target);
+                output::clean_stale(g.target);
             }
-            run_group(route, &members, &g.target, cancel, &mut sink);
+            run_group(route, &members, g.target, cancel, &mut sink);
         }
         sink.end_group();
     }
     sink.report(true)
+}
+
+/// `inputs` with each path once (the first kept), in order: filtered in
+/// place, so the paths are held once, not copied.
+fn unique(mut inputs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let keep: Vec<bool> = {
+        let mut seen = HashSet::with_capacity(inputs.len());
+        inputs.iter().map(|p| seen.insert(p.as_path())).collect()
+    };
+    let mut keep = keep.into_iter();
+    inputs.retain(|_| keep.next().unwrap_or(false));
+    inputs
 }
 
 /// The inputs an action may be given: absolute, UTF-8, regular files.
@@ -459,13 +486,12 @@ fn stem_of(p: &Path) -> String {
 /// fails.
 pub fn run_join(
     action: &Action,
-    inputs: &[PathBuf],
+    inputs: Vec<PathBuf>,
     obs: &mut dyn Observer,
     cancel: &CancelToken,
 ) -> Report {
     let gate = sandbox::ready();
-    let mut seen = HashSet::new();
-    let mut uniq: Vec<PathBuf> = inputs.iter().filter(|p| seen.insert(*p)).cloned().collect();
+    let mut uniq = unique(inputs);
     uniq.sort_by(|a, b| join_order(a, b));
     let mut joined = Joined {
         taken: 0,
@@ -496,8 +522,8 @@ pub fn run_join(
     if ok.is_empty() {
         return end(&mut sink, true, joined);
     }
-    // A copy for the anchor only, dropped before the action runs.
-    let accepted: Vec<PathBuf> = ok.iter().map(|&i| uniq[i].clone()).collect();
+    // References for the anchor only, dropped before the action runs.
+    let accepted: Vec<&Path> = ok.iter().map(|&i| uniq[i].as_path()).collect();
     let placed = output::anchor(&accepted);
     drop(accepted);
     let anchor = match placed {
@@ -548,8 +574,12 @@ fn join_group(
     };
     sink.steps = 1;
     sink.step = 0;
+    let all = sink.inputs;
     let step_in = StepIn {
-        paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
+        paths: members
+            .iter()
+            .map(|&i| Cow::Borrowed(all[i].as_path()))
+            .collect(),
         origin: members.to_vec(),
         intermediate: false,
         join: Some(min),
@@ -739,21 +769,23 @@ impl<'a> Sink<'a> {
 
 /// Inputs sharing a target folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Group {
-    target: PathBuf,
-    /// Indices into the grouped slice, in input order.
+struct Group<'t> {
+    /// Borrowed from the caller's targets: one copy per folder, not per
+    /// group (with `batch == false` every input is a group).
+    target: &'t Path,
+    /// Indices into the grouped inputs, in input order.
     members: Vec<usize>,
 }
 
 /// Groups `inputs` by `target_of(parent folder)`, in order of first
 /// appearance; with `batch == false` every input is its own group.
-fn group_by_target(
-    inputs: &[PathBuf],
+fn group_by_target<'t>(
+    inputs: impl IntoIterator<Item = &'t Path>,
     batch: bool,
-    mut target_of: impl FnMut(&Path) -> PathBuf,
-) -> Vec<Group> {
+    mut target_of: impl FnMut(&'t Path) -> &'t Path,
+) -> Vec<Group<'t>> {
     let mut groups: Vec<Group> = Vec::new();
-    for (i, p) in inputs.iter().enumerate() {
+    for (i, p) in inputs.into_iter().enumerate() {
         let target = target_of(p.parent().unwrap_or(Path::new("/")));
         match groups.iter_mut().find(|g| batch && g.target == target) {
             Some(g) => g.members.push(i),
@@ -767,8 +799,10 @@ fn group_by_target(
 }
 
 /// One step's process: its inputs and which original input each came from.
-struct StepIn {
-    paths: Vec<PathBuf>,
+struct StepIn<'a> {
+    /// The user's inputs borrowed from the run's one list (never copied),
+    /// or the previous step's outputs, owned.
+    paths: Vec<Cow<'a, Path>>,
     origin: Vec<usize>,
     /// The paths are the previous step's outputs, not the user's inputs.
     intermediate: bool,
@@ -794,8 +828,12 @@ fn run_group(
         }
     };
     sink.steps = route.len();
+    let all = sink.inputs;
     let mut step_in = StepIn {
-        paths: members.iter().map(|&i| sink.inputs[i].clone()).collect(),
+        paths: members
+            .iter()
+            .map(|&i| Cow::Borrowed(all[i].as_path()))
+            .collect(),
         origin: members.to_vec(),
         intermediate: false,
         join: None,
@@ -882,7 +920,7 @@ fn run_group(
                 continue;
             }
             for rel in outs {
-                next.paths.push(dir.join(rel));
+                next.paths.push(Cow::Owned(dir.join(rel)));
                 next.origin.push(o);
             }
         }
@@ -1055,7 +1093,12 @@ enum Event {
 /// one-to-one action, or of a join action with `join`: each speaks only
 /// its own result events (`done`, or `take` and `joined`). `Err` is a
 /// contract violation, described.
-fn parse_event(line: &str, inputs: &[PathBuf], work: &Path, join: bool) -> Result<Event, String> {
+fn parse_event<P: AsRef<Path>>(
+    line: &str,
+    inputs: &[P],
+    work: &Path,
+    join: bool,
+) -> Result<Event, String> {
     let l = manifest::parse_line(line).map_err(|e| format!("bad event line: {}", e.msg))?;
     let mut fields = Vec::with_capacity(l.items.len());
     for item in &l.items {
@@ -1098,7 +1141,7 @@ fn parse_event(line: &str, inputs: &[PathBuf], work: &Path, join: bool) -> Resul
     let index_of = |input: &str| {
         inputs
             .iter()
-            .position(|p| p.to_str() == Some(input))
+            .position(|p| p.as_ref().to_str() == Some(input))
             .ok_or_else(|| format!("{} event for unknown input {input}", l.kind))
     };
     Ok(match l.kind.as_str() {
@@ -1111,7 +1154,7 @@ fn parse_event(line: &str, inputs: &[PathBuf], work: &Path, join: bool) -> Resul
         "done" => {
             let (input, rel) = (fields[0], fields[1]);
             let index = done_index(rel, inputs.len())?;
-            if inputs[index].to_str() != Some(input) {
+            if inputs[index].as_ref().to_str() != Some(input) {
                 return Err(format!(
                     "done output {rel} is not under the index of {input}"
                 ));
@@ -1270,13 +1313,15 @@ const TOO_MANY: &str = "too many outputs";
 
 /// The input a malformed event line is about, if its first field names
 /// one of `inputs` (for `done`, `skip`, `fail`, `warn` and `take` lines).
-fn offender_of(line: &str, inputs: &[PathBuf]) -> Option<usize> {
+fn offender_of<P: AsRef<Path>>(line: &str, inputs: &[P]) -> Option<usize> {
     let l = manifest::parse_line(line).ok()?;
     if !matches!(l.kind.as_str(), "done" | "skip" | "fail" | "warn" | "take") {
         return None;
     }
     let first = l.bare_at(0)?;
-    inputs.iter().position(|p| p.to_str() == Some(first))
+    inputs
+        .iter()
+        .position(|p| p.as_ref().to_str() == Some(first))
 }
 
 /// Whether `tail` holds Rust's allocation-failure line
@@ -1344,15 +1389,10 @@ fn run_step(
     if step_in.paths.iter().any(|p| p.starts_with(dir)) {
         return fail_all(sink, "input inside the work directory");
     }
-    let mut text = String::new();
-    for p in &step_in.paths {
-        let Some(s) = p.to_str() else {
-            return fail_all(sink, "non-UTF-8 path");
-        };
-        text.push_str(&manifest::escape(s));
-        text.push('\n');
+    if step_in.paths.iter().any(|p| p.to_str().is_none()) {
+        return fail_all(sink, "non-UTF-8 path");
     }
-    if let Err(e) = fs::write(list, text) {
+    if let Err(e) = write_list(list, &step_in.paths) {
         return fail_all(sink, &format!("cannot write input list: {e}"));
     }
     let mut exec: Vec<PathBuf> = sandbox::SYSTEM_EXEC_PATHS
@@ -1364,14 +1404,14 @@ fn run_step(
     // The list is the engine's: never followed. Intermediate outputs are
     // granted in `pre`, from the fds their check opened.
     let exact = [list.to_path_buf()];
-    let read = if step_in.intermediate {
-        &[][..]
+    let read: Vec<&Path> = if step_in.intermediate {
+        Vec::new()
     } else {
-        &step_in.paths[..]
+        step_in.paths.iter().map(|p| p.as_ref()).collect()
     };
     let policy = Policy {
         exec: &exec,
-        read,
+        read: &read,
         read_exact: &exact,
         write: Some(dir),
     };
@@ -1459,6 +1499,22 @@ fn run_step(
     sup.finish(sink)
 }
 
+/// Writes the `--inputs-from` list of `paths` (all UTF-8) to a new file
+/// at `list`, one escaped path per line, streamed: never a second copy of
+/// the paths in memory.
+fn write_list(list: &Path, paths: &[Cow<Path>]) -> io::Result<()> {
+    let mut w = io::BufWriter::new(fs::File::create(list)?);
+    for p in paths {
+        let s = p
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 path"))?;
+        w.write_all(manifest::escape(s).as_bytes())?;
+        w.write_all(b"\n")?;
+    }
+    w.into_inner().map_err(io::IntoInnerError::into_error)?;
+    Ok(())
+}
+
 /// What one input of a process has reported so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reported {
@@ -1485,7 +1541,7 @@ struct Supervisor<'a> {
     /// The current line ran past MAX_LINE (already a violation).
     overlong: bool,
     tail: Vec<u8>,
-    step_in: &'a StepIn,
+    step_in: &'a StepIn<'a>,
     dir: &'a Path,
     root: &'a Path,
     cancel: &'a CancelToken,
@@ -1726,7 +1782,7 @@ fn read_quota(r: &mut impl Read, mut f: impl FnMut(&[u8])) -> (bool, bool) {
 impl<'a> Supervisor<'a> {
     fn new(
         child: Child,
-        step_in: &'a StepIn,
+        step_in: &'a StepIn<'a>,
         dir: &'a Path,
         root: &'a Path,
         cancel: &'a CancelToken,
@@ -1999,7 +2055,7 @@ impl<'a> Supervisor<'a> {
             self.started = true;
             sink.obs.started(self.pid as u32);
         }
-        let again = |paths: &[PathBuf], index: usize| {
+        let again = |paths: &[Cow<Path>], index: usize| {
             format!(
                 "second result for {} after skip or fail",
                 paths[index].display()
@@ -2766,33 +2822,81 @@ pub(crate) mod tests {
         violation(p("progress\t0.5\t0.6"));
     }
 
+    /// Per input its strongest outcome, each input once: the tally keys an
+    /// input by hashes of its path, with path equality (`/a//b.txt` is
+    /// `/a/b.txt`), never merging two inputs.
+    #[test]
+    fn tally_counts_each_input_once_by_its_strongest_outcome() {
+        let failed = |p: &str| Outcome::Failed {
+            input: p.into(),
+            reason: "x".into(),
+        };
+        let skipped = |p: &str| Outcome::Skipped {
+            input: p.into(),
+            reason: "x".into(),
+        };
+        let warned = |p: &str| Outcome::Warned {
+            input: p.into(),
+            message: "x".into(),
+        };
+        let done = |p: &str| Outcome::Done {
+            input: p.into(),
+            output: "/o".into(),
+            id: FileId {
+                dev: 0,
+                ino: 0,
+                size: 0,
+                mtime_ns: 0,
+                ctime_ns: 0,
+            },
+        };
+        let mut t = Tally::default();
+        for o in [
+            skipped("/a/b.txt"),
+            failed("/a//b.txt"),
+            done("/c.txt"),
+            done("/c.txt"),
+            warned("/c.txt"),
+            skipped("/d.txt"),
+            warned("/e.txt"),
+        ] {
+            t.add(&o);
+        }
+        assert_eq!(t.counts(), (1, 1, 1));
+        assert_eq!(t.unknown(), 0);
+        // Many distinct inputs stay distinct.
+        let mut t = Tally::default();
+        for i in 0..action::INPUT_COUNT {
+            t.add(&skipped(&format!("/in/{i}.txt")));
+        }
+        assert_eq!(t.counts(), (0, action::INPUT_COUNT, 0));
+    }
+
     #[test]
     fn groups_by_target_dir() {
-        let inputs: Vec<PathBuf> = ["/a/1.txt", "/b/2.txt", "/a/3.txt", "/ro/4.txt", "/c/5.txt"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
+        let inputs = ["/a/1.txt", "/b/2.txt", "/a/3.txt", "/ro/4.txt", "/c/5.txt"].map(Path::new);
+        let paths = || inputs.iter().copied();
         let mut probed = Vec::new();
         // /ro is not writable and falls back to /dl, which /c also maps to.
-        let mut target = |d: &Path| {
+        let mut target = |d: &'static Path| {
             probed.push(d.to_path_buf());
             match d.to_str().unwrap() {
-                "/ro" | "/c" => PathBuf::from("/dl"),
-                d => PathBuf::from(d),
+                "/ro" | "/c" => Path::new("/dl"),
+                _ => d,
             }
         };
-        let g = group_by_target(&inputs, true, &mut target);
+        let g = group_by_target(paths(), true, &mut target);
         let want = [("/a", vec![0, 2]), ("/b", vec![1]), ("/dl", vec![3, 4])];
         assert_eq!(g.len(), want.len());
         for (g, (t, m)) in g.iter().zip(want) {
-            assert_eq!(g.target, PathBuf::from(t));
+            assert_eq!(g.target, Path::new(t));
             assert_eq!(g.members, m);
         }
-        let g = group_by_target(&inputs, false, &mut target);
+        let g = group_by_target(paths(), false, &mut target);
         assert_eq!(g.len(), 5);
         assert!(g.iter().enumerate().all(|(i, g)| g.members == [i]));
-        assert_eq!(g[3].target, PathBuf::from("/dl"));
-        assert!(group_by_target(&[], true, &mut target).is_empty());
+        assert_eq!(g[3].target, Path::new("/dl"));
+        assert!(group_by_target([], true, &mut target).is_empty());
     }
 
     #[test]
@@ -2965,7 +3069,7 @@ pub(crate) mod tests {
         })));
         let tok = CancelToken::install().unwrap();
         let mut seen = Seen::default();
-        let report = run(&[&s1, &s2], std::slice::from_ref(&input), &mut seen, &tok);
+        let report = run(&[&s1, &s2], vec![input.clone()], &mut seen, &tok);
         AFTER_CHECK.set(None);
         assert!(report.sandboxed);
         for e in fs::read_dir(&docs).unwrap().flatten() {
@@ -3020,7 +3124,7 @@ pub(crate) mod tests {
             unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         })));
         let mut seen = Prep::default();
-        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        run(&[&action], vec![input.clone()], &mut seen, &tok);
         BEFORE_PREPARE.set(None);
         assert_eq!(seen.1, 0, "prepare_group ran for a cancelled input");
         assert_eq!(
@@ -3127,12 +3231,7 @@ pub(crate) mod tests {
         let tok = CancelToken::install().unwrap();
         WAITID_ERRNO.set(Some(libc::EINVAL));
         let mut seen_obs = Seen::default();
-        run(
-            &[&action],
-            std::slice::from_ref(&input),
-            &mut seen_obs,
-            &tok,
-        );
+        run(&[&action], vec![input.clone()], &mut seen_obs, &tok);
         WAITID_ERRNO.set(None);
         assert!(seen.join().unwrap(), "the lingerer or the chain never ran");
         // A killed process stays in /proc until the kernel has torn it down,
@@ -3172,7 +3271,7 @@ pub(crate) mod tests {
         let tok = CancelToken::install().unwrap();
         WAITID_ERRNO.set(Some(libc::EINVAL));
         let mut seen = Seen::default();
-        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        run(&[&action], vec![input.clone()], &mut seen, &tok);
         WAITID_ERRNO.set(None);
         assert_eq!(
             seen.0,
@@ -3183,7 +3282,7 @@ pub(crate) mod tests {
         );
         assert!(!out.exists());
         let mut seen = Seen::default();
-        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        run(&[&action], vec![input.clone()], &mut seen, &tok);
         assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
     }
 
@@ -3233,7 +3332,7 @@ pub(crate) mod tests {
                 }
             })));
             let mut seen = Groups::default();
-            run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            run(&[&action], vec![input.clone()], &mut seen, &tok);
             AFTER_PUBLISH.set(None);
             let [
                 Outcome::PublishedUnknown {
@@ -3289,7 +3388,7 @@ pub(crate) mod tests {
             for name in GATE_FAILURES {
                 let _g = inject_failure(name);
                 let mut seen = Seen::default();
-                let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+                let r = run(&[&action], vec![input.clone()], &mut seen, &tok);
                 // A setup error comes after the gate (which passed).
                 assert_eq!(
                     r.sandboxed,
@@ -3314,7 +3413,7 @@ pub(crate) mod tests {
                 assert!(!out.exists(), "builtin={builtin}, {name}: the action ran");
             }
             let mut seen = Seen::default();
-            let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+            let r = run(&[&action], vec![input.clone()], &mut seen, &tok);
             assert!(r.sandboxed);
             assert!(matches!(seen.0[..], [Outcome::Done { .. }]), "{:?}", seen.0);
             assert_eq!(fs::read_to_string(&out).unwrap(), "a\n");
@@ -3356,7 +3455,7 @@ pub(crate) mod tests {
             let cat = Catalog::load_from(&[(dir.clone(), true)], &cache);
             let action = cat.get("x.conv").expect("known from the cache");
             let mut seen = Seen::default();
-            let r = run(&[action], std::slice::from_ref(&input), &mut seen, &tok);
+            let r = run(&[action], vec![input.clone()], &mut seen, &tok);
             assert!(!r.sandboxed, "{name}");
             assert!(
                 matches!(&seen.0[..], [Outcome::Failed { reason, .. }] if reason.starts_with("sandbox unavailable: ")),
@@ -3370,7 +3469,7 @@ pub(crate) mod tests {
         let mut seen = Seen::default();
         run(
             &[cat.get("x.conv").unwrap()],
-            std::slice::from_ref(&input),
+            vec![input.clone()],
             &mut seen,
             &tok,
         );
@@ -3441,7 +3540,7 @@ pub(crate) mod tests {
         for route in [&[][..], &[&a, &a, &a][..]] {
             let tok = CancelToken::install().unwrap();
             let mut seen = Seen::default();
-            let report = run(route, std::slice::from_ref(&input), &mut seen, &tok);
+            let report = run(route, vec![input.clone()], &mut seen, &tok);
             assert_eq!(
                 seen.0,
                 [Outcome::Failed {
@@ -3469,7 +3568,7 @@ pub(crate) mod tests {
         let a = script_action(&t, "act", "echo ran > \"$4/ran\"", "md");
         let tok = CancelToken::install().unwrap();
         let mut seen = Seen::default();
-        run(&[&a], std::slice::from_ref(&dir_input), &mut seen, &tok);
+        run(&[&a], vec![dir_input.clone()], &mut seen, &tok);
         assert_eq!(
             seen.0,
             [Outcome::Failed {
@@ -3517,7 +3616,7 @@ pub(crate) mod tests {
             "builtin" => true,
             other => panic!("unknown case {other}"),
         };
-        let r = run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        let r = run(&[&action], vec![input.clone()], &mut seen, &tok);
         assert!(!r.sandboxed);
         assert_eq!(
             seen.0,
@@ -3829,9 +3928,14 @@ pub(crate) mod tests {
         }
     }
 
-    fn step_over(t: &Tmp) -> StepIn {
+    /// The step's inputs as the run's own list.
+    fn owned(step: &StepIn) -> Vec<PathBuf> {
+        step.paths.iter().map(|p| p.to_path_buf()).collect()
+    }
+
+    fn step_over(t: &Tmp) -> StepIn<'static> {
         StepIn {
-            paths: vec![t.0.join("in.txt")],
+            paths: vec![Cow::Owned(t.0.join("in.txt"))],
             origin: vec![0],
             intermediate: false,
             join: None,
@@ -3861,7 +3965,7 @@ pub(crate) mod tests {
     fn feed_limits_a_line_to_max_line() {
         let t = Tmp::new("feed");
         let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
-        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let (mut seen, inputs) = (Seen::default(), owned(&step));
         let mut sink = Sink::new(&mut seen, &inputs);
         let mut sup = sup_over("sleep 30", &step, &t, &tok);
         sup.feed(&vec![b'x'; MAX_LINE], &mut sink);
@@ -3887,7 +3991,7 @@ pub(crate) mod tests {
             &tok,
         );
         let until = Instant::now() + Duration::from_secs(10);
-        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let (mut seen, inputs) = (Seen::default(), owned(&step));
         let mut sink = Sink::new(&mut seen, &inputs);
         assert!(sup.drain(&mut sink, until));
         assert!(sup.stdout.is_none() && sup.stderr.is_none());
@@ -3916,7 +4020,7 @@ pub(crate) mod tests {
             &t,
             &tok,
         );
-        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let (mut seen, inputs) = (Seen::default(), owned(&step));
         let mut sink = Sink::new(&mut seen, &inputs);
         let t0 = Instant::now();
         let given_up = !sup.drain(&mut sink, t0 + Duration::from_millis(300));
@@ -3938,7 +4042,7 @@ pub(crate) mod tests {
         let mut sup = sup_over("exec >&-; echo data >&2", &step, &t, &tok);
         // Exited: the data is in the pipe and EOF follows it.
         sup.child.wait().unwrap();
-        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let (mut seen, inputs) = (Seen::default(), owned(&step));
         let mut sink = Sink::new(&mut seen, &inputs);
         let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         assert!(!sup.drain(&mut sink, past));
@@ -3958,7 +4062,7 @@ pub(crate) mod tests {
     fn done_events_are_checked_for_duplicates_and_the_byte_cap() {
         let t = Tmp::new("done");
         let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
-        let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+        let (mut seen, inputs) = (Seen::default(), owned(&step));
         let mut sink = Sink::new(&mut seen, &inputs);
         let (a, b) = (done_event(&t, "0/a.md"), done_event(&t, "0/b.md"));
         // The same path twice while it is the only one recorded.
@@ -4017,7 +4121,7 @@ pub(crate) mod tests {
         for from_observer in [true, false] {
             let t = Tmp::new("finish-cancel");
             let (step, tok) = (step_over(&t), CancelToken::install().unwrap());
-            let (mut seen, inputs) = (Seen::default(), step.paths.clone());
+            let (mut seen, inputs) = (Seen::default(), owned(&step));
             let mut sink = Sink::new(&mut seen, &inputs);
             let sup = sup_over("exit 0", &step, &t, &tok);
             if from_observer {
@@ -4031,7 +4135,7 @@ pub(crate) mod tests {
             assert_eq!(
                 seen.0,
                 [Outcome::Failed {
-                    input: step.paths[0].clone(),
+                    input: step.paths[0].to_path_buf(),
                     reason: "cancelled".to_owned()
                 }],
                 "observer: {from_observer}"
@@ -4070,7 +4174,7 @@ pub(crate) mod tests {
         action.bin = bin;
         let tok = CancelToken::install().unwrap();
         let mut seen = Dirs::default();
-        run(&[&action], std::slice::from_ref(&input), &mut seen, &tok);
+        run(&[&action], vec![input.clone()], &mut seen, &tok);
         assert!(
             matches!(seen.0.0[..], [Outcome::Done { .. }]),
             "{:?}",

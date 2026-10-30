@@ -1581,6 +1581,107 @@ fn many_groups_many_outputs_stay_within_rss_budget() {
     );
 }
 
+/// The largest of a `/proc` field's values (`None` while the file is
+/// unreadable, e.g. the process just exited).
+fn proc_field_kb(path: &str, key: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix(key))
+        .and_then(|v| v.split_whitespace().next()?.parse().ok())
+}
+
+/// One path of the invocation's worst realistic case: ~1 KiB, so 1024 of
+/// them fill the 1 MiB input list limit (`action::INPUT_LIST_BYTES`) with
+/// the escape's newline; the same length as the wheel's large-drop test
+/// (a 1023-byte `file://` URI line).
+const LONG_PATH: usize = 1014;
+/// The invocation's own input count limit (`action::INPUT_COUNT`).
+const MANY_INPUTS: usize = 1024;
+
+/// The budget holds through a whole run at the invocation's limits:
+/// `inacircle run` over 1024 inputs whose paths are ~1 KiB each (~1 MiB
+/// of paths), one batch process, one output group per input. Peak PSS of
+/// the `inacircle` process (engine and supervisor) is sampled from
+/// `smaps_rollup` every 200 us until exit (the run takes about 100 ms, so
+/// a few hundred samples; a sample costs about as long) and must stay within
+/// 5,000,000 B in the release build the budget is for; a debug build
+/// prints it.
+#[test]
+fn many_long_paths_stay_within_the_pss_budget() {
+    let release = Path::new(BIN)
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == "release");
+    let e = Env::new("longpaths");
+    let mut dir = e.files();
+    for c in ['a', 'b', 'c', 'd'] {
+        dir = dir.join(c.to_string().repeat(240));
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let mut paths = Vec::with_capacity(MANY_INPUTS);
+    for i in 0..MANY_INPUTS {
+        let plen = dir.join(format!("{i:04}.txt")).as_os_str().len();
+        let pad = LONG_PATH.saturating_sub(plen);
+        let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
+        fs::write(&p, "w\n").unwrap();
+        paths.push(p);
+    }
+    let bytes: usize = paths.iter().map(|p| p.as_os_str().len() + 1).sum();
+    assert!(bytes <= 1_048_576, "{bytes} bytes of paths");
+    let stdout = e.root.join("stdout");
+    let mut c = e.cmd(&["run", "markdown"]);
+    c.args(&paths)
+        .stdout(fs::File::create(&stdout).unwrap())
+        .stderr(Stdio::piped());
+    let child = c.spawn().unwrap();
+    let pid = child.id();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let (mut pss, mut hwm, mut n) = (0u64, 0u64, 0u64);
+            let (roll, status) = (
+                format!("/proc/{pid}/smaps_rollup"),
+                format!("/proc/{pid}/status"),
+            );
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(kb) = proc_field_kb(&roll, "Pss:") {
+                    pss = pss.max(kb);
+                    n += 1;
+                }
+                hwm = hwm.max(proc_field_kb(&status, "VmHWM:").unwrap_or(0));
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            (pss, hwm, n)
+        }
+    });
+    let o = child.wait_with_output().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (pss, hwm, samples) = sampler.join().unwrap();
+    let mut out = parse_out(o);
+    out.stdout = fs::read_to_string(&stdout).unwrap();
+    out.lines = out
+        .stdout
+        .split_inclusive('\n')
+        .map(|l| parse_line(l).unwrap_or_else(|e| panic!("bad line {l:?}: {e:?}")))
+        .collect();
+    if skip_unsandboxed("many_long_paths_stay_within_the_pss_budget", &out) {
+        return;
+    }
+    eprintln!(
+        "{MANY_INPUTS} x ~1 KiB paths, CLI run: sampled max PSS {pss} kB, VmHWM {hwm} kB, \
+         {samples} samples"
+    );
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.summary(), (MANY_INPUTS, 0, 0), "{}", out.stderr);
+    assert!(samples > 0, "no PSS sample: incomplete evidence");
+    if release {
+        // 5,000,000 B (CLAUDE.md); `Pss` is in KiB: multiply by 1024.
+        assert!(pss * 1024 <= 5_000_000, "PSS {pss} kB over the budget");
+    }
+}
+
 #[test]
 fn work_dirs_never_left_behind() {
     let e = Env::new("workdirs");
