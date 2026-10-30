@@ -377,3 +377,164 @@ fn many_empty_fixed_blocks() {
     assert_eq!(r.in_bytes, w.bytes.len() as u64);
     assert_eq!(w.bytes.len(), 1_048_575);
 }
+
+/// Every error has its own non-empty message (the zip reader and the pages
+/// action show it to the user).
+#[test]
+fn error_messages_are_stated() {
+    let cases = [
+        (InflateError::BadBlockType, "invalid deflate block type"),
+        (
+            InflateError::BadStoredLength,
+            "stored block length check failed",
+        ),
+        (InflateError::BadCode, "invalid Huffman code"),
+        (
+            InflateError::DistanceTooFar,
+            "match distance reaches before the start",
+        ),
+        (InflateError::Truncated, "stream ends early"),
+        (InflateError::OutputLimit, "output exceeds the limit"),
+        (InflateError::BadZlibHeader, "invalid zlib header"),
+        (InflateError::Adler32Mismatch, "Adler-32 mismatch"),
+        (
+            InflateError::Io(io::Error::other("boom")),
+            "read or write failed: boom",
+        ),
+    ];
+    for (e, want) in cases {
+        assert_eq!(e.to_string(), want);
+    }
+}
+
+/// A reader that reports `Interrupted` before every real read.
+struct Interrupting<'a> {
+    data: &'a [u8],
+    fail_next: bool,
+}
+impl Read for Interrupting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.fail_next {
+            self.fail_next = false;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.fail_next = true;
+        let n = buf.len().min(self.data.len()).min(7);
+        buf[..n].copy_from_slice(&self.data[..n]);
+        self.data = &self.data[n..];
+        Ok(n)
+    }
+}
+
+#[test]
+fn interrupted_reads_are_retried() {
+    let data = b"interrupted interrupted interrupted".repeat(20);
+    let s = compress_to_vec(&data, 6);
+    let mut out = Vec::new();
+    let r = inflate(
+        Interrupting {
+            data: &s,
+            fail_next: true,
+        },
+        1 << 20,
+        &mut |c| {
+            out.extend_from_slice(c);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(out, data);
+    assert_eq!(r.in_bytes, s.len() as u64);
+}
+
+/// The decoder asks the reader for 16 KiB at a time: the fixed memory
+/// (window plus buffer) is 48 KiB, as documented.
+#[test]
+fn reads_ask_for_a_16_kib_buffer() {
+    struct Spy<'a> {
+        data: &'a [u8],
+        biggest: usize,
+    }
+    impl Read for Spy<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.biggest = self.biggest.max(buf.len());
+            let n = buf.len().min(self.data.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+    let s = stored_block(true, &[1u8; 100]);
+    let mut spy = Spy {
+        data: &s,
+        biggest: 0,
+    };
+    inflate(&mut spy, 1 << 20, &mut |_| Ok(())).unwrap();
+    assert_eq!(spy.biggest, 16 * 1024);
+}
+
+/// Short stored blocks that leave whole bytes of the next block in the bit
+/// buffer after their data is copied out.
+#[test]
+fn short_stored_blocks_in_a_row() {
+    let mut s = Vec::new();
+    for chunk in [&b"ab"[..], b"c", b"def", b"g"] {
+        s.extend(stored_block(false, chunk));
+    }
+    s.extend(stored_block(true, b"hi"));
+    let (r, out) = run(&s, 1 << 20);
+    assert_eq!(r.unwrap().in_bytes, s.len() as u64);
+    assert_eq!(out, b"abcdefghi");
+}
+
+/// A reader that fails after delivering a stored stream is not asked
+/// again: the decoder takes no input it does not need.
+#[test]
+fn does_not_read_past_the_end_of_the_stream() {
+    struct OnceThenFail<'a>(&'a [u8]);
+    impl Read for OnceThenFail<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.0.is_empty() {
+                return Err(io::Error::other("read after the end"));
+            }
+            let n = buf.len().min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+    // Stored blocks only: a Huffman decoder legitimately tries to fill its
+    // bit buffer past the last code, and meets the end of input there.
+    let mut streams = vec![stored_block(true, b"x"), stored_block(true, &[3u8; 300])];
+    for len in 0..12 {
+        streams.push(stored_block(true, &[5u8; 12][..len]));
+    }
+    for s in streams {
+        let mut out = Vec::new();
+        let r = inflate(OnceThenFail(&s), 1 << 20, &mut |c| {
+            out.extend_from_slice(c);
+            Ok(())
+        });
+        assert_eq!(r.unwrap().in_bytes, s.len() as u64);
+    }
+}
+
+/// HLIT above 286 and HDIST above 30 are each refused on their own, before
+/// the code length codes are read (the stream ends right after the counts,
+/// so a decoder that did not refuse them would report `Truncated`).
+#[test]
+fn dynamic_header_counts_are_limited() {
+    for (hlit, hdist) in [(31u32, 0u32), (0, 31), (31, 31)] {
+        let mut w = BitW::default();
+        w.bits(1, 1); // BFINAL
+        w.bits(2, 2); // BTYPE dynamic
+        w.bits(hlit, 5);
+        w.bits(hdist, 5);
+        w.bits(0, 4);
+        let (r, _) = run(&w.bytes, 1 << 20);
+        assert!(
+            matches!(r, Err(InflateError::BadCode)),
+            "hlit {hlit} hdist {hdist}"
+        );
+    }
+}
