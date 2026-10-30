@@ -23,7 +23,9 @@ arguments is the wheel: drag a file, press the hotkey, drop it on a category
 The same binaries have passed manual conversion and notification Undo
 checks on [niri](https://github.com/YaLTeR/niri) with Nautilus and on
 Plasma Wayland with Dolphin. [Measurements on both systems](docs/benchmarks/wheel-portability.md)
-include the performance limits that remain open. There are no packages
+include the performance limits that remain open. GNOME support is in
+progress: GNOME Shell does not offer the layer-shell protocol the wheel
+uses today. There are no packages
 or presets worth installing yet. The first usable version is a **File Circle**.
 
 ## How it will work
