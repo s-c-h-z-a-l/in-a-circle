@@ -846,6 +846,25 @@ mod tests {
     }
 
     #[test]
+    fn write_whole_names_the_ceiling_only_when_it_tripped() {
+        let err = || io::Error::other("disk");
+        let tripped = Rc::new(Cell::new(true));
+        assert_eq!(
+            write_whole(err(), Some(3 << 20), &tripped).0,
+            "PDF would be larger than 3 MiB"
+        );
+        tripped.set(false);
+        assert_eq!(
+            write_whole(err(), Some(3 << 20), &tripped).0,
+            "cannot write output: disk"
+        );
+        assert_eq!(
+            write_whole(err(), None, &Rc::new(Cell::new(true))).0,
+            "cannot write output: disk"
+        );
+    }
+
+    #[test]
     fn extension_needs_a_dot() {
         assert!(kind_of(b"1.png") == Some(Kind::Png));
         assert!(kind_of(b"a.b.JPEG") == Some(Kind::Jpeg));

@@ -1195,6 +1195,103 @@ fn too_large_total_fails_whole() {
     no_join_output(&work);
 }
 
+/// `run_join` with the child's `RLIMIT_FSIZE` at `bytes`.
+fn run_join_with_fsize(work: &Path, inputs: &[PathBuf], bytes: u64) -> Output {
+    use std::os::unix::process::CommandExt;
+    let mut c = join_command(work);
+    c.args(inputs);
+    // SAFETY: only `setrlimit` (async-signal-safe) on a local struct runs
+    // between fork and exec.
+    unsafe {
+        c.pre_exec(move || {
+            let rl = libc::rlimit {
+                rlim_cur: bytes as libc::rlim_t,
+                rlim_max: bytes as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn join_image_over_the_entry_limit_fails_and_a_missing_one_says_why() {
+    let t = tmp("join-big");
+    let big = image_file(&t, "big.png", b"");
+    // Sparse: 64 MiB + 1 B on paper, nothing on disk.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_len((64 << 20) + 1)
+        .unwrap();
+    let gone = t.join("in/gone.png");
+    let ok = image_file(&t, "ok.png", &rgb_png(20, 20));
+    let ins = [big.clone(), gone.clone(), ok];
+    let o = run_join(&t.join("work"), &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 2, "{out}");
+    assert_eq!(f[0][1], big.to_str().unwrap());
+    assert_eq!(f[0][2], "image is larger than 64 MiB");
+    assert_eq!(f[1][1], gone.to_str().unwrap());
+    assert!(!f[1][2].contains("larger"), "{out}");
+    assert_eq!(lines(&out, "take").len(), 1, "{out}");
+}
+
+#[test]
+fn join_size_estimate_is_the_ceiling_exactly() {
+    let t = tmp("join-estimate");
+    let jpg = jpeg_fixture("rgb.jpg");
+    let a = image_file(&t, "a.jpg", &jpg);
+    let work = t.join("work");
+    // The estimate of one image: file overhead + page overhead + its bytes
+    // (FILE_OVERHEAD 1,024 and PAGE_OVERHEAD 2,560 in the action).
+    let estimate = jpg.len() as u64 + 1_024 + 2_560;
+    // A cap equal to the estimate lets it through.
+    let o = run_join_with_fsize(&work, std::slice::from_ref(&a), estimate);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    // A cap under the estimate refuses before writing, although the real
+    // file (the JPEG plus a small structure) would still fit under it.
+    let o = run_join_with_fsize(&work, std::slice::from_ref(&a), jpg.len() as u64 + 2_000);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert_eq!(lines(&out, "fail").len(), 1, "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    no_join_output(&work);
+}
+
+#[test]
+fn join_progress_counts_every_input_skipped_ones_included() {
+    use std::os::unix::ffi::OsStrExt;
+    let t = tmp("join-progress");
+    let png = rgb_png(8, 8);
+    let odd = image_file(&t, "x.png", &png);
+    let odd_name = t.join("in").join(std::ffi::OsStr::from_bytes(b"\xff.png"));
+    fs::rename(&odd, &odd_name).unwrap();
+    let ins = [
+        image_file(&t, "a.png", &png),
+        odd_name,
+        image_file(&t, "b.png", &png),
+        image_file(&t, "c.png", &png),
+    ];
+    let o = run_join(&t.join("work"), &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    assert_eq!(
+        progress_values(&out),
+        ["0", "0.25", "0.5", "0.75", "1"],
+        "{out}"
+    );
+}
+
 #[test]
 fn many_images_stay_within_memory() {
     let t = tmp("join-many");
