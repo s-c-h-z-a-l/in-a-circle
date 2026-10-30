@@ -1,8 +1,9 @@
-# aarch64 baseline of the final hardening build. Not measured on this
+# aarch64 baseline (hardening build, refreshed after the pages-to-PDF work). Not measured on this
 # machine but on the native GitHub arm64 runner (ubuntu-26.04-arm), CI
-# run 40955927479, job "Native (ubuntu-26.04-arm)", step "Binary sizes",
-# commit 70e9984 (plan-hardening), rustc 1.98.1 from rust-toolchain.toml,
+# run 41017837937, job "Native (ubuntu-26.04-arm)", step "Binary sizes",
+# commit af93036 (plan 9, pages-to-PDF), rustc 1.98.1 from rust-toolchain.toml,
 # release profile of Cargo.toml. The x86_64 account is in
 # docs/benchmarks/binary-size.md; no per-area aarch64 account exists.
-inacircle 987912 704420
+inacircle 987912 705124
 inacircle-text 660192 345896
+inacircle-pages 463568 306776
