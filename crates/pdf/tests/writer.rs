@@ -797,3 +797,123 @@ fn tolerances_catch_wrong_images() {
     eprintln!("inverted CMYK: mean diff {m:.1}");
     assert!(m > 50.0);
 }
+
+// ---------- lying input and limits ----------
+
+#[test]
+fn a_zero_width_or_zero_height_image_is_refused() {
+    for (width, height) in [(0u32, 5u32), (5, 0), (0, 0)] {
+        let info = probe::JpegInfo {
+            width,
+            height,
+            components: 3,
+            adobe_inverted: false,
+        };
+        let mut w = Writer::new(Vec::new()).unwrap();
+        assert!(
+            w.add_page(&[0xFF, 0xD8], &Image::Jpeg(info)).is_err(),
+            "{width}x{height}"
+        );
+    }
+    for (width, height) in [(0u32, 5u32), (5, 0)] {
+        let info = probe::PngInfo {
+            width,
+            height,
+            color: PngColor::Gray,
+            palette: None,
+            idat: std::iter::once(0..4).collect(),
+        };
+        let mut w = Writer::new(Vec::new()).unwrap();
+        assert!(w.add_page(&[0; 8], &Image::Png(info)).is_err());
+    }
+}
+
+#[test]
+fn palette_sizes_are_one_to_256_rgb_entries() {
+    let bytes = vec![7u8; 4096];
+    let page = |len: usize| {
+        let info = probe::PngInfo {
+            width: 2,
+            height: 2,
+            color: PngColor::Palette,
+            palette: Some(0..len),
+            idat: std::iter::once(1000..1010).collect(),
+        };
+        Writer::new(Vec::new())
+            .unwrap()
+            .add_page(&bytes, &Image::Png(info))
+    };
+    // Empty, not a multiple of 3, and one entry too many are each refused
+    // on their own; the smallest and the largest palette are written.
+    for bad in [0, 1, 4, 767, 771, 1000] {
+        assert!(page(bad).is_err(), "{bad} palette bytes");
+    }
+    for good in [3, 6, 768] {
+        page(good).unwrap();
+    }
+}
+
+/// A sink that counts the bytes and notes where object 3 (the page's
+/// content stream, the object after the image) starts.
+#[derive(Clone, Default)]
+struct Count {
+    total: std::rc::Rc<std::cell::Cell<u64>>,
+    content_at: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+}
+impl std::io::Write for Count {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if b == b"3 0 obj\n" {
+            self.content_at.set(Some(self.total.get()));
+        }
+        self.total.set(self.total.get() + b.len() as u64);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The largest offset an xref entry can hold: ten decimal digits.
+const MAX_OFFSET: u64 = 9_999_999_999;
+
+/// Write one gray PNG page whose image stream is `149 * 64 MiB + extra`
+/// bytes (the same zero buffer listed over and over: a lying `PngInfo`
+/// costs nothing but the count). Returns the sink and the result.
+fn big_page(extra: usize) -> (Count, std::io::Result<()>) {
+    const CHUNK: usize = 64 << 20;
+    let buf = vec![0u8; CHUNK];
+    let mut idat = vec![0..CHUNK; 149];
+    idat.push(0..extra);
+    let info = probe::PngInfo {
+        width: 1,
+        height: 1,
+        color: PngColor::Gray,
+        palette: None,
+        idat,
+    };
+    let sink = Count::default();
+    let mut w = Writer::new(sink.clone()).unwrap();
+    let r = w.add_page(&buf, &Image::Png(info));
+    (sink, r)
+}
+
+#[test]
+fn an_object_may_start_at_the_last_ten_digit_offset_but_not_past_it() {
+    let (sink, r) = big_page(0);
+    r.unwrap();
+    let base = sink.content_at.get().unwrap();
+    assert!(base < MAX_OFFSET - 1000, "the test scale is off: {base}");
+
+    // The content stream starts exactly at the last offset: it is written
+    // (the page object behind it is not).
+    let (sink, r) = big_page((MAX_OFFSET - base) as usize);
+    assert_eq!(sink.content_at.get(), Some(MAX_OFFSET));
+    assert!(r.is_err());
+    assert!(sink.total.get() > MAX_OFFSET + 8, "the object was refused");
+
+    // One byte further: refused before its first byte.
+    let (sink, r) = big_page((MAX_OFFSET + 1 - base) as usize);
+    assert!(r.is_err());
+    assert_eq!(sink.content_at.get(), None);
+    assert_eq!(sink.total.get(), MAX_OFFSET + 1);
+}
