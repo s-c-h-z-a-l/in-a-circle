@@ -101,8 +101,19 @@ jobs:
       # after one failed; the job still fails if any did. Every test binary
       # runs through scripts/test-runner.sh, which fails it if a test wrote
       # to the default home.
+      # The PDF and pages tests check their output with independent tools
+      # (qpdf, pdftoppm and pdfimages from poppler-utils, djpeg from
+      # libjpeg-turbo-progs); INACIRCLE_REQUIRE_PDF_TOOLS=1
+      # makes a missing one a failure instead of a skip.
+      - name: Install PDF test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils libjpeg-turbo-progs
+
       - name: Test
         if: ${{ !cancelled() }}
+        env:
+          INACIRCLE_REQUIRE_PDF_TOOLS: "1"
         run: cargo test --workspace --no-fail-fast
 
       # The Trash undo's tests on the runner's disk filesystem. Their

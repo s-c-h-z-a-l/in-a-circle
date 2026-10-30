@@ -116,6 +116,7 @@ dependencies = [
  "engine",
  "libc",
  "manifest",
+ "testzip",
  "ui",
  "wire",
 ]

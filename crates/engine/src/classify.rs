@@ -22,6 +22,11 @@ pub enum Classified {
 /// How much of the file decides the type.
 const HEAD: usize = 4096;
 
+const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
+
+/// The MIME type of a comic book archive (ZIP of page images, `.cbz`).
+const CBZ_MIME: &str = "application/vnd.comicbook+zip";
+
 /// Binary signatures: (prefix, mime the engine knows, label).
 const MAGIC: &[(&[u8], Option<&str>, &str)] = &[
     (b"%PDF-", None, "PDF"),
@@ -29,7 +34,7 @@ const MAGIC: &[(&[u8], Option<&str>, &str)] = &[
     (b"\xff\xd8\xff", None, "JPEG"),
     (b"GIF87a", None, "GIF"),
     (b"GIF89a", None, "GIF"),
-    (b"PK\x03\x04", None, "ZIP"),
+    (ZIP_MAGIC, None, "ZIP"),
     (b"\x1f\x8b", None, "gzip"),
     (
         b"INACIRCLE-TEST\n",
@@ -63,8 +68,23 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
     let mut head = Vec::with_capacity(HEAD);
     file.take(HEAD as u64).read_to_end(&mut head)?;
 
+    // "foo." has an empty extension, which counts as none.
+    let ext = path
+        .extension()
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_string_lossy().to_lowercase());
+
     for (prefix, mime, label) in MAGIC {
         if head.starts_with(prefix) {
+            // A comic book is a ZIP by content and `.cbz` by name: neither
+            // alone. Only the head already read and the extension decide;
+            // the archive itself is the action's business.
+            if *prefix == ZIP_MAGIC && ext.as_deref() == Some("cbz") {
+                return Ok(Classified::File(Kind {
+                    mime: Some(CBZ_MIME.to_owned()),
+                    label: "Comic book".to_owned(),
+                }));
+            }
             return Ok(Classified::File(Kind {
                 mime: mime.map(str::to_owned),
                 label: (*label).to_owned(),
@@ -72,11 +92,6 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
         }
     }
 
-    // "foo." has an empty extension, which counts as none.
-    let ext = path
-        .extension()
-        .filter(|e| !e.is_empty())
-        .map(|e| e.to_string_lossy().to_lowercase());
     let kind = if is_text(&head) {
         match ext.as_deref() {
             None | Some("txt" | "text" | "log" | "1st" | "me" | "readme" | "diz" | "nfo") => Kind {
@@ -149,6 +164,37 @@ mod tests {
     }
     fn is(mime: Option<&str>, label: &str) -> (Option<String>, String) {
         (mime.map(str::to_owned), label.to_owned())
+    }
+
+    #[test]
+    fn cbz_zip_is_a_comic_book() {
+        let d = Dir::new("cbz");
+        for n in ["a.cbz", "B.CBZ", "c.Cbz"] {
+            let p = d.file(n, b"PK\x03\x04rest");
+            assert_eq!(
+                kind(&p),
+                is(Some("application/vnd.comicbook+zip"), "Comic book"),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn zip_without_cbz_extension_has_no_type() {
+        let d = Dir::new("zipext");
+        for n in ["a.zip", "a.epub", "a.cbr", "a", "a.cbz.zip"] {
+            let p = d.file(n, b"PK\x03\x04rest");
+            assert_eq!(kind(&p), is(None, "ZIP"), "{n}");
+        }
+    }
+
+    #[test]
+    fn cbz_extension_without_zip_magic_is_not_a_comic_book() {
+        let d = Dir::new("cbzfake");
+        let p = d.file("notes.cbz", b"just words\n");
+        assert_eq!(kind(&p), is(None, ".cbz text"));
+        let p = d.file("rar.cbz", b"Rar!\x1a\x07\x00\x01\x02");
+        assert_eq!(kind(&p), is(None, ".cbz file"));
     }
 
     #[test]
