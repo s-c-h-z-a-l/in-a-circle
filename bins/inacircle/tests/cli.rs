@@ -364,6 +364,42 @@ fn images_to_pdf_end_to_end() {
     assert_eq!(fs::read(e.files().join("Nyaralás/2.png")).unwrap(), png);
 }
 
+/// `run --action <id>` reaches a join action too: the same single PDF the
+/// preset makes, with its inputs as one group; a preset id is not an action
+/// id, and a bare `--action` is a usage error.
+#[test]
+fn direct_action_runs_a_join_action() {
+    let e = Env::with_actions("direct-join", &["inacircle-pages"]);
+    e.file("a/1.jpg", &rgb_jpeg());
+    e.file("a/2.png", &gray_png());
+    let o = e.run(&[
+        "run",
+        "--action",
+        "pages.images-to-pdf",
+        "a/1.jpg",
+        "a/2.png",
+    ]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 0, 0), "{}", o.stdout);
+    let pdf = fs::read(e.files().join("a/a/a.pdf")).expect("no PDF written");
+    assert_eq!(
+        pdf.windows(12).filter(|w| w == b"/Type /Page ").count(),
+        2,
+        "page objects in the PDF"
+    );
+    // A preset id after `--action` is no action: nothing runs.
+    let o = e.run(&["run", "--action", "pdf", "a/1.jpg"]);
+    assert_ne!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert!(o.pairs("done").is_empty(), "{}", o.stdout);
+    // The flag without an id is a usage error, not a preset named "--action".
+    let o = e.run(&["run", "--action"]);
+    assert!(
+        o.stderr.contains("--action needs an action id"),
+        "{}",
+        o.stderr
+    );
+}
+
 /// An action whose tool is missing fails the inputs it would take, with the
 /// missing tool named; an input it does not take is still skipped.
 #[test]
