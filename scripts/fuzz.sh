@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -104,6 +104,15 @@ limits() {
         # limit: 2048x the input (a Conn's buffers are a few times MAX_INB);
         # 1024 MB RSS ceiling.
         wire_events) echo "8192 1 16 1024" ;;
+        # 1 MiB: a ZIP entry or PNG stream of that size reaches every block
+        # type, a dynamic header and long matches, and is the compressed
+        # size where a 64 MiB output limit (the target's LIMIT) can fire
+        # (258 bytes per ~12 bits). 2 s: both entry points each decode up
+        # to 64 MiB of output under ASan; measured 0.17 s for
+        # both on a 100 MiB zero bomb (0.66 MB of input). 16 MB malloc limit: inflate allocates only a 32 KiB
+        # window and a 16 KiB buffer whatever the input says, so any larger
+        # allocation is a bug (~330x the fixed use); 1024 MB RSS ceiling.
+        inflate) echo "1048576 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
