@@ -49,9 +49,10 @@ pub fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
 /// still unparsed before they are given back: 64 KiB, 1/16 of `MAX_BYTES`.
 /// The list at its limit is then released in at most 16 steps (on glibc a
 /// `realloc` that shrinks is done in place: an `mremap` for a large
-/// buffer, a split of the chunk on the heap, no copy), and the list and its paths overlap by at most this much, 1.3% of
-/// the 5,000,000 B memory budget. Smaller costs more calls for no
-/// measurable gain; larger keeps more of the list beside its paths.
+/// buffer, a split of the chunk on the heap, no copy), and the list and its
+/// paths overlap by at most this much, 1.3% of the 5,000,000 B memory
+/// budget. Smaller costs more calls for no measurable gain; larger keeps
+/// more of the list beside its paths.
 #[cfg(not(fuzzing))]
 const RELEASE_STEP: usize = 64 * 1024;
 
