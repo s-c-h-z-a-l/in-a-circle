@@ -1729,16 +1729,19 @@ fn failed_start_slow(name: &str, open_step: Duration, notify: Duration) -> Faile
 }
 
 /// The named pair around `notification_rpc_deadline` (500 ms per call): a
-/// `Notify` answered after 450 ms is shown; one after 550 ms is given up.
+/// `Notify` answered after 250 ms is shown; one after 750 ms is given up.
+/// Each value sits 250 ms from the deadline: a shared CI runner was seen to
+/// stretch a requested sleep by more than 80 ms, which a 50 ms margin cannot
+/// absorb; 250 ms still tells a per-call deadline from a missing one.
 #[test]
 fn startup_notice_call_below_the_rpc_deadline_is_shown() {
     let f = failed_start_slow(
         "startup-rpc-below",
         Duration::ZERO,
-        Duration::from_millis(450),
+        Duration::from_millis(250),
     );
     eprintln!(
-        "PREFLIGHT rpc notify@450ms: notices={} unavailable={} took={:?} stderr={:?}",
+        "PREFLIGHT rpc notify@250ms: notices={} unavailable={} took={:?} stderr={:?}",
         f.notices.len(),
         f.unavailable(),
         f.took,
@@ -1754,10 +1757,10 @@ fn startup_notice_call_above_the_rpc_deadline_is_given_up() {
     let f = failed_start_slow(
         "startup-rpc-above",
         Duration::ZERO,
-        Duration::from_millis(550),
+        Duration::from_millis(750),
     );
     eprintln!(
-        "PREFLIGHT rpc notify@550ms: notices={} unavailable={} took={:?} stderr={:?}",
+        "PREFLIGHT rpc notify@750ms: notices={} unavailable={} took={:?} stderr={:?}",
         f.notices.len(),
         f.unavailable(),
         f.took,
@@ -1773,16 +1776,20 @@ fn startup_notice_call_above_the_rpc_deadline_is_given_up() {
 }
 
 /// The open is one 500 ms frame, not 500 ms per step: three steps of
-/// 140 ms (420 ms in all) open; three of 200 ms (600 ms) are given up.
+/// 80 ms (240 ms in all) open; three of 250 ms (750 ms in all) are given up.
+/// The "below" sum keeps 260 ms of room, because a loaded CI runner was seen
+/// to delay an open by more than 80 ms (420 ms in all failed there). The
+/// "above" case keeps every single step at half the frame, so only the sum
+/// can exceed it, and the sum is 250 ms past it.
 #[test]
 fn startup_notice_open_within_the_aggregate_frame_is_shown() {
     let f = failed_start_slow(
         "startup-open-below",
-        Duration::from_millis(140),
+        Duration::from_millis(80),
         Duration::ZERO,
     );
     eprintln!(
-        "PREFLIGHT open 3x140ms: notices={} unavailable={} took={:?} stderr={:?}",
+        "PREFLIGHT open 3x80ms: notices={} unavailable={} took={:?} stderr={:?}",
         f.notices.len(),
         f.unavailable(),
         f.took,
@@ -1797,11 +1804,11 @@ fn startup_notice_open_within_the_aggregate_frame_is_shown() {
 fn startup_notice_open_past_the_aggregate_frame_is_given_up() {
     let f = failed_start_slow(
         "startup-open-above",
-        Duration::from_millis(200),
+        Duration::from_millis(250),
         Duration::ZERO,
     );
     eprintln!(
-        "PREFLIGHT open 3x200ms: notices={} unavailable={} took={:?} stderr={:?}",
+        "PREFLIGHT open 3x250ms: notices={} unavailable={} took={:?} stderr={:?}",
         f.notices.len(),
         f.unavailable(),
         f.took,
