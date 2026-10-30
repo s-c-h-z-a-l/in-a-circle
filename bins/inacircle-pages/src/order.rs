@@ -73,6 +73,10 @@ mod tests {
         assert_ne!(natural_cmp(b"001", b"01"), Ordering::Equal);
         // A name that ends inside the other sorts first.
         assert_eq!(natural_cmp(b"a", b"a1"), Ordering::Less);
+        // ... in either argument order.
+        assert_eq!(natural_cmp(b"a1", b"a"), Ordering::Greater);
+        assert_eq!(natural_cmp(b"a", b"a/1"), Ordering::Less);
+        assert_eq!(natural_cmp(b"a/1", b"a"), Ordering::Greater);
     }
 
     #[test]

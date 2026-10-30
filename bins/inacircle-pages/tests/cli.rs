@@ -823,3 +823,175 @@ fn large_page_timing() {
         start.elapsed()
     );
 }
+
+// ---------- boundaries, progress, cleanup ----------
+
+/// The values of the `progress` events, in order.
+fn progress_values(out: &str) -> Vec<String> {
+    lines(out, "progress")
+        .iter()
+        .map(|f| f[1].to_string())
+        .collect()
+}
+
+#[test]
+fn exactly_the_page_limit_converts() {
+    let t = tmp("pagelimit");
+    let png = rgb_png(1, 1);
+    let names: Vec<String> = (0..PAGES).map(|i| format!("{i:05}.png")).collect();
+    let entries: Vec<(&[u8], &[u8], testzip::Store)> = names
+        .iter()
+        .map(|n| (n.as_bytes(), png.as_slice(), Stored))
+        .collect();
+    let input = cbz(&t, "limit.cbz", &entries);
+    let o = run(&t.join("work"), &[&input]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{}", &out[..out.len().min(500)]);
+    assert_eq!(lines(&out, "done").len(), 1);
+}
+
+#[test]
+fn a_page_of_exactly_64_mib_passes_the_size_check() {
+    // The size check is `>`: 64 MiB is allowed, so the page is read and
+    // then refused for what it is (zeros are no image), not for its size.
+    let t = tmp("pagebytes");
+    let zeros = vec![0u8; 64 << 20];
+    let input = cbz(&t, "edge.cbz", &[(b"1.png", &zeros, Deflated)]);
+    let (_, f) = one_input(&t, "fail", &input);
+    assert_eq!(f[2], "page 1.png: not a JPEG or PNG");
+}
+
+#[test]
+fn the_output_ceiling_is_inclusive_and_checked_before_any_page() {
+    // Overheads mirror FILE_OVERHEAD and PAGE_OVERHEAD in main.rs.
+    let t = tmp("ceiling");
+    let (w, h) = (100usize, 100usize);
+    let mut x = 0x1357_9BDFu32;
+    let mut rows = Vec::new();
+    for _ in 0..h {
+        rows.extend_from_slice(&[0]); // filter type 0
+        for _ in 0..3 * w {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            rows.push((x >> 24) as u8);
+        }
+    }
+    let png = testzip::png(w as u32, h as u32, 2, None, false, false, &rows);
+    let input = cbz(&t, "one.cbz", &[(b"1.png", &png, Stored)]);
+    let total = 1_024 + png.len() as u64 + 2_560;
+    let work = t.join("work");
+
+    // A ceiling equal to the estimate lets the page through.
+    let o = run_with_fsize(&work, &input, total);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(files_with_ext(&work, "pdf").len(), 1);
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    // One byte less is refused from the directory alone: no page was read,
+    // so there is no per-page progress.
+    let o = run_with_fsize(&work, &input, total - 1);
+    assert_eq!(o.status.code(), Some(1));
+    let out = stdout(&o);
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 1, "{out}");
+    assert!(f[0][2].starts_with("PDF would be larger than"), "{out}");
+    assert_eq!(progress_values(&out), ["0", "1"], "{out}");
+    assert_no_pdf(&work);
+}
+
+#[test]
+fn progress_counts_pages_within_inputs_and_inputs_within_the_batch() {
+    let t = tmp("progress");
+    let png = rgb_png(2, 2);
+    let a = cbz(
+        &t,
+        "a.cbz",
+        &[(b"1.png", &png, Stored), (b"2.png", &png, Stored)],
+    );
+    let b = cbz(
+        &t,
+        "b.cbz",
+        &[(b"1.png", &png, Stored), (b"2.png", &png, Stored)],
+    );
+    let o = run(&t.join("work"), &[&a, &b]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(
+        progress_values(&stdout(&o)),
+        ["0", "0.25", "0.5", "0.5", "0.75", "1", "1"]
+    );
+}
+
+/// A PNG with an `iCCP` chunk behind the header.
+fn png_with_profile(w: u32, h: u32) -> Vec<u8> {
+    let mut png = rgb_png(w, h);
+    let data = b"icc\0\0profile";
+    let mut body = b"iCCP".to_vec();
+    body.extend_from_slice(data);
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(&body);
+    chunk.extend_from_slice(&testzip::crc32(&body).to_be_bytes());
+    png.splice(33..33, chunk);
+    png
+}
+
+#[test]
+fn colour_profile_warning_is_counted() {
+    let t = tmp("profile");
+    let with = png_with_profile(3, 3);
+    let without = rgb_png(3, 3);
+    let input = cbz(
+        &t,
+        "p.cbz",
+        &[
+            (b"1.png", &with, Stored),
+            (b"2.png", &with, Stored),
+            (b"3.png", &without, Stored),
+        ],
+    );
+    let o = run(&t.join("work"), &[&input]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(
+        lines(&stdout(&o), "warn"),
+        [vec![
+            "warn",
+            input.to_str().unwrap(),
+            "colour profile not embedded on 2 pages"
+        ]]
+    );
+}
+
+#[test]
+fn a_fifo_input_fails_without_blocking() {
+    use std::os::unix::ffi::OsStrExt;
+    let t = tmp("fifo");
+    let fifo = t.join("pipe.cbz");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c` is a valid NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let mut child = command(&t.join("work"))
+        .arg(&fifo)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A blocking open would wait for a writer that never comes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the input FIFO blocked the action");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1));
+    let mut out = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut out).unwrap();
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 1, "{out}");
+    assert_eq!(f[0][2], "not a regular file");
+}

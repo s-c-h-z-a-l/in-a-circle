@@ -565,6 +565,39 @@ mod tests {
     }
 
     #[test]
+    fn capped_flush_reaches_the_inner_writer() {
+        struct Flushes(u32);
+        impl Write for Flushes {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+        let mut w = Capped {
+            inner: Flushes(0),
+            cap: None,
+            written: 0,
+            tripped: Rc::new(Cell::new(false)),
+        };
+        w.flush().unwrap();
+        assert_eq!(w.inner.0, 1);
+    }
+
+    #[test]
+    fn extension_needs_a_dot() {
+        assert!(kind_of(b"1.png") == Some(Kind::Png));
+        assert!(kind_of(b"a.b.JPEG") == Some(Kind::Jpeg));
+        assert!(kind_of(b".jpg") == Some(Kind::Jpeg));
+        // A name that is only an extension word has no extension.
+        assert!(kind_of(b"png").is_none());
+        assert!(kind_of(b"jpg").is_none());
+        assert!(kind_of(b"dir.png/page").is_none());
+    }
+
+    #[test]
     fn metadata_names() {
         assert!(is_metadata(b"__MACOSX/._1.jpg"));
         assert!(is_metadata(b"__MACOSX/a/2.png"));
