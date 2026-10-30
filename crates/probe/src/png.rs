@@ -16,8 +16,8 @@ const MAX_31: u32 = 0x7FFF_FFFF;
 /// could be larger than the file that produced it. Encoders write 8-64 KiB
 /// IDATs (libpng default 8 KiB): 65536 chunks cover 512 MiB at that size,
 /// far above any page we accept, and cap the list at 1 MiB. Past it the
-/// file is `TooLarge`.
-const MAX_IDAT_CHUNKS: usize = 65_536;
+/// file is `TooManyChunks`.
+pub const MAX_IDAT_CHUNKS: usize = 65_536;
 
 pub(crate) fn probe(bytes: &[u8], max_pixels: u64) -> Result<Probed, ProbeError> {
     let mut pos = SIGNATURE.len();
@@ -82,7 +82,7 @@ pub(crate) fn probe(bytes: &[u8], max_pixels: u64) -> Result<Probed, ProbeError>
                     return Err(ProbeError::Damaged);
                 }
                 if idat.len() >= MAX_IDAT_CHUNKS {
-                    return Err(ProbeError::TooLarge);
+                    return Err(ProbeError::TooManyChunks);
                 }
                 idat.push(data_start..data_end);
             }

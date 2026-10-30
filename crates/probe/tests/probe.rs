@@ -734,3 +734,29 @@ fn png_filter_byte_is_checked_at_the_start_of_every_row() {
     );
     check_png_data(&png, &info_of(&png)).unwrap();
 }
+
+/// A 1x1 gray PNG whose IDAT is split into `n` chunks: the first holds the
+/// whole zlib stream, the others are empty.
+fn png_with_idat_chunks(n: usize) -> Vec<u8> {
+    let ok = png_gray(1, 1);
+    let r = png_info(&ok).idat[0].clone();
+    let mut v = ok[..33].to_vec();
+    v.extend_from_slice(&chunk(b"IDAT", &ok[r.start..r.end]));
+    let empty = chunk(b"IDAT", &[]);
+    for _ in 1..n {
+        v.extend_from_slice(&empty);
+    }
+    v.extend_from_slice(&chunk(b"IEND", &[]));
+    v
+}
+
+#[test]
+fn png_idat_chunk_count_limit() {
+    let limit = probe::MAX_IDAT_CHUNKS;
+    let at = probe(&png_with_idat_chunks(limit), MAX).unwrap();
+    assert!(matches!(at.image, Image::Png(ref p) if p.idat.len() == limit));
+    assert_eq!(
+        probe(&png_with_idat_chunks(limit + 1), MAX).unwrap_err(),
+        ProbeError::TooManyChunks
+    );
+}

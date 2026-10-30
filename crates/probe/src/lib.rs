@@ -12,7 +12,7 @@ mod png;
 
 use std::ops::Range;
 
-pub use png::check_png_data;
+pub use png::{MAX_IDAT_CHUNKS, check_png_data};
 
 /// PNG color types the PDF writer can pass through (8 bit, no alpha).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,8 @@ pub enum ProbeError {
     Damaged,
     /// `width * height` is over the limit (or a size computation overflows).
     TooLarge,
+    /// A PNG with more than [`MAX_IDAT_CHUNKS`] data chunks.
+    TooManyChunks,
     Unsupported(Unsupported),
 }
 
