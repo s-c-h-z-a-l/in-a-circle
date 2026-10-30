@@ -545,7 +545,12 @@ fn parse_action(l: &Line) -> Option<Action> {
         // never be met.
         let min = match l.get("min") {
             None => 1,
-            Some(v) => v.parse::<u32>().ok()?,
+            // Plain canonical decimal only: no sign, no leading zero (`u32`
+            // parsing alone takes `+1` and `01`).
+            Some(v) if v.bytes().all(|b| b.is_ascii_digit()) && !v.starts_with('0') => {
+                v.parse::<u32>().ok()?
+            }
+            Some(_) => return None,
         };
         if min == 0 || min as usize > action::INPUT_COUNT {
             return None;
@@ -2486,6 +2491,10 @@ pub(crate) mod tests {
             base("\tjoin=yes\tmin=1", &seventeen),
             base("\tjoin=yes\tmin=x", "image/png"),
             base("\tjoin=yes\tmin=", "image/png"),
+            base("\tjoin=yes\tmin=+1", "image/png"),
+            base("\tjoin=yes\tmin=01", "image/png"),
+            base("\tjoin=yes\tmin=-1", "image/png"),
+            base("\tjoin=yes\tmin= 1", "image/png"),
         ];
         for l in &bad {
             assert!(parsed(l).is_none(), "{l}");
