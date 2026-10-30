@@ -7,15 +7,18 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
-/// Small limits so the fuzzer reaches every one of them and no input can
-/// make the target do much work: at most 8 entries, 4 MiB each (32 MiB of
-/// output at the very most, which takes under a second under ASan, see
-/// scripts/fuzz.sh; 16 x 8 MiB took 2.7 s and timed out),
-/// ratio 1100 (a deflate stream cannot exceed 1032:1, so the ratio limit
+/// Small limits so the fuzzer reaches every one of them at speed: at most
+/// 8 entries, 256 KiB each (2 MiB of output at the very most; the earlier
+/// 8 x 4 MiB ran ~25 exec/s with flat coverage). 256 KiB is 8 x the 32 KiB
+/// inflate window, so an entry still exercises window wrap, long matches
+/// and the declared-size/CRC checks. The limit boundaries themselves are
+/// pinned by `limits_entries_names_size_ratio` and
+/// `rejects_more_data_than_declared` in crates/zip/tests/reader.rs.
+/// Ratio 1100 (a deflate stream cannot exceed 1032:1, so the ratio limit
 /// never hides the entry-size limit), names up to 256 bytes.
 const LIMITS: zip::Limits = zip::Limits {
     entries: 8,
-    entry_bytes: 4 << 20,
+    entry_bytes: 256 << 10,
     ratio: 1100,
     name_bytes: 256,
 };

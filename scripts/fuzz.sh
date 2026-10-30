@@ -104,33 +104,37 @@ limits() {
         # limit: 2048x the input (a Conn's buffers are a few times MAX_INB);
         # 1024 MB RSS ceiling.
         wire_events) echo "8192 1 16 1024" ;;
-        # 1 MiB: a ZIP entry or PNG stream of that size reaches every block
-        # type, a dynamic header and long matches, and is the compressed
-        # size where a 64 MiB output limit (the target's LIMIT) can fire
-        # (258 bytes per ~12 bits). 2 s: the worst inputs known, measured
-        # under the fuzz build (ASan) with -timeout=2: 1 MiB of empty fixed
-        # blocks (839k blocks, tables built once per stream) 0.26 s (before
-        # the fix: over 2 s, a timeout);
-        # a 100 MiB zero bomb (0.66 MB of input, both entry points) 0.17 s.
+        # 64 KiB: reaches every block type, a dynamic header and long
+        # matches, and is enough compressed input for the target's 64 KiB
+        # output limit to fire (258 bytes per ~12 bits). Smaller than the
+        # page reader's real limits on purpose: with 1 MiB inputs and a
+        # 64 MiB output limit the target ran ~25 exec/s and coverage stood
+        # still. The 1 MiB empty-fixed-blocks case (839k blocks, tables
+        # built once per stream) is pinned by `many_empty_fixed_blocks`, the
+        # limit boundary by `output_limit_stops_at_the_limit`, both in
+        # crates/flate/tests/inflate.rs. 2 s: far above the worst 64 KiB
+        # input (a 64 KiB output, both entry points, in ms under ASan).
         # 16 MB malloc limit: inflate allocates only a 32 KiB window and a
         # 16 KiB buffer whatever the input says, so any larger allocation is
         # a bug (~330x the fixed use); 1024 MB RSS ceiling.
-        inflate) echo "1048576 2 16 1024" ;;
-        # 1 MiB: the whole file the target writes out and opens; it holds
-        # a full 65535-byte end-record comment, a long directory and
-        # deflate entries large enough to reach every block type. 2 s: the
-        # worst input constructed, measured under the fuzz build (ASan)
-        # with -timeout=2: 8 entries of 4 MiB zeros each (the target's
-        # LIMITS.entries and entry_bytes; 32 MiB of output from ~33 KiB of
-        # input, so inflate, CRC-32 and the copy into the Vec all run) took
-        # 0.67 s, three runs. The first choice, 16 x 8 MiB (128 MiB), took
-        # 2.7 s and timed out, so the target's limits were cut to what keeps
-        # 3x headroom. 16 MB malloc limit: open allocates a 64 KiB tail
-        # buffer, up to 8 names of at most 256 bytes and a 64 KiB chunk
-        # buffer; read reserves at most entry_bytes = 4 MiB for one entry,
-        # so 16 MB is 4x the largest legitimate allocation; 1024 MB RSS
-        # ceiling.
-        zip_reader) echo "1048576 2 16 1024" ;;
+        inflate) echo "65536 2 16 1024" ;;
+        # 64 KiB: the whole file the target writes out and opens; it holds
+        # an end-record comment of up to ~64 KiB (the 16-bit maximum,
+        # 65535, cannot fit with the 22-byte record: that exact length is
+        # pinned by the unit tests), a directory of several entries and
+        # small deflate entries that reach every block type. Smaller than
+        # before on purpose: 1 MiB inputs with 8 x 4 MiB of output ran
+        # ~25 exec/s with flat coverage.
+        # Large entries and the limit boundaries are covered by
+        # crates/zip/tests/reader.rs (`limits_entries_names_size_ratio`,
+        # `rejects_more_data_than_declared`). 2 s: far above the worst
+        # input, 8 entries of 256 KiB zeros (2 MiB of output) which inflate,
+        # CRC-32 and copy in ms. 16 MB malloc limit: open allocates a 64 KiB
+        # tail buffer, up to 8 names of at most 256 bytes and a 64 KiB chunk
+        # buffer; read reserves at most entry_bytes = 256 KiB for one entry,
+        # so 16 MB is far above the largest legitimate allocation; 1024 MB
+        # RSS ceiling.
+        zip_reader) echo "65536 2 16 1024" ;;
         # 1 MiB: an image entry of that size holds a full IDAT bomb (the
         # target's MAX_PIXELS, 12 million) and many chunks. 2 s: the worst
         # input constructed, measured under the fuzz build (ASan): a

@@ -354,10 +354,10 @@ fn trailing_bytes_are_not_part_of_the_stream() {
     assert_eq!(out, b"hello hello hello");
 }
 
-/// 1 MiB (the fuzz target's max_len) of empty fixed blocks, 10 bits each:
-/// per-block cost must not include building the fixed tables. Decodes to
-/// nothing and consumes every input byte. (Timing is guarded by the fuzz
-/// timeout and the seed `empty_fixed_blocks`; this pins the result.)
+/// 1 MiB of empty fixed blocks, 10 bits each: per-block cost must not
+/// include building the fixed tables. Decodes to nothing and consumes every
+/// input byte. (The fuzz target's inputs are shorter than this, so this
+/// test is what covers the case; it pins the result.)
 #[test]
 fn many_empty_fixed_blocks() {
     let mut w = BitW::default();

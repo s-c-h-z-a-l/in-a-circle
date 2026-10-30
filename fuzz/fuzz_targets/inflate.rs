@@ -4,11 +4,18 @@
 
 use libfuzzer_sys::fuzz_target;
 
-/// 64 MiB: the output limit the page reader gives one page (an upper
-/// estimate of a decoded page), so the fuzzer exercises the same limit the
-/// shipped code runs with. A bomb stops here instead of exhausting memory;
-/// the sink below keeps nothing, so memory stays flat either way.
-const LIMIT: u64 = 64 << 20;
+/// 64 KiB = 2 x the 32 KiB window: enough output for the window to wrap
+/// once or twice, for matches at the maximum distance and for the limit to
+/// fire mid-stream (a 64 KiB input, the max_len in scripts/fuzz.sh, can
+/// expand to ~64 MiB, so a bomb stops here after a fraction of a
+/// millisecond). It is deliberately far below the page reader's 64 MiB: at
+/// 64 MiB every bomb input cost tens of ms and the run managed ~25 exec/s
+/// with flat coverage (256 KiB still managed only ~440 exec/s per worker). The limit logic is the same at any value; the exact
+/// boundary is covered by `output_limit_stops_at_the_limit` and the
+/// million-block case by `many_empty_fixed_blocks` in
+/// crates/flate/tests/inflate.rs. The sink keeps nothing, so memory stays
+/// flat.
+const LIMIT: u64 = 64 << 10;
 
 fuzz_target!(|data: &[u8]| {
     // Same bytes through both entry points: a raw stream is a zlib stream
