@@ -72,19 +72,40 @@ target ran at about 440 exec/s per worker, with 64 KiB at 1,600-3,000; the
 counter (8.3 s under ASan); the work is linear, reports progress per page
 and can be cancelled.
 
-## Drop to stage 2 (pending)
+## Drop to stage 2
 
-The classifier now recognises ZIP content on the budgeted drop-to-stage-2
-path. The 50-sample p95 of our CPU from the drop's data to the stage-2
-wheel's commit, on the reference environment and on a second, untuned
-machine, is **pending**: it needs the user at the machine. Until it is
-recorded here the budget claim for that path is open.
+The classifier recognises ZIP content on the budgeted drop-to-stage-2
+path. The metric is our CPU from the dropped data to the stage-2 wheel's
+commit (`INACIRCLE_MEASURE=1` lines), p95 by nearest rank. Main has no CBZ
+path, so the regression check is the existing text path (a text file
+dropped on the Document slice) with the old and the new binary; the CBZ
+(8 pages, stored) is then measured on the new binary alone. The drags were
+made by hand, one series per condition; a sample of `-1` is a wheel that
+received no drop and is excluded as not valid.
 
-## Verdict
+Builds: A is `main` 6e0873b (`inacircle` sha256 22ba2264...). B is the
+branch that adds this family and contains the next plan's work (the join
+action) as well, f981591f...; so B's text series also shows whether that
+work cost the path anything. Machines: the reference desktop (Ryzen 7
+5700X, CachyOS, kernel 7.2.9) and a ThinkCentre M910q (i5-7500T, Arch,
+kernel 7.2.11), inventory as in
+[hardening-performance.md](hardening-performance.md#machines). The second
+machine is outside the reference timing gate by policy and is shown.
 
-Within every measured bound: the memory is the page file plus a few MB, a
-42 MB page converts in under 0.2 s, and the binaries are inside their
-budgets on both architectures. The drop-to-stage-2 timing is open.
+| Machine | Build | Drop | Valid | p50 (us) | p95 (us) | max (us) |
+|---|---|---|---|---|---|---|
+| desktop | A | txt to Document | 58 of 66 | 158 | 164 | 168 |
+| desktop | B | txt to Document | 65 | 160 | 171 | 175 |
+| desktop | B | CBZ to Book | 64 | 151 | 166 | 188 |
+| ThinkCentre | A | txt to Document | 65 of 69 | 561 | 617 | 671 |
+| ThinkCentre | B | txt to Document | 52 | 554 | 618 | 667 |
+| ThinkCentre | B | CBZ to Book | 57 | 517 | 571 | 609 |
+
+The text path moved +4% (p95) on the desktop, under the 10%
+investigation threshold, and +0.2% on the ThinkCentre. The CBZ path costs
+the same as the text path or slightly less (it has no text sniffing).
+The boundary between B's text and CBZ series on the desktop was inferred
+from the gaps in time between the drags, not recorded.
 
 ## Reproduce
 
