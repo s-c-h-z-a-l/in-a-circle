@@ -404,7 +404,9 @@ Every action runs sandboxed, set up in the child between `fork` and
 - **Join presets.** A preset may name a set of MIME types (`Preset.join`);
   the `pdf` and `cbz` presets name JPEG and PNG. A preset's 1:1 input is
   optional: `cbz` has none (`Preset.input` is `None`), so `choose` only
-  looks at the join. `menu::choose` decides what a preset
+  looks at the join. A run of a preset that matches no input is named
+  (the history's `action=`) after the 1:1 route it would have taken, or the
+  preset's id when it has none. `menu::choose` decides what a preset
   runs for a selection: the 1:1 route (for the preset's own input) or a join
   action, which is a catalog action whose type set covers the preset's set,
   with the preset's output, runnable, and with at least its `min` files in

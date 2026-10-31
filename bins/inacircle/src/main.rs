@@ -433,12 +433,21 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             match menu::choose(&cat, p, &tally) {
                 Some((menu::Choice::Route(r), _)) => (p.input.into_iter().collect(), r, None, None),
                 Some((menu::Choice::Join(a), _)) => (join_types(a), Vec::new(), Some(a), None),
-                None => (
-                    p.input.into_iter().collect(),
-                    Vec::new(),
-                    None,
-                    Some(String::new()),
-                ),
+                // Nothing runs: the run is named after the 1:1 route when
+                // there is one (a preset without a 1:1 form has none, and
+                // is named after itself), and every matching input is skipped.
+                None => {
+                    let planned = p
+                        .input
+                        .and_then(|i| menu::route(&cat, i, p.output))
+                        .unwrap_or_default();
+                    (
+                        p.input.into_iter().collect(),
+                        planned,
+                        None,
+                        Some(String::new()),
+                    )
+                }
             }
         }
         (Target::Action(id), _) => {

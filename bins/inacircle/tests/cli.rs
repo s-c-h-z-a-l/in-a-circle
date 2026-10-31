@@ -505,6 +505,34 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// A preset that matches no input still names its run after the 1:1 route
+/// it would have taken (the history's `action=`), not after the preset.
+#[test]
+fn no_match_preset_run_records_route_id() {
+    let e = Env::new("nomatch-route");
+    let png = gray_png();
+    let src = e.file("x.png", &png);
+    let o = e.run(&["run", "markdown", "x.png"]);
+    // Nothing was done: exit 3 (unsupported), as before.
+    assert_eq!(o.code, Some(3), "{}{}", o.stdout, o.stderr);
+    assert_eq!(
+        o.pairs("skip"),
+        [(src.clone(), "unsupported".to_owned())],
+        "{}",
+        o.stdout
+    );
+    let job = o.job();
+    let history = e.history();
+    let named: Vec<String> = history
+        .lines()
+        .filter_map(|l| parse_line(l).ok())
+        .filter(|l| l.kind == "job" && l.get("id") == Some(&job))
+        .filter_map(|l| l.get("action").map(str::to_owned))
+        .collect();
+    assert_eq!(named, ["text.txt-to-md"], "{history}");
+    assert_eq!(fs::read(&src).unwrap(), png, "the source changed");
+}
+
 /// Undo moves each input's group whole into the Trash (the test's own
 /// `XDG_DATA_HOME`), with its `.trashinfo`; a group with a changed file is
 /// kept whole, and the CLI prints one line per group.
