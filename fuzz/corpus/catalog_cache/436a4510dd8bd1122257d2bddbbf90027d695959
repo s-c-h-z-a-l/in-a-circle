@@ -1,0 +1,7 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.a	f	tch=log 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.aanacircle-catalog 0
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=0850000476
+action	x.a	atalotexte	mtime=8yes

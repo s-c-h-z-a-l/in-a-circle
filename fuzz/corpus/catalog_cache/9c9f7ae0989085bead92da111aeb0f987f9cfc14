@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.a	
+action	xno	bayes

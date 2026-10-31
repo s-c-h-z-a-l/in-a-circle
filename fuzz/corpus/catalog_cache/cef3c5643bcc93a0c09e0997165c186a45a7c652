@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=1	size=7	builtin=yes	failsf0060
+action	x.a	family=f	in=text385
+action	xno	bch=yes

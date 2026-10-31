@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails60
+action	x.a	family=f	in=texte	mtime=5	sls=1	retry=1700000060
+action	xno	batch=yes

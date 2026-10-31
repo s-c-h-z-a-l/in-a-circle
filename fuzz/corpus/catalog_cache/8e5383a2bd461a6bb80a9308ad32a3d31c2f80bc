@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=no	fails=64	retry=18446744073709551616
+a
