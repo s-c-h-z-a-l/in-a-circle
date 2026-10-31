@@ -537,6 +537,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     let files = pre_count + inputs.len();
     let mut entry = None;
     let mut joined = None;
+    let mut cut = 0;
     let sandboxed = if inputs.is_empty() {
         engine::sandbox::ready().is_ok()
     } else {
@@ -553,11 +554,10 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         };
         entry = obs.entry.take();
         joined = report.joined;
+        cut = report.cut;
         report.sandboxed
     };
     mark("exec");
-    // Read now: a cancel after this point stopped nothing.
-    let cancelled = cancel.is_cancelled();
     let closed = rec.finish(sandboxed);
     drop(running);
     mark("record");
@@ -605,7 +605,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             &job,
             sandboxed,
             (done, skipped, failed, closed.tally.unknown()),
-            cancelled,
+            cut,
             closed.undoable,
             &cancel,
         );

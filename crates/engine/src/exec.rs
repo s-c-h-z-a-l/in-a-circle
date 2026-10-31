@@ -181,6 +181,11 @@ pub struct Report {
     pub sandboxed: bool,
     /// The join of a [`run_join`]; `None` for a [`run`].
     pub joined: Option<Joined>,
+    /// Inputs a cancel stopped: failed as `cancelled` while still unsettled
+    /// (not started, killed, or their result dropped before the commit).
+    /// 0 for a cancel that came after every input was settled, which then
+    /// stopped nothing.
+    pub cut: usize,
 }
 
 /// What a join run made of its inputs.
@@ -351,6 +356,9 @@ impl Drop for CancelToken {
     }
 }
 
+/// The reason of an input a cancel stopped (see [`Sink::cut`]).
+const CANCELLED: &str = "cancelled";
+
 /// Runs `route` over `inputs` and places the results. Never panics on a
 /// misbehaving action; every input ends with at least one outcome.
 pub fn run(
@@ -410,7 +418,7 @@ pub fn run(
         sink.begin_group(members.len());
         if sink.is_cancelled(cancel) {
             for &i in &members {
-                sink.fail(i, "cancelled".to_owned());
+                sink.cut(i);
             }
         } else {
             if cleaned.insert(g.target) {
@@ -507,7 +515,11 @@ pub fn run_join(
     let mut sink = Sink::new(obs, &uniq);
     let all = |sink: &mut Sink, ins: &[usize], reason: &str| {
         for &i in ins {
-            sink.fail(i, reason.to_owned());
+            if reason == CANCELLED {
+                sink.cut(i);
+            } else {
+                sink.fail(i, reason.to_owned());
+            }
         }
     };
     let every: Vec<usize> = (0..uniq.len()).collect();
@@ -540,7 +552,7 @@ pub fn run_join(
     };
     sink.begin_group(ok.len());
     if sink.is_cancelled(cancel) {
-        all(&mut sink, &ok, "cancelled");
+        all(&mut sink, &ok, CANCELLED);
     } else {
         // The download fallback may not exist yet.
         let _ = fs::create_dir_all(&anchor.target);
@@ -631,6 +643,8 @@ struct Sink<'a> {
     step: usize,
     /// The observer answered [`Wake::Cancel`]: sticky, like the token.
     cancelled: bool,
+    /// Inputs failed by [`Sink::cut`]: see [`Report::cut`].
+    cut: usize,
     /// The observer's wake fd that hung up (or is invalid): not polled
     /// again while `wake_fd` returns it.
     dead_wake_fd: Option<RawFd>,
@@ -652,6 +666,7 @@ impl<'a> Sink<'a> {
             steps: 1,
             step: 0,
             cancelled: false,
+            cut: 0,
             dead_wake_fd: None,
             fired_at: None,
         }
@@ -686,6 +701,17 @@ impl<'a> Sink<'a> {
         let input = self.input(i);
         self.emit(Outcome::Failed { input, reason });
         self.finish(i);
+    }
+
+    /// Input `i` stopped by a cancel: failed as `cancelled` and counted in
+    /// [`Report::cut`], unless it was already settled (a cancel cannot cut
+    /// what is finished). Only the engine's own cancel paths call this: an
+    /// action's `fail` event with that text is an ordinary failure.
+    fn cut(&mut self, i: usize) {
+        if !self.finished[i] {
+            self.cut += 1;
+        }
+        self.fail(i, CANCELLED.to_owned());
     }
 
     fn skip(&mut self, i: usize, reason: String) {
@@ -768,6 +794,7 @@ impl<'a> Sink<'a> {
         Report {
             sandboxed,
             joined: None,
+            cut: self.cut,
         }
     }
 }
@@ -995,11 +1022,15 @@ fn publish(
 ) -> Option<Publication> {
     let fail = |sink: &mut Sink, reason: String| {
         for &o in settle {
-            sink.fail(o, reason.clone());
+            if reason == CANCELLED {
+                sink.cut(o);
+            } else {
+                sink.fail(o, reason.clone());
+            }
         }
     };
     if sink.is_cancelled(cancel) {
-        fail(sink, "cancelled".to_owned());
+        fail(sink, CANCELLED.to_owned());
         return None;
     }
     let mut cancelled = false;
@@ -1027,7 +1058,7 @@ fn publish(
     let p = match published {
         Ok(p) => p,
         Err(_) if cancelled => {
-            fail(sink, "cancelled".to_owned());
+            fail(sink, CANCELLED.to_owned());
             return None;
         }
         Err(e) => {
@@ -1478,7 +1509,7 @@ fn run_step(
     }
     if sink.is_cancelled(cancel) {
         for &o in &step_in.origin {
-            sink.fail(o, "cancelled".to_owned());
+            sink.cut(o);
         }
         return None;
     }
@@ -2217,13 +2248,12 @@ impl<'a> Supervisor<'a> {
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
             // Killed but not exiting: stuck in the kernel. It stays
             // unreaped (its group id stays ours); nothing is accepted.
-            let why = if self.cancelled {
-                "cancelled"
-            } else {
-                "action left processes behind"
-            };
             for &o in &self.step_in.origin {
-                sink.fail(o, why.to_owned());
+                if self.cancelled {
+                    sink.cut(o);
+                } else {
+                    sink.fail(o, "action left processes behind".to_owned());
+                }
             }
             return None;
         }
@@ -2256,7 +2286,7 @@ impl<'a> Supervisor<'a> {
         let origin = &self.step_in.origin;
         if self.cancelled {
             for &o in origin {
-                sink.fail(o, "cancelled".to_owned());
+                sink.cut(o);
             }
             return None;
         }
@@ -3126,6 +3156,105 @@ pub(crate) mod tests {
                 reason: "denied".to_owned()
             }]
         );
+    }
+
+    /// A cancel that comes after the join's commit stopped nothing: the
+    /// result is in place, every input is `Done`, and `cut` is 0.
+    #[test]
+    fn cancel_after_join_commit_cuts_nothing() {
+        let t = Tmp::new("cancel-after-join");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let a = docs.join("a.txt");
+        let b = docs.join("b.txt");
+        fs::write(&a, "a\n").unwrap();
+        fs::write(&b, "b\n").unwrap();
+        let bin = t.0.join("joiner");
+        install_script(
+            &bin,
+            "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.md\"\n\
+             while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.md\"; \
+             printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+             printf 'joined\\tjoin/out.md\\n'",
+        );
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        action.join = Some(crate::catalog::Join {
+            types: vec!["text/plain".into()],
+            min: 1,
+        });
+        let tok = CancelToken::install().unwrap();
+        AFTER_PUBLISH.set(Some(Box::new(|_p: &Publication| {
+            // SAFETY: signals this thread, which has SIGTERM blocked.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        })));
+        let mut seen = Seen::default();
+        let report = run_join(&action, vec![a.clone(), b.clone()], &mut seen, &tok);
+        AFTER_PUBLISH.set(None);
+        assert_eq!(report.cut, 0, "{:?}", seen.0);
+        let j = report.joined.unwrap();
+        assert_eq!((j.taken, j.total), (2, 2));
+        assert!(j.publication.is_some());
+        let done = seen
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Done { .. }))
+            .count();
+        assert_eq!(done, 2, "{:?}", seen.0);
+        assert!(
+            !seen.0.iter().any(|o| matches!(o, Outcome::Failed { .. })),
+            "{:?}",
+            seen.0
+        );
+        assert!(tok.is_cancelled(), "the cancel did arrive");
+    }
+
+    /// Three inputs, a cancel after the first is done: the other two are
+    /// cut.
+    #[test]
+    fn cancel_mid_batch_counts_cut_inputs() {
+        struct CancelOnDone(Seen);
+        impl Observer for CancelOnDone {
+            fn event(&mut self, o: &Outcome) {
+                if matches!(o, Outcome::Done { .. }) {
+                    // SAFETY: signals this thread, which has SIGTERM blocked.
+                    unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+                }
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+        }
+        let t = Tmp::new("cancel-mid-batch");
+        let mut inputs = Vec::new();
+        for d in ["d1", "d2", "d3"] {
+            let dir = t.0.join(d);
+            fs::create_dir(&dir).unwrap();
+            let f = dir.join("a.txt");
+            fs::write(&f, "a\n").unwrap();
+            inputs.push(f);
+        }
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        let mut seen = CancelOnDone(Seen::default());
+        let report = run(&[&action], inputs, &mut seen, &tok);
+        let done = seen
+            .0
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Done { .. }))
+            .count();
+        let cancelled = seen
+            .0
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Failed { reason, .. } if reason == "cancelled"))
+            .count();
+        assert_eq!((done, cancelled), (1, 2), "{:?}", seen.0.0);
+        assert_eq!(report.cut, 2);
     }
 
     /// A cancel that arrives while the outputs are copied stops before

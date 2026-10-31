@@ -498,6 +498,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   timeout, I/O error or hangup during the run only drops the connection:
   no more updates, and the end opens once more (with the end's deadlines)
   so the result still replaces the "running" notification and its Cancel.
+  A cancel (signal or Cancel click) reads as "Cancelled" only if it stopped at
+  least one input; one that came after the last result is reported as the finished
+  run.
   A broken server, or any failure at the end, turns notifications off for
   the rest of the run with one line on stderr
   (`inacircle: notifications unavailable: …`); the result, the history and
