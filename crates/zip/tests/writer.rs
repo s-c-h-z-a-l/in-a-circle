@@ -114,13 +114,17 @@ fn independent_check(archive: &Path, expected: &[(&str, &[u8])]) {
             .stdin(Stdio::null())
             .output()
             .unwrap();
-        // unzip exits 1 ("warning") for an archive with no entries.
-        if !expected.is_empty() {
-            assert!(
-                out.status.success(),
-                "unzip -tq: {}",
-                String::from_utf8_lossy(&out.stdout)
-            );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if expected.is_empty() {
+            // unzip exits 1 with a warning for an archive with no entries.
+            assert_eq!(out.status.code(), Some(1), "unzip -tq: {text}");
+            assert!(text.contains("zipfile is empty"), "unzip -tq: {text}");
+        } else {
+            assert!(out.status.success(), "unzip -tq: {text}");
         }
     }
 }
@@ -331,19 +335,28 @@ fn limits_are_projected() {
     let first = w.projected_len(5, 3).unwrap();
     assert_eq!(first, 30 + 5 + 3 + 46 + 5 + 22);
     // Each empty entry "NNNNN" takes 30 + 5 and 46 + 5 bytes.
-    for i in 0..65_535u32 {
+    for i in 0..65_534u32 {
         assert!(w.projected_len(5, 0).is_some(), "{i}");
         w.add(&format!("{i:05}"), &mut &b""[..], 0).unwrap();
     }
-    assert_eq!(w.len(), 65_535);
+    assert_eq!(w.len(), 65_534);
     assert_eq!(w.projected_len(5, 0), None);
     assert!(matches!(
         w.add("extra", &mut &b""[..], 0),
         Err(WriteError::TooManyEntries)
     ));
     let f = w.finish().unwrap();
-    assert_eq!(f.metadata().unwrap().len(), 65_535 * (35 + 51) + 22);
-    // The u32 limit is covered by a unit test in the module (it needs a
+    assert_eq!(f.metadata().unwrap().len(), 65_534 * (35 + 51) + 22);
+    // The count must not be the ZIP64 marker 0xFFFF: our reader takes the
+    // finished archive back.
+    let limits = Limits {
+        entries: 70_000,
+        entry_bytes: 64 << 20,
+        ratio: 1100,
+        name_bytes: 255,
+    };
+    assert_eq!(open(&f, limits).unwrap().entries().len(), 65_534);
+    // The u32 limit is covered by unit tests in the module (they need a
     // writer positioned near 4 GiB without a 4 GiB file).
 }
 

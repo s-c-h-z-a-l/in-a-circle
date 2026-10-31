@@ -6,15 +6,18 @@
 //!
 //! Entry data is streamed in chunks of 64 KiB and never held whole. The
 //! local header is written first with zero CRC and sizes, and patched in
-//! place once the data is known, so the writer needs no seek-less output.
+//! place once the data is known, so the output must be a file that takes
+//! positioned writes.
 //!
 //! A failed entry (the source errors, or it is larger than the caller's
 //! limit, or the archive would pass the format's limits) is rolled back by
 //! cutting the file to where the entry began; the writer stays usable. A
 //! failed write to the file leaves it in an unknown state, so the writer is
-//! poisoned and refuses everything after. `finish` is the only way to get a
-//! central directory, so an unfinished archive has none and no reader takes
-//! it for a valid one.
+//! poisoned and refuses everything after. The writer never writes its own
+//! end record before `finish`. After any `Err` from `add` that is `Io` or
+//! `Poisoned`, or from `finish`, the file is in an unknown state and
+//! discarding it is the caller's job: entry data is arbitrary bytes, so a
+//! leftover prefix may still hold an end record some reader would accept.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -33,9 +36,10 @@ const LOCAL_LEN: u64 = 30;
 const CENTRAL_LEN: u64 = 46;
 /// End of central directory record without comment (APPNOTE 4.3.16).
 const EOCD_LEN: u64 = 22;
-/// The entry count fields are 16 bits wide; 0xFFFF would mean "see ZIP64",
-/// which is not written, so the largest honest count is one less.
-const MAX_ENTRIES: usize = 65_535;
+/// The entry count fields are 16 bits wide; 0xFFFF is the ZIP64 marker
+/// (APPNOTE 4.4.1.4) and our own reader rejects it as ZIP64, so the largest
+/// count that reads back is one less.
+const MAX_ENTRIES: usize = 65_534;
 /// Every offset, size and the archive itself must fit the 32 bits fields:
 /// past them a reader would need ZIP64.
 const MAX_ARCHIVE: u64 = u32::MAX as u64;
@@ -60,8 +64,8 @@ pub enum WriteError {
     /// The archive would pass `u32::MAX` bytes; rolled back.
     ArchiveTooLarge,
     TooManyEntries,
-    /// Empty, longer than 255 bytes, not ASCII graphic, or `/`, `\`, `.`
-    /// or `..` in it.
+    /// Empty, longer than 255 bytes, not ASCII graphic, or `/` or `\` in
+    /// it, or the name `.` or `..`.
     BadName,
     DuplicateName,
     /// An earlier write failed.
@@ -148,7 +152,7 @@ impl StoreWriter {
     /// The finished archive's length if one more entry with a name of
     /// `name_len` bytes and `data_len` bytes of data is added: its local
     /// header and data, the whole central directory with its record and the
-    /// end record. `None` when that passes 65 535 entries or `u32::MAX`
+    /// end record. `None` when that passes 65 534 entries or `u32::MAX`
     /// bytes.
     pub fn projected_len(&self, name_len: usize, data_len: u64) -> Option<u64> {
         if self.entries.len() >= MAX_ENTRIES {
@@ -213,6 +217,7 @@ impl StoreWriter {
             return Err(self.io(e));
         }
 
+        // Cannot overflow: start + header is bounded by projected_len above.
         let data_start = start + head.len() as u64;
         let mut crc = Crc32::new();
         let mut size = 0u64;
@@ -230,6 +235,8 @@ impl StoreWriter {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => break Some(WriteError::Read(e)),
             };
+            // Cannot overflow: size <= max + 1 by the read cap, and the
+            // projected_len check below bounds it by u32::MAX per chunk.
             size += n as u64;
             if size > max {
                 break Some(WriteError::EntryTooLarge);
@@ -240,6 +247,7 @@ impl StoreWriter {
             crc.update(&buf[..n]);
             if let Err(e) = self
                 .file
+                // Bounded by projected_len above (data_start + size <= u32::MAX).
                 .write_all_at(&buf[..n], data_start + size - n as u64)
             {
                 return Err(self.io(e));
@@ -263,6 +271,7 @@ impl StoreWriter {
             return Err(self.io(e));
         }
 
+        // Both bounded by the last projected_len check (<= u32::MAX).
         self.pos = data_start + size;
         self.cd_len += CENTRAL_LEN + name.len() as u64;
         self.names.insert(name.to_owned());
@@ -314,7 +323,7 @@ impl StoreWriter {
                 out.clear();
             }
         }
-        let count = self.entries.len() as u16; // <= 65 535
+        let count = self.entries.len() as u16; // <= 65 534
         out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
         out.extend_from_slice(&[0; 4]); // disk numbers
         out.extend_from_slice(&count.to_le_bytes());
@@ -345,5 +354,44 @@ mod tests {
         assert_eq!(w.projected_len(1, 11), None);
         assert_eq!(w.projected_len(2, 10), None);
         assert_eq!(w.projected_len(1, u64::MAX), None);
+    }
+
+    /// A sparse temp file, `len` bytes long, for a writer near 4 GiB.
+    fn sparse(len: u64) -> (std::path::PathBuf, File) {
+        let path = std::path::PathBuf::from(format!(
+            "{}/zipw-unit-{}",
+            std::env::temp_dir().display(),
+            std::process::id()
+        ));
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        f.set_len(len).unwrap();
+        (path, f)
+    }
+
+    #[test]
+    fn mid_entry_archive_limit_rolls_back() {
+        // Room for a small entry only: header 30 + name 1, CD 46 + 1, EOCD 22.
+        let start = MAX_ARCHIVE - 8192;
+        let (path, f) = sparse(start);
+        let probe = f.try_clone().unwrap();
+        let mut w = StoreWriter::at(f, start);
+        let big = vec![1u8; 3 * CHUNK];
+        assert!(matches!(
+            w.add("a", &mut &big[..], 1 << 30),
+            Err(WriteError::ArchiveTooLarge)
+        ));
+        assert_eq!(probe.metadata().unwrap().len(), start, "cut back");
+        assert_eq!(w.len(), 0);
+        // A small entry still fits and the archive finishes.
+        w.add("b", &mut &b"xyz"[..], 100).unwrap();
+        let done = w.finish().unwrap();
+        assert!(done.metadata().unwrap().len() <= MAX_ARCHIVE);
+        std::fs::remove_file(path).unwrap();
     }
 }
