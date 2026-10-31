@@ -784,7 +784,12 @@ name is missing from the atlas (or the name is empty), the name is
 replaced by `1 file · <type label>` (e.g. `1 file · text`), until a larger
 atlas exists. On level 2 the hub keeps the category's label when one file
 was dropped or the category's lit targets take every dropped file;
-otherwise it shows `<n> / <total> files` as above.
+otherwise it shows `<n> / <total> files` as above. When no category is
+lit on level 1, the hub says `no action for <type label>` (the first file's
+label, e.g. `no action for .cbr file`) if the hub can draw all of it
+(108 px wide, every glyph in the atlas), else `no action`: with the 15 px
+font `no action for ` alone takes about 85 px, so in practice the short
+form shows and `inacircle offer` prints the long one.
 
 **Text**
 

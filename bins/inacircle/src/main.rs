@@ -1128,17 +1128,38 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
             lit: g.lit,
         });
     }
-    // A name the hub cannot show is replaced by the type's top-level name.
-    gm.hub = match (&gm.tally.first_name, gm.tally.types.first()) {
-        (Some(name), Some((mime, ..))) if gm.tally.total == 1 => {
-            let label = mime.split('/').next().unwrap_or(mime);
-            ui::text::hub_text(1, name, 1, label, ui::wheel::HUB_TEXT_W)
-        }
-        _ => gm.tally.source_text(),
-    };
+    // Nothing lights: say so, naming the first file's type.
+    let lit = gm.slices.iter().flatten().any(|g| g.lit);
+    if let (false, Some(label)) = (lit, &gm.tally.first_label) {
+        gm.hub = no_action_hub(label);
+    } else {
+        // A name the hub cannot show is replaced by the type's top-level name.
+        gm.hub = match (&gm.tally.first_name, gm.tally.types.first()) {
+            (Some(name), Some((mime, ..))) if gm.tally.total == 1 => {
+                let label = mime.split('/').next().unwrap_or(mime);
+                ui::text::hub_text(1, name, 1, label, ui::wheel::HUB_TEXT_W)
+            }
+            _ => gm.tally.source_text(),
+        };
+    }
     gm.paths = Rc::new(paths);
     gm.catalog = Some(cat);
     gm
+}
+
+/// The level-1 hub when nothing applies: `menu::offer`'s words for the
+/// first file's type label, but only when the hub can draw them whole
+/// (`HUB_TEXT_W` wide, every glyph in the atlas); otherwise `no action`.
+/// Measured: `no action for ` alone is ~85 px of the 108 px, so a real
+/// label ("ZIP", ".cbr file") never fits, and a cut `no action for .c...`
+/// would hide the one word that matters; `no action` always fits.
+fn no_action_hub(label: &str) -> String {
+    let full = format!("no action for {label}");
+    if ui::text::width(&full) <= ui::wheel::HUB_TEXT_W && ui::atlas::get().has_all(&full) {
+        full
+    } else {
+        "no action".into()
+    }
 }
 
 /// Level 2: the category's presets in their own directions (a preset's
@@ -1455,6 +1476,33 @@ mod tests {
         assert_eq!(slice(0), ("PDF", "pdf", true));
         assert_eq!(slice(4), ("CBZ", "cbz", true));
         assert_eq!(m.hub, "3 / 4 files");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A selection nothing applies to says so on the hub, with the first
+    /// file's type; one lit category keeps the usual hub.
+    #[test]
+    fn unknown_type_hub_says_no_action() {
+        let (dir, a) = text_file("unknown", "a.txt");
+        // A RAR archive: no magic the classifier knows, so `.<ext> file`.
+        let zip = |name: &str| {
+            let f = dir.join(name);
+            std::fs::write(&f, b"Rar!\x1a\x07\0 not a comic").unwrap();
+            f
+        };
+        let (cbr, other) = (zip("x.cbr"), zip("y.rar"));
+        let g = group_menu_for(vec![cbr.clone()], Some(md_catalog()));
+        assert_eq!(g.hub, "no action");
+        assert!(g.slices.iter().flatten().all(|s| !s.lit));
+        let g = group_menu_for(vec![cbr.clone(), other], Some(md_catalog()));
+        assert_eq!(g.hub, "no action");
+        // The label is spelled out only when the hub can draw all of it.
+        assert_eq!(no_action_hub(""), "no action for ");
+        assert_eq!(no_action_hub(".cbr file"), "no action");
+        assert_eq!(no_action_hub("漢"), "no action", "outside the atlas");
+        // One lit category: the hub stays the source.
+        let g = group_menu_for(vec![a, cbr], Some(md_catalog()));
+        assert_eq!(g.hub, "2 files");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

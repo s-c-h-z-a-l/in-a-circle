@@ -616,6 +616,35 @@ fn wheel_offers_and_runs_images_to_cbz() {
     );
 }
 
+/// An archive no action reads (a RAR `.cbr`): no category lights, so the
+/// drop on Book is rejected and the wheel closes without a stage 2; the
+/// hub text itself is pinned by `unknown_type_hub_says_no_action`.
+#[test]
+fn wheel_shows_no_action_for_unknown_file() {
+    let root = Root::new("cbr");
+    root.markdown_action_cached();
+    let src = root.0.join("f/x.cbr");
+    fs::write(&src, b"Rar!\x1a\x07\0 pages").unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let (mut c, mut child) = start(&root, false);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    c.release_held();
+    // Book, east: dim, so the drop is rejected.
+    c.drag_motion(1110, 540);
+    c.pump(Duration::from_millis(200));
+    c.drop_it();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).code(),
+        Some(0)
+    );
+    assert_eq!(c.attaches(), 2, "no stage 2 for an unknown file");
+    assert!(src.is_file(), "the source changed");
+}
+
 /// The same path with `inacircle-text`: Document (north), Markdown (north).
 /// Until now no test ran an action chosen on the wheel.
 #[test]
