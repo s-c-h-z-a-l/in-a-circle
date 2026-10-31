@@ -1040,14 +1040,9 @@ impl<'m> Parser<'m> {
                             if self.m.failed() {
                                 break;
                             }
+                            let checked = self.task_marker(i);
                             let blocks = self.convert_children(i);
-                            self.m.push(
-                                &mut out,
-                                ListItem {
-                                    checked: None,
-                                    blocks,
-                                },
-                            );
+                            self.m.push(&mut out, ListItem { checked, blocks });
                         }
                         out
                     },
@@ -1057,6 +1052,36 @@ impl<'m> Parser<'m> {
                 unreachable!("documents and items are converted by their parents")
             }
         }
+    }
+
+    /// GFM task list item: the item's first block is a paragraph that
+    /// begins with `[ ]`, `[x]` or `[X]` (spaces before it allowed) and then
+    /// a space or tab. The marker and the whitespace after it are taken off
+    /// the paragraph's raw text; `Some(checked)`, or `None` for any other
+    /// item and in CommonMark. No allocation: the raw text is shifted in
+    /// place.
+    fn task_marker(&mut self, item: usize) -> Option<bool> {
+        if self.dialect != Dialect::Gfm {
+            return None;
+        }
+        let &first = self.nodes[item].children.first()?;
+        let node = &mut self.nodes[first];
+        if !matches!(node.kind, Kind::Paragraph) {
+            return None;
+        }
+        let raw = node.content.trim_end_matches([' ', '\t', '\n']);
+        let at = raw.len() - raw.trim_start_matches([' ', '\t']).len();
+        let checked = match raw.as_bytes().get(at..at + TASK_MARKER + 1)? {
+            [b'[', b' ' | b'\t', b']', b' ' | b'\t'] => false,
+            [b'[', b'x' | b'X', b']', b' ' | b'\t'] => true,
+            _ => return None,
+        };
+        // The paragraph is trimmed at its end, so content follows the
+        // whitespace: the item keeps a non-empty paragraph.
+        let rest = raw[at + TASK_MARKER..].trim_start_matches([' ', '\t', '\n']);
+        let cut = raw.len() - rest.len();
+        node.content.drain(..cut);
+        Some(checked)
     }
 }
 
@@ -1207,6 +1232,9 @@ fn parse_list_marker(
     };
     Some((end - pos, data))
 }
+
+/// Bytes of a task list item marker: `[`, one character, `]`.
+const TASK_MARKER: usize = 3;
 
 /// cmark-gfm's `spacechar` in table rows.
 fn is_table_space(c: u8) -> bool {
@@ -2034,6 +2062,104 @@ mod tests {
         assert_eq!(need(&format!("{md}y\n")), need(&md) + 1 + 100 + 1);
         // A paragraph before the table is one more node.
         assert_eq!(need(&format!("p\n{md}")), need(&md) + 2);
+    }
+
+    /// `checked` of each item of the document's first block, a list.
+    fn checks(md: &str, dialect: Dialect) -> Vec<Option<bool>> {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        match super::parse(md, dialect, &mut m).unwrap().blocks.first() {
+            Some(Block::List { items, .. }) => items.iter().map(|i| i.checked).collect(),
+            other => panic!("not a list: {other:?}"),
+        }
+    }
+
+    const UNCHECKED: &str = "<input disabled=\"\" type=\"checkbox\"> ";
+    const CHECKED: &str = "<input checked=\"\" disabled=\"\" type=\"checkbox\"> ";
+
+    #[test]
+    fn task_markers_read() {
+        assert_eq!(
+            checks("- [ ] a\n- [x] b\n- [X] c\n- [\t] d\n", Dialect::Gfm),
+            [Some(false), Some(true), Some(true), Some(false)]
+        );
+        assert_eq!(
+            gfm_html("1. [x] a\n"),
+            format!("<ol>\n<li>{CHECKED}a</li>\n</ol>\n")
+        );
+        // The marker and the whitespace after it leave the paragraph.
+        assert_eq!(
+            gfm_html("- [ ]   *a*\n"),
+            format!("<ul>\n<li>{UNCHECKED}<em>a</em></li>\n</ul>\n")
+        );
+        assert_eq!(
+            gfm_html("- [ ] \n  a\n"),
+            format!("<ul>\n<li>{UNCHECKED}a</li>\n</ul>\n")
+        );
+        // Loose lists, block quotes, and the item's first line left blank.
+        assert_eq!(
+            gfm_html("- [x] a\n\n- b\n"),
+            format!("<ul>\n<li>\n<p>{CHECKED}a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>\n")
+        );
+        assert_eq!(
+            gfm_html("> - [x] a\n"),
+            format!("<blockquote>\n<ul>\n<li>{CHECKED}a</li>\n</ul>\n</blockquote>\n")
+        );
+        assert_eq!(checks("-\n  [x] a\n", Dialect::Gfm), [Some(true)]);
+    }
+
+    #[test]
+    fn task_marker_only_at_item_start() {
+        // Not the paragraph's start, not the first block, not in a list.
+        assert_eq!(checks("- a [x] b\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- a\n  [x] b\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- > [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- # [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x] a\n  ---\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- `[x] a`\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("-     [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(gfm_html("[x] a\n"), "<p>[x] a</p>\n");
+        // Only the outer item's paragraph decides for the outer item.
+        assert_eq!(checks("- a\n  - [x] b\n", Dialect::Gfm), [None]);
+        // Other characters between the brackets are text.
+        assert_eq!(
+            checks("- [y] a\n- [] a\n- [xx] a\n", Dialect::Gfm),
+            [None; 3]
+        );
+    }
+
+    #[test]
+    fn task_marker_needs_following_space() {
+        assert_eq!(checks("- [x]a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [ ]a\n- [ ]\n  a\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- [ ]\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x]   \n", Dialect::Gfm), [None]);
+        assert_eq!(gfm_html("- [x]\n"), "<ul>\n<li>[x]</li>\n</ul>\n");
+        // A line end is not the space: the marker stays text.
+        assert_eq!(checks("- [x]\n  a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x]\ta\n", Dialect::Gfm), [Some(true)]);
+    }
+
+    #[test]
+    fn checked_is_none_without_marker() {
+        assert_eq!(checks("- a\n- b\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- [x] a\n- b\n", Dialect::Gfm), [Some(true), None]);
+        assert_eq!(checks("-\n- b\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- ```\n  [x] a\n  ```\n", Dialect::Gfm), [None]);
+    }
+
+    #[test]
+    fn cm_dialect_has_neither() {
+        for md in ["- [ ] a\n- [x] ~~b~~\n", "1. [X] a\n"] {
+            assert!(checks(md, Dialect::CommonMark).iter().all(Option::is_none));
+            let d = parse(md);
+            assert_eq!(d, super::super::read(md.as_bytes()).unwrap());
+            let out = html::write(&d);
+            assert!(!out.contains("<input") && !out.contains("<del>"), "{out}");
+        }
+        assert_eq!(
+            html::write(&parse("- [x] ~~b~~\n")),
+            "<ul>\n<li>[x] ~~b~~</li>\n</ul>\n"
+        );
     }
 
     #[test]

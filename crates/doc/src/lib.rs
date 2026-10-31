@@ -26,8 +26,9 @@ pub enum Align {
     Right,
 }
 
-/// A list item: its blocks, and the task list state when the item starts
-/// with `[ ]` or `[x]`.
+/// A list item: its blocks, and (GFM) the task list state when its first
+/// block is a paragraph that starts with `[ ]`, `[x]` or `[X]` and a space
+/// or tab; the marker is not part of the blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
     /// `None`: not a task item; `Some(done)` otherwise.

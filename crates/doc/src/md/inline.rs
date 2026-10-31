@@ -11,9 +11,13 @@
 //! declaration ends) are memoized, and inactive link openers are tracked by
 //! a counter instead of being walked, so the pass is linear.
 //!
-//! Nesting (emphasis, links, images) deeper than [`MAX_DEPTH`] is flattened
-//! when the arena becomes the [`Inline`] tree: those wrappers are dropped
-//! and their content is kept. This bounds the recursion of every writer.
+//! In the GFM dialect a `~~` run is a delimiter too (strikethrough), with
+//! the emphasis flanking rules and its own search bounds; one tilde or three
+//! or more stay text.
+//!
+//! Nesting (emphasis, strikethrough, links, images) deeper than
+//! [`MAX_DEPTH`] is flattened when the arena becomes the [`Inline`] tree:
+//! those wrappers are dropped and their content is kept. This bounds the recursion of every writer.
 
 use super::scan::{close_tag, link_destination, link_label, link_title, open_tag, utf8};
 use super::{Refs, char_ref, decode, decoded_len, normalize_label, punct::PUNCT, unescape};
@@ -38,32 +42,7 @@ const HEAD: usize = 0;
 /// destination and title is charged to `m` before it is made; once `m`
 /// has failed the pass stops and the (partial) result is discarded.
 pub(super) fn parse(raw: &str, refs: &Refs, dialect: Dialect, m: &mut Meter) -> Vec<Inline> {
-    let mut p = Parser {
-        m,
-        dialect,
-        s: raw,
-        b: raw.as_bytes(),
-        pos: 0,
-        refs,
-        nodes: vec![Node::new(Kind::Text(String::new()))],
-        tail: HEAD,
-        delims: Vec::new(),
-        last_delim: NONE,
-        brackets: Vec::new(),
-        brackets_made: 0,
-        link_floor: 0,
-        backticks: None,
-        ends: [Memo::default(); 4],
-    };
-    p.run();
-    if p.m.failed() {
-        return Vec::new();
-    }
-    p.process_emphasis(0);
-    let mut out = Vec::new();
-    let first = p.nodes[HEAD].next;
-    p.convert(first, 0, &mut out);
-    out
+    Parser::new(raw, refs, dialect, m).parse()
 }
 
 enum Kind {
@@ -74,6 +53,7 @@ enum Kind {
     HardBreak,
     Emph,
     Strong,
+    Strikethrough,
     Link { dest: String, title: String },
     Image { dest: String, title: String },
 }
@@ -100,7 +80,8 @@ impl Node {
     }
 }
 
-/// A `*` or `_` run that can open or close emphasis. Delimiters live in an
+/// A `*` or `_` run that can open or close emphasis, or (GFM) a `~~` run
+/// that can open or close strikethrough. Delimiters live in an
 /// arena (index = creation order, the spec's stack position) and the live
 /// ones form a doubly linked list.
 struct Delim {
@@ -144,8 +125,7 @@ const ENDS: [&[u8]; 4] = [b"-->", b"?>", b"]]>", b">"];
 
 struct Parser<'a> {
     m: &'a mut Meter,
-    /// Which syntax is read.
-    #[allow(dead_code)] // read once the GFM extensions are parsed
+    /// Which syntax is read: GFM adds the `~~` strikethrough delimiter.
     dialect: Dialect,
     s: &'a str,
     b: &'a [u8],
@@ -163,7 +143,22 @@ struct Parser<'a> {
     /// first backtick.
     backticks: Option<HashMap<usize, Vec<usize>>>,
     ends: [Memo; 4],
+    /// Opener candidates looked at by `process_emphasis`, so a test can
+    /// bound the search without timing it.
+    #[cfg(test)]
+    steps: usize,
 }
+
+/// Length of the only tilde run that opens or closes strikethrough: GFM
+/// 0.29 wraps strikethrough "in two tildes"; one tilde ("~5 min") and three
+/// or more stay text. (cmark-gfm also takes one tilde unless its
+/// double-tilde option is set; the spec text is the authority here.)
+const STRIKE_RUN: usize = 2;
+
+/// Slots of `process_emphasis`'s `openers_bottom`: per delimiter char
+/// (`*`, `_`, `~`), whether the closer can also open (2), and the closer's
+/// run length mod 3 (3).
+const OPENER_KEYS: usize = 3 * 2 * 3;
 
 fn is_special(c: u8) -> bool {
     matches!(
@@ -249,6 +244,42 @@ fn scan_email(b: &[u8], i: usize) -> Option<usize> {
     }
 }
 
+impl<'a> Parser<'a> {
+    fn new(raw: &'a str, refs: &'a Refs, dialect: Dialect, m: &'a mut Meter) -> Self {
+        Parser {
+            m,
+            dialect,
+            s: raw,
+            b: raw.as_bytes(),
+            pos: 0,
+            refs,
+            nodes: vec![Node::new(Kind::Text(String::new()))],
+            tail: HEAD,
+            delims: Vec::new(),
+            last_delim: NONE,
+            brackets: Vec::new(),
+            brackets_made: 0,
+            link_floor: 0,
+            backticks: None,
+            ends: [Memo::default(); 4],
+            #[cfg(test)]
+            steps: 0,
+        }
+    }
+
+    fn parse(&mut self) -> Vec<Inline> {
+        self.run();
+        if self.m.failed() {
+            return Vec::new();
+        }
+        self.process_emphasis(0);
+        let mut out = Vec::new();
+        let first = self.nodes[HEAD].next;
+        self.convert(first, 0, &mut out);
+        out
+    }
+}
+
 impl Parser<'_> {
     fn run(&mut self) {
         while self.pos < self.b.len() && !self.m.failed() {
@@ -269,6 +300,7 @@ impl Parser<'_> {
                 }
                 b']' => self.close_bracket(),
                 b'*' | b'_' => self.delim_run(c),
+                b'~' if self.dialect == Dialect::Gfm => self.delim_run(c),
                 _ => self.text_run(),
             }
         }
@@ -365,8 +397,11 @@ impl Parser<'_> {
     fn text_run(&mut self) {
         let start = self.pos;
         let mut end = start + 1;
+        let gfm = self.dialect == Dialect::Gfm;
         while let Some(&c) = self.b.get(end) {
-            if is_special(c) && !(c == b'!' && self.b.get(end + 1) != Some(&b'[')) {
+            if (is_special(c) || (gfm && c == b'~'))
+                && !(c == b'!' && self.b.get(end + 1) != Some(&b'['))
+            {
                 break;
             }
             end += 1;
@@ -629,7 +664,7 @@ impl Parser<'_> {
             (left, right)
         };
         let node = self.text(&self.s[start..self.pos]);
-        if can_open || can_close {
+        if (can_open || can_close) && (ch != b'~' || n == STRIKE_RUN) {
             let d = self.delims.len();
             self.delims.push(Delim {
                 node,
@@ -681,7 +716,7 @@ impl Parser<'_> {
     fn process_emphasis(&mut self, bottom: usize) {
         // Keyed by delimiter char, whether the closer can also open, and
         // the closer's run length mod 3.
-        let mut openers_bottom = [bottom; 12];
+        let mut openers_bottom = [bottom; OPENER_KEYS];
         let mut closer = NONE;
         let mut d = self.last_delim;
         while d != NONE && d >= bottom {
@@ -694,10 +729,19 @@ impl Parser<'_> {
                 closer = c.next;
                 continue;
             }
-            let key = usize::from(c.ch == b'_') * 6 + usize::from(c.can_open) * 3 + c.len % 3;
+            let ch = match c.ch {
+                b'*' => 0,
+                b'_' => 1,
+                _ => 2,
+            };
+            let key = ch * 6 + usize::from(c.can_open) * 3 + c.len % 3;
             let mut opener = c.prev;
             let mut found = false;
             while opener != NONE && opener >= openers_bottom[key] {
+                #[cfg(test)]
+                {
+                    self.steps += 1;
+                }
                 let o = &self.delims[opener];
                 if o.can_open
                     && o.ch == c.ch
@@ -726,8 +770,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Wraps the nodes between `opener` and `closer` in emphasis; returns
-    /// the next closer to look at.
+    /// Wraps the nodes between `opener` and `closer` in emphasis (or, for
+    /// `~~`, strikethrough: both runs are exactly two, so both go whole);
+    /// returns the next closer to look at.
     fn insert_emph(&mut self, opener: usize, closer: usize) -> usize {
         let use_ = if self.delim_count(opener) >= 2 && self.delim_count(closer) >= 2 {
             2
@@ -743,7 +788,11 @@ impl Parser<'_> {
             d = p;
         }
         let (o_node, c_node) = (self.delims[opener].node, self.delims[closer].node);
-        let kind = if use_ == 1 { Kind::Emph } else { Kind::Strong };
+        let kind = match (self.delims[opener].ch, use_) {
+            (b'~', _) => Kind::Strikethrough,
+            (_, 1) => Kind::Emph,
+            _ => Kind::Strong,
+        };
         self.wrap(o_node, c_node, kind);
         if left_o == 0 {
             self.unlink(o_node);
@@ -920,6 +969,7 @@ impl Parser<'_> {
                 }
                 Kind::Emph => Inline::Emph(children(self)),
                 Kind::Strong => Inline::Strong(children(self)),
+                Kind::Strikethrough => Inline::Strikethrough(children(self)),
                 Kind::Link { dest, title } => Inline::Link {
                     dest,
                     title,
@@ -953,7 +1003,11 @@ impl Parser<'_> {
                 Kind::Html(t) => self.m.push(out, Inline::Html(t)),
                 Kind::SoftBreak => self.m.push(out, Inline::SoftBreak),
                 Kind::HardBreak => self.m.push(out, Inline::HardBreak),
-                Kind::Emph | Kind::Strong | Kind::Link { .. } | Kind::Image { .. } => {
+                Kind::Emph
+                | Kind::Strong
+                | Kind::Strikethrough
+                | Kind::Link { .. }
+                | Kind::Image { .. } => {
                     stack.push(self.nodes[n].first);
                 }
             }
@@ -1007,7 +1061,9 @@ mod tests {
     fn inline_depth(is: &[Inline]) -> usize {
         is.iter()
             .map(|i| match i {
-                Inline::Emph(c) | Inline::Strong(c) => 1 + inline_depth(c),
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+                    1 + inline_depth(c)
+                }
                 Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => {
                     1 + inline_depth(c)
                 }
@@ -1086,6 +1142,21 @@ mod tests {
             html::write(&d);
             md::write(&d);
             txt::write(&d);
+        }
+    }
+
+    #[test]
+    fn deep_strikethrough_is_capped() {
+        let n = 1000;
+        let p = format!("{}b{}", "~~a ".repeat(n), " a~~".repeat(n));
+        let quoted = format!("{}{p}", ">".repeat(300));
+        for p in [p, quoted] {
+            let d = md::read_with(p.as_bytes(), Dialect::Gfm).unwrap();
+            assert_eq!(para_depth(&d), MAX_DEPTH);
+            // The flattened wrappers keep their text: every `a` and the `b`.
+            assert_eq!(txt::write(&d).0.matches('a').count(), 2 * n);
+            html::write(&d);
+            md::write(&d);
         }
     }
 
@@ -1172,6 +1243,146 @@ mod tests {
         assert!(!html(&md).contains("href"));
         let md = format!("[{}]\n\n[{}]: /u", "a".repeat(999), "a".repeat(999));
         assert!(html(&md).contains("href=\"/u\""));
+    }
+
+    fn gfm(md: &str) -> String {
+        html::write(&md::read_with(md.as_bytes(), Dialect::Gfm).unwrap())
+    }
+
+    #[test]
+    fn single_tilde_is_text() {
+        assert_eq!(gfm("~a~"), "<p>~a~</p>\n");
+        assert_eq!(gfm("~5 min"), "<p>~5 min</p>\n");
+        // A single tilde neither opens nor closes against a double one.
+        assert_eq!(gfm("~a~~"), "<p>~a~~</p>\n");
+        assert_eq!(gfm("~~a~"), "<p>~~a~</p>\n");
+        assert_eq!(gfm("~~a~~"), "<p><del>a</del></p>\n");
+    }
+
+    #[test]
+    fn triple_tilde_is_text() {
+        // (Text first: three tildes at a line start open a code fence.)
+        assert_eq!(gfm("x ~~~a~~~"), "<p>x ~~~a~~~</p>\n");
+        assert_eq!(gfm("x ~~~~a~~~~"), "<p>x ~~~~a~~~~</p>\n");
+        // A longer run is not split into a pair and a rest.
+        assert_eq!(gfm("x ~~~a~~"), "<p>x ~~~a~~</p>\n");
+        assert_eq!(gfm("~~a~~~"), "<p>~~a~~~</p>\n");
+    }
+
+    #[test]
+    fn tilde_follows_the_flanking_rules() {
+        assert_eq!(gfm("~~ a~~"), "<p>~~ a~~</p>\n");
+        assert_eq!(gfm("~~a ~~"), "<p>~~a ~~</p>\n");
+        assert_eq!(gfm("a~~b~~c"), "<p>a<del>b</del>c</p>\n");
+        assert_eq!(gfm("\\~~a~~"), "<p>~~a~~</p>\n");
+        // Unclosed openers stay text; the first closer takes the nearest.
+        assert_eq!(gfm("~~a ~~b~~"), "<p>~~a <del>b</del></p>\n");
+    }
+
+    #[test]
+    fn tilde_and_emphasis_nest() {
+        assert_eq!(gfm("~~*a*~~"), "<p><del><em>a</em></del></p>\n");
+        assert_eq!(gfm("*~~a~~*"), "<p><em><del>a</del></em></p>\n");
+        assert_eq!(
+            gfm("**a ~~b~~**"),
+            "<p><strong>a <del>b</del></strong></p>\n"
+        );
+        assert_eq!(gfm("~~[a](b)~~"), "<p><del><a href=\"b\">a</a></del></p>\n");
+        assert_eq!(gfm("[~~a](b)~~"), "<p><a href=\"b\">~~a</a>~~</p>\n");
+        // Crossing runs: the first closer wins, the other stays text.
+        assert_eq!(gfm("~~a *b~~ c*"), "<p><del>a *b</del> c*</p>\n");
+        // A failed `~~` closer does not hide `*` openers below it.
+        // (The `**` closer has the `~~` closer's run length and flags, so
+        // a search bound shared between the two would stop at the `~~`.)
+        assert_eq!(gfm("*a b~~ c*"), "<p><em>a b~~ c</em></p>\n");
+        assert_eq!(gfm("**a b~~ c**"), "<p><strong>a b~~ c</strong></p>\n");
+    }
+
+    #[test]
+    fn tilde_in_code_span_is_text() {
+        assert_eq!(gfm("`~~a~~`"), "<p><code>~~a~~</code></p>\n");
+        assert_eq!(
+            gfm("~~a `b~~` c~~"),
+            "<p><del>a <code>b~~</code> c</del></p>\n"
+        );
+        assert_eq!(gfm("<~~a~~>"), "<p>&lt;<del>a</del>&gt;</p>\n");
+        assert_eq!(
+            gfm("x <a title=\"~~a~~\">"),
+            "<p>x <a title=\"~~a~~\"></p>\n"
+        );
+    }
+
+    #[test]
+    fn cm_dialect_reads_tildes_as_text() {
+        for md in ["~~a~~", "a ~~b~~ c", "~~*a*~~"] {
+            let cm = md::read_with(md.as_bytes(), Dialect::CommonMark).unwrap();
+            assert_eq!(cm, md::read(md.as_bytes()).unwrap());
+            assert!(!html::write(&cm).contains("<del>"), "{md}");
+        }
+        assert_eq!(
+            md::read(b"~~a~~").unwrap().blocks,
+            vec![Block::Paragraph(vec![Inline::Text("~~a~~".into())])]
+        );
+    }
+
+    #[test]
+    fn strikethrough_is_a_charged_node() {
+        let read = |nodes: usize| {
+            let limits = crate::Limits {
+                nodes,
+                ..crate::Limits::DEFAULT
+            };
+            md::read_limited_with(b"~~a~~", limits, Dialect::Gfm)
+        };
+        let need = (1..).find(|&n| read(n).is_ok()).unwrap();
+        assert_eq!(
+            read(need - 1),
+            Err(crate::ReadError::Limit(crate::LimitError::Exceeded(
+                "nodes"
+            )))
+        );
+        let plain = |nodes: usize| {
+            let limits = crate::Limits {
+                nodes,
+                ..crate::Limits::DEFAULT
+            };
+            md::read_limited_with(b"~~a~~", limits, Dialect::CommonMark).is_ok()
+        };
+        // GFM: the paragraph, two `~~` text nodes, `a`, and the wrapper;
+        // CommonMark reads `~~a~~` as one text node.
+        assert_eq!(need, (1..).find(|&n| plain(n)).unwrap() + 3);
+    }
+
+    /// Opener candidates `process_emphasis` looks at for `raw` in GFM.
+    fn emphasis_steps(raw: &str) -> usize {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let refs = Refs::new();
+        let mut p = Parser::new(raw, &refs, Dialect::Gfm, &mut m);
+        p.parse();
+        p.steps
+    }
+
+    #[test]
+    fn tilde_runs_stay_linear() {
+        // Step counts, not time: a search that restarted from the top per
+        // closer would look at ~n^2/2 candidates here.
+        let n = 2_000;
+        let inputs = [
+            "~~a ".repeat(n),
+            "a~~ ".repeat(n),
+            "~~".repeat(n),
+            "~".repeat(n),
+            "~~~ ".repeat(n),
+            format!("{}{}", "*a ".repeat(n), "a~~ ".repeat(n)),
+            format!("{}{}", "~~a ".repeat(n), "a* ".repeat(n)),
+            format!("{}{}", "~~a ".repeat(n), "a~~".repeat(n)),
+            "~~a*".repeat(n),
+            "[~~a".repeat(n),
+        ];
+        for raw in &inputs {
+            let steps = emphasis_steps(raw);
+            assert!(steps <= 4 * n, "{} steps for {:?}...", steps, &raw[..12]);
+        }
     }
 
     #[test]
