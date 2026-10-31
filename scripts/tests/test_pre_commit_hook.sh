@@ -59,13 +59,16 @@ pub fn h() -> u32 {
 }
 T
 echo "docs" >README.md
+# Cargo.lock is tracked (the hook runs cargo with --locked).
+cargo generate-lockfile --offline -q
 
 out="$work/out"
-# commit <label> <expect: pass|fail>: runs `git commit` (so the hook runs
+# commit <label> <expect: pass|fail> [paths]: runs `git commit` (so the hook runs
 # through git exactly as for a person) and compares the verdict.
 commit() {
   local label=$1 expect=$2 got=pass
-  git commit -q -m "$label" >"$out" 2>&1 || got=fail
+  shift 2
+  git commit -q -m "$label" "$@" >"$out" 2>&1 || got=fail
   if [ "$got" = "$expect" ]; then
     echo "ok   $label"
   else
@@ -137,11 +140,10 @@ commit "doc only" pass
 
 # (e) A deletion staged with `git rm --cached` is honoured: the file stays
 # in the working tree but is absent from the commit, and main.rs needs it.
-git checkout -q -- app/src/main.rs 2>/dev/null || git show HEAD:app/src/main.rs >app/src/main.rs
+git show HEAD:app/src/main.rs >app/src/main.rs
 rm -f app/src/untracked.rs
 git rm -q --cached app/src/helper.rs
 commit "staged deletion" fail
-git reset -q
 git add -A
 
 # (f) Formatting is judged on the staged content: staged unformatted code is
@@ -155,6 +157,110 @@ pub fn f(x: u32) -> u32 {
 T
 commit "staged unformatted" fail
 said "cargo fmt"
+
+git add app/src/lib.rs
+git diff --cached --quiet || { echo "FAIL setup: index differs from HEAD"; fails=$((fails + 1)); }
+
+pc=target/pre-commit
+# restore <path>: the committed content, staged (index == HEAD for it).
+restore() {
+  git show "HEAD:$1" >"$1"
+  git add -- "$1"
+}
+broken_main() {
+  printf 'mod helper;\n\nfn main() {\n    println!("{}", app::f(1) + helper::h() + missing());\n}\n' >app/src/main.rs
+}
+
+# (g) A rename to a non-Rust name must still run the check: lib-side `mod`
+# declarations (here main.rs's `mod helper;`) no longer resolve.
+git mv app/src/helper.rs app/src/helper.md
+commit "rename rs to md" fail
+said "FAILED step"
+git mv app/src/helper.md app/src/helper.rs
+
+# (h) `git commit <paths>` checks the tree of those paths only: a broken
+# change staged in another path is not part of the commit...
+broken_main
+git add app/src/main.rs
+printf '// note\n' >>app/src/lib.rs
+commit "paths: other staged path broken" pass app/src/lib.rs
+restore app/src/main.rs
+# ... and a broken listed path is rejected although everything else is fine.
+printf 'pub fn f(x: u32) -> u32 {\n    x + "a"\n}\n' >app/src/lib.rs
+commit "paths: listed path broken" fail app/src/lib.rs
+said "cargo check"
+git show HEAD:app/src/lib.rs >app/src/lib.rs
+
+# (i) A mode change is carried into the export.
+chmod +x app/src/helper.rs
+git add app/src/helper.rs
+commit "mode +x" pass
+[ -x $pc/tree/app/src/helper.rs ] || { echo "FAIL +x not exported"; fails=$((fails + 1)); }
+chmod -x app/src/helper.rs
+git add app/src/helper.rs
+commit "mode -x" pass
+[ ! -x $pc/tree/app/src/helper.rs ] || { echo "FAIL -x not exported"; fails=$((fails + 1)); }
+
+# (j) An unusable stamp forces a full export. A file in the export that is
+# not in the index (here extra.rs) would let `mod extra;` build if the
+# export were reused.
+extra_main() {
+  printf 'mod extra;\nmod helper;\n\nfn main() {\n    println!("{}", app::f(1) + helper::h());\n}\n' >app/src/main.rs
+  git add app/src/main.rs
+}
+echo 'garbage' >$pc/tree.id
+printf '' >$pc/tree/app/src/extra.rs
+extra_main
+commit "corrupt stamp" fail
+restore app/src/main.rs
+# A stamp naming a tree that does not exist.
+printf '0123456789012345678901234567890123456789\n' >$pc/tree.id
+printf '// n2\n' >>app/src/lib.rs
+git add app/src/lib.rs
+commit "missing-tree stamp" pass
+[ ! -e $pc/tree/app/src/extra.rs ] || { echo "FAIL stale file survived a full export"; fails=$((fails + 1)); }
+# Valid stamp, but a stray file in the export: the file-count guard.
+printf '' >$pc/tree/app/src/extra.rs
+extra_main
+commit "stray file in export" fail
+restore app/src/main.rs
+
+# (k) A failing `git diff-tree` must abort and leave no stamp, never pass
+# on a stale export. The shim fails only that subcommand.
+realgit=$(command -v git)
+mkdir "$work/shim"
+printf '#!/bin/sh\n[ "$1" = diff-tree ] && exit 3\nexec %s "$@"\n' "$realgit" >"$work/shim/git"
+chmod +x "$work/shim/git"
+printf '// n3\n' >>app/src/lib.rs
+git add app/src/lib.rs
+commit "warm export" pass
+broken_main
+git add app/src/main.rs
+# git puts its own exec dir before PATH for hooks, so the hook is run
+# directly here, as git would (cwd = top level).
+rc=0
+PATH="$work/shim:$PATH" bash scripts/git-hooks/pre-commit >"$out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL diff-tree failure let the hook pass"
+  fails=$((fails + 1))
+else
+  echo "ok   diff-tree fails"
+fi
+said "diff-tree"
+[ ! -e $pc/tree.id ] || { echo "FAIL stamp survived a failed update"; fails=$((fails + 1)); }
+commit "after failed update" fail
+said "cargo check"
+restore app/src/main.rs
+
+# (l) --locked: a staged Cargo.toml change without the matching Cargo.lock
+# is rejected; with the updated lock staged it passes.
+sed -i 's/^version = "0.0.0"/version = "0.0.1"/' app/Cargo.toml
+git add app/Cargo.toml
+commit "stale lock" fail
+said "Cargo.lock"
+cargo generate-lockfile --offline -q
+git add Cargo.lock
+commit "lock updated" pass
 
 if [ "$fails" -ne 0 ]; then
   echo "$fails failure(s)"
