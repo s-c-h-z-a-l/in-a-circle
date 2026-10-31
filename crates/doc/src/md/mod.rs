@@ -521,6 +521,9 @@ struct InlineWriter<'a> {
     markers: bool,
     /// Line breaks become spaces (headings cannot contain them).
     single_line: bool,
+    /// The delimiter of the `Emph` the inlines being written are inside
+    /// (at any depth), so a nested one at its edge can take the other.
+    in_emph: Option<&'static str>,
 }
 
 impl<'a> InlineWriter<'a> {
@@ -537,6 +540,7 @@ impl<'a> InlineWriter<'a> {
             line_start: true,
             markers,
             single_line,
+            in_emph: None,
         }
     }
 
@@ -555,7 +559,38 @@ impl<'a> InlineWriter<'a> {
                     };
                     self.text(t, eol);
                 }
-                Inline::Emph(c) => self.wrapped("*", c),
+                Inline::Emph(c) => {
+                    // An `Emph` at the edge of an `Emph` would put two
+                    // `*` side by side (`**x**`), which reads back as
+                    // `Strong`. `_` there is the other emphasis
+                    // delimiter; it opens and closes next to `*` and
+                    // punctuation, but not inside a word, so it is used
+                    // only when the neighbouring text is not alphanumeric.
+                    // An inner `Emph` glued to a word inside an outer one
+                    // (`*x*b` as the first child) still cannot be written
+                    // either way; that shape is left as it was.
+                    let alnum = |i: Option<&Inline>, end: bool| match i {
+                        Some(Inline::Text(t)) => {
+                            let c = if end {
+                                t.chars().next_back()
+                            } else {
+                                t.chars().next()
+                            };
+                            c.is_some_and(char::is_alphanumeric)
+                        }
+                        _ => false,
+                    };
+                    let before = idx.checked_sub(1).and_then(|i| items.get(i));
+                    let edge = (before.is_none() && !alnum(next, false))
+                        || (next.is_none() && !alnum(before, true));
+                    let delim = match self.in_emph {
+                        Some("*") if edge => "_",
+                        _ => "*",
+                    };
+                    let outer = self.in_emph.replace(delim);
+                    self.wrapped(delim, c);
+                    self.in_emph = outer;
+                }
                 Inline::Strong(c) => self.wrapped("**", c),
                 Inline::Strikethrough(c) => {
                     self.losses.insert(Loss::Strikethrough);
@@ -964,6 +999,29 @@ mod tests {
             "\\~`~`~\n"
         );
         assert_eq!(inline(vec![Inline::Code("~~".into()), t("~")]), "`~~`~\n");
+    }
+
+    /// `Emph` inside `Emph` must not write `**x**` (that reads back as
+    /// `Strong`): the inner one takes `_` at the edge and round-trips.
+    #[test]
+    fn nested_emphasis_round_trips() {
+        let e = |v: Vec<Inline>| Inline::Emph(v);
+        let cases = [
+            vec![e(vec![e(vec![t("x")])])],
+            vec![e(vec![t("a "), e(vec![t("x")])])],
+            vec![e(vec![e(vec![t("x")]), t(" b")])],
+            vec![e(vec![t("a "), e(vec![t("x")]), t(" b")])],
+            vec![e(vec![e(vec![e(vec![t("x")])])])],
+            vec![e(vec![Inline::Strong(vec![e(vec![t("x")])])])],
+        ];
+        for inl in cases {
+            let d = doc(vec![Block::Paragraph(inl)]);
+            let (out, losses) = write(&d);
+            assert!(losses.is_empty());
+            assert_eq!(read(out.as_bytes()).unwrap(), d, "{out:?}");
+        }
+        let (out, _) = write(&doc(vec![Block::Paragraph(vec![e(vec![e(vec![t("x")])])])]));
+        assert_eq!(out, "*_x_*\n");
     }
 
     #[test]
