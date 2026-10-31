@@ -31,6 +31,13 @@
 # the CBZ join action. Both are under the 100 KB explanation threshold;
 # inacircle-text is unchanged; the shipped inacircle still does not link the
 # zip, flate, probe or pdf crates.
+# Refreshed after the GFM work (tables, strikethrough, task lists and extended
+# autolinks in the Markdown reader; the aligned and listed table layout in the
+# plain-text writer), same toolchain and profile, built from commit f811cc5c
+# (tree clean): inacircle-text grew 61456 B (file, 53136 B of .text), from the
+# table parser and the column-width and wrapping logic. That is under the
+# 100 KB explanation threshold and the .text stays under the 1 MiB family
+# limit; inacircle and inacircle-pages are unchanged.
 inacircle 1160024 891880
-inacircle-text 695000 397314
+inacircle-text 756456 450450
 inacircle-pages 503712 403267
