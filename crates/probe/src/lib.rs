@@ -9,10 +9,12 @@
 
 mod jpeg;
 mod png;
+pub mod sniff;
 
 use std::ops::Range;
 
 pub use png::{MAX_IDAT_CHUNKS, check_png_data};
+pub use sniff::{Format, Sniffed, sniff};
 
 /// PNG color types the PDF writer can pass through (8 bit, no alpha).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

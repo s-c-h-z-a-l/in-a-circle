@@ -9,7 +9,7 @@ pub(crate) const SIGNATURE: [u8; 8] = *b"\x89PNG\r\n\x1a\n";
 
 /// PNG chunk lengths and image dimensions are at most 2^31 - 1 (PNG spec,
 /// section 5.2).
-const MAX_31: u32 = 0x7FFF_FFFF;
+pub(crate) const MAX_31: u32 = 0x7FFF_FFFF;
 
 /// At most this many IDAT chunks are listed. The list costs 16 bytes per
 /// chunk while each chunk costs the file at least 12, so an unbounded list
