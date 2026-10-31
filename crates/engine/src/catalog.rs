@@ -1367,8 +1367,6 @@ pub(crate) mod tests {
         lo
     }
 
-    /// Every cache limit is exact: the value at the limit is taken, one
-    /// more is refused, and a refusal takes nothing.
     /// The cleanup's verdicts on the killed leader and its group: a run that
     /// outlives SIGKILL or leaves members behind (also when they are still
     /// there at the deadline) is the binary's; a system call that fails is
@@ -1397,6 +1395,8 @@ pub(crate) mod tests {
         assert!(tra(group_failure(Err(err(std::io::ErrorKind::Other)))));
     }
 
+    /// Every cache limit is exact: the value at the limit is taken, one
+    /// more is refused, and a refusal takes nothing.
     #[test]
     fn cache_budget_limits_are_exact() {
         // Binaries: CACHE_BINS fit, the next one does not.
