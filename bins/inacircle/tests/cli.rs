@@ -20,7 +20,7 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
-const ACTIONS: [&str; 2] = ["inacircle-text", "inacircle-testaction"];
+const ACTIONS: [&str; 3] = ["inacircle-text", "inacircle-testaction", "inacircle-pages"];
 
 /// The action binaries live next to ours. `cargo test -p inacircle` alone
 /// does not build them, so build them once into the same target dir.
@@ -233,6 +233,58 @@ fn skip_unsandboxed(test: &str, o: &Out) -> bool {
         return true;
     }
     false
+}
+
+// ---- comic book to PDF through the real inacircle-pages ----
+
+/// A two-page CBZ of generated 8x8 grayscale PNGs.
+fn comic_book() -> Vec<u8> {
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let page = testzip::png(8, 8, 0, None, false, false, &rows);
+    testzip::zip(&[
+        (b"page2.png", &page, testzip::Store::Stored),
+        (b"page1.png", &page, testzip::Store::Deflated),
+    ])
+}
+
+#[test]
+fn cbz_to_pdf_end_to_end() {
+    let e = Env::with_actions("cbz2pdf", &["inacircle-pages"]);
+    let src = e.file("képregény.cbz", &comic_book());
+    let o = e.run(&["run", "pdf", "képregény.cbz"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("képregény/képregény.pdf");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    assert!(fs::read(&out).unwrap().starts_with(b"%PDF-"));
+    // The source is untouched.
+    assert_eq!(fs::read(&src).unwrap(), comic_book());
+    let job = o.job();
+    let history = e.history();
+    let commit = history
+        .lines()
+        .filter_map(|l| parse_line(l).ok())
+        .find(|l| l.kind == "publish-commit" && l.get("job") == Some(&job))
+        .unwrap_or_else(|| panic!("no publish-commit in {history}"));
+    // The history percent-encodes non-ASCII bytes of a path.
+    assert_eq!(
+        commit.get("actual"),
+        Some(format!("{}/k%C3%A9preg%C3%A9ny", e.files().display()).as_str())
+    );
+    assert!(
+        history
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("pages.cbz-to-pdf")
+                && l.get("status") == Some("done"))),
+        "{history}"
+    );
+
+    // The wheel's offer for the same file.
+    let o = e.run(&["offer", "képregény.cbz"]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("preset=pdf"), "{}", o.stdout);
 }
 
 // ---- text conversions through the real inacircle-text ----
@@ -1475,18 +1527,18 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=no\nhub\tx.bin\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\tx.bin\n"
     );
     // The plain offer output is unchanged and `--groups` needs files.
     let o = e.run(&["offer", "--groups"]);

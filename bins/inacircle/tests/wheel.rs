@@ -351,6 +351,11 @@ fn find_sleeper(secs: u32) -> Option<i32> {
 /// moves onto the Document slice (north of the center) and drops; returns
 /// once stage 2 is on the wheel.
 fn drag_to_stage2(c: &mut Compositor, list: &[u8]) {
+    drag_to_category(c, list, (960, 390));
+}
+
+/// Like [`drag_to_stage2`], onto the category slice at `at`.
+fn drag_to_category(c: &mut Compositor, list: &[u8], at: (u32, u32)) {
     let w = c
         .drag_enters(0, Duration::from_secs(2))
         .expect("the early receive");
@@ -358,8 +363,8 @@ fn drag_to_stage2(c: &mut Compositor, list: &[u8]) {
     // Attached so far: `Drop here`, then the categories.
     c.attached(2, Duration::from_secs(5));
     c.release_held();
-    c.drag_motion(960, 390);
-    // The hover on the lit Document slice.
+    c.drag_motion(at.0, at.1);
+    // The hover on the lit category slice.
     c.attached(3, Duration::from_secs(2));
     c.release_held();
     c.drop_it();
@@ -379,6 +384,123 @@ fn wait_exit(child: &mut std::process::Child, limit: Duration) -> std::process::
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// The real action binaries live next to the wheel's; build them once.
+fn action_bin(name: &str) -> PathBuf {
+    use std::sync::Once;
+    static BUILT: Once = Once::new();
+    let dir = Path::new(BIN).parent().unwrap();
+    BUILT.call_once(|| {
+        let mut c = Command::new(env!("CARGO"));
+        c.args([
+            "build",
+            "-q",
+            "-p",
+            "inacircle-text",
+            "-p",
+            "inacircle-pages",
+        ]);
+        if dir.file_name() == Some(std::ffi::OsStr::new("release")) {
+            c.arg("--release");
+        }
+        c.arg("--target-dir").arg(dir.parent().unwrap());
+        assert!(c.status().expect("cannot run cargo").success());
+    });
+    let p = dir.join(name);
+    assert!(p.is_file(), "{} not built", p.display());
+    p
+}
+
+impl Root {
+    /// Links the real action binary `name` into the actions dir and primes
+    /// the catalog cache with it by `inacircle offer sample` (outside the
+    /// wheel), checking that the offer names `preset`.
+    fn real_action_cached(&self, name: &str, sample: (&str, &[u8]), preset: &str) {
+        std::os::unix::fs::symlink(action_bin(name), self.0.join("actions").join(name)).unwrap();
+        let f = self.0.join("f").join(sample.0);
+        fs::write(&f, sample.1).unwrap();
+        let out = self.cmd().arg("offer").arg(&f).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains(&format!("preset={preset}")), "{stdout}");
+        fs::remove_file(f).unwrap();
+    }
+}
+
+/// Starts the wheel with a pointer over it, drags `list` onto the category
+/// at `category`, moves onto the target slice at `target`, clicks the left
+/// button and waits for the wheel to exit; its exit code.
+fn choose_on_the_wheel(
+    root: &Root,
+    list: &[u8],
+    category: (u32, u32),
+    target: (u32, u32),
+) -> Option<i32> {
+    let (mut c, mut child) = start(root, false);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    drag_to_category(&mut c, list, category);
+    // Past the guard against the second half of a double click
+    // (`SWAP_GUARD`, 200 ms): 300 ms leaves 100 ms for a loaded machine.
+    c.pump(Duration::from_millis(300));
+    c.release_held();
+    c.pointer_motion(target.0, target.1);
+    // 50 ms: the wheel handles the motion before the button arrives.
+    c.pump(Duration::from_millis(50));
+    // BTN_LEFT (evdev 0x110), the only button that chooses.
+    c.pointer_button(0x110);
+    // The wheel closes and the supervisor runs the action; the compositor
+    // only has to answer until the wheel hangs up. 20 s: the sandboxed
+    // action of a tiny fixture takes well under a second even in a debug
+    // build; past 20 s it is hung, and the test fails instead of waiting.
+    let t = Instant::now();
+    let hung = c.hangs_up(Duration::from_secs(20));
+    assert!(hung.is_ok(), "the wheel never closed after the click");
+    let st = wait_exit(&mut child, Duration::from_secs(20));
+    eprintln!("choice to exit: {:?}", t.elapsed());
+    st.code()
+}
+
+/// Real `inacircle-pages` on the wheel: a dropped `.cbz` lights Book (east),
+/// its PDF slice (north) is clicked, and the PDF is written.
+#[test]
+fn wheel_offers_and_runs_cbz_to_pdf() {
+    let root = Root::new("cbz");
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let page = testzip::png(8, 8, 0, None, false, false, &rows);
+    let cbz = testzip::zip(&[
+        (b"p2.png", &page, testzip::Store::Stored),
+        (b"p1.png", &page, testzip::Store::Deflated),
+    ]);
+    root.real_action_cached("inacircle-pages", ("primer.cbz", &cbz), "pdf");
+    let src = root.0.join("f/képregény.cbz");
+    fs::write(&src, &cbz).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Book is east of the center, PDF is its north slice.
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (960, 390));
+    assert_eq!(code, Some(0));
+    let pdf = fs::read(root.0.join("f/képregény/képregény.pdf")).expect("no PDF written");
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert_eq!(fs::read(&src).unwrap(), cbz, "the source changed");
+}
+
+/// The same path with `inacircle-text`: Document (north), Markdown (north).
+/// Until now no test ran an action chosen on the wheel.
+#[test]
+fn wheel_offers_and_runs_txt_to_md() {
+    let root = Root::new("txt2md");
+    root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "markdown");
+    let src = root.0.join("f/jegyzet.txt");
+    fs::write(&src, "Hello *world*\n").unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let code = choose_on_the_wheel(&root, &list, (960, 390), (960, 390));
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        fs::read_to_string(root.0.join("f/jegyzet/jegyzet.md")).expect("no Markdown written"),
+        "Hello \\*world\\*\n"
+    );
 }
 
 /// Stage 2 comes from the catalog cache: an action binary the cache does

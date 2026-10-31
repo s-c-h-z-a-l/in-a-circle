@@ -1,0 +1,16 @@
+[package]
+name = "testzip"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Compressor for the generated ZIP entries and PNG streams. Pulled in only
+# as a dev-dependency of the crates under test (never by a shipped binary;
+# scripts/check-shipped-deps.sh guards that). Same pin as crates/flate:
+# 0.9.1 was released 2026-03-13, more than two weeks before 2026-10-30.
+miniz_oxide = "=0.9.1"

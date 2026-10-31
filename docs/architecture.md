@@ -66,6 +66,17 @@ are in `CLAUDE.md`.
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
   As a fallback, the planner chains two edges through a lossless
   intermediate file, mostly for external tools.
+- **`pages`** (`inacircle-pages`): page-image books to PDF. Today one
+  action, `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
+  PNG without transparency, JPEG passed through untouched) becomes one
+  PDF with one page per image, in natural order of the entry names; one
+  CBZ, one PDF, all or nothing. It sits in the **Book** category. It is
+  `lossy=yes`: it leaves out entries that are not images (such as
+  `ComicInfo.xml`), ignores the Exif orientation and does not embed ICC
+  profiles, and reports each as a warning, which the notification shows.
+  A PNG is checked down to its scanlines; a JPEG is passed through
+  without checking its scan data, so a JPEG truncated inside its entropy
+  data is not detected and shows as a grey or partial page in the reader.
 
 ## Manifest
 
@@ -133,6 +144,7 @@ are in `CLAUDE.md`.
 inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
+action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
@@ -292,6 +304,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   for is useless anyway.
 - Binary formats: magic bytes in the first few KB decide; content beats a
   wrong extension.
+- **Comic books:** a file that starts with the ZIP signature and has the
+  extension `cbz` (any case) is `application/vnd.comicbook+zip`, label
+  `Comic book`. Only the head already read and the name decide; the engine
+  does not open the archive. Any other ZIP stays a label ("ZIP") without a
+  type.
 - **Planned, not built yet:** zip containers are looked into: ODF and
   EPUB declare their type in the `mimetype` entry; OOXML is told apart by
   the central directory at the end of the file (`word/document.xml`,
@@ -589,11 +606,11 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`; an unknown `group` is not shown, one stderr line per run). A category is **lit** when any dragged file has a
+  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not shown, one stderr line per run). A category is **lit** when any dragged file has a
   target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south): lit if applicable, dim otherwise; the hub is
+  north, `plain-text` south; `pdf` north in Book): lit if applicable, dim otherwise; the hub is
   the category's label. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
@@ -871,13 +888,19 @@ inacircle cancel <job-id>
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, action, doc (planned: toml)
+crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
+          probe, pdf (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
-          and text; the shipped `inacircle` links them, never `doc`)
-bins/     inacircle, inacircle-text, inacircle-testaction (test-only)
-tools/    gen-entities, bake-atlas (dev tools; bake-atlas alone uses
-          `fontdue`, kept out of the shipped binaries)
+          and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
+          `inacircle-pages`; the shipped `inacircle` links wire, dbus, ui,
+          engine, manifest and action, never `doc`, `flate`, `zip`,
+          `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
+bins/     inacircle, inacircle-text, inacircle-pages,
+          inacircle-testaction (test-only)
+tools/    gen-entities, bake-atlas, testzip (dev tools; bake-atlas alone
+          uses `fontdue`, testzip alone uses `miniz_oxide` to build test
+          archives; both are kept out of the shipped binaries)
 scripts/  checks and helpers
 spikes/   measurements, not product code
 ```

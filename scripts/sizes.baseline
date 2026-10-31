@@ -8,5 +8,10 @@
 # measurement markers.
 # The per-area account of the growth over the Plan 7 baseline
 # (inacircle 900352 671864) is in docs/benchmarks/binary-size.md.
-inacircle 1105536 841176
+# Refreshed after the pages-to-PDF work on this x86_64 desktop, built from
+# commit 8cf5df2 (tree clean), same toolchain and profile: inacircle grew
+# 1112 B (file) and the pages family 3224 B; the shipped inacircle does not
+# link the new zip, flate, probe or pdf crates.
+inacircle 1106648 841832
 inacircle-text 695000 397314
+inacircle-pages 451240 359779

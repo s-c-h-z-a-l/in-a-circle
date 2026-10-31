@@ -22,11 +22,18 @@ pub struct Group {
     pub direction: u8,
 }
 
-pub const GROUPS: &[Group] = &[Group {
-    id: "document",
-    label: "Document",
-    direction: 0,
-}];
+pub const GROUPS: &[Group] = &[
+    Group {
+        id: "document",
+        label: "Document",
+        direction: 0,
+    },
+    Group {
+        id: "book",
+        label: "Book",
+        direction: 2,
+    },
+];
 
 pub const PRESETS: &[Preset] = &[
     Preset {
@@ -44,6 +51,14 @@ pub const PRESETS: &[Preset] = &[
         label: "Plain text",
         direction: 4,
         group: "document",
+    },
+    Preset {
+        id: "pdf",
+        input: "application/vnd.comicbook+zip",
+        output: "application/pdf",
+        label: "PDF",
+        direction: 0,
+        group: "book",
     },
 ];
 
@@ -539,7 +554,9 @@ mod tests {
         let g = groups(&two_way(), &tally(&[("a.txt", "text/plain")]));
         let s = g[0].as_ref().unwrap();
         assert_eq!((s.group, s.label, s.lit), ("document", "Document", true));
-        assert_eq!(g.iter().flatten().count(), 1);
+        // Book is on the wheel too, dim: nothing here is a comic book.
+        assert_eq!(g.iter().flatten().count(), 2);
+        assert!(!g[2].as_ref().unwrap().lit);
     }
 
     #[test]
@@ -567,8 +584,8 @@ mod tests {
         }];
         let t = tally(&[("a.txt", "text/plain")]);
         let g = groups_in(GROUPS, &presets, &two_way(), &t);
-        // Only the table's category appears, and the stray preset lights nothing.
-        assert_eq!(g.iter().flatten().count(), 1);
+        // Only the table's categories appear, and the stray preset lights nothing.
+        assert_eq!(g.iter().flatten().count(), GROUPS.len());
         assert!(!g[0].as_ref().unwrap().lit);
         let o = offer_group_in(GROUPS, &presets, &two_way(), &t, "nonexistent");
         assert!(o.slices.iter().all(Option::is_none));
@@ -637,6 +654,63 @@ mod tests {
                 a.id
             );
         }
+    }
+
+    #[test]
+    fn book_group_sits_east() {
+        let book = GROUPS.iter().find(|g| g.id == "book").unwrap();
+        assert_eq!((book.label, book.direction), ("Book", 2));
+        let pdf = PRESETS.iter().find(|p| p.id == "pdf").unwrap();
+        assert_eq!(
+            (pdf.input, pdf.output, pdf.label, pdf.direction, pdf.group),
+            (
+                "application/vnd.comicbook+zip",
+                "application/pdf",
+                "PDF",
+                0,
+                "book"
+            )
+        );
+    }
+
+    #[test]
+    fn comic_book_offers_pdf_north_in_book() {
+        let mut a = act(
+            "pages.cbz-to-pdf",
+            "application/vnd.comicbook+zip",
+            "application/pdf",
+            10,
+            false,
+        );
+        a.group = "book".into();
+        let cat = Catalog { actions: vec![a] };
+        let t = tally(&[("x.cbz", "application/vnd.comicbook+zip")]);
+        let g = groups(&cat, &t);
+        let book = g[2].as_ref().unwrap();
+        assert_eq!((book.group, book.label, book.lit), ("book", "Book", true));
+        assert!(!g[0].as_ref().unwrap().lit, "Document stays dim");
+        let o = offer_group(&cat, &t, "book");
+        assert_eq!(o.hub, "Book");
+        let pdf = o.slices[0].as_ref().unwrap();
+        assert_eq!(
+            (
+                pdf.preset,
+                pdf.label.as_str(),
+                pdf.applicable,
+                pdf.disabled.as_deref()
+            ),
+            ("pdf", "PDF", 1, None)
+        );
+        assert_eq!(o.slices.iter().flatten().count(), 1);
+        // The flat offer for the same file offers it too.
+        let o = offer(
+            &cat,
+            &[(
+                "x.cbz".into(),
+                kind(Some("application/vnd.comicbook+zip"), "Comic book"),
+            )],
+        );
+        assert_eq!(o.slices[0].as_ref().unwrap().preset, "pdf");
     }
 
     #[test]

@@ -1,0 +1,16 @@
+[package]
+name = "flate"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# Reference implementation for the differential tests and the compressor
+# for the test streams. 0.9.1 was released 2026-03-13 (more than two weeks
+# before 2026-10-30); it is the newest release at that age. Test-time only.
+miniz_oxide = "=0.9.1"

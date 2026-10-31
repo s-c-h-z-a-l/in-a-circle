@@ -1242,7 +1242,9 @@ mod tests {
             (doc.label.as_str(), doc.group.as_str(), doc.lit),
             ("Document", "document", true)
         );
-        assert_eq!(g.slices.iter().flatten().count(), 1);
+        // Book is on the wheel too, dim: no dragged file is a comic book.
+        assert_eq!(g.slices.iter().flatten().count(), 2);
+        assert!(!g.slices[2].as_ref().expect("books point east").lit);
 
         let none = groups_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
