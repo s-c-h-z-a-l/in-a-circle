@@ -1,0 +1,18 @@
+[foo]: 7z
+
+[foo]b[foo]: 7zz]
+[foo]bbaz"
+
+[foo]\baz"
+
+[foo]baz"
+
+[f]
+[foo]bbaz"
+[foo]\baz"
+
+[foo]baz"
+
+[foo]\baz"
+
+[foo]

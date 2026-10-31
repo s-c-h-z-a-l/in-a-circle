@@ -1,0 +1,19 @@
+| abc | def |
+| --- | --- |
+| bar | baz abc | def |
+| --- | --- |
+| bar | baz |
+ <
+| ---de --- |
+| bar | baz |
+bar
+
+barba|
+ <
+| --- | --- |
+| bar | baz |
+bar
+
+barbar
+
+bar

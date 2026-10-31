@@ -1,0 +1,12 @@
+[[baz][--
+		*bar [baz][roo\
+----
+		ef]*][ref]
+
+[ref]: /uri *bar [baz][roo\
+----
+		f]
+
+[rz][roo\
+----
+		*bar [baz]

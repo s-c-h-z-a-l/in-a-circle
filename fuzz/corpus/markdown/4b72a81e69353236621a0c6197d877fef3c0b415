@@ -1,7 +1,0 @@
-[fourL2
-[bar]: /url/baz]
-
-[bazfoo][bar][baz]
-
-[baz]: /url1
-[bar]: /
