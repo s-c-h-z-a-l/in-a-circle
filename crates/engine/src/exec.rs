@@ -1626,8 +1626,15 @@ pub(crate) fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
 }
 
 /// Whether our child `pid` has exited, observed without reaping it (the
-/// fallback for kernels without pidfd).
+/// fallback for kernels without pidfd). A `waitid` error reads as not
+/// exited.
 pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
+    probe_exit(pid).unwrap_or(false)
+}
+
+/// [`exited_unreaped`] with the `waitid` error kept apart from "still
+/// running".
+fn probe_exit(pid: libc::pid_t) -> io::Result<bool> {
     #[cfg(test)]
     tests::PROBES.set(tests::PROBES.get() + 1);
     // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
@@ -1635,19 +1642,43 @@ pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
     let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
     // SAFETY: info is a valid out-pointer; WNOWAIT leaves the child unreaped.
     let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
     // With WNOHANG and no state change, si_pid stays 0.
     // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
-    r == 0 && unsafe { info.si_pid() } != 0
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+/// What [`wait_for_exit`] saw by its deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// The child has exited (still unreaped).
+    Exited,
+    /// It still ran at the deadline: the last look said so.
+    Running,
+    /// The last look at it was a failed `waitid`: whether it runs is not
+    /// known.
+    Unknown,
 }
 
 /// Waits until our unreaped child `pid` has exited (it stays unreaped),
 /// by its pidfd or, without one, by `waitid(WNOWAIT)`; false if it has not
-/// by `until`.
+/// by `until` (or the last look at it failed, see [`wait_for_exit`]).
 pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> bool {
+    wait_for_exit(pid, pidfd, until) == Waited::Exited
+}
+
+/// [`wait_exited`], telling a child still running at `until` from one the
+/// last `waitid` could not look at. Same waits, same deadline: only the
+/// verdict at the end differs.
+pub(crate) fn wait_for_exit(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> Waited {
     let mut nap = Duration::from_millis(1);
     loop {
         let left = until.saturating_duration_since(Instant::now());
-        match pidfd {
+        // Whether this look at the child was a failed `waitid` (a pidfd
+        // poll that timed out is a clean "still running").
+        let unknown = match pidfd {
             Some(fd) => {
                 let mut p = libc::pollfd {
                     fd: fd.as_raw_fd(),
@@ -1659,7 +1690,7 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
                 // SAFETY: p is one valid pollfd.
                 let r = unsafe { libc::poll(&mut p, 1, ms) };
                 if r > 0 {
-                    return true;
+                    return Waited::Exited;
                 }
                 // mutants: not killable by a test. No signal handler is
                 // installed and SIGTERM/SIGINT are blocked, so poll does not
@@ -1674,14 +1705,26 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
                 // valid pidfd; none can be provoked. It asks `waitid` instead (no verdict
                 // is guessed), so a changed condition cannot open a gap.
                 if r < 0 {
-                    return exited_unreaped(pid);
+                    return match probe_exit(pid) {
+                        Ok(true) => Waited::Exited,
+                        Ok(false) => Waited::Running,
+                        Err(_) => Waited::Unknown,
+                    };
                 }
+                false
             }
-            None if exited_unreaped(pid) => return true,
-            None => {}
-        }
+            None => match probe_exit(pid) {
+                Ok(true) => return Waited::Exited,
+                Ok(false) => false,
+                Err(_) => true,
+            },
+        };
         if left.is_zero() {
-            return false;
+            return if unknown {
+                Waited::Unknown
+            } else {
+                Waited::Running
+            };
         }
         if pidfd.is_none() {
             std::thread::sleep(nap.min(left));
@@ -4032,6 +4075,32 @@ pub(crate) mod tests {
         assert!(probes <= PROBES_MAX, "the wait spun: {probes} probes");
         slow.kill().unwrap();
         slow.wait().unwrap();
+    }
+
+    /// `wait_for_exit` tells an exit, a child still running at the
+    /// deadline (with and without a pidfd) and a `waitid` that cannot look
+    /// at it (not our child: ECHILD) apart.
+    #[test]
+    fn wait_for_exit_tells_running_from_unknown() {
+        let mut quick = spawn_sh("exit 0");
+        let pid = quick.id() as libc::pid_t;
+        let until = Instant::now() + Duration::from_secs(5);
+        assert_eq!(wait_for_exit(pid, None, until), Waited::Exited);
+        quick.wait().unwrap();
+
+        let mut slow = spawn_sh("sleep 30");
+        let pid = slow.id() as libc::pid_t;
+        let short = || Instant::now() + Duration::from_millis(20);
+        assert_eq!(wait_for_exit(pid, None, short()), Waited::Running);
+        let pidfd = pidfd_open(pid);
+        if pidfd.is_some() {
+            assert_eq!(wait_for_exit(pid, pidfd.as_ref(), short()), Waited::Running);
+        }
+        slow.kill().unwrap();
+        slow.wait().unwrap();
+
+        assert_eq!(wait_for_exit(1, None, short()), Waited::Unknown);
+        assert!(!wait_exited(1, None, short()), "unknown is not exited");
     }
 
     /// `reap_group` sleeps between probes of a member that still runs: it

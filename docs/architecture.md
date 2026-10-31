@@ -116,8 +116,8 @@ are in `CLAUDE.md`.
   retries).
 - A failed run is the binary's own fault, or not. Its own: it hung past
   its own 2 s deadline, crashed (died by a signal), exited non-zero, left
-  processes behind, kept its output open after its exit, or did not exit
-  after SIGKILL. Then the binary backs off (the negative cache): its `bin`
+  processes behind (also ones still there when the cleanup gives up),
+  kept its output open after its exit, or did not exit after SIGKILL. Then the binary backs off (the negative cache): its `bin`
   line keeps its current identity plus `fails=<n>` and `retry=<unix
   seconds>`, and its old actions, if any, stay on the wheel. Its manifest
   is not rerun before `retry`: 60 s after the first failure in a row,

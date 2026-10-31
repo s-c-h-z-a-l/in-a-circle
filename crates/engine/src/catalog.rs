@@ -997,25 +997,22 @@ fn collect(child: &mut std::process::Child, deadline: Instant, own: bool) -> Res
     // its members cannot be counted.
     kill_group(child);
     let until = Instant::now() + exec::GROUP_GONE;
-    if !exec::wait_exited(pid, pidfd.as_ref(), until) {
-        // Killed but stuck in the kernel; left unreaped (its group id stays
-        // its own), nothing accepted.
-        return Err(p("did not exit after SIGKILL"));
+    // Not exited: left unreaped (its group id stays its own), nothing
+    // accepted (see `leader_failure`).
+    if let Some(f) = leader_failure(exec::wait_for_exit(pid, pidfd.as_ref(), until)) {
+        return Err(f);
     }
     let status = child.wait();
     // A descendant alive at the leader's exit rejects the manifest: its
     // output is not finished. The kernel's child list tells
-    // (`exec::reap_group`); not empty in time: rejected, the binary's
-    // fault; unreadable: rejected, ours (transient).
+    // (`exec::reap_group`, see `group_failure`).
     let left_behind = exec::reap_group(pid, until);
     // The reason the run itself failed (timed out, too large, unreadable)
     // is the cause; the descendants that outlived it are its consequence.
     // Either way nothing is accepted.
     result?;
-    match left_behind {
-        Ok(false) => {}
-        Ok(true) => return Err(p("left processes behind")),
-        Err(_) => return Err(t("cannot count its processes")),
+    if let Some(f) = group_failure(left_behind) {
+        return Err(f);
     }
     while open {
         let left = until.saturating_duration_since(Instant::now());
@@ -1047,6 +1044,33 @@ fn collect(child: &mut std::process::Child, deadline: Instant, own: bool) -> Res
         Ok(s) if s.success() => Ok(out),
         Ok(s) => Err(Fail::Penalized(format!("exited with {s}"))),
         Err(_) => Err(t("wait failed")),
+    }
+}
+
+/// The killed leader's exit wait (`exec::wait_for_exit`), as a failure.
+/// Still running at the cleanup's deadline: stuck in the kernel after
+/// SIGKILL, the binary's run (penalized). The last `waitid` failed: ours,
+/// not the binary's (transient).
+fn leader_failure(w: exec::Waited) -> Option<Fail> {
+    match w {
+        exec::Waited::Exited => None,
+        exec::Waited::Running => Some(Fail::Penalized("did not exit after SIGKILL".to_owned())),
+        exec::Waited::Unknown => Some(Fail::Transient("cannot tell if it exited".to_owned())),
+    }
+}
+
+/// The group's reap (`exec::reap_group`), as a failure. A member alive at
+/// the kill, or one still there at the cleanup's deadline (`TimedOut`):
+/// the binary left processes behind (penalized). Any other error: the
+/// child list could not be read, ours (transient).
+fn group_failure(r: std::io::Result<bool>) -> Option<Fail> {
+    match r {
+        Ok(false) => None,
+        Ok(true) => Some(Fail::Penalized("left processes behind".to_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Some(Fail::Penalized("left processes behind".to_owned()))
+        }
+        Err(_) => Some(Fail::Transient("cannot count its processes".to_owned())),
     }
 }
 
@@ -1345,6 +1369,34 @@ pub(crate) mod tests {
 
     /// Every cache limit is exact: the value at the limit is taken, one
     /// more is refused, and a refusal takes nothing.
+    /// The cleanup's verdicts on the killed leader and its group: a run that
+    /// outlives SIGKILL or leaves members behind (also when they are still
+    /// there at the deadline) is the binary's; a system call that fails is
+    /// ours.
+    #[test]
+    fn cleanup_failures_are_penalized_or_transient() {
+        let pen = |f: Option<Fail>, why: &str| matches!(f, Some(Fail::Penalized(w)) if w == why);
+        let tra = |f: Option<Fail>| matches!(f, Some(Fail::Transient(_)));
+        assert!(leader_failure(exec::Waited::Exited).is_none());
+        assert!(pen(
+            leader_failure(exec::Waited::Running),
+            "did not exit after SIGKILL"
+        ));
+        assert!(tra(leader_failure(exec::Waited::Unknown)));
+
+        let err = |k| std::io::Error::new(k, "x");
+        assert!(group_failure(Ok(false)).is_none());
+        assert!(pen(group_failure(Ok(true)), "left processes behind"));
+        assert!(pen(
+            group_failure(Err(err(std::io::ErrorKind::TimedOut))),
+            "left processes behind"
+        ));
+        assert!(tra(group_failure(Err(std::io::Error::from_raw_os_error(
+            libc::EINVAL
+        )))));
+        assert!(tra(group_failure(Err(err(std::io::ErrorKind::Other)))));
+    }
+
     #[test]
     fn cache_budget_limits_are_exact() {
         // Binaries: CACHE_BINS fit, the next one does not.
@@ -1380,6 +1432,32 @@ pub(crate) mod tests {
         full.push(action_line(1, 1));
         let mut b = CacheBudget::new();
         assert!(b.take(&entry(full)).unwrap_err().contains("fields"));
+
+        // The same with a backoff on the bin, whose line then has 6 fields:
+        // the writer counts them as the reader does, so a cache written at
+        // the limit is read back, and one field more is refused by both.
+        let fields_with_backoff = |extra: usize| {
+            let mut lines = vec![action_line(per, 1); (CACHE_TOTAL_FIELDS - 6) / per];
+            lines.push(action_line((CACHE_TOTAL_FIELDS - 6) % per, 1));
+            if extra > 0 {
+                lines.push(action_line(extra, 1));
+            }
+            let mut e = entry(lines);
+            e.backoff = Some(Backoff {
+                fails: 3,
+                retry: 1_000,
+            });
+            assert_eq!(bin_line(&e).items.len(), 6);
+            let mut b = CacheBudget::new();
+            (b.take(&e).map(|()| b.fields), cache_text(&[e]))
+        };
+        let (taken, text) = fields_with_backoff(0);
+        assert_eq!(taken, Ok(CACHE_TOTAL_FIELDS));
+        assert_eq!(check_cache(text.as_bytes()), Ok(()));
+        assert!(parse_cache(text.as_bytes()).is_some());
+        let (taken, text) = fields_with_backoff(1);
+        assert!(taken.unwrap_err().contains("fields"));
+        assert!(check_cache(text.as_bytes()).is_err());
 
         // Fields of one record: 32 fit, 33 do not.
         let mut b = CacheBudget::new();
