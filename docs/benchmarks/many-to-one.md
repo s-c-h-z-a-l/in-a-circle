@@ -61,20 +61,49 @@ budgets on both architectures.
 The sandboxed children write corrupt `profraw` files, so the coverage
 profiles were merged with `failure-mode=warn`.
 
-## Drop to stage 2 (pending)
+## Drop to stage 2
 
-The classifier now types PNG and JPEG, and the preset choice runs per
-preset on the budgeted drop-to-stage-2 path. The 50-sample p95 of our CPU
-from the drop's data to the stage-2 wheel's commit, for 1, 30 and 1,000
-images, on the reference environment and on a second, untuned machine, is
-**pending**: it needs the user at the machine. Until it is recorded here
-the budget claim for that path is open.
+The classifier types PNG and JPEG, and the preset choice runs per preset on
+the budgeted drop-to-stage-2 path. The metric is our CPU from the dropped
+data to the stage-2 wheel's commit (`INACIRCLE_MEASURE=1`), p95 by nearest
+rank for the series; the image drops are hand-made runs, so they are shown
+as ranges. Builds, machines and the text-path series (the regression check
+against `main`) are in [pages-family.md](pages-family.md#drop-to-stage-2):
+the text path moved +4% (desktop) and +0.2% (ThinkCentre) p95, p95 171 us
+and 618 us, against the 1,000 us budget. Build B is the branch with the
+join; B2 adds the drop-list fix below.
+
+| Machine | Build | Images | Runs | Drop to stage 2 (us) | Early list to level 1 (us) |
+|---|---|---|---|---|---|
+| desktop | B | 30 | 5 | 141-167 | not recorded |
+| desktop | B | 1,000 (~57 KB list) | 3 | 165-173 | 3,680-3,923 |
+| ThinkCentre | B | 30 | 5 | 454-529 | 1,475-1,899 |
+| ThinkCentre | B | 1,000 (~71 KB list, 62-byte paths) | 9 attempts, none worked | - | - |
+| ThinkCentre | B2 | 1,000 | 3 | 468-507 | 14,800-15,900 |
+
+The early list to level 1 grows with the number of inputs (per-input
+work, reported and not budgeted); the drop to stage 2 does not.
+
+**Finding.** With build B, every one of the 9 attempts on the ThinkCentre
+refused the 1,000-image drag silently (the wheel showed "Drop here"): the
+list of dropped paths (~71 KB with 62-byte paths) was over the 64 KiB drop
+list limit. The desktop list (~57 KB, shorter paths) fit, which hid it
+there. The limit was raised to 1 MiB (B2), still a fixed, bounded limit; with B2
+the same drag works and the wheel's PSS stayed about 2.8 MB (gate 5 MB).
+
+**End to end.** One 1,000-image drag on the ThinkCentre with B2 ran the
+whole join: a PDF of 1,000 pages, 4,191,043 B, PDF 1.4, `qpdf --check`
+clean; wheel PSS 2,796 kB; drop to stage 2 357 us.
+
+The second machine is outside the reference timing gate by policy and is
+shown for the absolute overrun check; nothing is over.
 
 ## Verdict
 
 Within every measured bound: 1,000 images join in under 3 MB of peak
 memory, and the binaries are inside their budgets on both architectures.
-The drop-to-stage-2 timing is open.
+The drop to stage 2 is 141-173 us per run on the desktop and
+357-529 us on the ThinkCentre, far under the 1,000 us budget.
 
 ## Reproduce
 
