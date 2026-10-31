@@ -1548,6 +1548,51 @@ fn name_width_follows_input_count() {
 }
 
 #[test]
+fn cbz_progress_counts_every_input_skipped_ones_included() {
+    use std::os::unix::ffi::OsStrExt;
+    let t = tmp("cbz-progress");
+    let png = rgb_png(8, 8);
+    let odd = image_file(&t, "x.png", &png);
+    let odd_name = t.join("in").join(std::ffi::OsStr::from_bytes(b"\xff.png"));
+    fs::rename(&odd, &odd_name).unwrap();
+    let ins = [
+        image_file(&t, "a.png", &png),
+        odd_name,
+        image_file(&t, "b.png", &png),
+        image_file(&t, "c.png", &png),
+    ];
+    let o = run_cbz(&t.join("work"), &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    assert_eq!(
+        progress_values(&out),
+        ["0", "0.25", "0.5", "0.75", "1"],
+        "{out}"
+    );
+}
+
+#[test]
+fn cbz_takes_an_image_of_exactly_the_entry_limit() {
+    let t = tmp("cbz-exact-limit");
+    let exact = image_file(&t, "exact.png", &rgb_png(8, 8));
+    // Sparse: a real PNG header, then zeros up to exactly 64 MiB. The
+    // limit is `>`: the size itself is allowed.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&exact)
+        .unwrap()
+        .set_len(64 << 20)
+        .unwrap();
+    let o = run_cbz(&t.join("work"), std::slice::from_ref(&exact));
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(lines(&out, "fail").is_empty(), "{out}");
+    assert_eq!(lines(&out, "take").len(), 1, "{out}");
+    assert_eq!(lines(&out, "joined").len(), 1, "{out}");
+}
+
+#[test]
 fn bad_inputs_fail_rest_joined() {
     let t = tmp("cbz-bad");
     let good = rgb_png(8, 8);

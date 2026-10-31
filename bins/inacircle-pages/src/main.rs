@@ -1381,6 +1381,18 @@ mod tests {
     }
 
     #[test]
+    fn the_rlimit_ceiling_allows_exactly_the_projected_size() {
+        let s = Scratch::new("capedge");
+        let o = read_only_out(&s);
+        let total = o.writer.projected_len(7, 4096).unwrap();
+        assert!(check_ceilings(&o.writer, 7, 4096, Some(total)).is_ok());
+        let Err(Whole(r)) = check_ceilings(&o.writer, 7, 4096, Some(total - 1)) else {
+            panic!("one byte over the cap passed");
+        };
+        assert!(r.starts_with("CBZ would be larger than"), "{r}");
+    }
+
+    #[test]
     fn the_entry_count_has_its_own_copy() {
         let s = Scratch::new("count");
         let mut w = writer(&s);
