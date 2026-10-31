@@ -19,8 +19,14 @@
 //! `ftp://` links are found during the pass (at a `w` or the scheme's `:`),
 //! bare email addresses in the finished text, outside links and images.
 //! Each scan is bounded: the domain run is memoized for every start inside
-//! it, a link's parentheses are counted once, and an address scan never
-//! passes the next `@`.
+//! it; whether the trailing-punctuation rule trims into the domain is
+//! decided before the path is read, by a scan that stops at the first byte
+//! the trim keeps, so only a link that is taken reads its path (and counts
+//! its parentheses), once; and an address scan never passes the next `@`.
+//!
+//! The rules follow the GFM spec text. One reading follows cmark-gfm where
+//! the text is open to two: the `www` of `www.` counts as a segment, so
+//! `www.x` (no period after `www.`) is a link, as the reference renders it.
 //!
 //! Nesting (emphasis, strikethrough, links, images) deeper than
 //! [`MAX_DEPTH`] is flattened when the arena becomes the [`Inline`] tree:
@@ -327,10 +333,10 @@ struct DomainRun {
     /// The segments of `start..cut`: the domain when the link is trimmed
     /// into the run (`_www.a.b_` links `www.a.b`).
     at_cut: Segments,
-    /// The trimmed end of a link through this run, once computed. It does
-    /// not depend on where the link starts: the run holds no parenthesis,
-    /// and trimming inside it stops at `cut`.
-    tail: Option<usize>,
+    /// Whether the trailing-punctuation rule removes the whole path after
+    /// the run ([`path_trims_away`]), once computed. It does not depend on
+    /// where the link starts: the run holds no parenthesis.
+    trims: Option<bool>,
 }
 
 /// Whether the domain of `run` from `d`, with the segments `g` (of the
@@ -392,6 +398,38 @@ fn trim_link(link: &[u8], opens: usize, mut closes: usize, steps: &mut usize) ->
         }
     }
     n
+}
+
+/// Whether [`trim_link`] removes the whole path from `i` (the end of a
+/// domain run) to the next whitespace, `<` or the end, so that the trim
+/// reaches into the run. It does when every byte of the path is one of
+/// `?!.,:*_~`, a `)` (with no `(` in the path, every `)` is one too many:
+/// a domain holds none), or part of an entity look-alike `&` alnum+ `;`;
+/// those are exactly what the trim removes, in any order. Stops at the
+/// first other byte, so it never reads into a later candidate: a `www.` or
+/// scheme there needs a letter outside an entity look-alike after a
+/// boundary, and the scan stops at that letter.
+fn path_trims_away(b: &[u8], mut i: usize, steps: &mut usize) -> bool {
+    loop {
+        *steps += 1;
+        match b.get(i) {
+            None => return true,
+            Some(&c) if is_ascii_space(c) || c == b'<' => return true,
+            Some(b'?' | b'!' | b'.' | b',' | b':' | b'*' | b'_' | b'~' | b')') => i += 1,
+            Some(b'&') => {
+                let k = b[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .count();
+                *steps += k;
+                if k == 0 || b.get(i + 1 + k) != Some(&b';') {
+                    return false;
+                }
+                i += k + 2;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// The domain of an email address from `j` (after the `@`): segments of
@@ -788,21 +826,32 @@ impl Parser<'_> {
             self.domain = Some(run);
             return None;
         }
-        let tail = match run.tail {
+        // Which domain counts (the whole run, or the run trimmed to `cut`)
+        // is decided before the path is scanned, so a candidate that fails
+        // here never scans the path, and a later candidate in that path
+        // never makes it scan again.
+        let trims = match run.trims {
             Some(t) => t,
             None => {
-                let t = self.link_tail(d, run.end);
-                run.tail = Some(t);
+                let mut steps = 0;
+                let t = path_trims_away(b, run.end, &mut steps);
+                self.count(steps);
+                run.trims = Some(t);
                 t
             }
         };
         self.domain = Some(run);
-        let segs = if tail >= run.end {
-            &run.full
-        } else {
-            &run.at_cut
-        };
-        valid(&run, segs, d).then_some((from, tail))
+        if trims {
+            // The trim takes the path, then the run's trailing `.` and
+            // `_`, and stops at `cut`.
+            return valid(&run, &run.at_cut, d).then_some((from, run.cut));
+        }
+        if !valid(&run, &run.full, d) {
+            return None;
+        }
+        let tail = self.link_tail(d, run.end);
+        debug_assert!(tail > run.end);
+        Some((from, tail))
     }
 
     /// The end of a link whose domain starts at `d` and ends at `end`: the
@@ -830,7 +879,7 @@ impl Parser<'_> {
             full: Segments::default(),
             cut: start,
             at_cut: Segments::default(),
-            tail: None,
+            trims: None,
         };
         let mut after_dot = false;
         let mut steps = 0;
@@ -1355,8 +1404,11 @@ impl Parser<'_> {
             };
             let email = &t[from..end];
             // Three nodes (the link, its text, the text after it) and the
-            // destination, a second copy of the address with `mailto:`;
-            // the pieces of `t` are copies of text already charged.
+            // destination, a second copy of the address with `mailto:`.
+            // The pieces of `t` (before, address, rest) are not charged
+            // again: together they are `t`'s bytes, which are charged, and
+            // `t` is dropped when the caller's item goes, so the copy
+            // briefly holds at most one charged text node twice.
             if !self.m.nodes(3) || !self.m.text("mailto:".len() + email.len()) {
                 return;
             }
@@ -1808,6 +1860,12 @@ mod tests {
         ] {
             assert_eq!(gfm(no), format!("<p>{no}</p>\n"), "{no:?}");
         }
+        // The `www` of `www.` is a segment (cmark-gfm's reading; the spec
+        // text is open to two): `www.x` is a link.
+        assert_eq!(
+            gfm("www.localhost"),
+            "<p><a href=\"http://www.localhost\">www.localhost</a></p>\n"
+        );
         assert_eq!(
             gfm("www.a_b.c.d"),
             "<p><a href=\"http://www.a_b.c.d\">www.a_b.c.d</a></p>\n"
@@ -1851,6 +1909,25 @@ mod tests {
             gfm("www.a.b&x;&y;."),
             "<p><a href=\"http://www.a.b\">www.a.b</a>&amp;x;&amp;y;.</p>\n"
         );
+        // When the trim takes the whole path, it goes on into the domain
+        // and the trimmed domain decides; otherwise the whole one does.
+        for (md, want) in [
+            ("www.a.b_)", "<a href=\"http://www.a.b\">www.a.b</a>_)"),
+            (
+                "www.a.b_&x;.",
+                "<a href=\"http://www.a.b\">www.a.b</a>_&amp;x;.",
+            ),
+            ("www.a.b_?/", "www.a.b_?/"),
+            ("www.a.b_&x", "www.a.b_&amp;x"),
+            ("www.a.b_;", "www.a.b_;"),
+            ("www.a_b.c.?", "www.a_b.c.?"),
+            (
+                "www.a_b.c./",
+                "<a href=\"http://www.a_b.c./\">www.a_b.c./</a>",
+            ),
+        ] {
+            assert_eq!(gfm(md), format!("<p>{want}</p>\n"), "{md:?}");
+        }
     }
 
     #[test]
@@ -2023,14 +2100,45 @@ mod tests {
             "(www.a.b) ".repeat(n),
         ];
         for raw in &inputs {
-            let steps = autolink_steps(raw);
-            assert!(
-                steps <= 4 * raw.len(),
-                "{} steps for {} bytes of {:?}...",
-                steps,
-                raw.len(),
-                &raw[..12]
-            );
+            assert_linear_steps(raw);
+        }
+    }
+
+    /// Fails unless the autolink scans of `raw` look at no more than four
+    /// times its bytes.
+    fn assert_linear_steps(raw: &str) {
+        let steps = autolink_steps(raw);
+        assert!(
+            steps <= 4 * raw.len(),
+            "{} steps for {} bytes of {:?}...",
+            steps,
+            raw.len(),
+            &raw[..12]
+        );
+    }
+
+    #[test]
+    fn rejected_paths_are_not_rescanned() {
+        // A domain that is valid only when trimmed (or only in full) with a
+        // path that decides against it: a path scan per candidate, each
+        // to the next whitespace, would look at ~n^2/2 bytes. Checked up
+        // to the 8 MiB the default limits accept, where that is hours.
+        let shapes: [fn(usize) -> String; 9] = [
+            |k| "www.a.b_/(".repeat(k),
+            |k| "(http://a.b_/".repeat(k),
+            |k| "www.a.b_*".repeat(k),
+            |k| "www.a.b_~".repeat(k),
+            |k| "www.a.b_)(".repeat(k),
+            |k| "_www.a.b_&a".repeat(k),
+            |k| "(www.a.b_;".repeat(k),
+            |k| "www.a_b.c.*".repeat(k),
+            |k| "(ftp://a.b_)x".repeat(k),
+        ];
+        for size in [16 << 10, 8 << 20] {
+            for shape in &shapes {
+                let raw = shape(size / shape(1).len());
+                assert_linear_steps(&raw);
+            }
         }
     }
 

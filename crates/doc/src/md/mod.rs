@@ -566,13 +566,16 @@ impl<'a> InlineWriter<'a> {
                 // came and unescaped: a GFM reader links it again, where a
                 // backslash (`www.a\_b.c`) would cut it.
                 Inline::Link {
+                    dest,
                     content,
                     auto: true,
                     ..
                 } => {
                     self.line_start = false;
+                    let email = dest.starts_with("mailto:");
                     for c in content {
                         match c {
+                            Inline::Text(t) if email => self.email_text(t),
                             Inline::Text(t) => self.sink.push_str(&mut self.out, t),
                             other => self.inlines(std::slice::from_ref(other), false),
                         }
@@ -625,6 +628,29 @@ impl<'a> InlineWriter<'a> {
         self.sink.push_str(&mut self.out, delim);
         self.inlines(c, false);
         self.sink.push_str(&mut self.out, delim);
+    }
+
+    /// The text of an email autolink. A GFM reader finds addresses after
+    /// emphasis, so an `_` that can open or close emphasis would pair with
+    /// another (`_a@b.c x_@d.e`). Every `_` not between two ASCII
+    /// alphanumerics (where it can do neither) is escaped; the reader
+    /// takes the escape before it looks for the address, so the address
+    /// comes back the same.
+    fn email_text(&mut self, t: &str) {
+        let b = t.as_bytes();
+        let alnum = |i: Option<usize>| {
+            i.and_then(|i| b.get(i))
+                .is_some_and(u8::is_ascii_alphanumeric)
+        };
+        let mut from = 0;
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'_' && !(alnum(i.checked_sub(1)) && alnum(Some(i + 1))) {
+                self.sink.push_str(&mut self.out, &t[from..i]);
+                self.sink.push_str(&mut self.out, "\\_");
+                from = i + 1;
+            }
+        }
+        self.sink.push_str(&mut self.out, &t[from..]);
     }
 
     fn code_span(&mut self, t: &str) {
@@ -1242,6 +1268,29 @@ mod tests {
             let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
             let (s, l) = write(&d);
             assert_eq!(s, format!("{input}\n"));
+            assert!(l.is_empty(), "{input:?}: {l:?}");
+            assert_eq!(read_with(s.as_bytes(), Dialect::Gfm).unwrap(), d);
+        }
+        // In an address an `_` that could open or close emphasis is
+        // escaped, so it cannot pair with one in another address; the
+        // reader drops the escape before it finds the address.
+        for (input, written) in [
+            ("\\_a@b.c x_@d.e", "\\_a@b.c x\\_@d.e"),
+            ("a.\\_b@c.d x a\\_.b@c.d", "a.\\_b@c.d x a\\_.b@c.d"),
+        ] {
+            let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            let Block::Paragraph(p) = &d.blocks[0] else {
+                panic!("{d:?}")
+            };
+            assert_eq!(
+                p.iter()
+                    .filter(|i| matches!(i, Inline::Link { auto: true, .. }))
+                    .count(),
+                2,
+                "{input:?}: {p:?}"
+            );
+            let (s, l) = write(&d);
+            assert_eq!(s, format!("{written}\n"));
             assert!(l.is_empty(), "{input:?}: {l:?}");
             assert_eq!(read_with(s.as_bytes(), Dialect::Gfm).unwrap(), d);
         }
