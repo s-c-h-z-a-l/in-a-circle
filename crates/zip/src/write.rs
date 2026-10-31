@@ -1,0 +1,349 @@
+//! Writer for ZIP archives with stored (method 0) entries only, written to
+//! a file on disk. The output is fixed and deterministic: version needed
+//! and made by 10 (MS-DOS), flags 0, modification time 0x0000 and date
+//! 0x0021 (1980-01-01), no extra field, comment, data descriptor or ZIP64.
+//! The same entries in the same order give the same bytes.
+//!
+//! Entry data is streamed in chunks of 64 KiB and never held whole. The
+//! local header is written first with zero CRC and sizes, and patched in
+//! place once the data is known, so the writer needs no seek-less output.
+//!
+//! A failed entry (the source errors, or it is larger than the caller's
+//! limit, or the archive would pass the format's limits) is rolled back by
+//! cutting the file to where the entry began; the writer stays usable. A
+//! failed write to the file leaves it in an unknown state, so the writer is
+//! poisoned and refuses everything after. `finish` is the only way to get a
+//! central directory, so an unfinished archive has none and no reader takes
+//! it for a valid one.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
+
+use flate::Crc32;
+
+/// Chunk size of the copy: the size of the one buffer the writer holds, and
+/// the largest piece of entry data in memory. Same as the reader's chunk.
+const CHUNK: usize = 64 * 1024;
+/// Local file header, fixed part (APPNOTE 4.3.7).
+const LOCAL_LEN: u64 = 30;
+/// Central directory file header, fixed part (APPNOTE 4.3.12).
+const CENTRAL_LEN: u64 = 46;
+/// End of central directory record without comment (APPNOTE 4.3.16).
+const EOCD_LEN: u64 = 22;
+/// The entry count fields are 16 bits wide; 0xFFFF would mean "see ZIP64",
+/// which is not written, so the largest honest count is one less.
+const MAX_ENTRIES: usize = 65_535;
+/// Every offset, size and the archive itself must fit the 32 bits fields:
+/// past them a reader would need ZIP64.
+const MAX_ARCHIVE: u64 = u32::MAX as u64;
+/// Longest name: a file name component is at most 255 bytes on the
+/// filesystems an archive is unpacked to.
+const MAX_NAME: usize = 255;
+/// DOS date 1980-01-01 (year 0, month 1, day 1): the earliest date, a fixed
+/// value so the output does not depend on the clock.
+const DOS_DATE: u16 = 0x0021;
+/// Version needed to extract and made by (MS-DOS): 1.0, the version of
+/// stored entries.
+const VERSION: u16 = 10;
+
+#[derive(Debug)]
+pub enum WriteError {
+    /// Writing to the file failed; the writer is poisoned.
+    Io(io::Error),
+    /// Reading the entry's source failed; the entry is rolled back.
+    Read(io::Error),
+    /// The source gave more than the caller's `max` bytes; rolled back.
+    EntryTooLarge,
+    /// The archive would pass `u32::MAX` bytes; rolled back.
+    ArchiveTooLarge,
+    TooManyEntries,
+    /// Empty, longer than 255 bytes, not ASCII graphic, or `/`, `\`, `.`
+    /// or `..` in it.
+    BadName,
+    DuplicateName,
+    /// An earlier write failed.
+    Poisoned,
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "write failed: {e}"),
+            Self::Read(e) => write!(f, "read failed: {e}"),
+            Self::EntryTooLarge => f.write_str("an entry is too large"),
+            Self::ArchiveTooLarge => f.write_str("the archive would be too large"),
+            Self::TooManyEntries => f.write_str("too many entries"),
+            Self::BadName => f.write_str("the entry name is not allowed"),
+            Self::DuplicateName => f.write_str("two entries have the same name"),
+            Self::Poisoned => f.write_str("an earlier write failed"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
+
+struct Record {
+    name: String,
+    crc: u32,
+    size: u32,
+    offset: u32,
+}
+
+pub struct StoreWriter {
+    file: File,
+    entries: Vec<Record>,
+    names: HashSet<String>,
+    /// End of the written entries (where the next local header goes).
+    pos: u64,
+    /// Bytes the central directory records written so far would take.
+    cd_len: u64,
+    poisoned: bool,
+}
+
+fn name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'/' && b != b'\\')
+}
+
+impl StoreWriter {
+    /// Write an archive from the start of `file`, which should be empty and
+    /// writable (and readable is not needed). Anything past the archive's
+    /// end is cut at `finish`.
+    pub fn new(file: File) -> Self {
+        Self {
+            file,
+            entries: Vec::new(),
+            names: HashSet::new(),
+            pos: 0,
+            cd_len: 0,
+            poisoned: false,
+        }
+    }
+
+    /// Test seam: a writer whose next entry starts at `pos`.
+    #[cfg(test)]
+    fn at(file: File, pos: u64) -> Self {
+        let mut w = Self::new(file);
+        w.pos = pos;
+        w
+    }
+
+    /// Entries added so far.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The finished archive's length if one more entry with a name of
+    /// `name_len` bytes and `data_len` bytes of data is added: its local
+    /// header and data, the whole central directory with its record and the
+    /// end record. `None` when that passes 65 535 entries or `u32::MAX`
+    /// bytes.
+    pub fn projected_len(&self, name_len: usize, data_len: u64) -> Option<u64> {
+        if self.entries.len() >= MAX_ENTRIES {
+            return None;
+        }
+        let name_len = u64::try_from(name_len).ok()?;
+        let cd = self
+            .cd_len
+            .checked_add(CENTRAL_LEN)?
+            .checked_add(name_len)?;
+        let total = self
+            .pos
+            .checked_add(LOCAL_LEN)?
+            .checked_add(name_len)?
+            .checked_add(data_len)?
+            .checked_add(cd)?
+            .checked_add(EOCD_LEN)?;
+        (total <= MAX_ARCHIVE).then_some(total)
+    }
+
+    fn io(&mut self, e: io::Error) -> WriteError {
+        self.poisoned = true;
+        WriteError::Io(e)
+    }
+
+    /// Add a stored entry read from `data`, at most `max` bytes of it;
+    /// returns its size. On `Read`, `EntryTooLarge` and `ArchiveTooLarge`
+    /// the file is cut back to before the entry and the writer is usable
+    /// again; on `Io` it is poisoned. Name errors write nothing.
+    pub fn add(&mut self, name: &str, data: &mut impl Read, max: u64) -> Result<u64, WriteError> {
+        if self.poisoned {
+            return Err(WriteError::Poisoned);
+        }
+        if !name_ok(name) {
+            return Err(WriteError::BadName);
+        }
+        if self.names.contains(name) {
+            return Err(WriteError::DuplicateName);
+        }
+        if self.entries.len() >= MAX_ENTRIES {
+            return Err(WriteError::TooManyEntries);
+        }
+        if self.projected_len(name.len(), 0).is_none() {
+            return Err(WriteError::ArchiveTooLarge);
+        }
+        let start = self.pos;
+        // Fits u32: projected_len(.., 0) above is <= u32::MAX.
+        let offset = u32::try_from(start).map_err(|_| WriteError::ArchiveTooLarge)?;
+
+        let mut head = Vec::with_capacity(LOCAL_LEN as usize + name.len());
+        head.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        head.extend_from_slice(&VERSION.to_le_bytes());
+        head.extend_from_slice(&0u16.to_le_bytes()); // flags
+        head.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        head.extend_from_slice(&0u16.to_le_bytes()); // time
+        head.extend_from_slice(&DOS_DATE.to_le_bytes());
+        head.extend_from_slice(&[0; 12]); // crc, sizes: patched below
+        head.extend_from_slice(&(name.len() as u16).to_le_bytes()); // <= 255
+        head.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        head.extend_from_slice(name.as_bytes());
+        if let Err(e) = self.file.write_all_at(&head, start) {
+            return Err(self.io(e));
+        }
+
+        let data_start = start + head.len() as u64;
+        let mut crc = Crc32::new();
+        let mut size = 0u64;
+        let mut buf = vec![0u8; CHUNK];
+        // Reading `max + 1` bytes tells "exactly max" from "more than max".
+        let cap = max.saturating_add(1);
+        let failure = loop {
+            let want = usize::try_from(cap - size).map_or(CHUNK, |w| w.min(CHUNK));
+            if want == 0 {
+                break Some(WriteError::EntryTooLarge);
+            }
+            let n = match data.read(&mut buf[..want]) {
+                Ok(0) => break None,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => break Some(WriteError::Read(e)),
+            };
+            size += n as u64;
+            if size > max {
+                break Some(WriteError::EntryTooLarge);
+            }
+            if self.projected_len(name.len(), size).is_none() {
+                break Some(WriteError::ArchiveTooLarge);
+            }
+            crc.update(&buf[..n]);
+            if let Err(e) = self
+                .file
+                .write_all_at(&buf[..n], data_start + size - n as u64)
+            {
+                return Err(self.io(e));
+            }
+        };
+        if let Some(err) = failure {
+            if let Err(e) = self.file.set_len(start) {
+                return Err(self.io(e));
+            }
+            return Err(err);
+        }
+
+        // size <= u32::MAX: projected_len bounded it above.
+        let crc = crc.finish();
+        let size32 = size as u32;
+        let mut patch = [0u8; 12];
+        patch[0..4].copy_from_slice(&crc.to_le_bytes());
+        patch[4..8].copy_from_slice(&size32.to_le_bytes());
+        patch[8..12].copy_from_slice(&size32.to_le_bytes());
+        if let Err(e) = self.file.write_all_at(&patch, start + 14) {
+            return Err(self.io(e));
+        }
+
+        self.pos = data_start + size;
+        self.cd_len += CENTRAL_LEN + name.len() as u64;
+        self.names.insert(name.to_owned());
+        self.entries.push(Record {
+            name: name.to_owned(),
+            crc,
+            size: size32,
+            offset,
+        });
+        Ok(size)
+    }
+
+    /// Write the central directory and the end record, cut the file there
+    /// and hand it back.
+    pub fn finish(self) -> Result<File, WriteError> {
+        if self.poisoned {
+            return Err(WriteError::Poisoned);
+        }
+        let cd_start = self.pos;
+        let total = cd_start
+            .checked_add(self.cd_len)
+            .and_then(|t| t.checked_add(EOCD_LEN))
+            .filter(|&t| t <= MAX_ARCHIVE)
+            .ok_or(WriteError::ArchiveTooLarge)?;
+        let mut at = cd_start;
+        let mut out: Vec<u8> = Vec::with_capacity(CHUNK + CENTRAL_LEN as usize + MAX_NAME);
+        for r in &self.entries {
+            out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            out.extend_from_slice(&VERSION.to_le_bytes()); // made by: MS-DOS
+            out.extend_from_slice(&VERSION.to_le_bytes()); // needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags
+            out.extend_from_slice(&0u16.to_le_bytes()); // method
+            out.extend_from_slice(&0u16.to_le_bytes()); // time
+            out.extend_from_slice(&DOS_DATE.to_le_bytes());
+            out.extend_from_slice(&r.crc.to_le_bytes());
+            out.extend_from_slice(&r.size.to_le_bytes());
+            out.extend_from_slice(&r.size.to_le_bytes());
+            out.extend_from_slice(&(r.name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&[0; 2]); // extra length
+            out.extend_from_slice(&[0; 2]); // comment length
+            out.extend_from_slice(&[0; 2]); // disk number
+            out.extend_from_slice(&[0; 2]); // internal attributes
+            out.extend_from_slice(&[0; 4]); // external attributes
+            out.extend_from_slice(&r.offset.to_le_bytes());
+            out.extend_from_slice(r.name.as_bytes());
+            if out.len() >= CHUNK {
+                self.file.write_all_at(&out, at).map_err(WriteError::Io)?;
+                at += out.len() as u64;
+                out.clear();
+            }
+        }
+        let count = self.entries.len() as u16; // <= 65 535
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]); // disk numbers
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&(self.cd_len as u32).to_le_bytes()); // <= total
+        out.extend_from_slice(&(cd_start as u32).to_le_bytes()); // <= total
+        out.extend_from_slice(&[0; 2]); // comment length
+        self.file.write_all_at(&out, at).map_err(WriteError::Io)?;
+        self.file.set_len(total).map_err(WriteError::Io)?;
+        Ok(self.file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u32_limit_is_projected() {
+        let w = StoreWriter::at(
+            // Nothing is written: only projected_len is called.
+            File::open("/dev/null").unwrap(),
+            MAX_ARCHIVE - (30 + 1 + 10 + 46 + 1 + 22),
+        );
+        // Exactly fits.
+        assert_eq!(w.projected_len(1, 10), Some(MAX_ARCHIVE));
+        // One byte more of data, or of name, does not.
+        assert_eq!(w.projected_len(1, 11), None);
+        assert_eq!(w.projected_len(2, 10), None);
+        assert_eq!(w.projected_len(1, u64::MAX), None);
+    }
+}

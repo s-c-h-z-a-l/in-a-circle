@@ -991,7 +991,8 @@ crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
-          `inacircle-pages`; the shipped `inacircle` links wire, dbus, ui,
+          `inacircle-pages`, zip also writes archives with stored
+          entries only; the shipped `inacircle` links wire, dbus, ui,
           engine, manifest and action, never `doc`, `flate`, `zip`,
           `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,

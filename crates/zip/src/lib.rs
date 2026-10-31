@@ -1,5 +1,6 @@
 //! Strict reader for ZIP archives (stored and deflated entries) read from a
-//! file on disk. The archive is foreign input and a security boundary:
+//! file on disk, and writer of archives with stored entries (`write`). The
+//! archive the reader opens is foreign input and a security boundary:
 //!
 //! - Everything is read with positioned reads (`read_exact_at`); there is no
 //!   way to read outside the file, and every offset or length addition is
@@ -23,6 +24,9 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
+
+pub mod write;
+pub use write::{StoreWriter, WriteError};
 
 use flate::{Crc32, InflateError, inflate};
 
