@@ -23,7 +23,8 @@
 # Refreshed after the CBZ work (images to CBZ, the stored-ZIP writer, the
 # image header probe, the catalog's failure backoff), same toolchain and
 # profile, built from commit 62f592bd (tree clean; later commits touch only
-# fuzz corpora): inacircle grew 9312 B (file, 8544 B of .text), from the
+# fuzz corpora and tests, and the shrinking-source check in the ZIP writer,
+# which added 32 B to inacircle-pages): inacircle grew 9312 B (file, 8544 B of .text), from the
 # backoff bookkeeping and the typed stop reason; inacircle-pages grew 39088 B
 # (file, 31072 B of .text), from the ZIP writer, the PNG/JPEG header sniffer and
 # the CBZ join action. Both are under the 100 KB explanation threshold;
@@ -31,4 +32,4 @@
 # zip, flate, probe or pdf crates.
 inacircle 1160024 891880
 inacircle-text 695000 397314
-inacircle-pages 503680 403283
+inacircle-pages 503712 403267
