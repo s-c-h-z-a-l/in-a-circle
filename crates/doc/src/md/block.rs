@@ -37,7 +37,10 @@ const MAX_COLUMNS: usize = u16::MAX as usize;
 /// further rows: cmark-gfm 0.29.0.gfm.13's `MAX_AUTOCOMPLETED_CELLS`. A
 /// header of many columns over many one-cell rows would otherwise grow the
 /// cells with the product of the two; past it the line ends the table and
-/// starts a paragraph, as in the reference.
+/// starts a paragraph, as in the reference. It equals `Limits::DEFAULT.nodes`
+/// (2^19) and every padded cell charges a node, so under the default limits
+/// the node budget always stops first: the cap only bounds the unbudgeted
+/// `read`/`read_with`, per table.
 const MAX_PADDING_CELLS: usize = 0x80000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -833,7 +836,7 @@ impl<'m> Parser<'m> {
             return false;
         }
         scan_row(line, |s, len| {
-            let cell = line[s..s + len].trim_ascii();
+            let cell = trim_cmark_spaces(&line[s..s + len]);
             align.push(match (cell.first(), cell.last()) {
                 (Some(b':'), Some(b':')) => Align::Center,
                 (Some(b':'), _) => Align::Left,
@@ -1210,10 +1213,19 @@ fn is_table_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | 0x0b | 0x0c)
 }
 
-/// cmark's `cmark_isspace`, which trims cells and the paragraph before a
-/// table.
+/// cmark's `cmark_isspace` (space, tab, line feed, carriage return; not
+/// vertical tab or form feed), which trims header and body cells, delimiter
+/// cells and the paragraph before a table.
 fn is_cmark_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// `b` without leading and trailing [`is_cmark_space`] bytes.
+fn trim_cmark_spaces(b: &[u8]) -> &[u8] {
+    let space = |c: &u8| is_cmark_space(char::from(*c));
+    let start = b.iter().position(|c| !space(c)).unwrap_or(b.len());
+    let end = b.iter().rposition(|c| !space(c)).map_or(start, |e| e + 1);
+    &b[start..end]
 }
 
 fn table_spaces(b: &[u8], i: usize) -> usize {
@@ -1865,6 +1877,40 @@ mod tests {
                 "<p>[r]: /u\n<code>p|q</code>\na</p>\n{}<p>[r]</p>\n",
                 table_html(&["h"], &[])
             )
+        );
+    }
+
+    #[test]
+    fn table_prefix_trims_only_cmark_spaces() {
+        // cmark trims cells and the lines above a header with
+        // `cmark_isspace`: space, tab, line feed and carriage return only. A
+        // form feed alone is a paragraph line, kept as it is.
+        assert_eq!(
+            gfm_html("\x0c\n| a |\n|-|\n"),
+            format!("<p>\x0c</p>\n{}", table_html(&["a"], &[]))
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_vertical_tab_and_form_feed() {
+        // Not `cmark_isspace`: they stay in a cell's text (a leading one
+        // only with no pipe before it, as cmark-gfm's cell separator takes
+        // it like a space).
+        assert_eq!(
+            gfm_html("| a\x0c |\n|-|\n\x0bb |\n"),
+            table_html(&["a\x0c"], &[&["\x0bb"]])
+        );
+    }
+
+    #[test]
+    fn table_alignment_ignores_vertical_tab_and_form_feed() {
+        // They do not count as spaces around the alignment colons: the
+        // reference reads `\x0b:-:` as right and `:-:\x0c` as left aligned.
+        // (After a pipe, cmark-gfm's cell separator takes them like spaces.)
+        assert_eq!(
+            gfm_html("a|b|c\n\x0b:-:|:-:\x0c|:-:\n"),
+            "<table>\n<thead>\n<tr>\n<th align=\"right\">a</th>\n\
+<th align=\"left\">b</th>\n<th align=\"center\">c</th>\n</tr>\n</thead>\n</table>\n"
         );
     }
 
