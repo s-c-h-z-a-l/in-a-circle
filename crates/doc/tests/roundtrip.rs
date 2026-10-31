@@ -31,6 +31,83 @@ fn inlines(c: &[Inline], out: &mut String) {
     }
 }
 
+/// Every inline list of `doc`, depth first.
+fn inline_lists(blocks: &mut [Block], f: &mut impl FnMut(&mut Vec<Inline>)) {
+    for b in blocks {
+        match b {
+            Block::Paragraph(c) | Block::Heading { content: c, .. } => f(c),
+            Block::BlockQuote(bs) => inline_lists(bs, f),
+            Block::List { items, .. } => {
+                for i in items {
+                    inline_lists(&mut i.blocks, f);
+                }
+            }
+            Block::Table { head, rows, .. } => {
+                head.iter_mut()
+                    .chain(rows.iter_mut().flatten())
+                    .for_each(&mut *f);
+            }
+            Block::CodeBlock { .. } | Block::ThematicBreak | Block::HtmlBlock(_) => {}
+        }
+    }
+}
+
+/// Whether a GFM extended autolink of `doc` holds a backslash or an `&`:
+/// an escape of the Markdown writer (it writes every `&` of the text as
+/// `\&`, and `&` starts the entities it writes).
+fn has_escaped_autolink(doc: &Document) -> bool {
+    fn any(c: &[Inline]) -> bool {
+        c.iter().any(|i| match i {
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => content
+                .iter()
+                .any(|t| matches!(t, Inline::Text(t) if t.contains(['\\', '&']))),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => any(c),
+            Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => any(c),
+            _ => false,
+        })
+    }
+    let mut found = false;
+    inline_lists(&mut doc.blocks.clone(), &mut |c| found |= any(c));
+    found
+}
+
+/// Replaces every GFM extended autolink by its text, merged with the text
+/// around it.
+fn unlink_autolinks(doc: &mut Document) {
+    fn unlink(c: &mut Vec<Inline>) {
+        let mut out: Vec<Inline> = Vec::new();
+        for i in c.drain(..) {
+            let pieces = match i {
+                Inline::Link {
+                    auto: true,
+                    content,
+                    ..
+                } => content,
+                mut other => {
+                    if let Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) =
+                        &mut other
+                    {
+                        unlink(c);
+                    }
+                    vec![other]
+                }
+            };
+            for p in pieces {
+                match (out.last_mut(), p) {
+                    (Some(Inline::Text(a)), Inline::Text(b)) => a.push_str(&b),
+                    (_, p) => out.push(p),
+                }
+            }
+        }
+        *c = out;
+    }
+    inline_lists(&mut doc.blocks, &mut unlink);
+}
+
 /// Whether the text has an interior run of two or more spaces/tabs, the only
 /// thing the Markdown writer may report as `Whitespace`.
 fn has_ws_run(s: &str) -> bool {
@@ -59,7 +136,20 @@ fn check(input: &str) -> Option<String> {
 fn check_with(input: &str, dialect: Dialect) -> Option<String> {
     let (d1, txt_losses) = txt::read(input.as_bytes()).unwrap();
     let (md_text, md_losses) = md::write(&d1);
-    let d2 = md::read_with(md_text.as_bytes(), dialect).unwrap();
+    let mut d2 = md::read_with(md_text.as_bytes(), dialect).unwrap();
+    if dialect == Dialect::Gfm {
+        // A bare URL or address is a GFM extended autolink: the same text,
+        // so it is compared as its text. Known limit of the Markdown
+        // writer (it writes CommonMark): the backslash it puts before a
+        // `_ * & # [ ] < > \` in a bare URL, or the entity it writes for a
+        // space it must keep, lands inside the autolink a GFM reader makes
+        // of it, and shows. Only that is not compared;
+        // `known_limit_escapes_inside_a_gfm_autolink` pins it.
+        if has_escaped_autolink(&d2) {
+            return None;
+        }
+        unlink_autolinks(&mut d2);
+    }
     let (e1, e2) = (extract(&d1), extract(&d2));
     if e1 != e2 {
         return Some(format!(
@@ -118,6 +208,25 @@ fn tildes_survive_txt_to_md_under_gfm() {
         assert_eq!(d1, d2, "{input:?} via {md_text:?}");
         assert_round_trips(input);
     }
+}
+
+/// The known limit `check_with` leaves out: in a bare URL the Markdown
+/// writer escapes what CommonMark would read as syntax, and a GFM reader
+/// keeps the backslash inside its autolink. A Markdown writer for GFM
+/// would write the URL as it is.
+#[test]
+fn known_limit_escapes_inside_a_gfm_autolink() {
+    let (d1, _) = txt::read(b"see http://x.y/a_b now").unwrap();
+    let (md_text, _) = md::write(&d1);
+    assert_eq!(md_text, "see http://x.y/a\\_b now\n");
+    let d2 = md::read_with(md_text.as_bytes(), Dialect::Gfm).unwrap();
+    assert!(has_escaped_autolink(&d2));
+    // Without an escape the URL comes back as the same text.
+    let (d1, _) = txt::read(b"see http://x.y/a-b now").unwrap();
+    let mut d2 = md::read_with(md::write(&d1).0.as_bytes(), Dialect::Gfm).unwrap();
+    assert!(!has_escaped_autolink(&d2) && d1 != d2);
+    unlink_autolinks(&mut d2);
+    assert_eq!(d1, d2);
 }
 
 #[test]

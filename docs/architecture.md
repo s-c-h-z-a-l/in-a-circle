@@ -202,7 +202,10 @@ are in `CLAUDE.md`.
   combining character (East Asian Wide and Fullwidth, emoji, combining
   marks) is reported as possible misalignment. Strikethrough loses its
   marks (reported); a task list item is written `- [x] ` or `- [ ] `
-  before its text, and that loses nothing. Padding and the repeated
+  before its text, and that loses nothing. An extended autolink (a bare
+  `www.`, `http://`, `https://` or `ftp://` URL, or a bare email address)
+  is written as its text, and that loses nothing; a `<...>` autolink is
+  reported as a flattened link, as before. Padding and the repeated
   headers of the listed form count against the output budget like any
   other byte.
 - The text family stops a document at structure budgets, charged while it

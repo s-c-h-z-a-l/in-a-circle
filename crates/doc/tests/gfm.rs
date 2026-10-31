@@ -16,22 +16,10 @@
 use doc::html::{self, Options};
 use doc::{Dialect, md};
 
-/// Examples known to fail, with the reason. Each entry needs one. These
-/// are the extensions the reader does not parse yet; an entry goes when its
-/// extension lands, and the harness fails an entry that passes.
-const SKIP: &[(u32, &str)] = &[
-    (621, "extension not implemented yet: autolink"),
-    (622, "extension not implemented yet: autolink"),
-    (623, "extension not implemented yet: autolink"),
-    (624, "extension not implemented yet: autolink"),
-    (625, "extension not implemented yet: autolink"),
-    (626, "extension not implemented yet: autolink"),
-    (627, "extension not implemented yet: autolink"),
-    (628, "extension not implemented yet: autolink"),
-    (629, "extension not implemented yet: autolink"),
-    (630, "extension not implemented yet: autolink"),
-    (631, "extension not implemented yet: autolink"),
-];
+/// Examples known to fail, with the reason. Each entry needs one, and the
+/// harness fails an entry that passes. Empty: every extension example
+/// passes.
+const SKIP: &[(u32, &str)] = &[];
 
 const SPEC: &str = include_str!("data/gfm-spec-0.29.0.gfm.13.txt");
 
@@ -166,6 +154,7 @@ fn commonmark_mode_ignores_gfm_syntax() {
         ("~~x~~\n", "<p>~~x~~</p>\n"),
         ("www.x.y\n", "<p>www.x.y</p>\n"),
         ("http://x.y\n", "<p>http://x.y</p>\n"),
+        ("a@x.y\n", "<p>a@x.y</p>\n"),
         ("[ ] item\n", "<p>[ ] item</p>\n"),
         ("- [ ] item\n", "<ul>\n<li>[ ] item</li>\n</ul>\n"),
         ("- [x] item\n", "<ul>\n<li>[x] item</li>\n</ul>\n"),
@@ -182,5 +171,33 @@ fn commonmark_mode_ignores_gfm_syntax() {
             expected,
             "{input:?}"
         );
+    }
+}
+
+/// The CommonMark examples that GFM reads differently (`SKIP_GFM` in
+/// `commonmark.rs`): a bare URL or address becomes an extended autolink.
+#[test]
+fn commonmark_examples_gfm_autolinks() {
+    let cases = [
+        (
+            "<foo\\+@bar.example.com>\n",
+            "<p>&lt;<a href=\"mailto:foo+@bar.example.com\">foo+@bar.example.com</a>&gt;</p>\n",
+        ),
+        (
+            "< https://foo.bar >\n",
+            "<p>&lt; <a href=\"https://foo.bar\">https://foo.bar</a> &gt;</p>\n",
+        ),
+        (
+            "https://example.com\n",
+            "<p><a href=\"https://example.com\">https://example.com</a></p>\n",
+        ),
+        (
+            "foo@bar.example.com\n",
+            "<p><a href=\"mailto:foo@bar.example.com\">foo@bar.example.com</a></p>\n",
+        ),
+    ];
+    for (input, expected) in cases {
+        let d = md::read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+        assert_eq!(html::write(&d), expected, "{input:?}");
     }
 }

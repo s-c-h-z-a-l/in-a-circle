@@ -14,8 +14,19 @@ const SKIP: &[(u32, &str)] = &[];
 
 /// Examples whose expected HTML changes in GFM mode, with the reason (the
 /// extensions deliberately read some CommonMark input differently). Each
-/// entry needs one. Empty until the extensions are parsed.
-const SKIP_GFM: &[(u32, &str)] = &[];
+/// entry needs one. The GFM reading of each is pinned in `gfm.rs`.
+const SKIP_GFM: &[(u32, &str)] = &[
+    (
+        606,
+        "GFM: the address inside the literal `<...>` is an extended autolink",
+    ),
+    (
+        608,
+        "GFM: the URL inside the literal `< ... >` is an extended autolink",
+    ),
+    (611, "GFM: a bare URL is an extended autolink"),
+    (612, "GFM: a bare email address is an extended autolink"),
+];
 
 const SPEC: &str = include_str!("data/commonmark-0.31.2.json");
 

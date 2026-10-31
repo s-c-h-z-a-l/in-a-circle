@@ -562,6 +562,22 @@ impl<'a> InlineWriter<'a> {
                     self.inlines(c, end_of_line && next.is_none());
                 }
                 Inline::Code(t) => self.code_span(t),
+                // A GFM extended autolink is written as its text, as it
+                // came and unescaped: a GFM reader links it again, where a
+                // backslash (`www.a\_b.c`) would cut it.
+                Inline::Link {
+                    content,
+                    auto: true,
+                    ..
+                } => {
+                    self.line_start = false;
+                    for c in content {
+                        match c {
+                            Inline::Text(t) => self.sink.push_str(&mut self.out, t),
+                            other => self.inlines(std::slice::from_ref(other), false),
+                        }
+                    }
+                }
                 Inline::Link {
                     dest,
                     title,
@@ -1211,6 +1227,24 @@ mod tests {
             write(&d).0,
             "[l](https://x/a\\(b\\) \"t\\\"q\")![alt](<a b>)[](<>)\n"
         );
+    }
+
+    #[test]
+    fn extended_autolink_written_as_its_text() {
+        // An extended autolink is its text as written, unescaped: a GFM
+        // reader links it again; a `\\_` would cut it.
+        for input in [
+            "www.a_b.c.d/x_y*z",
+            "http://a.b/~~c~~d",
+            "a_b@c.d",
+            "x www.a.b.",
+        ] {
+            let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            let (s, l) = write(&d);
+            assert_eq!(s, format!("{input}\n"));
+            assert!(l.is_empty(), "{input:?}: {l:?}");
+            assert_eq!(read_with(s.as_bytes(), Dialect::Gfm).unwrap(), d);
+        }
     }
 
     #[test]

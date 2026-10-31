@@ -628,6 +628,13 @@ impl Writer {
                     self.losses.insert(Loss::InlineCode);
                     self.sink.push_str(out, t);
                 }
+                // A GFM extended autolink is its own destination as
+                // written (`www.x`, `a@b.x`): its text loses nothing.
+                Inline::Link {
+                    content,
+                    auto: true,
+                    ..
+                } => self.push_inlines(content, out),
                 Inline::Link { dest, content, .. } => {
                     self.losses.insert(Loss::Links);
                     let text = self.inlines(content);
@@ -963,6 +970,43 @@ mod tests {
     }
     fn gfm_txt(input: &str) -> (String, BTreeSet<Loss>) {
         write(&gfm(input))
+    }
+
+    #[test]
+    fn cm_autolink_keeps_links_loss() {
+        // A CommonMark `<...>` autolink is written as before, with the
+        // links loss, in both dialects.
+        for d in [
+            crate::md::read(b"<http://x>\n").unwrap(),
+            gfm("<http://x>\n"),
+        ] {
+            assert_eq!(
+                write(&d),
+                ("http://x\n".into(), BTreeSet::from([Loss::Links]))
+            );
+        }
+        assert_eq!(
+            write(&gfm("<a@b.c>\n")),
+            (
+                "a@b.c (mailto:a@b.c)\n".into(),
+                BTreeSet::from([Loss::Links])
+            )
+        );
+    }
+
+    #[test]
+    fn extended_autolink_txt_is_visible_text() {
+        for input in [
+            "www.x.hu",
+            "see www.x.hu/a(b), http://x.hu?q.",
+            "mail a.b@x.hu.",
+            "*www.x.hu*",
+        ] {
+            let (s, l) = gfm_txt(input);
+            let want = input.replace('*', "");
+            assert_eq!(s, format!("{want}\n"), "{input:?}");
+            assert!(!l.contains(&Loss::Links), "{input:?}: {l:?}");
+        }
     }
 
     #[test]
