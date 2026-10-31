@@ -821,7 +821,9 @@ enum AddFail {
 /// Add `len` bytes of `r` as `name`. The writer reads at most `len` bytes
 /// (the size the file had when it was measured, already checked against
 /// `ENTRY_BYTES`), so the file written never passes the size the ceiling
-/// check allowed, even if the source grows while it is copied.
+/// check allowed, even if the source grows while it is copied. A source
+/// that shrinks fails the input as well: a page stored cut short is worse
+/// than a missing one.
 fn add_entry(
     w: &mut zip::StoreWriter,
     name: &str,
@@ -829,10 +831,12 @@ fn add_entry(
     len: u64,
 ) -> Result<(), AddFail> {
     use zip::WriteError as W;
-    match w.add(name, r, len) {
+    match w.add_exact(name, r, len) {
         Ok(_) => Ok(()),
         Err(W::Read(e)) => Err(AddFail::Input(e.to_string())),
-        Err(W::EntryTooLarge) => Err(AddFail::Input("image changed while it was read".into())),
+        Err(W::EntryTooLarge | W::EntryTooSmall) => {
+            Err(AddFail::Input("image changed while it was read".into()))
+        }
         Err(W::ArchiveTooLarge) => Err(AddFail::Whole("CBZ would be larger than 4 GiB".into())),
         // Unreachable, hence untested here (the writer's own test covers the
         // error): the run takes at most 1024 inputs, far below the 65 534
@@ -1207,6 +1211,21 @@ mod tests {
         assert_eq!(cbz_width(1000), 4);
         assert_eq!(cbz_width(9999), 4);
         assert_eq!(cbz_width(10_000), 5);
+    }
+
+    #[test]
+    fn a_source_that_shrinks_fails_only_that_entry() {
+        let s = Scratch::new("shrink");
+        let mut w = writer(&s);
+        assert!(add_entry(&mut w, "001.png", &mut &b"abcd"[..], 4).is_ok());
+        // Measured as 4 bytes, yields 2: not stored cut short.
+        let got = add_entry(&mut w, "002.png", &mut &b"ab"[..], 4);
+        assert_eq!(
+            got,
+            Err(AddFail::Input("image changed while it was read".into()))
+        );
+        assert!(add_entry(&mut w, "002.png", &mut &b"wxyz"[..], 4).is_ok());
+        assert_eq!(w.len(), 2);
     }
 
     #[test]

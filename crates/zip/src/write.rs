@@ -52,6 +52,10 @@ const DOS_DATE: u16 = 0x0021;
 /// Version needed to extract and made by (MS-DOS): 1.0, the version of
 /// stored entries.
 const VERSION: u16 = 10;
+/// Offset of the CRC-32 field in a local file header (APPNOTE 4.3.7):
+/// signature 4 + version 2 + flags 2 + method 2 + time 2 + date 2 = 14. The
+/// CRC and both sizes (12 bytes) follow and are patched after the data.
+const LOCAL_CRC_AT: u64 = 14;
 
 #[derive(Debug)]
 pub enum WriteError {
@@ -61,6 +65,8 @@ pub enum WriteError {
     Read(io::Error),
     /// The source gave more than the caller's `max` bytes; rolled back.
     EntryTooLarge,
+    /// `add_exact` got fewer bytes than the caller said; rolled back.
+    EntryTooSmall,
     /// The archive would pass `u32::MAX` bytes; rolled back.
     ArchiveTooLarge,
     TooManyEntries,
@@ -78,6 +84,7 @@ impl fmt::Display for WriteError {
             Self::Io(e) => write!(f, "write failed: {e}"),
             Self::Read(e) => write!(f, "read failed: {e}"),
             Self::EntryTooLarge => f.write_str("an entry is too large"),
+            Self::EntryTooSmall => f.write_str("an entry is shorter than announced"),
             Self::ArchiveTooLarge => f.write_str("the archive would be too large"),
             Self::TooManyEntries => f.write_str("too many entries"),
             Self::BadName => f.write_str("the entry name is not allowed"),
@@ -183,6 +190,29 @@ impl StoreWriter {
     /// the file is cut back to before the entry and the writer is usable
     /// again; on `Io` it is poisoned. Name errors write nothing.
     pub fn add(&mut self, name: &str, data: &mut impl Read, max: u64) -> Result<u64, WriteError> {
+        self.add_inner(name, data, max, false)
+    }
+
+    /// Like `add`, but the source must give exactly `len` bytes: more is
+    /// `EntryTooLarge`, fewer is `EntryTooSmall`, both rolled back. For a
+    /// file measured before it is copied, so one that changed meanwhile is
+    /// not stored cut short.
+    pub fn add_exact(
+        &mut self,
+        name: &str,
+        data: &mut impl Read,
+        len: u64,
+    ) -> Result<u64, WriteError> {
+        self.add_inner(name, data, len, true)
+    }
+
+    fn add_inner(
+        &mut self,
+        name: &str,
+        data: &mut impl Read,
+        max: u64,
+        exact: bool,
+    ) -> Result<u64, WriteError> {
         if self.poisoned {
             return Err(WriteError::Poisoned);
         }
@@ -230,6 +260,7 @@ impl StoreWriter {
                 break Some(WriteError::EntryTooLarge);
             }
             let n = match data.read(&mut buf[..want]) {
+                Ok(0) if exact && size < max => break Some(WriteError::EntryTooSmall),
                 Ok(0) => break None,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -267,7 +298,7 @@ impl StoreWriter {
         patch[0..4].copy_from_slice(&crc.to_le_bytes());
         patch[4..8].copy_from_slice(&size32.to_le_bytes());
         patch[8..12].copy_from_slice(&size32.to_le_bytes());
-        if let Err(e) = self.file.write_all_at(&patch, start + 14) {
+        if let Err(e) = self.file.write_all_at(&patch, start + LOCAL_CRC_AT) {
             return Err(self.io(e));
         }
 
@@ -455,6 +486,10 @@ mod tests {
             (WriteError::Read(io_err()), "read failed: boom"),
             (WriteError::EntryTooLarge, "an entry is too large"),
             (
+                WriteError::EntryTooSmall,
+                "an entry is shorter than announced",
+            ),
+            (
                 WriteError::ArchiveTooLarge,
                 "the archive would be too large",
             ),
@@ -507,5 +542,27 @@ mod tests {
             Err(WriteError::Read(e)) if e.kind() == io::ErrorKind::Other
         ));
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn add_exact_rolls_back_a_short_or_long_source() {
+        let sp = Sparse::new();
+        let f = sp.create(0);
+        let probe = f.try_clone().unwrap();
+        let mut w = StoreWriter::new(f);
+        assert_eq!(w.add_exact("a", &mut &b"abcd"[..], 4).unwrap(), 4);
+        let kept = probe.metadata().unwrap().len();
+        assert!(matches!(
+            w.add_exact("b", &mut &b"ab"[..], 4),
+            Err(WriteError::EntryTooSmall)
+        ));
+        assert!(matches!(
+            w.add_exact("b", &mut &b"abcdef"[..], 4),
+            Err(WriteError::EntryTooLarge)
+        ));
+        assert_eq!(probe.metadata().unwrap().len(), kept, "cut back");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w.add_exact("b", &mut &b"wxyz"[..], 4).unwrap(), 4);
+        assert_eq!(w.len(), 2);
     }
 }

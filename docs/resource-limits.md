@@ -141,8 +141,9 @@ stored as it is. It holds a 4 KiB stack buffer and reads at most 64 MiB
 | name | 3+ digits plus 3 | `001.jpg`; the digits are those of the input count, at least 3, so the names sort as text; far below the 255 B name limit |
 | output ceiling | `RLIMIT_FSIZE` | the exact size of the finished archive (headers, directory, end record) is projected before each image is written; past the ceiling nothing more is taken, every taken input fails with `CBZ would be larger than <N> MiB` and the half-written file is removed |
 
-An image that grows while it is copied (it is read for no more bytes than
-its measured size) or whose read fails is rolled back and fails alone;
+An image that grows or shrinks while it is copied (it is read for exactly
+its measured size) or whose read fails is rolled back and fails alone
+(`image changed while it was read` for a size change);
 the CBZ keeps the rest. A failed write (disk full) leaves the archive in
 an unknown state, so the whole join fails and `join/out.cbz` is removed:
 image data can contain a ZIP end record, so a leftover prefix is never
