@@ -323,8 +323,12 @@ fn blocks_to_string(
 fn needs_blank(prev: &Block, next: &Block) -> bool {
     match prev {
         Block::List { .. } | Block::BlockQuote(_) | Block::HtmlBlock(_) => true,
-        Block::Paragraph(_) => match next {
-            Block::Paragraph(_) | Block::HtmlBlock(_) | Block::ThematicBreak => true,
+        // A table is written as paragraph text, so it follows the same rules.
+        Block::Paragraph(_) | Block::Table { .. } => match next {
+            Block::Paragraph(_)
+            | Block::Table { .. }
+            | Block::HtmlBlock(_)
+            | Block::ThematicBreak => true,
             Block::List { start, items, .. } => {
                 !(matches!(start, None | Some(1))
                     && items.first().is_some_and(|i| !i.blocks.is_empty()))
@@ -439,9 +443,14 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
             // Flattened to one line per row, cells separated by a space.
             losses.insert(Loss::TableLayout);
             let mut w = InlineWriter::new(true, false, losses, sink);
-            let all = std::iter::once(head).chain(rows.iter());
-            let n = rows.len() + 1;
-            for (i, row) in all.enumerate() {
+            // A row with no content would be a blank line and split the
+            // block, so it is left out.
+            let all: Vec<&Vec<Vec<Inline>>> = std::iter::once(head)
+                .chain(rows.iter())
+                .filter(|r| r.iter().any(|c| !c.is_empty()))
+                .collect();
+            let n = all.len();
+            for (i, row) in all.into_iter().enumerate() {
                 for (j, cell) in row.iter().enumerate() {
                     if j > 0 {
                         w.sink.push(&mut w.out, ' ');
@@ -735,7 +744,12 @@ impl<'a> InlineWriter<'a> {
                         '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '|' | '!' | '#'
                     ) || (self.line_start
                         && self.markers
-                        && matches!(c, '-' | '+' | '=' | '~'));
+                        && matches!(c, '-' | '+' | '=' | '~'))
+                        // Two tildes make strikethrough for a GFM reader; every
+                        // tilde of a run of two or more is escaped, so no pair
+                        // is left whatever the reader's run rule. A lone tilde
+                        // stays as it was.
+                        || (c == '~' && (rest[1..].starts_with('~') || self.out.ends_with('~')));
                     if escape {
                         self.sink.push(&mut self.out, '\\');
                     }
@@ -875,13 +889,56 @@ mod tests {
     }
 
     #[test]
+    fn existing_escapes_unchanged() {
+        // A single tilde, and a tilde run not at the line start, were never
+        // escaped in the middle of a line; only the pair is new.
+        assert_eq!(md("~5 min"), "\\~5 min\n");
+        assert_eq!(md("a ~ b"), "a ~ b\n");
+        assert_eq!(md("a~b"), "a~b\n");
+        assert_eq!(md("x ~5"), "x ~5\n");
+    }
+
+    #[test]
+    fn tilde_pairs_escaped_inline() {
+        assert_eq!(md("a ~~b~~ c"), "a \\~\\~b\\~\\~ c\n");
+        // Every tilde of a longer run: no pair is left for a reader.
+        assert_eq!(md("a ~~~ b"), "a \\~\\~\\~ b\n");
+    }
+
+    #[test]
+    fn table_in_tight_item_is_separated_from_a_paragraph() {
+        let table = Block::Table {
+            align: vec![crate::Align::None],
+            head: vec![vec![t("h")]],
+            rows: vec![vec![vec![t("c")]]],
+        };
+        let item = list(None, true, vec![vec![para("p"), table.clone(), para("q")]]);
+        let (out, _) = write(&doc(vec![item]));
+        assert_eq!(out, "- p\n\n  h\n  c\n\n  q\n");
+    }
+
+    #[test]
+    fn all_empty_table_row_does_not_split_the_block() {
+        let table = Block::Table {
+            align: vec![crate::Align::None],
+            head: vec![vec![t("h")]],
+            rows: vec![vec![vec![]], vec![vec![t("c")]]],
+        };
+        let (out, _) = write(&doc(vec![table]));
+        let d = read(out.as_bytes()).unwrap();
+        assert_eq!(d.blocks.len(), 1, "{out:?}");
+    }
+
+    #[test]
     fn line_start_list_markers_escaped() {
         assert_eq!(md("- x"), "\\- x\n");
         assert_eq!(md("+ x"), "\\+ x\n");
         assert_eq!(md("1. x"), "1\\. x\n");
         assert_eq!(md("23) x"), "23\\) x\n");
         assert_eq!(md("=== x"), "\\=== x\n");
-        assert_eq!(md("~~~"), "\\~~~\n");
+        // The whole run is escaped now (a pair would be strikethrough).
+        assert_eq!(md("~~~"), "\\~\\~\\~\n");
+        assert_eq!(md("~ x"), "\\~ x\n");
         // Mid-line markers are plain text.
         assert_eq!(md("a - b + c = d ~ 1. e"), "a - b + c = d ~ 1. e\n");
         // Ten digits cannot start a list.

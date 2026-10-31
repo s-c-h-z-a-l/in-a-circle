@@ -2,7 +2,7 @@
 //! everything that could be read as structure; these tests prove it on
 //! fixtures and on a deterministic pseudo-random corpus.
 
-use doc::{Block, Document, Inline, Loss, md, txt};
+use doc::{Block, Dialect, Document, Inline, Loss, md, txt};
 use std::collections::BTreeSet;
 
 /// Inline text concatenated, `HardBreak` = "\n"; blocks separated by a blank
@@ -53,9 +53,13 @@ fn has_blank_run(s: &str) -> bool {
 
 /// `None` when the round trip is lossless, else a description.
 fn check(input: &str) -> Option<String> {
+    check_with(input, Dialect::CommonMark).or_else(|| check_with(input, Dialect::Gfm))
+}
+
+fn check_with(input: &str, dialect: Dialect) -> Option<String> {
     let (d1, txt_losses) = txt::read(input.as_bytes()).unwrap();
     let (md_text, md_losses) = md::write(&d1);
-    let d2 = md::read(md_text.as_bytes()).unwrap();
+    let d2 = md::read_with(md_text.as_bytes(), dialect).unwrap();
     let (e1, e2) = (extract(&d1), extract(&d2));
     if e1 != e2 {
         return Some(format!(
@@ -91,6 +95,28 @@ fn check(input: &str) -> Option<String> {
 fn assert_round_trips(input: &str) {
     if let Some(why) = check(input) {
         panic!("round trip failed for {input:?}: {why}");
+    }
+}
+
+#[test]
+fn tildes_survive_txt_to_md_under_gfm() {
+    for input in [
+        "~5 min",
+        "~~kész~~",
+        "wait ~5 min, then ~~kész~~ and ~~~three~~~ ok",
+        "~~a\n~~b~~\n~",
+        "- ~~x~~\n- ~y",
+    ] {
+        let (d1, _) = txt::read(input.as_bytes()).unwrap();
+        let (md_text, _) = md::write(&d1);
+        let d2 = md::read_with(md_text.as_bytes(), Dialect::Gfm).unwrap();
+        assert_eq!(
+            txt::write(&d2).0,
+            txt::write(&d1).0,
+            "{input:?} via {md_text:?}"
+        );
+        assert_eq!(d1, d2, "{input:?} via {md_text:?}");
+        assert_round_trips(input);
     }
 }
 
