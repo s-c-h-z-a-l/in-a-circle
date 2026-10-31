@@ -589,6 +589,28 @@ fn wheel_offers_and_runs_images_to_cbz() {
     let eocd = &cbz[cbz.len() - 22..];
     assert_eq!(&eocd[..4], b"PK\x05\x06");
     assert_eq!(u16::from_le_bytes([eocd[10], eocd[11]]), 3, "one per image");
+    // Walk the central directory: names, their order and each entry's bytes
+    // (stored, so they sit right after the local header).
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([cbz[at], cbz[at + 1]]));
+    let u32_at =
+        |at: usize| u32::from_le_bytes([cbz[at], cbz[at + 1], cbz[at + 2], cbz[at + 3]]) as usize;
+    let mut at = u32_at(cbz.len() - 22 + 16);
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(&cbz[at..at + 4], b"PK\x01\x02");
+        let (size, name_len) = (u32_at(at + 24), u16_at(at + 28));
+        let skip = name_len + u16_at(at + 30) + u16_at(at + 32);
+        let local = u32_at(at + 42);
+        let name = String::from_utf8(cbz[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        got.push((name, cbz[data..data + size].to_vec()));
+        at += 46 + skip;
+    }
+    let want = [("001.jpg", &jpg), ("002.png", &png), ("003.png", &alpha)];
+    for ((name, bytes), (want_name, want_bytes)) in got.iter().zip(want) {
+        assert_eq!(name, want_name, "entry name and order");
+        assert_eq!(bytes, want_bytes, "{name} holds the input's bytes");
+    }
     assert_eq!(
         fs::read(dir.join("1.jpg")).unwrap(),
         jpg,
