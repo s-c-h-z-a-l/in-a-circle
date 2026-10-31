@@ -192,10 +192,11 @@ fn column_widths(natural: &[usize], available: usize) -> Option<Vec<usize>> {
 
 /// Whether `c` is shown in a monospaced terminal with a width other than
 /// one cell: a combining mark (zero) or an East Asian Wide or Fullwidth
-/// character, emoji included (two). A small fixed table of the main blocks
-/// (Unicode 15.0, EastAsianWidth.txt and the combining-mark blocks), no
-/// dependency; it only decides whether to warn, the layout counts
-/// characters.
+/// character, emoji included (two), or a joiner or variation selector that
+/// changes how a neighbour is drawn. A small fixed table of the main blocks
+/// (Unicode 15.0: EastAsianWidth.txt, emoji-data.txt and the
+/// combining-mark blocks), no dependency; it only decides whether to warn,
+/// the layout counts characters.
 fn is_wide_or_combining(c: char) -> bool {
     matches!(u32::from(c),
         // Combining Diacritical Marks, Extended, Supplement; for Symbols;
@@ -209,6 +210,27 @@ fn is_wide_or_combining(c: char) -> bool {
         | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F
         // Fullwidth forms.
         | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
+        // Zero Width Joiner: glues emoji into one glyph (emoji-data.txt,
+        // Emoji_Component); width zero.
+        | 0x200D
+        // Miscellaneous Symbols and Dingbats: the emoji-presentation
+        // characters there (check marks, crosses, stars, weather, signs)
+        // are wide in EastAsianWidth.txt, and the rest become emoji with
+        // VS16. The whole blocks are taken, a few narrow symbols only cost
+        // an extra warning.
+        | 0x2600..=0x27BF
+        // Hourglass, media controls (Misc Technical, wide emoji in
+        // EastAsianWidth.txt).
+        | 0x231A..=0x231B | 0x23E9..=0x23F3 | 0x23F8..=0x23FA
+        // Large squares, star, circle (Misc Symbols and Arrows, wide
+        // emoji in EastAsianWidth.txt).
+        | 0x2B1B..=0x2B1C | 0x2B50 | 0x2B55
+        // Variation selectors: VS16 (U+FE0F) switches a symbol to emoji
+        // presentation (width two), the rest alter glyph shapes.
+        | 0xFE00..=0xFE0F
+        // Mahjong, cards, enclosed alphanumeric and ideographic
+        // supplements (wide in EastAsianWidth.txt).
+        | 0x1F000..=0x1F2FF
         // Emoji and pictographs; CJK extensions B and later.
         | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD)
 }
@@ -396,6 +418,18 @@ impl Writer {
         rows: &[Vec<Vec<Inline>>],
         width: usize,
     ) -> String {
+        // The cell grid holds one `String` header per cell besides the
+        // text; empty cells make that header the whole cost. Charged to the
+        // output budget before anything is allocated, so a table of
+        // millions of empty cells fails like any other overrun instead of
+        // taking memory the output never shows.
+        let cells = head
+            .len()
+            .saturating_add(rows.iter().map(Vec::len).sum::<usize>());
+        let grid_bytes = cells.saturating_mul(std::mem::size_of::<String>());
+        if !self.sink.charge(grid_bytes) {
+            return String::new();
+        }
         let mut grid: Vec<Vec<String>> = Vec::new();
         for row in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)) {
             let mut cells = Vec::with_capacity(row.len());
@@ -1088,6 +1122,35 @@ mod tests {
     }
 
     #[test]
+    fn common_emoji_symbols_warn() {
+        let (_, l) = gfm_txt("| ok | n |\n|--|--|\n| \u{2705} | \u{2B50} |\n| \u{274C} | x |\n");
+        assert_eq!(l, BTreeSet::from([Loss::TableWidth]));
+        for c in ['\u{200D}', '\u{FE0F}', '\u{1F004}'] {
+            assert!(is_wide_or_combining(c), "{c:?}");
+        }
+        let (_, l) = gfm_txt("| a | b |\n|---|---|\n| ok | 1 |\n| no | 2 |\n");
+        assert!(l.is_empty());
+    }
+
+    #[test]
+    fn many_empty_cells_are_charged_to_the_output_budget() {
+        let mut input = String::from("| a | b | c | d |\n|--|--|--|--|\n");
+        for _ in 0..2000 {
+            input.push_str("|  |  |  |  |\n");
+        }
+        let d = gfm(&input);
+        let full = write(&d).0.len();
+        let lim = Limits {
+            output_bytes: full,
+            ..Limits::UNLIMITED
+        };
+        assert_eq!(
+            write_limited(&d, lim).unwrap_err(),
+            LimitError::Exceeded("output")
+        );
+    }
+
+    #[test]
     fn strikethrough_drops_markup() {
         let (s, l) = gfm_txt("~~a~~ b\n");
         assert_eq!(s, "a b\n");
@@ -1118,7 +1181,9 @@ mod tests {
     fn huge_table_fails_on_the_output_budget() {
         let mut input = String::from("| a | b |\n|--|--|\n");
         for _ in 0..2000 {
-            input.push_str("| 1 | 2 |\n");
+            // Cells long enough that the output, not the cell grid's
+            // per-cell headers, sets the budget edge.
+            input.push_str(&format!("| {} | {} |\n", "1".repeat(30), "2".repeat(30)));
         }
         let d = gfm(&input);
         let full = write(&d).0.len();
