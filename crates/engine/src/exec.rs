@@ -359,6 +359,14 @@ impl Drop for CancelToken {
 /// The reason of an input a cancel stopped (see [`Sink::cut`]).
 const CANCELLED: &str = "cancelled";
 
+/// Why a group of inputs ends unfinished: a cancel (counted in
+/// [`Report::cut`]) or an ordinary failure with its text. A typed value, so
+/// no failure whose text happens to read "cancelled" is taken for a cancel.
+enum Stop<'a> {
+    Cancelled,
+    Failed(&'a str),
+}
+
 /// Runs `route` over `inputs` and places the results. Never panics on a
 /// misbehaving action; every input ends with at least one outcome.
 pub fn run(
@@ -513,12 +521,11 @@ pub fn run_join(
         downloads: false,
     };
     let mut sink = Sink::new(obs, &uniq);
-    let all = |sink: &mut Sink, ins: &[usize], reason: &str| {
+    let all = |sink: &mut Sink, ins: &[usize], stop: Stop| {
         for &i in ins {
-            if reason == CANCELLED {
-                sink.cut(i);
-            } else {
-                sink.fail(i, reason.to_owned());
+            match stop {
+                Stop::Cancelled => sink.cut(i),
+                Stop::Failed(reason) => sink.fail(i, reason.to_owned()),
             }
         }
     };
@@ -528,11 +535,15 @@ pub fn run_join(
         ..sink.report(sandboxed)
     };
     let Some(min) = action.join.as_ref().map(|j| j.min as usize) else {
-        all(&mut sink, &every, "invalid route");
+        all(&mut sink, &every, Stop::Failed("invalid route"));
         return end(&mut sink, gate.is_ok(), joined);
     };
     if let Err(e) = gate {
-        all(&mut sink, &every, &format!("sandbox unavailable: {e}"));
+        all(
+            &mut sink,
+            &every,
+            Stop::Failed(&format!("sandbox unavailable: {e}")),
+        );
         return end(&mut sink, false, joined);
     }
     let ok = admit(&mut sink);
@@ -546,13 +557,17 @@ pub fn run_join(
     let anchor = match placed {
         Ok(a) => a,
         Err(e) => {
-            all(&mut sink, &ok, &format!("no folder for the output: {e}"));
+            all(
+                &mut sink,
+                &ok,
+                Stop::Failed(&format!("no folder for the output: {e}")),
+            );
             return end(&mut sink, true, joined);
         }
     };
     sink.begin_group(ok.len());
     if sink.is_cancelled(cancel) {
-        all(&mut sink, &ok, CANCELLED);
+        all(&mut sink, &ok, Stop::Cancelled);
     } else {
         // The download fallback may not exist yet.
         let _ = fs::create_dir_all(&anchor.target);
@@ -1020,17 +1035,16 @@ fn publish(
     cancel: &CancelToken,
     sink: &mut Sink,
 ) -> Option<Publication> {
-    let fail = |sink: &mut Sink, reason: String| {
+    let fail = |sink: &mut Sink, stop: Stop| {
         for &o in settle {
-            if reason == CANCELLED {
-                sink.cut(o);
-            } else {
-                sink.fail(o, reason.clone());
+            match stop {
+                Stop::Cancelled => sink.cut(o),
+                Stop::Failed(reason) => sink.fail(o, reason.to_owned()),
             }
         }
     };
     if sink.is_cancelled(cancel) {
-        fail(sink, CANCELLED.to_owned());
+        fail(sink, Stop::Cancelled);
         return None;
     }
     let mut cancelled = false;
@@ -1058,11 +1072,11 @@ fn publish(
     let p = match published {
         Ok(p) => p,
         Err(_) if cancelled => {
-            fail(sink, CANCELLED.to_owned());
+            fail(sink, Stop::Cancelled);
             return None;
         }
         Err(e) => {
-            fail(sink, format!("cannot publish output: {e}"));
+            fail(sink, Stop::Failed(&format!("cannot publish output: {e}")));
             return None;
         }
     };
@@ -1695,9 +1709,10 @@ pub(crate) fn wait_for_exit(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: In
                 // mutants: not killable by a test. No signal handler is
                 // installed and SIGTERM/SIGINT are blocked, so poll does not
                 // see EINTR; the `==` -> `!=` mutant on the EINTR test would
-                // only matter then (an early `false`). Every caller of
-                // `wait_exited` (the supervisor, catalog.rs twice) treats
-                // `false` as "not gone" and fails closed: no security gap.
+                // only matter then (an early "not exited"). Every caller
+                // (the supervisor and the catalog's kill-and-wait, through
+                // `wait_exited` or `wait_for_exit`) treats that as "not
+                // gone" and fails closed: no security gap.
                 if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
