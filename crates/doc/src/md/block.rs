@@ -2107,6 +2107,13 @@ mod tests {
         assert_eq!(checks("-\n  [x] a\n", Dialect::Gfm), [Some(true)]);
     }
 
+    /// A link reference definition is not content: the paragraph that
+    /// remains after it begins the item, so its `[x]` is the marker.
+    #[test]
+    fn task_marker_after_a_link_reference_definition() {
+        assert_eq!(checks("- [foo]: /u\n  [x] a\n", Dialect::Gfm), [Some(true)]);
+    }
+
     #[test]
     fn task_marker_only_at_item_start() {
         // Not the paragraph's start, not the first block, not in a list.
