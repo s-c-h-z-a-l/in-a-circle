@@ -336,7 +336,10 @@ fn warn_unknown_groups(table: &[Group], presets: &[Preset]) {
 
 /// The second-level wheel: the presets of one category in their own
 /// directions; a preset no dragged file fits is dim (`applicable == 0`).
-/// The hub is the category's label.
+/// The hub is the category's label; when the category's lit targets take
+/// fewer than all dropped files it is `<n> / <total> files`, `n` the most
+/// files any one lit target takes (the count `choose` gives, the same the
+/// flat offer shows).
 pub fn offer_group(cat: &Catalog, tally: &Tally, group: &str) -> Offer {
     offer_group_in(GROUPS, PRESETS, cat, tally, group)
 }
@@ -374,11 +377,20 @@ fn offer_group_in(
             disabled,
         });
     }
-    Offer {
-        slices,
-        hub: g.label.to_owned(),
-        total,
-    }
+    // A lit target is one that can run; its `applicable` is `choose`'s count.
+    let taken = slices
+        .iter()
+        .flatten()
+        .filter(|s| s.disabled.is_none())
+        .map(|s| s.applicable)
+        .max()
+        .unwrap_or(0);
+    let hub = if total > 1 && taken > 0 && taken < total {
+        format!("{taken} / {total} files")
+    } else {
+        g.label.to_owned()
+    };
+    Offer { slices, hub, total }
 }
 
 /// The wheel for a selection: presets of the most common file type, each in
@@ -896,6 +908,7 @@ mod tests {
         let g = groups(&cat, &t);
         assert!(g[2].as_ref().unwrap().lit, "Book lights");
         let o = offer_group(&cat, &t, "book");
+        assert_eq!(o.hub, "Book", "all files apply");
         let s = pdf_slice(&o);
         assert_eq!(
             (s.preset, s.applicable, s.disabled.as_deref()),
@@ -919,6 +932,25 @@ mod tests {
         assert_eq!(o.hub, "kep.png");
         let o = offer_group(&cat, &t, "book");
         assert_eq!(pdf_slice(&o).applicable, 1);
+        assert_eq!(o.hub, "Book", "one file keeps the label");
+    }
+
+    #[test]
+    fn target_hub_counts_files_when_not_all_apply() {
+        let cat = Catalog {
+            actions: [pdf_catalog(true).actions, two_way().actions].concat(),
+        };
+        let t = tally_of(&[many("image/png", 5, "png"), many("text/plain", 1, "txt")]);
+        assert_eq!(offer_group(&cat, &t, "book").hub, "5 / 6 files");
+        let t = tally_of(&[many("image/png", 3, "png")]);
+        assert_eq!(offer_group(&cat, &t, "book").hub, "Book");
+        // Nothing in the category can run: the label stays.
+        let t = tally_of(&[
+            many("image/png", 2, "png"),
+            many("application/zip", 1, "zip"),
+        ]);
+        let none = pdf_catalog(false);
+        assert_eq!(offer_group(&none, &t, "book").hub, "Book");
     }
 
     #[test]
@@ -937,6 +969,7 @@ mod tests {
             assert_eq!(o.hub, format!("{n} / 8 files"));
             let o = offer_group(&cat, &t, "book");
             assert_eq!(pdf_slice(&o).applicable, n);
+            assert_eq!(o.hub, format!("{n} / 8 files"));
         };
         check(3, 5, true, 5);
         check(5, 3, false, 5);
@@ -954,6 +987,7 @@ mod tests {
         assert!(g[0].as_ref().unwrap().lit && g[2].as_ref().unwrap().lit);
         let o = offer_group(&cat, &t, "book");
         assert_eq!(pdf_slice(&o).applicable, 20);
+        assert_eq!(o.hub, "20 / 22 files");
         let o = offer_tally(&cat, &t);
         assert_eq!(pdf_slice(&o).applicable, 20);
         assert_eq!(o.hub, "20 / 22 files");

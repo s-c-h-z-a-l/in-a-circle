@@ -1398,6 +1398,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Level 2 counts the files a target takes when that is not all of
+    /// them, and keeps the category label when it takes all.
+    #[test]
+    fn target_menu_hub_counts_files_when_not_all_apply() {
+        let (dir, a) = text_file("hubcount", "a.txt");
+        let pdf = dir.join("c.pdf");
+        std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
+        let g = group_menu_for(vec![a.clone(), pdf], Some(md_catalog()));
+        assert_eq!(target_menu(&g, "document").hub, "1 / 2 files");
+        let g = group_menu_for(vec![a], Some(md_catalog()));
+        assert_eq!(target_menu(&g, "document").hub, "Document");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Only the first valid pair is kept; every child is counted. Kills the
     /// `&&` -> `||` of `Entry::seen`.
     #[test]

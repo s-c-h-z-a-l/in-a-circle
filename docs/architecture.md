@@ -691,7 +691,9 @@ compositor.
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
   north, `plain-text` south; `pdf` north in Book): lit if applicable, dim otherwise; the hub is
-  the category's label. `inacircle offer --groups <files…>` prints level 1.
+  the category's label, or `<n> / <total> files` when the most files any lit
+  target of the category takes (`n`, the count the run would take) is below
+  the number dropped. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
@@ -766,7 +768,9 @@ files` for several (`n` is what the wheel offers on, `total` what was
 dropped). Text wider than the hub is cut with `…`. If a character of the
 name is missing from the atlas (or the name is empty), the name is
 replaced by `1 file · <type label>` (e.g. `1 file · text`), until a larger
-atlas exists.
+atlas exists. On level 2 the hub keeps the category's label when one file
+was dropped or the category's lit targets take every dropped file;
+otherwise it shows `<n> / <total> files` as above.
 
 **Text**
 
