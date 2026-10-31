@@ -1,8 +1,8 @@
 # JPEG fixtures
 
 Tiny JPEGs for the probe and PDF tests. Sources are generated with
-ImageMagick 7 (`magick`), then encoded with libjpeg-turbo `cjpeg` (3.x
-for `-precision` and `-lossless`; `magick`'s own encoder for the CMYK
+ImageMagick 7 (`magick`), then encoded with libjpeg-turbo 3.2.0 `cjpeg`
+(3.0 or later has `-precision` and `-lossless`; `magick`'s own encoder for the CMYK
 file) and Pillow 12.3. Run in this directory; `$T` is any scratch
 directory.
 

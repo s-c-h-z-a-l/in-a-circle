@@ -22,7 +22,11 @@ const MAX_PIXELS: u64 = 12_000_000;
 
 fuzz_target!(|data: &[u8]| {
     let mut stream = data;
-    let sniffed = probe::sniff(&mut stream, MAX_PIXELS);
+    let (sniffed, why) = probe::sniff::fuzz_sniff(&mut stream, MAX_PIXELS);
+    // The marker limit ends the walk only as `Damaged`.
+    if why == Some("marker limit") {
+        assert!(matches!(sniffed, Err(ProbeError::Damaged)));
+    }
     // Both entry points recognize the same signatures.
     let probed = probe::probe(data, MAX_PIXELS);
     assert_eq!(
@@ -42,13 +46,15 @@ fuzz_target!(|data: &[u8]| {
         Image::Jpeg(j) => (Format::Jpeg, j.width, j.height),
         Image::Png(p) => (Format::Png, p.width, p.height),
     };
-    match sniffed {
-        Ok(got) => assert_eq!((got.format, got.width, got.height), want),
-        // The one exception: the probe has no marker limit, the sniff stops
-        // after MAX_STEPS markers and fill bytes. Each step takes at least
-        // one byte, so only a longer input can reach it.
-        Err(ProbeError::Damaged) if data.len() > probe::sniff::MAX_STEPS as usize => {}
-        Err(e) => panic!("the probe accepted, the sniff said {e:?}"),
+    // The exceptions, each reported by the sniff itself: the probe has no
+    // marker limit, skips a hierarchical (DHP) header, whose size the sniff
+    // reports and checks, and does not read the sampling factors and table
+    // selectors the sniff range-checks.
+    if why.is_none() {
+        match sniffed {
+            Ok(got) => assert_eq!((got.format, got.width, got.height), want),
+            Err(e) => panic!("the probe accepted, the sniff said {e:?}"),
+        }
     }
     match probed.image {
         Image::Jpeg(j) => {

@@ -51,25 +51,84 @@ const SKIP_BUF: usize = 4096;
 /// at about 65536 x 65537 B = 4 GiB read at worst. The caller's file-size
 /// limit is the tighter, natural bound; this one only ends a loop that
 /// would otherwise not end. Past it the file is `Damaged`.
-pub const MAX_STEPS: u32 = 65_536;
+const MAX_STEPS: u32 = 65_536;
+
+/// The sample precisions some coding process allows (ITU T.81,
+/// B.2.2: 8 for baseline, 8 or 12 for extended and progressive, 2 to 16
+/// for lossless); the union is 2..=16, so no per-process table is needed.
+const PRECISION: std::ops::RangeInclusive<u8> = 2..=16;
+
+/// Horizontal and vertical sampling factors (T.81, B.2.2: 1 to 4).
+const SAMPLING: std::ops::RangeInclusive<u8> = 1..=4;
+
+/// Highest quantization table selector (T.81, B.2.2: 0 to 3).
+const MAX_TQ: u8 = 3;
+
+/// What the walk saw that the public result does not say, each a case
+/// where the strict probe (no marker limit, DHP skipped, sampling factors
+/// and table selectors unread) may decide otherwise. Only the fuzz target
+/// and the tests read it.
+#[derive(Default)]
+struct Trace {
+    /// Stopped at [`MAX_STEPS`].
+    step_limit: bool,
+    /// A hierarchical (DHP) header set the size.
+    dhp: bool,
+    /// A frame header field was out of its range.
+    field: bool,
+}
 
 /// Check the header of the image `r` streams: a PNG signature and a valid
 /// first IHDR chunk (CRC included), or a JPEG SOI and a SOF segment before
 /// the first SOS. Any valid bit depth, color type, interlace, precision,
 /// component count or coding process is accepted; nothing past the header
 /// is read or decoded. Files with more than `max_pixels` pixels are
-/// `TooLarge`.
+/// `TooLarge`; for a hierarchical JPEG both the DHP segment's size (the
+/// completed image, reported) and the first frame's must fit.
 ///
-/// Reads exactly what the header's own lengths allow: the stream is left
-/// at the end of the IHDR chunk or of the SOF segment, never further. No
+/// Reads at most what the header's own lengths allow: the stream is left
+/// at the end of the IHDR chunk or of the SOF segment, never further. A
+/// JPEG may put many segments before its SOF, so that can be up to about
+/// 4 GiB; the caller bounds `r` to its own file-size limit (e.g.
+/// `take(ENTRY_BYTES)`), and the end of that bound is `Truncated`. No
 /// heap allocation; the only buffer is 4 KiB on the stack.
 /// The end of the stream inside the header is `Truncated`; a read error is
 /// `Damaged` (the header cannot be confirmed, so the image is refused).
 pub fn sniff(r: &mut impl Read, max_pixels: u64) -> Result<Sniffed, ProbeError> {
+    traced(r, max_pixels, &mut Trace::default())
+}
+
+/// Fuzz entry point: [`sniff`], plus why the strict probe may disagree on
+/// this input, if it may: `"marker limit"` (always with `Damaged`),
+/// `"hierarchical"` or `"frame field"`.
+#[cfg(fuzzing)]
+pub fn fuzz_sniff(
+    r: &mut impl Read,
+    max_pixels: u64,
+) -> (Result<Sniffed, ProbeError>, Option<&'static str>) {
+    let mut t = Trace::default();
+    let res = traced(r, max_pixels, &mut t);
+    let why = if t.step_limit {
+        Some("marker limit")
+    } else if t.dhp {
+        Some("hierarchical")
+    } else if t.field {
+        Some("frame field")
+    } else {
+        None
+    };
+    (res, why)
+}
+
+fn traced<R: Read + ?Sized>(
+    r: &mut R,
+    max_pixels: u64,
+    t: &mut Trace,
+) -> Result<Sniffed, ProbeError> {
     let mut head = [0u8; 3];
     let n = fill(r, &mut head)?;
     if n == head.len() && head == [0xFF, 0xD8, 0xFF] {
-        return jpeg(r, max_pixels);
+        return jpeg(r, max_pixels, t);
     }
     if n == head.len() && head == SIGNATURE[..3] {
         let mut rest = [0u8; 5];
@@ -184,16 +243,23 @@ fn png<R: Read + ?Sized>(r: &mut R, max_pixels: u64) -> Result<Sniffed, ProbeErr
 
 /// After SOI and the first marker's 0xFF: walk the markers to the first
 /// SOF, skipping every segment by its length.
-fn jpeg<R: Read + ?Sized>(r: &mut R, max_pixels: u64) -> Result<Sniffed, ProbeError> {
+fn jpeg<R: Read + ?Sized>(
+    r: &mut R,
+    max_pixels: u64,
+    t: &mut Trace,
+) -> Result<Sniffed, ProbeError> {
     let mut steps = 0u32;
-    let mut step = || {
+    let mut step = |t: &mut Trace| {
         steps += 1;
         if steps > MAX_STEPS {
+            t.step_limit = true;
             Err(ProbeError::Damaged)
         } else {
             Ok(())
         }
     };
+    // The size of the completed image, from a hierarchical header.
+    let mut dhp = None;
     // The first marker's 0xFF was the third byte of the signature.
     let mut first = true;
     loop {
@@ -204,10 +270,10 @@ fn jpeg<R: Read + ?Sized>(r: &mut R, max_pixels: u64) -> Result<Sniffed, ProbeEr
         let mut code = byte(r)?;
         // Fill bytes: any number of 0xFF before the code.
         while code == 0xFF {
-            step()?;
+            step(t)?;
             code = byte(r)?;
         }
-        step()?;
+        step(t)?;
         match code {
             // A stuffed zero outside entropy data is not a marker.
             0x00 => return Err(ProbeError::Damaged),
@@ -226,17 +292,39 @@ fn jpeg<R: Read + ?Sized>(r: &mut R, max_pixels: u64) -> Result<Sniffed, ProbeEr
             // SOF0-SOF15, every coding process; C4 (DHT), C8 (JPG) and CC
             // (DAC) share the range but are not frame headers.
             0xC0..=0xCF if !matches!(code, 0xC4 | 0xC8 | 0xCC) => {
-                return sof(r, body, max_pixels);
+                let frame_size = frame(r, body, max_pixels, t)?;
+                // T.81, B.3.2: the DHP gives the completed image's size; the
+                // frames are its (possibly smaller) levels.
+                let (width, height) = dhp.unwrap_or(frame_size);
+                return Ok(Sniffed {
+                    format: Format::Jpeg,
+                    width,
+                    height,
+                });
+            }
+            // DHP: the frame header layout (T.81, B.3.2), for the whole
+            // hierarchical image. Its size counts for the pixel limit too,
+            // or a small first frame would hide a huge image.
+            0xDE => {
+                t.dhp = true;
+                dhp = Some(frame(r, body, max_pixels, t)?);
             }
             _ => skip(r, body)?,
         }
     }
 }
 
-/// SOF segment body: precision, height, width, component count, then 3
-/// bytes per component (ITU T.81, B.2.2). The precision is not checked:
-/// every process has its own range and the image is copied, not decoded.
-fn sof<R: Read + ?Sized>(r: &mut R, body: usize, max_pixels: u64) -> Result<Sniffed, ProbeError> {
+/// SOF (or DHP) segment body: precision, height, width, component count,
+/// then per component an id, the sampling factors and a quantization table
+/// selector (ITU T.81, B.2.2). Each field must be in the range some coding
+/// process allows; no per-process check: the image is copied, not decoded.
+/// Returns (width, height), within `max_pixels`.
+fn frame<R: Read + ?Sized>(
+    r: &mut R,
+    body: usize,
+    max_pixels: u64,
+    t: &mut Trace,
+) -> Result<(u32, u32), ProbeError> {
     if body < 6 {
         return Err(ProbeError::Damaged);
     }
@@ -248,18 +336,26 @@ fn sof<R: Read + ?Sized>(r: &mut R, body: usize, max_pixels: u64) -> Result<Snif
     if n == 0 || body != 6 + 3 * n {
         return Err(ProbeError::Damaged);
     }
+    if !PRECISION.contains(&f[0]) {
+        t.field = true;
+        return Err(ProbeError::Damaged);
+    }
     // Height 0 means "defined by a DNL marker after the first scan"; the
     // scan is not walked, so the size is unknown and the file is refused.
     if width == 0 || height == 0 {
         return Err(ProbeError::Damaged);
     }
-    skip(r, 3 * n)?;
+    for _ in 0..n {
+        let mut c = [0u8; 3];
+        exact(r, &mut c)?;
+        let (h, v) = (c[1] >> 4, c[1] & 0x0F);
+        if !SAMPLING.contains(&h) || !SAMPLING.contains(&v) || c[2] > MAX_TQ {
+            t.field = true;
+            return Err(ProbeError::Damaged);
+        }
+    }
     pixels_ok(width, height, max_pixels)?;
-    Ok(Sniffed {
-        format: Format::Jpeg,
-        width,
-        height,
-    })
+    Ok((width, height))
 }
 
 #[cfg(test)]
@@ -638,6 +734,146 @@ mod tests {
             sniff(&mut &jpeg_sof(0xC0, 8, 100, 101, 3)[..], 10_000),
             Err(TooLarge)
         );
+    }
+
+    /// A frame header body (SOF or DHP layout) with `hv` as every
+    /// component's sampling byte and `tq` as its table selector.
+    fn frame_body(precision: u8, height: u16, width: u16, n: u8, hv: u8, tq: u8) -> Vec<u8> {
+        let mut v = vec![precision];
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&width.to_be_bytes());
+        v.push(n);
+        for i in 0..n {
+            v.extend_from_slice(&[i + 1, hv, tq]);
+        }
+        v
+    }
+
+    /// SOI, `segs`, then a SOF0 segment with `sof` as its body and an SOS.
+    fn jpeg_with(segs: &[u8], sof: &[u8]) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8];
+        v.extend_from_slice(segs);
+        v.extend_from_slice(&segment(0xC0, sof));
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+        v
+    }
+
+    #[test]
+    fn sniff_checks_frame_header_fields() {
+        use ProbeError::Damaged;
+        // Precision outside 2..=16, a sampling factor outside 1..=4, or a
+        // table selector above 3, in any component.
+        for (what, body) in [
+            ("P=0", frame_body(0, 5, 5, 1, 0x11, 0)),
+            ("P=1", frame_body(1, 5, 5, 1, 0x11, 0)),
+            ("P=17", frame_body(17, 5, 5, 1, 0x11, 0)),
+            ("P=255", frame_body(255, 5, 5, 1, 0x11, 0)),
+            ("H=0", frame_body(8, 5, 5, 3, 0x01, 0)),
+            ("V=0", frame_body(8, 5, 5, 3, 0x10, 0)),
+            ("H=5", frame_body(8, 5, 5, 3, 0x51, 0)),
+            ("V=5", frame_body(8, 5, 5, 3, 0x15, 0)),
+            ("H=V=0", frame_body(8, 5, 5, 1, 0x00, 0)),
+            ("Tq=4", frame_body(8, 5, 5, 3, 0x11, 4)),
+            ("Tq=255", frame_body(8, 5, 5, 1, 0x11, 255)),
+        ] {
+            assert_eq!(s(&jpeg_with(&[], &body)), Err(Damaged), "{what}");
+        }
+        // Only the last component bad.
+        let mut body = frame_body(8, 5, 5, 3, 0x11, 0);
+        body[6 + 2 * 3 + 1] = 0x50;
+        assert_eq!(s(&jpeg_with(&[], &body)), Err(Damaged), "last H=5");
+        // The edges of every range are valid.
+        for (p, hv, tq) in [(2, 0x11, 0), (16, 0x44, 3), (12, 0x14, 1), (8, 0x41, 2)] {
+            assert_eq!(
+                s(&jpeg_with(&[], &frame_body(p, 5, 7, 3, hv, tq))),
+                ok(Format::Jpeg, 7, 5),
+                "P={p} HV={hv:#x} Tq={tq}"
+            );
+        }
+    }
+
+    #[test]
+    fn sniff_counts_the_hierarchical_size() {
+        use ProbeError::{Damaged, TooLarge, Truncated};
+        let small = frame_body(8, 1, 1, 1, 0x11, 0);
+        // A 4.3-gigapixel DHP before a 1x1 first frame.
+        let dhp = segment(0xDE, &frame_body(8, 65_535, 65_535, 1, 0x11, 0));
+        assert_eq!(s(&jpeg_with(&dhp, &small)), Err(TooLarge));
+        // Just over and at the limit: the frame is small either way.
+        let dhp = segment(0xDE, &frame_body(8, 100, 101, 1, 0x11, 0));
+        assert_eq!(
+            sniff(&mut &jpeg_with(&dhp, &small)[..], 10_000),
+            Err(TooLarge)
+        );
+        let dhp = segment(0xDE, &frame_body(8, 100, 100, 1, 0x11, 0));
+        assert_eq!(
+            sniff(&mut &jpeg_with(&dhp, &small)[..], 10_000),
+            ok(Format::Jpeg, 100, 100)
+        );
+        // The frame still counts after a small DHP.
+        let dhp = segment(0xDE, &frame_body(8, 2, 2, 1, 0x11, 0));
+        let big = frame_body(8, 10_000, 20_000, 1, 0x11, 0);
+        assert_eq!(s(&jpeg_with(&dhp, &big)), Err(TooLarge));
+        // The reported size is the completed image's (the DHP's).
+        let dhp = segment(0xDE, &frame_body(8, 30, 40, 3, 0x11, 0));
+        let level = frame_body(8, 15, 20, 3, 0x11, 0);
+        assert_eq!(s(&jpeg_with(&dhp, &level)), ok(Format::Jpeg, 40, 30));
+        // A DHP is checked like a frame header.
+        for body in [
+            frame_body(0, 30, 40, 1, 0x11, 0),
+            frame_body(8, 0, 40, 1, 0x11, 0),
+            frame_body(8, 30, 40, 1, 0x05, 0),
+            frame_body(8, 30, 40, 0, 0x11, 0),
+            vec![8, 0, 30, 0],
+        ] {
+            assert_eq!(s(&jpeg_with(&segment(0xDE, &body), &level)), Err(Damaged));
+        }
+        let cut = jpeg_with(&dhp, &level);
+        assert_eq!(s(&cut[..2 + 4 + 5]), Err(Truncated));
+    }
+
+    #[test]
+    fn trace_says_why_the_walk_stopped() {
+        fn trace(b: &[u8]) -> (Result<Sniffed, ProbeError>, bool, bool, bool) {
+            let mut t = Trace::default();
+            let r = traced(&mut &b[..], MAX, &mut t);
+            (r, t.step_limit, t.dhp, t.field)
+        }
+        let mut j = vec![0xFF, 0xD8];
+        j.extend(std::iter::repeat_n([0xFF, 0xE0, 0, 2], 70_000).flatten());
+        assert_eq!(trace(&j), (Err(ProbeError::Damaged), true, false, false));
+        let mut fill = io::Read::chain(&[0xFF, 0xD8][..], Endless(0xFF));
+        let mut t = Trace::default();
+        assert_eq!(traced(&mut fill, MAX, &mut t), Err(ProbeError::Damaged));
+        assert!(t.step_limit);
+        // Damaged for another reason after more than 64 KiB: not the limit.
+        let big = after_soi(
+            &jpeg_with(&[], &frame_body(0, 5, 5, 1, 0x11, 0)),
+            &segment(0xE1, &[1; 65_533]),
+        );
+        assert!(big.len() > MAX_STEPS as usize);
+        assert_eq!(trace(&big), (Err(ProbeError::Damaged), false, false, true));
+        let no_sof = after_soi(
+            &[0xFF, 0xD8, 0xFF, 0xDA, 0, 2],
+            &segment(0xE1, &[1; 65_533]),
+        );
+        assert!(no_sof.len() > MAX_STEPS as usize);
+        assert_eq!(
+            trace(&no_sof),
+            (Err(ProbeError::Damaged), false, false, false)
+        );
+        assert_eq!(trace(RGB), (ok(Format::Jpeg, 32, 24), false, false, false));
+        // Found by the fuzzer: the probe reads no sampling factors, so it
+        // accepts a component with H=14, V=7; the sniff refuses it and says
+        // why, so the fuzz target does not count it as a disagreement.
+        let sof = RGB.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        let mut bad = RGB.to_vec();
+        bad[sof + 10 + 2 * 3 + 1] = 0xE7;
+        assert!(probe(&bad, MAX).is_ok());
+        assert_eq!(trace(&bad), (Err(ProbeError::Damaged), false, false, true));
+        let dhp = segment(0xDE, &frame_body(8, 30, 40, 1, 0x11, 0));
+        let h = jpeg_with(&dhp, &frame_body(8, 15, 20, 1, 0x11, 0));
+        assert_eq!(trace(&h), (ok(Format::Jpeg, 40, 30), false, true, false));
     }
 
     /// A reader that never ends: every byte is `byte`.
