@@ -118,6 +118,39 @@ taken: the inputs already taken and those not yet examined fail with
 `PDF would be larger than <N> MiB` (inputs already skipped or failed keep
 their own outcome), nothing is written, and the half-written PDF is removed.
 
+The join action `pages.images-to-cbz` stores the images unchanged in a
+CBZ, so it never holds an image: each file is opened without waiting
+(a FIFO fails), measured, header-checked, and copied through a 64 KiB
+buffer into the archive. The header check (`probe::sniff`) reads only up
+to the end of the PNG IHDR chunk or the JPEG start-of-frame segment, and
+checks what a valid image must have there: the PNG signature, the IHDR
+length and CRC, the JPEG marker structure, the frame's precision, sampling
+factors and table selectors, and the pixel count (180 MP). It accepts
+every valid variant (alpha, 16-bit and interlaced PNG; CMYK, 12-bit,
+arithmetic, progressive and lossless JPEG) because the bytes are not
+changed. It does not decode anything: the image body is neither inflated
+nor walked, so an image damaged inside its data passes, as the file is
+stored as it is. It holds a 4 KiB stack buffer and reads at most 64 MiB
+(it is bounded by `take`), and the walk over JPEG markers is bounded too.
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| image file | 64 MiB | the page limit above, so what a CBZ holds is what `pages.cbz-to-pdf` reads back; `image is larger than 64 MiB` for that input only |
+| entries | 65,534 | 0xFFFF in the 16-bit count is the ZIP64 marker; the invocation takes at most 1,024 inputs, so it is a format guard, not one a user reaches |
+| archive | 4 GiB - 1 | every offset and size is 32 bits (no ZIP64); `CBZ would be larger than 4 GiB`, the whole join fails |
+| name | 3+ digits plus 3 | `001.jpg`; the digits are those of the input count, at least 3, so the names sort as text; far below the 255 B name limit |
+| output ceiling | `RLIMIT_FSIZE` | the exact size of the finished archive (headers, directory, end record) is projected before each image is written; past the ceiling nothing more is taken, every taken input fails with `CBZ would be larger than <N> MiB` and the half-written file is removed |
+
+An image that grows while it is copied (it is read for no more bytes than
+its measured size) or whose read fails is rolled back and fails alone;
+the CBZ keeps the rest. A failed write (disk full) leaves the archive in
+an unknown state, so the whole join fails and `join/out.cbz` is removed:
+image data can contain a ZIP end record, so a leftover prefix is never
+kept. Memory is the 64 KiB copy buffer, the accepted-input list and the
+name set (about 100 B per entry). 1,024 sparse 1 MiB images (a 1 GiB
+archive) peak at 3.5 MB `VmHWM` (debug build; the baseline is about
+1.7 MB), not the sum of the images; the test ceiling is 6 MB.
+
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
 checking its scan data: the probe reads the markers, not the entropy

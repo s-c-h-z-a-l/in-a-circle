@@ -66,7 +66,7 @@ are in `CLAUDE.md`.
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
   As a fallback, the planner chains two edges through a lossless
   intermediate file, mostly for external tools.
-- **`pages`** (`inacircle-pages`): page-image books to PDF. Two
+- **`pages`** (`inacircle-pages`): page-image books to PDF and CBZ. Three
   actions. `pages.images-to-pdf` is a join action: any number of JPEG and
   PNG files (the same image rules as below) become one PDF, one page per
   file in the given order. An image that cannot be taken is left out and
@@ -77,6 +77,17 @@ are in `CLAUDE.md`.
   and those not yet examined fail with the size copy, while those already
   skipped or failed keep their own outcome. It is
   `lossy=yes` for the same reasons as the other action.
+  `pages.images-to-cbz` is the other join action: the same JPEG and PNG
+  files become one CBZ, each image stored byte for byte (ZIP method 0, a
+  fixed header with no timestamp, extra field or ZIP64) under a numbered
+  name (`001.jpg`, `002.png`, ... in the given order; at least three digits,
+  more when there are more than 999 inputs). Only the header is checked, so
+  every valid JPEG and PNG is taken (alpha, 16-bit, interlaced, CMYK,
+  12-bit, arithmetic) and nothing is changed: it is `lossy=no`. An image
+  that is not a JPEG or PNG, is damaged in its header or is over a limit
+  (64 MiB, 180 MP) is left out and reported as `fail`; the rest is joined.
+  If the archive as a whole would pass the output size limit or 4 GiB, or a
+  write fails, nothing is written and every taken input fails.
   `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
@@ -167,6 +178,7 @@ action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=M
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
 ```
 
 ## Invocation

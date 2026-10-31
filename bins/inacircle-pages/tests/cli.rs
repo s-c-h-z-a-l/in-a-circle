@@ -11,7 +11,8 @@ use testzip::Store::{Deflated, Stored};
 
 const MANIFEST: &str = "inacircle-manifest 0\n\
 action\tpages.cbz-to-pdf\tfamily=pages\tin=application/vnd.comicbook+zip\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
-action\tpages.images-to-pdf\tfamily=pages\tin=image/jpeg,image/png\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n";
+action\tpages.images-to-pdf\tfamily=pages\tin=image/jpeg,image/png\tout=application/pdf\text=pdf\tlabel=PDF\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n\
+action\tpages.images-to-cbz\tfamily=pages\tin=image/jpeg,image/png\tout=application/vnd.comicbook+zip\text=cbz\tlabel=CBZ\tgroup=book\tcost=10\tlossy=no\tbatch=yes\tjoin=yes\tmin=1\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -203,7 +204,7 @@ fn one_input(t: &Tmp, kind: &str, input: &Path) -> (Output, Vec<String>) {
 // ---------- tests ----------
 
 #[test]
-fn manifest_lists_both_actions() {
+fn manifest_lists_three_actions() {
     let o = Command::new(env!("CARGO_BIN_EXE_inacircle-pages"))
         .arg("--manifest")
         .output()
@@ -1317,5 +1318,445 @@ fn many_images_stay_within_memory() {
     assert!(peak_kb <= 8 * 1024, "VmHWM {peak_kb} kB");
     if let Some(s) = page_sizes(&t, &work.join("join/out.pdf"), 1000) {
         assert_eq!(s.len(), 1000);
+    }
+}
+
+// ---------- pages.images-to-cbz (join) ----------
+
+fn cbz_command(work: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_inacircle-pages"));
+    c.args(["run", "pages.images-to-cbz", "--work"])
+        .arg(work)
+        .arg("--");
+    c
+}
+
+fn run_cbz(work: &Path, inputs: &[PathBuf]) -> Output {
+    cbz_command(work).args(inputs).output().unwrap()
+}
+
+fn no_cbz_output(work: &Path) {
+    assert!(
+        files_with_ext(work, "cbz").is_empty(),
+        "half-written CBZ left behind"
+    );
+    assert!(!work.join("join/out.cbz").exists(), "output left in join/");
+}
+
+/// Lists the archive with Python's `zipfile` (CRC-checked by `testzip`):
+/// `names` prints one name per line, `hex` prints `name method hex`.
+const LIST_PY: &str = r#"import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+assert z.testzip() is None
+for i in z.infolist():
+    if sys.argv[2] == "hex":
+        print(i.filename, i.compress_type, z.read(i).hex())
+    else:
+        print(i.filename, i.compress_type, i.file_size)
+"#;
+
+/// An independent read of `archive`: `(name, method, data)` per entry in
+/// order (`data` empty in `names` mode; then the size is in the third
+/// field instead), after `unzip -t` accepted it. `None` when python3 or
+/// unzip is missing (a skip, or a failure with
+/// `INACIRCLE_REQUIRE_PDF_TOOLS=1`).
+fn read_cbz(t: &Tmp, archive: &Path, hex: bool) -> Option<Vec<(String, String, String)>> {
+    if !(have("python3") && have("unzip")) {
+        return None;
+    }
+    let script = t.join("list.py");
+    fs::write(&script, LIST_PY).unwrap();
+    let mode = if hex { "hex" } else { "names" };
+    let o = Command::new("python3")
+        .arg("-I")
+        .arg(&script)
+        .arg(archive)
+        .arg(mode)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        o.status.success(),
+        "python zipfile: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let u = Command::new("unzip")
+        .arg("-tq")
+        .arg(archive)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        u.status.success(),
+        "unzip -tq: {}{}",
+        String::from_utf8_lossy(&u.stdout),
+        String::from_utf8_lossy(&u.stderr)
+    );
+    Some(
+        String::from_utf8(o.stdout)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let mut p = l.split(' ');
+                let f = |p: &mut std::str::Split<'_, char>| p.next().unwrap().to_owned();
+                (f(&mut p), f(&mut p), f(&mut p))
+            })
+            .collect(),
+    )
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Assert the archive holds exactly `expected` (name, bytes) as stored
+/// entries, read by independent tools.
+fn assert_cbz(t: &Tmp, archive: &Path, expected: &[(String, &[u8])]) {
+    let Some(got) = read_cbz(t, archive, true) else {
+        return;
+    };
+    let want: Vec<(String, String, String)> = expected
+        .iter()
+        .map(|(n, d)| (n.clone(), "0".to_owned(), hex(d)))
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// `png` with its bit depth rewritten (the IHDR CRC fixed): the header
+/// check does not read pixel data, but the file stays a well-formed header.
+fn with_depth(mut png: Vec<u8>, depth: u8) -> Vec<u8> {
+    png[24] = depth;
+    let crc = testzip::crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&crc.to_be_bytes());
+    png
+}
+
+#[test]
+fn cbz_joins_in_given_order_with_numbered_names() {
+    let t = tmp("cbz-order");
+    let jpg = jpeg_fixture("rgb.jpg");
+    let (p1, p2) = (rgb_png(20, 20), rgb_png(50, 10));
+    // The given order, not the name order.
+    let ins = [
+        image_file(&t, "z.jpg", &jpg),
+        image_file(&t, "b.png", &p1),
+        image_file(&t, "a.png", &p2),
+    ];
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.starts_with("progress\t0\n"), "{out}");
+    let takes = lines(&out, "take");
+    assert_eq!(takes.len(), 3, "{out}");
+    for (tk, i) in takes.iter().zip(&ins) {
+        assert_eq!(tk[1], i.to_str().unwrap());
+    }
+    let j = lines(&out, "joined");
+    assert_eq!(j.len(), 1, "{out}");
+    assert_eq!(j[0][1], "join/out.cbz");
+    assert!(lines(&out, "done").is_empty(), "{out}");
+    assert!(lines(&out, "warn").is_empty(), "{out}");
+    let want = [
+        ("001.jpg".to_owned(), jpg.as_slice()),
+        ("002.png".to_owned(), p1.as_slice()),
+        ("003.png".to_owned(), p2.as_slice()),
+    ];
+    assert_cbz(&t, &work.join("join/out.cbz"), &want);
+    // Independent of the tools: the stored bytes are the inputs' bytes.
+    let raw = fs::read(work.join("join/out.cbz")).unwrap();
+    assert!(raw.starts_with(b"PK\x03\x04"));
+    for (_, d) in &want {
+        assert!(raw.windows(d.len()).any(|w| w == *d));
+    }
+}
+
+#[test]
+fn cbz_keeps_bytes_of_every_variant() {
+    let t = tmp("cbz-variants");
+    let rows = |w: usize, bpp: usize, h: usize| vec![0u8; h * (1 + w * bpp)];
+    let imgs: Vec<(&str, Vec<u8>)> = vec![
+        ("alpha", flat_png(6, 4, 6)),
+        (
+            "16-bit",
+            with_depth(
+                testzip::png(5, 5, 2, None, false, false, &rows(5, 3, 5)),
+                16,
+            ),
+        ),
+        (
+            "interlaced",
+            testzip::png(7, 5, 2, None, false, true, &rows(7, 3, 5)),
+        ),
+        ("cmyk", jpeg_fixture("cmyk_adobe.jpg")),
+        ("12-bit", jpeg_fixture("precision12.jpg")),
+        ("arithmetic", jpeg_fixture("arithmetic.jpg")),
+        ("progressive", jpeg_fixture("progressive.jpg")),
+        ("exif", jpeg_fixture("exif_orientation6.jpg")),
+    ];
+    let ins: Vec<PathBuf> = imgs
+        .iter()
+        .enumerate()
+        .map(|(i, (n, d))| image_file(&t, &format!("{i}-{n}.bin"), d))
+        .collect();
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(lines(&out, "take").len(), imgs.len(), "{out}");
+    assert!(lines(&out, "warn").is_empty(), "{out}");
+    assert!(lines(&out, "fail").is_empty(), "{out}");
+    assert!(lines(&out, "skip").is_empty(), "{out}");
+    let want: Vec<(String, &[u8])> = imgs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, d))| {
+            let ext = if d.starts_with(b"\x89PNG") {
+                "png"
+            } else {
+                "jpg"
+            };
+            (format!("{:03}.{ext}", i + 1), d.as_slice())
+        })
+        .collect();
+    assert_cbz(&t, &work.join("join/out.cbz"), &want);
+}
+
+#[test]
+fn name_width_follows_input_count() {
+    let t = tmp("cbz-width");
+    let png = rgb_png(4, 4);
+    let mut ins: Vec<PathBuf> = (0..990)
+        .map(|i| image_file(&t, &format!("{i:04}.png"), &png))
+        .collect();
+    for i in 0..10 {
+        ins.push(image_file(&t, &format!("n{i}.txt"), b"not an image"));
+    }
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 10, "{out}");
+    assert!(f.iter().all(|l| l[2] == "not a JPEG or PNG"), "{out}");
+    assert_eq!(lines(&out, "take").len(), 990, "{out}");
+    if let Some(got) = read_cbz(&t, &work.join("join/out.cbz"), false) {
+        let names: Vec<&str> = got.iter().map(|e| e.0.as_str()).collect();
+        let want: Vec<String> = (1..=990).map(|i| format!("{i:04}.png")).collect();
+        assert_eq!(names, want.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn bad_inputs_fail_rest_joined() {
+    let t = tmp("cbz-bad");
+    let good = rgb_png(8, 8);
+    let truncated = rgb_png(8, 8)[..20].to_vec();
+    let huge = testzip::png(20_000, 10_000, 2, None, false, false, &[0u8; 8]);
+    let big = image_file(&t, "big.png", b"");
+    // Sparse: 64 MiB + 1 B on paper, nothing on disk.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_len((64 << 20) + 1)
+        .unwrap();
+    let ins = [
+        image_file(&t, "a.png", &good),
+        image_file(&t, "trunc.png", &truncated),
+        image_file(&t, "huge.png", &huge),
+        big,
+        image_file(&t, "text.png", b"hello"),
+        image_file(&t, "b.png", &good),
+    ];
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let f = lines(&out, "fail");
+    let reasons: Vec<&str> = f.iter().map(|l| l[2]).collect();
+    assert_eq!(
+        reasons,
+        [
+            "damaged image data",
+            "image is larger than 180 megapixels",
+            "image is larger than 64 MiB",
+            "not a JPEG or PNG",
+        ],
+        "{out}"
+    );
+    let takes = lines(&out, "take");
+    assert_eq!(takes.len(), 2, "{out}");
+    assert_eq!(takes[0][1], ins[0].to_str().unwrap());
+    assert_eq!(takes[1][1], ins[5].to_str().unwrap());
+    // No hole in the numbering.
+    assert_cbz(
+        &t,
+        &work.join("join/out.cbz"),
+        &[
+            ("001.png".to_owned(), good.as_slice()),
+            ("002.png".to_owned(), good.as_slice()),
+        ],
+    );
+}
+
+#[test]
+fn a_fifo_input_fails_without_blocking_and_the_rest_joins() {
+    let t = tmp("cbz-fifo");
+    let fifo = t.join("in/pipe.png");
+    fs::create_dir_all(t.join("in")).unwrap();
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: `c` is a valid NUL-terminated path for the whole call.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let good = image_file(&t, "a.png", &rgb_png(8, 8));
+    let work = t.join("work");
+    let o = run_cbz(&work, &[fifo.clone(), good]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 1, "{out}");
+    assert_eq!(f[0][1], fifo.to_str().unwrap());
+    assert_eq!(lines(&out, "take").len(), 1, "{out}");
+}
+
+#[test]
+fn nothing_acceptable_writes_no_cbz() {
+    let t = tmp("cbz-none");
+    let ins = [
+        image_file(&t, "1.txt", b"one"),
+        image_file(&t, "2.txt", b"two"),
+    ];
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 2, "{out}");
+    assert!(f.iter().all(|l| l[2] == "not a JPEG or PNG"), "{out}");
+    assert!(lines(&out, "take").is_empty(), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    no_cbz_output(&work);
+    assert!(!work.join("join").exists(), "join/ created for nothing");
+}
+
+#[test]
+fn cbz_too_large_total_fails_whole() {
+    let t = tmp("cbz-fsize");
+    // Two incompressible ~750 KB PNGs: one fits in 1 MiB, two do not.
+    let (w, h) = (500usize, 500usize);
+    let mut x = 0x2545_F491u32;
+    let mut rows = Vec::with_capacity(h * (1 + 3 * w));
+    for _ in 0..h {
+        rows.extend_from_slice(&[0]); // filter type 0
+        for _ in 0..3 * w {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            rows.push((x >> 24) as u8);
+        }
+    }
+    let png = testzip::png(w as u32, h as u32, 2, None, false, false, &rows);
+    let a = image_file(&t, "a.png", &png);
+    let b = image_file(&t, "b.png", &png);
+    let work = t.join("work");
+    let with_cap = |ins: &[PathBuf]| {
+        use std::os::unix::process::CommandExt;
+        let mut c = cbz_command(&work);
+        c.args(ins);
+        // SAFETY: only `setrlimit` (async-signal-safe) on a local struct
+        // runs between fork and exec.
+        unsafe {
+            c.pre_exec(|| {
+                let rl = libc::rlimit {
+                    rlim_cur: 1 << 20,
+                    rlim_max: 1 << 20,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        c.output().unwrap()
+    };
+    // Positive control: one image under the cap joins.
+    let o = with_cap(std::slice::from_ref(&a));
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(lines(&stdout(&o), "joined").len(), 1);
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    let o = with_cap(&[a.clone(), b.clone()]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    let f = lines(&out, "fail");
+    assert_eq!(f.len(), 2, "{out}");
+    for (fl, i) in f.iter().zip([&a, &b]) {
+        assert_eq!(fl[1], i.to_str().unwrap());
+        assert_eq!(fl[2], "CBZ would be larger than 1 MiB");
+    }
+    assert!(lines(&out, "take").is_empty(), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    no_cbz_output(&work);
+}
+
+#[test]
+fn cbz_reads_back_as_pdf() {
+    let t = tmp("cbz-pdf");
+    let ins = [
+        image_file(&t, "a.jpg", &jpeg_fixture("rgb.jpg")), // 32 x 24
+        image_file(&t, "b.png", &rgb_png(20, 20)),
+        image_file(&t, "c.png", &flat_png(50, 10, 0)),
+    ];
+    let work = t.join("work");
+    let o = run_cbz(&work, &ins);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let archive = work.join("join/out.cbz");
+    let work2 = t.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = run(&work2, &[&archive]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(lines(&out, "done").len(), 1, "{out}");
+    let pdf = work2.join("0/out.pdf");
+    assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+    if let Some(sizes) = page_sizes(&t, &pdf, 3) {
+        assert_eq!(sizes, [(32, 24), (20, 20), (50, 10)]);
+    }
+}
+
+#[test]
+fn many_large_images_stay_within_memory() {
+    let t = tmp("cbz-many");
+    // 1024 sparse 1 MiB files that each start with a valid PNG header.
+    let png = rgb_png(64, 64);
+    let ins: Vec<PathBuf> = (0..1024)
+        .map(|i| {
+            let p = image_file(&t, &format!("{i:04}.png"), &png);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_len(1 << 20)
+                .unwrap();
+            p
+        })
+        .collect();
+    let work = t.join("work");
+    let mut child = cbz_command(&work)
+        .args(&ins)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (peak_kb, text) = peak_kb(&mut child);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{text}");
+    assert_eq!(lines(&text, "take").len(), 1024, "{text}");
+    assert_eq!(lines(&text, "joined").len(), 1, "{text}");
+    println!("many_large_images_stay_within_memory: 1024 x 1 MiB, VmHWM {peak_kb} kB");
+    assert!(peak_kb <= 6 * 1024, "VmHWM {peak_kb} kB");
+    if let Some(got) = read_cbz(&t, &work.join("join/out.cbz"), false) {
+        assert_eq!(got.len(), 1024);
+        assert!(got.iter().all(|e| e.1 == "0" && e.2 == "1048576"));
     }
 }
