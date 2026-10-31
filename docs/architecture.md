@@ -186,8 +186,11 @@ are in `CLAUDE.md`.
   the spaces of whitespace-only lines count). The planner therefore never
   takes it as a lossless intermediate, and the notice says formatting was
   lost for a run whose output actually lost something.
-- `text.md-to-txt` writes GFM tables as aligned columns in a full line of
-  80 characters (the prefix of an enclosing list or quote counts): two
+- `text.md-to-txt` reads a `.md` input as GitHub Flavored Markdown
+  (CommonMark plus tables, strikethrough, task lists and extended
+  autolinks); `text.txt-to-md` escapes every tilde of a run of two or more
+  so that plain text is never read back as strikethrough. The md-to-txt
+  action writes GFM tables as aligned columns in a full line of 80 characters (the prefix of an enclosing list or quote counts): two
   spaces between columns, a row of dashes under the header, the column
   alignment kept as padding. When the table is wider, the widest columns
   give up width one character at a time, none below 10 (a column that is

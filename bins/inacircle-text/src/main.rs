@@ -154,7 +154,7 @@ impl Conversion {
                 Ok((text, merge_losses(losses, more)))
             }
             Conversion::MdToTxt => {
-                let d = doc::md::read_limited(bytes, LIMITS)?;
+                let d = doc::md::read_limited_with(bytes, LIMITS, doc::Dialect::Gfm)?;
                 Ok(doc::txt::write_limited(&d, LIMITS)?)
             }
         }
