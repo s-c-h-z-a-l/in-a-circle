@@ -162,6 +162,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash scripts/tests/test_fuzz_target.sh
 
+      - name: Pre-commit hook checks the staged tree
+        if: ${{ !cancelled() }}
+        run: bash scripts/tests/test_pre_commit_hook.sh
+
       - name: Shipped dependencies
         if: ${{ !cancelled() }}
         run: scripts/check-shipped-deps.sh

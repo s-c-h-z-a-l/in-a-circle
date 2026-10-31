@@ -184,7 +184,8 @@ it's a bug.
 - Run `cargo fmt` and `cargo clippy` after changes.
 - Prefer `cargo check` / narrow tests before the full suite.
 - Enable the pre-commit hook once per clone: `git config core.hooksPath scripts/git-hooks`
-  (checks `cargo fmt` and that every target compiles; never use `--no-verify`).
+  (checks `cargo fmt` and that every target compiles, on the staged tree, not the
+  working tree; never use `--no-verify`).
 - No `unsafe` without a documented invariant.
 - No magic numbers: every limit, deadline and threshold states its reason
   (why this value, derived from what, what happens past it) in a code
