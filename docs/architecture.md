@@ -114,6 +114,24 @@ are in `CLAUDE.md`.
   `TMPDIR=/nonexistent`. Without the whole sandbox no manifest runs,
   built-in or not ("sandbox unavailable"; not cached, so a later start
   retries).
+- A failed run is the binary's own fault, or not. Its own: it hung past
+  its own 2 s deadline, crashed (died by a signal), exited non-zero, left
+  processes behind, kept its output open after its exit, or did not exit
+  after SIGKILL. Then the binary backs off (the negative cache): its `bin`
+  line keeps its current identity plus `fails=<n>` and `retry=<unix
+  seconds>`, and its old actions, if any, stay on the wheel. Its manifest
+  is not rerun before `retry`: 60 s after the first failure in a row,
+  doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
+  stops at 64. A success clears both fields; a changed binary (mtime or
+  size) is tried at once and counts from zero. `retry` is wall-clock time
+  (`CLOCK_REALTIME`, which survives a reboot); one more than 24 h ahead
+  (the clock went back) is tried at once. Not its fault, so not
+  penalized ("will retry" at the next start, as before): the refresh
+  budget ran out, even when it cut a manifest short of its own 2 s; the
+  sandbox or the supervision did not start; the spawn failed; no stdout;
+  a `poll`, `wait`, `read` or child-list error. A broken manifest (not
+  UTF-8, too large, malformed) stays cached without actions and without a
+  backoff until the binary changes.
 - A whole catalog refresh shares one 10 s budget: each manifest gets
   min(2 s, the rest of the budget), so a run of hanging binaries cannot
   hold a start for N x 2 s. A binary cut by it keeps its old cache entry
@@ -123,9 +141,14 @@ are in `CLAUDE.md`.
 - The cache, `$XDG_CACHE_HOME/inacircle/catalog` (with an
   `INACIRCLE_ACTIONS_DIR` override: `catalog-<FNV-1a of the list>`, one file
   per set of directories), is a manifest-style file
-  (header `inacircle-catalog 0`): per binary a `bin` line (path, mtime,
-  size, built in or not) followed by its `action` lines; it is valid only
-  while the set of binaries and their mtime and size match it exactly.
+  (header `inacircle-catalog 1`): per binary a `bin` line (path, mtime,
+  size, built in or not, and `fails`/`retry` while it backs off) followed
+  by its `action` lines; it is used as it is only while the set of
+  binaries and their mtime and size match it exactly and no backoff is
+  due; otherwise only the binaries that are new, changed or due rerun.
+  `fails` (1 to 64) and `retry` (at most 20 digits, a `u64`) are plain
+  decimals, both or neither; anything else, or another version, rejects
+  the cache, which is rebuilt.
   The wheel never runs a manifest while its overlay is up: it reads the
   cache as it is and refreshes it after it closes (see the B path).
   The cache is read bounded (256 KiB, measured on the bytes read, not on

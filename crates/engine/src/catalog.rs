@@ -3,11 +3,18 @@
 //! start costs a few `stat` calls.
 //!
 //! Cache format (`$XDG_CACHE_HOME/inacircle/catalog`): header
-//! `inacircle-catalog 0`; per binary a `bin` line (`path`, `mtime` in ns,
-//! `size`, `builtin`) followed by that binary's `action` lines. The cache is
-//! valid only when the current set of binaries and their (mtime, size) match
-//! it exactly; otherwise everything is rebuilt. A binary whose manifest is
-//! broken is cached with no actions, so it is not rerun until it changes.
+//! `inacircle-catalog 1`; per binary a `bin` line (`path`, `mtime` in ns,
+//! `size`, `builtin`, and `fails`/`retry` while it backs off) followed by
+//! that binary's `action` lines. The cache is used as it is only when the
+//! current set of binaries and their (mtime, size) match it exactly and no
+//! binary is due for a retry; otherwise the binaries that are new, changed
+//! or due rerun their manifest and the rest come from the cache. A binary
+//! whose manifest is broken is cached with no actions, so it is not rerun
+//! until it changes. A binary whose run fails by its own fault (it hangs
+//! past its own deadline, crashes, exits non-zero, leaves processes or its
+//! output open) backs off: it keeps its old actions, if any, and is not
+//! rerun before `retry` (unix seconds), 60 s after the first failure in a
+//! row, doubling up to a day; a success or a change of the binary ends it.
 
 use crate::exec;
 use manifest::Line;
@@ -19,6 +26,29 @@ use std::time::{Duration, Instant};
 
 const MANIFEST_MAGIC: &str = "inacircle-manifest";
 const CACHE_MAGIC: &str = "inacircle-catalog";
+/// 1: a `bin` line may carry `fails` and `retry`. A version-0 reader would
+/// ignore them and take a backed-off entry (the binary's current identity,
+/// its old or no actions) as final, never rerunning it; so each version
+/// rejects the other's cache, which is then rebuilt.
+const CACHE_VERSION: u32 = 1;
+/// The wait after the first failure in a row that is the binary's own: a
+/// one-off hang (a loaded disk at login) recovers within a minute, while a
+/// binary that hangs at every start costs a start 2 s at most once a minute.
+const BACKOFF_FIRST: u64 = 60;
+/// The longest wait (24 h), reached at the 12th failure in a row
+/// (60 x 2^11 > 86 400): a binary broken for good is tried once a day, so a
+/// system repaired meanwhile gets its actions back within a day. A `retry`
+/// further ahead than this cannot be ours (the clock went back), so it is
+/// tried at once instead of waiting for days.
+const BACKOFF_MAX: u64 = 86_400;
+/// The failure counter stops here. From the 12th failure on the wait is
+/// already `BACKOFF_MAX`, so a higher count changes nothing; the ceiling
+/// keeps `2^(fails - 1)` within a `u64` shift and is what the cache reader
+/// accepts (1..=64, past it the cache is rejected).
+const BACKOFF_FAILS_MAX: u32 = 64;
+/// `retry` in the cache: `u64::MAX` has 20 decimal digits, so a longer
+/// value is no `u64` and is refused before it is parsed.
+const RETRY_DIGITS_MAX: usize = 20;
 /// One manifest's deadline: it prints a few lines and exits in milliseconds,
 /// so 2 s is far above a healthy run and short enough to cut a hang.
 const DEADLINE: Duration = Duration::from_secs(2);
@@ -39,8 +69,9 @@ const MAX_OUTPUT: usize = 64 * 1024;
 // rebuilt, never half-used. The real cache is about 0.4 KB for three
 // records; the limits leave 1.6x to 100x room over the largest shape the
 // other limits allow.
-/// `cache_bytes`: 1024 actions x ~133 B + 128 bins x ~200 B is ~160 KB;
-/// 256 KiB is 1.6x. Checked on the bytes actually read (max + 1).
+/// `cache_bytes`: 1024 actions x ~133 B + 128 bins x ~235 B (with a
+/// backoff) is ~166 KB; 256 KiB is 1.58x. Checked on the bytes actually
+/// read (max + 1).
 const CACHE_BYTES: usize = 262_144;
 /// `cache_bins`: ~100x the handful of shipped binaries; each bin is one
 /// spawn on a rebuild, so this bounds the rebuild cost too.
@@ -52,8 +83,9 @@ const CACHE_RECORDS: usize = CACHE_BINS + CACHE_ACTIONS;
 /// `cache_fields_per_record`: the widest real record has 10 fields
 /// (columns after the kind); 32 is 3.2x. Counted before any allocation.
 const CACHE_FIELDS_PER_RECORD: usize = 32;
-/// `cache_total_fields`: 1024 x 10 + 128 x 4 = 10 752 real-shaped fields;
-/// 12 288 is 1.14x (the earlier 8192 refused a valid full cache).
+/// `cache_total_fields`: 1024 x 10 + 128 x 6 (a bin with a backoff) =
+/// 11 008 real-shaped fields; 12 288 is 1.12x (the earlier 8192 refused a
+/// valid full cache).
 const CACHE_TOTAL_FIELDS: usize = 12_288;
 /// `cache_line_bytes`: a 4096 B path escaped twice is 8 KiB plus ~200 B
 /// of other fields; 32 KiB is 3.9x.
@@ -137,17 +169,18 @@ impl CacheBudget {
             bins: 0,
             actions: 0,
             fields: 0,
-            bytes: manifest::header(CACHE_MAGIC, 0).len(),
+            bytes: manifest::header(CACHE_MAGIC, CACHE_VERSION).len(),
         }
     }
 
     /// Takes `e` in, or says which limit it would cross (and takes nothing).
     fn take(&mut self, e: &Entry) -> Result<(), &'static str> {
-        let bin = manifest::write_line(&bin_line(&e.bin));
+        let bin_l = bin_line(e);
+        let bin = manifest::write_line(&bin_l);
         let mut next = CacheBudget {
             bins: self.bins + 1,
             actions: self.actions,
-            fields: self.fields + 4,
+            fields: self.fields + bin_l.items.len(),
             bytes: self.bytes.saturating_add(bin.len()),
         };
         if bin.len() - 1 > CACHE_LINE_BYTES {
@@ -182,12 +215,19 @@ impl CacheBudget {
     }
 }
 
-fn bin_line(b: &Bin) -> Line {
-    Line::new("bin")
+fn bin_line(e: &Entry) -> Line {
+    let b = &e.bin;
+    let l = Line::new("bin")
         .pair("path", &b.path.to_string_lossy())
         .pair("mtime", &b.mtime.to_string())
         .pair("size", &b.size.to_string())
-        .pair("builtin", if b.builtin { "yes" } else { "no" })
+        .pair("builtin", if b.builtin { "yes" } else { "no" });
+    match &e.backoff {
+        Some(o) => l
+            .pair("fails", &o.fails.to_string())
+            .pair("retry", &o.retry.to_string()),
+        None => l,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,10 +270,61 @@ struct Bin {
     builtin: bool,
 }
 
-/// A binary plus its (validated) `action` lines.
+/// A binary plus its (validated) `action` lines, and its backoff while
+/// its last runs failed by its own fault.
+#[cfg_attr(fuzzing, derive(PartialEq))]
 struct Entry {
     bin: Bin,
     lines: Vec<Line>,
+    backoff: Option<Backoff>,
+}
+
+/// A binary's backoff: `fails` failures of its own in a row (1 to
+/// `BACKOFF_FAILS_MAX`), its manifest not rerun before `retry` (unix
+/// seconds, `CLOCK_REALTIME`, which survives a reboot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Backoff {
+    fails: u32,
+    retry: u64,
+}
+
+impl Backoff {
+    /// The backoff after one more failure of its own, `prev` before it
+    /// (0: none), at `now`: `BACKOFF_FIRST x 2^(n - 1)`, at most
+    /// `BACKOFF_MAX`, with `n` the new count.
+    fn after(prev: u32, now: u64) -> Backoff {
+        let fails = prev.saturating_add(1).clamp(1, BACKOFF_FAILS_MAX);
+        let wait = 1u64
+            .checked_shl(fails - 1)
+            .and_then(|m| m.checked_mul(BACKOFF_FIRST))
+            .map_or(BACKOFF_MAX, |w| w.min(BACKOFF_MAX));
+        Backoff {
+            fails,
+            retry: now.saturating_add(wait),
+        }
+    }
+
+    /// Whether the manifest reruns at `now`: its time has come, or `retry`
+    /// is further ahead than any wait we set (the clock went back).
+    fn due(&self, now: u64) -> bool {
+        now >= self.retry || self.retry > now.saturating_add(BACKOFF_MAX)
+    }
+}
+
+impl Entry {
+    /// Whether this entry's binary reruns its manifest at `now` even
+    /// though it did not change.
+    fn due(&self, now: u64) -> bool {
+        self.backoff.is_some_and(|b| b.due(now))
+    }
+}
+
+/// The wall clock in unix seconds (`CLOCK_REALTIME`); before the epoch, 0
+/// (every backoff is then further ahead than `BACKOFF_MAX`: retried).
+fn wall_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl Catalog {
@@ -242,12 +333,12 @@ impl Catalog {
     /// not used.
     pub fn load() -> Catalog {
         let (dirs, cache) = standard();
-        Catalog::load_with(&dirs, cache.as_deref())
+        Catalog::load_with(&dirs, cache.as_deref(), wall_secs())
     }
 
     /// Testable core. `dirs` is in priority order; the bool marks built-in.
     pub fn load_from(dirs: &[(PathBuf, bool)], cache: &Path) -> Catalog {
-        Catalog::load_with(dirs, Some(cache))
+        Catalog::load_with(dirs, Some(cache), wall_secs())
     }
 
     /// The catalog from the cache alone, for the wheel: no manifest is run
@@ -268,7 +359,9 @@ impl Catalog {
         Some(Catalog::of(&entries))
     }
 
-    fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>) -> Catalog {
+    /// The catalog at wall-clock time `now` (unix seconds): see the module
+    /// doc for when a manifest reruns.
+    fn load_with(dirs: &[(PathBuf, bool)], cache: Option<&Path>, now: u64) -> Catalog {
         let refresh_end = Instant::now() + REFRESH_BUDGET;
         let mut bins = scan(dirs);
         if bins.len() > CACHE_BINS {
@@ -278,31 +371,62 @@ impl Catalog {
             bins.truncate(CACHE_BINS);
         }
         let cached = cache.and_then(read_cache).unwrap_or_default();
-        let hit = cached.iter().map(|e| &e.bin).eq(bins.iter());
+        // A hit: every binary as cached and none due for a retry.
+        let hit =
+            cached.iter().map(|e| &e.bin).eq(bins.iter()) && !cached.iter().any(|e| e.due(now));
         let entries: Vec<Entry> = if hit {
             cached
         } else {
-            // Rerun only binaries that are new or changed. When the rerun
-            // fails transiently, the binary's old entry (same path, old
-            // mtime and size) stays, so its family stays on the wheel,
-            // which reads the cache alone, until a rerun succeeds; the old
-            // mtime/size differ from the file on disk, so the next start
-            // reruns it. A binary with no old entry stays out.
+            // Rerun only binaries that are new, changed or due. When the
+            // rerun fails transiently, the binary's old entry (same path,
+            // old mtime and size or a due backoff) stays as it was, so its
+            // family stays on the wheel, which reads the cache alone, and
+            // the next start reruns it. A binary with no old entry stays
+            // out. A failure of its own backs the binary off instead.
             let mut cached = cached;
             let mut budget = CacheBudget::new();
             let mut entries: Vec<Entry> = Vec::new();
             for bin in bins {
-                let lines = if let Some(i) = cached.iter().position(|e| e.bin == bin) {
-                    cached.swap_remove(i).lines
+                let mut entry = if let Some(i) =
+                    cached.iter().position(|e| e.bin == bin && !e.due(now))
+                {
+                    cached.swap_remove(i)
                 } else {
+                    let old = cached
+                        .iter()
+                        .position(|e| e.bin.path == bin.path)
+                        .map(|i| cached.swap_remove(i));
                     match run_manifest(&bin.path, refresh_end) {
-                        Some(lines) => lines,
-                        None => match cached.iter().position(|e| e.bin.path == bin.path) {
-                            Some(i) => {
-                                // The old entry stays as it was (old bin),
-                                // unless it no longer fits: then it goes,
-                                // loudly, like any binary over the limits.
-                                let old = cached.swap_remove(i);
+                        Run::Lines(lines) => Entry {
+                            bin,
+                            lines,
+                            backoff: None,
+                        },
+                        Run::Penalized(why) => {
+                            // The same binary failing again counts on; a
+                            // changed one starts over. Its old actions, if
+                            // any, stay on the wheel meanwhile.
+                            let prev = match &old {
+                                Some(o) if o.bin == bin => o.backoff.map_or(0, |b| b.fails),
+                                _ => 0,
+                            };
+                            let backoff = Backoff::after(prev, now);
+                            eprintln!(
+                                "inacircle: {}: {why}; skipped, retried in {} s",
+                                bin.path.display(),
+                                backoff.retry - now
+                            );
+                            Entry {
+                                bin,
+                                lines: old.map(|o| o.lines).unwrap_or_default(),
+                                backoff: Some(backoff),
+                            }
+                        }
+                        Run::Transient => {
+                            // The old entry stays as it was (old bin),
+                            // unless it no longer fits: then it goes,
+                            // loudly, like any binary over the limits.
+                            if let Some(old) = old {
                                 match budget.take(&old) {
                                     Ok(()) => entries.push(old),
                                     Err(why) => eprintln!(
@@ -310,13 +434,11 @@ impl Catalog {
                                         old.bin.path.display()
                                     ),
                                 }
-                                continue;
                             }
-                            None => continue,
-                        },
+                            continue;
+                        }
                     }
                 };
-                let mut entry = Entry { bin, lines };
                 // Valid alone is not enough: the sum of all manifests must
                 // fit what the cache can hold. A binary that would cross a
                 // limit is refused whole and loudly (no action of it is
@@ -614,41 +736,67 @@ fn mime_set(v: &str) -> Option<Vec<String>> {
     Some(types)
 }
 
-/// Why a manifest run failed. Transient failures (the binary may work next
-/// time) are not cached; deterministic ones are.
+/// Why a manifest run failed.
 enum Fail {
+    /// Not the binary's fault (the refresh budget, the sandbox, the
+    /// supervision, a system call): not cached, retried at the next start.
     Transient(String),
+    /// The binary's own run failed (it hung past its own deadline, crashed,
+    /// exited non-zero, left processes or its output open, or outlived
+    /// SIGKILL): it backs off (see [`Backoff`]).
+    Penalized(String),
+    /// The manifest itself is broken (not UTF-8, too large, malformed):
+    /// cached without actions until the binary changes.
     Deterministic(String),
 }
 
-/// Runs `<bin> --manifest` and returns its valid `action` lines. A broken
-/// binary yields no lines (message on stderr); `None` means a transient
-/// failure: nothing new is cached, and the caller keeps the binary's old
-/// entry, if any.
-fn run_manifest(bin: &Path, refresh_end: Instant) -> Option<Vec<Line>> {
+/// The outcome of one manifest run, for the catalog.
+enum Run {
+    /// Its valid `action` lines; none for a broken manifest.
+    Lines(Vec<Line>),
+    /// A failure of the binary's own (message: why).
+    Penalized(String),
+    /// A transient failure: nothing new is cached, and the caller keeps the
+    /// binary's old entry, if any.
+    Transient,
+}
+
+/// Runs `<bin> --manifest` (messages on stderr, except for a penalized
+/// failure, which the caller reports with its backoff).
+fn run_manifest(bin: &Path, refresh_end: Instant) -> Run {
     match manifest_lines(bin, refresh_end) {
-        Ok(lines) => Some(lines),
+        Ok(lines) => Run::Lines(lines),
         Err(Fail::Deterministic(why)) => {
             eprintln!("inacircle: {}: {why}; skipped", bin.display());
-            Some(Vec::new())
+            Run::Lines(Vec::new())
         }
+        Err(Fail::Penalized(why)) => Run::Penalized(why),
         Err(Fail::Transient(why)) => {
             eprintln!("inacircle: {}: {why}; skipped, will retry", bin.display());
-            None
+            Run::Transient
         }
     }
 }
 
 /// The deadline of one manifest: `DEADLINE`, but not past the refresh's end;
-/// `None` when the refresh has no time left.
-fn step_deadline(now: Instant, refresh_end: Instant) -> Option<Instant> {
-    (now < refresh_end).then(|| (now + DEADLINE).min(refresh_end))
+/// `None` when the refresh has no time left. The bool says whether it is
+/// the step's own `DEADLINE` (true) or the refresh's end cut it short
+/// (false): only a hang past its own deadline is the binary's fault.
+fn step_deadline(now: Instant, refresh_end: Instant) -> Option<(Instant, bool)> {
+    (now < refresh_end).then(|| {
+        let own = now + DEADLINE;
+        if own <= refresh_end {
+            (own, true)
+        } else {
+            (refresh_end, false)
+        }
+    })
 }
 
 fn manifest_lines(bin: &Path, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
-    let deadline = step_deadline(Instant::now(), refresh_end)
+    let (deadline, own) = step_deadline(Instant::now(), refresh_end)
         .ok_or_else(|| Fail::Transient("refresh budget spent".to_owned()))?;
-    let out = capture(bin, deadline)?;
+    let out = capture(bin, deadline, own)?;
     let bad = |why: String| Fail::Deterministic(why);
     let text = String::from_utf8(out).map_err(|_| bad("manifest is not UTF-8".to_owned()))?;
     preflight(&text, &MANIFEST_SHAPE).map_err(|why| {
@@ -680,9 +828,9 @@ fn manifest_lines(bin: &Path, refresh_end: Instant) -> Result<Vec<Line>, Fail> {
 /// [`sandbox::ready`](crate::sandbox::ready)) no manifest runs, built-in
 /// or not (transient: a later start retries). See [`collect`] for how the
 /// child's whole process group is finished before its output counts.
-fn capture(bin: &Path, deadline: Instant) -> Result<Vec<u8>, Fail> {
+fn capture(bin: &Path, deadline: Instant, own: bool) -> Result<Vec<u8>, Fail> {
     let mut child = spawn_manifest(bin)?;
-    collect(&mut child, deadline)
+    collect(&mut child, deadline, own)
 }
 
 /// Starts `<bin> --manifest` in the manifest sandbox (see [`capture`]).
@@ -759,10 +907,15 @@ fn kill_group(child: &std::process::Child) {
 /// rejected. Then reads the pipe to EOF: the kernel's word that no
 /// write end is open, so no descendant can add to the output any more.
 /// Only then does the output count, if the child exited with success.
-/// The cleanup has its own `exec::GROUP_GONE`; past it the manifest fails
-/// (transient). The child is always reaped unless it never exits.
-fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>, Fail> {
+/// The cleanup has its own `exec::GROUP_GONE`; past it the manifest fails.
+/// The child is always reaped unless it never exits. `own` says whether
+/// `deadline` is the step's own (see [`step_deadline`]): a hang past it is
+/// the binary's fault, one cut by the refresh's end is not. Every failure
+/// of the run itself is [`Fail::Penalized`]; one of ours (a system call,
+/// the budget) is [`Fail::Transient`].
+fn collect(child: &mut std::process::Child, deadline: Instant, own: bool) -> Result<Vec<u8>, Fail> {
     let t = |s: &str| Fail::Transient(s.to_owned());
+    let p = |s: &str| Fail::Penalized(s.to_owned());
     let pid = child.id() as libc::pid_t;
     let pidfd = exec::pidfd_open(pid);
     let Some(stdout) = child.stdout.take() else {
@@ -789,7 +942,11 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            result = Err(t("timed out"));
+            result = Err(if own {
+                p("timed out")
+            } else {
+                t("timed out (refresh budget spent)")
+            });
             break;
         }
         let mut fds = Vec::with_capacity(2);
@@ -843,35 +1000,41 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     if !exec::wait_exited(pid, pidfd.as_ref(), until) {
         // Killed but stuck in the kernel; left unreaped (its group id stays
         // its own), nothing accepted.
-        return Err(t("did not exit after SIGKILL"));
+        return Err(p("did not exit after SIGKILL"));
     }
     let status = child.wait();
     // A descendant alive at the leader's exit rejects the manifest: its
     // output is not finished. The kernel's child list tells
-    // (`exec::reap_group`); unreadable, or not empty in time: rejected.
-    let left_behind = !matches!(exec::reap_group(pid, until), Ok(false));
+    // (`exec::reap_group`); not empty in time: rejected, the binary's
+    // fault; unreadable: rejected, ours (transient).
+    let left_behind = exec::reap_group(pid, until);
     // The reason the run itself failed (timed out, too large, unreadable)
     // is the cause; the descendants that outlived it are its consequence.
     // Either way nothing is accepted.
     result?;
-    if left_behind {
-        return Err(t("left processes behind"));
+    match left_behind {
+        Ok(false) => {}
+        Ok(true) => return Err(p("left processes behind")),
+        Err(_) => return Err(t("cannot count its processes")),
     }
     while open {
         let left = until.saturating_duration_since(Instant::now());
-        let mut p = libc::pollfd {
+        let mut pfd = libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         };
         let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
-        // SAFETY: `p` is a valid pollfd and nfds is 1.
-        let r = unsafe { libc::poll(&mut p, 1, ms) };
+        // SAFETY: `pfd` is a valid pollfd and nfds is 1.
+        let r = unsafe { libc::poll(&mut pfd, 1, ms) };
         if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
             continue;
         }
-        if r <= 0 {
-            return Err(t("output still open"));
+        if r < 0 {
+            return Err(t("poll failed"));
+        }
+        if r == 0 {
+            return Err(p("output still open"));
         }
         match read_some(fd, &mut out) {
             Ok(true) => {}
@@ -882,7 +1045,7 @@ fn collect(child: &mut std::process::Child, deadline: Instant) -> Result<Vec<u8>
     drop(stdout);
     match status {
         Ok(s) if s.success() => Ok(out),
-        Ok(s) => Err(Fail::Transient(format!("exited with {s}"))),
+        Ok(s) => Err(Fail::Penalized(format!("exited with {s}"))),
         Err(_) => Err(t("wait failed")),
     }
 }
@@ -1008,7 +1171,7 @@ fn check_cache(bytes: &[u8]) -> Result<(), &'static str> {
 fn parse_cache(bytes: &[u8]) -> Option<Vec<Entry>> {
     check_cache(bytes).ok()?;
     let text = std::str::from_utf8(bytes).ok()?;
-    let (0, lines) = manifest::parse(text, CACHE_MAGIC).ok()? else {
+    let (CACHE_VERSION, lines) = manifest::parse(text, CACHE_MAGIC).ok()? else {
         return None;
     };
     let mut entries: Vec<Entry> = Vec::new();
@@ -1026,6 +1189,17 @@ fn parse_cache(bytes: &[u8]) -> Option<Vec<Entry>> {
                     },
                 },
                 lines: Vec::new(),
+                backoff: match (l.get("fails"), l.get("retry")) {
+                    (None, None) => None,
+                    (Some(f), Some(r)) => Some(Backoff {
+                        // 2: the digits of `BACKOFF_FAILS_MAX` (64).
+                        fails: decimal(f, 2)
+                            .filter(|f| (1..=u64::from(BACKOFF_FAILS_MAX)).contains(f))?
+                            as u32,
+                        retry: decimal(r, RETRY_DIGITS_MAX)?,
+                    }),
+                    _ => return None,
+                },
             }),
             "action" => entries.last_mut()?.lines.push(l),
             _ => return None,
@@ -1034,21 +1208,61 @@ fn parse_cache(bytes: &[u8]) -> Option<Vec<Entry>> {
     Some(entries)
 }
 
-/// Fuzz entry point: the cache parser on arbitrary bytes.
-#[cfg(fuzzing)]
-pub fn fuzz_read_cache(bytes: &[u8]) {
-    let _ = parse_cache(bytes);
+/// A plain canonical decimal of at most `digits` digits (no sign, space or
+/// leading zero, as `to_string` writes it) that fits a `u64`.
+fn decimal(v: &str, digits: usize) -> Option<u64> {
+    if v.is_empty()
+        || v.len() > digits
+        || !v.bytes().all(|b| b.is_ascii_digit())
+        || (v.len() > 1 && v.starts_with('0'))
+    {
+        return None;
+    }
+    v.parse().ok()
 }
 
-/// Atomic (temp file + rename).
-fn write_cache(path: &Path, entries: &[Entry]) {
-    let mut s = manifest::header(CACHE_MAGIC, 0);
+/// Fuzz entry point: the cache parser on arbitrary bytes. What it accepts
+/// is written back as the same entries (when the text written fits the
+/// limits), and every backoff it accepts obeys the retry rule at any time.
+#[cfg(fuzzing)]
+pub fn fuzz_read_cache(bytes: &[u8]) {
+    let Some(entries) = parse_cache(bytes) else {
+        return;
+    };
+    let text = cache_text(&entries);
+    if check_cache(text.as_bytes()).is_ok() {
+        assert!(parse_cache(text.as_bytes()).as_deref() == Some(&entries[..]));
+    }
+    for b in entries.iter().filter_map(|e| e.backoff) {
+        assert!((1..=BACKOFF_FAILS_MAX).contains(&b.fails));
+        let top = u64::MAX - BACKOFF_MAX;
+        for now in [0, b.retry.saturating_sub(1), b.retry, top, u64::MAX] {
+            let _ = b.due(now);
+            let n = Backoff::after(b.fails, now);
+            assert!(n.fails >= b.fails && n.fails <= BACKOFF_FAILS_MAX);
+            // A fresh backoff is never due at once, nor further than a day.
+            if now <= top {
+                assert!(n.retry > now && n.retry - now <= BACKOFF_MAX && !n.due(now));
+            }
+        }
+    }
+}
+
+/// The cache file's text for `entries`.
+fn cache_text(entries: &[Entry]) -> String {
+    let mut s = manifest::header(CACHE_MAGIC, CACHE_VERSION);
     for e in entries {
-        s.push_str(&manifest::write_line(&bin_line(&e.bin)));
+        s.push_str(&manifest::write_line(&bin_line(e)));
         for l in &e.lines {
             s.push_str(&manifest::write_line(l));
         }
     }
+    s
+}
+
+/// Atomic (temp file + rename).
+fn write_cache(path: &Path, entries: &[Entry]) {
+    let s = cache_text(entries);
     // Any failure just means no cache. A private folder (opened once,
     // checked), a fresh temp file under a random name (exclusive, never
     // through a symlink), renamed over the cache relative to the folder.
@@ -1102,6 +1316,7 @@ pub(crate) mod tests {
                 builtin: false,
             },
             lines,
+            backoff: None,
         }
     }
 
@@ -1193,7 +1408,7 @@ pub(crate) mod tests {
         let mut e = entry(vec![]);
         e.bin.path = PathBuf::from("/".to_owned() + &"p".repeat(n));
         assert_eq!(
-            manifest::write_line(&bin_line(&e.bin)).len() - 1,
+            manifest::write_line(&bin_line(&e)).len() - 1,
             CACHE_LINE_BYTES
         );
 
@@ -1642,7 +1857,7 @@ pub(crate) mod tests {
         assert_eq!(c.actions.len(), 1);
     }
 
-    const CACHE_OK: &str = "inacircle-catalog 0\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes\n";
+    const CACHE_OK: &str = "inacircle-catalog 1\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes\n";
 
     #[test]
     fn parse_cache_reads_what_write_cache_writes() {
@@ -1655,7 +1870,7 @@ pub(crate) mod tests {
             (5, 7, true)
         );
         assert_eq!(e[0].lines.len(), 1);
-        assert_eq!(parse_cache(b"inacircle-catalog 0\n").unwrap().len(), 0);
+        assert_eq!(parse_cache(b"inacircle-catalog 1\n").unwrap().len(), 0);
     }
 
     #[test]
@@ -1667,11 +1882,12 @@ pub(crate) mod tests {
         // Wrong magic, unsupported version, not UTF-8, an action before any
         // bin, an unknown line kind.
         assert!(parse_cache(b"other 0\n").is_none());
-        assert!(parse_cache(b"inacircle-catalog 1\n").is_none());
-        assert!(parse_cache(b"inacircle-catalog 0\n\xff\n").is_none());
-        let orphan = format!("inacircle-catalog 0\n{}\n", act("x.a", "A"));
+        assert!(parse_cache(b"inacircle-catalog 2\n").is_none());
+        assert!(parse_cache(b"inacircle-catalog 0\n").is_none());
+        assert!(parse_cache(b"inacircle-catalog 1\n\xff\n").is_none());
+        let orphan = format!("inacircle-catalog 1\n{}\n", act("x.a", "A"));
         assert!(parse_cache(orphan.as_bytes()).is_none());
-        assert!(parse_cache(b"inacircle-catalog 0\nzzz\n").is_none());
+        assert!(parse_cache(b"inacircle-catalog 1\nzzz\n").is_none());
     }
 
     #[test]
@@ -1707,10 +1923,15 @@ pub(crate) mod tests {
         let now = Instant::now();
         assert_eq!(
             step_deadline(now, now + Duration::from_secs(9)),
-            Some(now + DEADLINE)
+            Some((now + DEADLINE, true))
+        );
+        // Exactly the step's own deadline left: still its own.
+        assert_eq!(
+            step_deadline(now, now + DEADLINE),
+            Some((now + DEADLINE, true))
         );
         let end = now + Duration::from_secs(1);
-        assert_eq!(step_deadline(now, end), Some(end));
+        assert_eq!(step_deadline(now, end), Some((end, false)));
         assert_eq!(step_deadline(now, now), None);
         assert_eq!(step_deadline(now + Duration::from_secs(1), now), None);
     }
@@ -1922,11 +2143,15 @@ pub(crate) mod tests {
             up,
             Duration::from_secs(20),
         );
-        let c = Catalog::load_from(&[(d, true)], &f.cache());
+        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
         assert!(seen.join().unwrap(), "a descendant never ran");
         for id in ["x.a", "x.early", "x.lingers", "x.late"] {
             assert!(c.get(id).is_none(), "{id} was taken");
         }
+        // Leaving processes behind is the binary's own fault: it backs off.
+        let cached = read_cache(&f.cache()).expect("a cache");
+        let e = cached.iter().find(|e| e.bin.path == d.join("one"));
+        assert_eq!(e.and_then(|e| e.backoff).map(|b| b.fails), Some(1));
         let left = left_after_kill(&[&token, &wait]);
         assert!(left.is_empty(), "descendants left alive: {left:?}");
     }
@@ -2048,7 +2273,7 @@ pub(crate) mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            collect(&mut c, Instant::now() + Duration::from_secs(20))
+            collect(&mut c, Instant::now() + Duration::from_secs(20), true)
         };
         crate::exec::become_subreaper().unwrap();
         assert_eq!(run(MAX_OUTPUT).ok().map(|o| o.len()), Some(MAX_OUTPUT));
@@ -2058,25 +2283,35 @@ pub(crate) mod tests {
         ));
     }
 
+    /// A failure's message, for test output.
+    fn why(r: Result<Vec<u8>, Fail>) -> Option<String> {
+        r.err().map(|e| match e {
+            Fail::Transient(m) | Fail::Penalized(m) | Fail::Deterministic(m) => m,
+        })
+    }
+
     /// A manifest that outlives its deadline and has a descendant fails as
     /// "timed out", the cause, not as "left processes behind", its
-    /// consequence.
+    /// consequence. Past its own deadline that is its fault (penalized);
+    /// cut by the refresh's end, it is not (transient).
     #[test]
     fn manifest_timeout_with_a_descendant_says_timed_out() {
         let f = Fix::new("mf-timeout-reason");
-        let token = format!("55.{}{}", std::process::id(), line!());
-        let body = format!("sleep {token} & touch \"$1\"; exec sleep 60");
-        let (mut child, ready) = spawn_plain(&f, &body);
-        wait_for(&ready, Duration::from_secs(20));
-        let r = collect(&mut child, Instant::now() + Duration::from_millis(200));
-        assert!(
-            matches!(&r, Err(Fail::Transient(m)) if m == "timed out"),
-            "{:?}",
-            r.err().map(|e| match e {
-                Fail::Transient(m) | Fail::Deterministic(m) => m,
-            })
-        );
-        assert!(left_after_kill(&[&token]).is_empty());
+        for own in [true, false] {
+            let token = format!("55.{}{}{own}", std::process::id(), line!());
+            let body = format!("sleep {token} & touch \"$1\"; exec sleep 60");
+            let (mut child, ready) = spawn_plain(&f, &body);
+            wait_for(&ready, Duration::from_secs(20));
+            let _ = std::fs::remove_file(&ready);
+            let r = collect(&mut child, Instant::now() + Duration::from_millis(200), own);
+            let ok = match &r {
+                Err(Fail::Penalized(m)) => own && m == "timed out",
+                Err(Fail::Transient(m)) => !own && m == "timed out (refresh budget spent)",
+                _ => false,
+            };
+            assert!(ok, "own={own}: {:?}", why(r));
+            assert!(left_after_kill(&[&token]).is_empty());
+        }
     }
 
     /// The early "no stdout" exit also reaps the killed members, so none
@@ -2090,7 +2325,7 @@ pub(crate) mod tests {
         wait_for(&ready, Duration::from_secs(20));
         let pgid = child.id() as libc::pid_t;
         drop(child.stdout.take());
-        let r = collect(&mut child, Instant::now() + Duration::from_secs(5));
+        let r = collect(&mut child, Instant::now() + Duration::from_secs(5), true);
         assert!(matches!(&r, Err(Fail::Transient(m)) if m == "no stdout"));
         // A member left unreaped would show up as a child of the group
         // within moments of its reparenting; none may, for a bounded look.
@@ -2224,14 +2459,17 @@ pub(crate) mod tests {
         assert!(c.get("x.b").is_some());
     }
 
+    /// A failed run is retried once its backoff is due (here, from the
+    /// start: a system failure), a broken manifest never until it changes.
     #[test]
-    fn transient_failure_retried_deterministic_cached() {
+    fn failed_run_retried_deterministic_cached() {
         let f = Fix::new("transient");
         let d = f.dir("a");
         // A manifest cannot leave a run marker (it is sandboxed), so reruns
-        // are told by a changed outcome: `a-fails` exits 1 now and is fixed
-        // after the first load; `b-garbage` has a malformed header and is
-        // fixed after it with the same size and mtime.
+        // are told by a changed outcome: `a-fails` exits 1 now (it backs
+        // off) and is fixed after the first load; `b-garbage` has a
+        // malformed header and is fixed after it with the same size and
+        // mtime.
         let good_a = manifest_body("", &[act("y.a", "Y")]);
         // Same size as the good body: a wrongly cached failure would then
         // stay cached after the fix (size and mtime unchanged).
@@ -2259,10 +2497,11 @@ pub(crate) mod tests {
             .unwrap();
         script(&d.join("b-garbage"), &good_b);
         set_mtime(&d.join("b-garbage"), mtime);
-        let c = Catalog::load_from(&[(d.clone(), true)], &f.cache());
+        let due = wall_secs() + BACKOFF_FIRST;
+        let c = Catalog::load_with(&[(d.clone(), true)], Some(&f.cache()), due);
         assert!(
             c.get("y.a").is_some(),
-            "the transient failure was not retried"
+            "the failed run was not retried once due"
         );
         assert!(
             c.get("x.b").is_none(),
@@ -2280,9 +2519,9 @@ pub(crate) mod tests {
         manifest_script(&d.join("other"), &[act("y.a", "Y")]);
         let c = Catalog::load_from(&dirs, &f.cache());
         assert_eq!(c.get("x.a").unwrap().label, "old");
-        // The binary changes and its manifest now fails transiently (exit 1
-        // is a crash, not a broken manifest). A new binary that fails the
-        // same way has no old entry and stays out.
+        // The binary changes and its manifest now fails (exit 1 is a
+        // failure of its run, not a broken manifest). A new binary that
+        // fails the same way has no old entry and stays out.
         script(&d.join("tool"), "exit 1");
         script(&d.join("fresh"), "exit 1");
         let c = Catalog::load_from(&dirs, &f.cache());
@@ -2292,10 +2531,423 @@ pub(crate) mod tests {
         let w = Catalog::load_cached_from(&dirs, &f.cache()).expect("a cache");
         assert_eq!(w.get("x.a").map(|a| a.label.as_str()), Some("old"));
         assert_eq!(w.actions.len(), 2);
-        // The old entry kept its old mtime/size, so the next start reruns it.
+        // It backs off under its new identity; once changed again, the next
+        // start reruns it at once.
         manifest_script(&d.join("tool"), &[act("x.a", "new")]);
         let c = Catalog::load_from(&dirs, &f.cache());
         assert_eq!(c.get("x.a").unwrap().label, "new");
+    }
+
+    // ---- negative cache (backoff) ----
+
+    /// The clock of the backoff tests: only the distance from it matters.
+    const BASE: u64 = 1_700_000_000;
+
+    fn load_at(dirs: &[(PathBuf, bool)], f: &Fix, now: u64) -> Catalog {
+        Catalog::load_with(dirs, Some(&f.cache()), now)
+    }
+
+    /// Whether a load at `now` ran a hanging manifest: such a run takes the
+    /// whole `DEADLINE`; a load that reruns nothing takes milliseconds.
+    fn hung(dirs: &[(PathBuf, bool)], f: &Fix, now: u64) -> bool {
+        let t = Instant::now();
+        load_at(dirs, f, now);
+        t.elapsed() >= DEADLINE
+    }
+
+    /// The cached backoff of `bin`: `None` without an entry, `Some(None)`
+    /// for an entry without one.
+    fn backoff_of(f: &Fix, bin: &Path) -> Option<Option<(u32, u64)>> {
+        let entries = read_cache(&f.cache()).expect("a cache");
+        entries
+            .iter()
+            .find(|e| e.bin.path == bin)
+            .map(|e| e.backoff.as_ref().map(|b| (b.fails, b.retry)))
+    }
+
+    /// `body` padded with a trailing comment to exactly `len` bytes.
+    fn padded(body: &str, len: usize) -> String {
+        let s = format!("{body}\n#");
+        assert!(s.len() <= len, "{body:?} is longer than {len}");
+        format!("{s}{}", "x".repeat(len - s.len()))
+    }
+
+    /// Replaces the script at `path` by `body` (the same size) and keeps its
+    /// mtime: to the catalog it is the same binary. A manifest cannot leave
+    /// a run marker (it is sandboxed), so a rerun shows as a new outcome.
+    fn swap(path: &Path, body: &str) {
+        let m = std::fs::metadata(path).unwrap();
+        script(path, body);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), m.len());
+        set_mtime(path, m.modified().unwrap());
+    }
+
+    /// A manifest that hangs is not rerun until its retry time; at it
+    /// (`now == retry`), it is, and the wait doubles.
+    #[test]
+    fn hanging_manifest_is_not_rerun_until_retry() {
+        let f = Fix::new("bo-hang");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("hang");
+        script(&bin, "exec sleep 10");
+        assert!(hung(&dirs, &f, BASE), "the first load did not run it");
+        assert_eq!(backoff_of(&f, &bin), Some(Some((1, BASE + 60))));
+        assert!(!hung(&dirs, &f, BASE + 30), "rerun during the backoff");
+        assert!(!hung(&dirs, &f, BASE + 59), "rerun during the backoff");
+        assert!(hung(&dirs, &f, BASE + 60), "not rerun once due");
+        assert_eq!(backoff_of(&f, &bin), Some(Some((2, BASE + 60 + 120))));
+        let left = left_after_kill(&[&d.to_string_lossy()]);
+        assert!(left.is_empty(), "left alive: {left:?}");
+    }
+
+    /// Each failure in a row doubles the wait from 60 s up to a day; the
+    /// counter stops at 64, the wait stays a day.
+    #[test]
+    fn backoff_doubles_up_to_a_day() {
+        let f = Fix::new("bo-double");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("fails");
+        script(&bin, "exit 3");
+        let (mut now, mut waits) = (BASE, Vec::new());
+        for k in 1..=70u32 {
+            load_at(&dirs, &f, now);
+            let (fails, retry) = backoff_of(&f, &bin).unwrap().expect("a backoff");
+            assert_eq!(fails, k.min(64), "failure {k}");
+            waits.push(retry - now);
+            now = retry;
+        }
+        assert_eq!(
+            waits[..13],
+            [
+                60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 30720, 61440, 86400, 86400
+            ]
+        );
+        assert!(waits[13..].iter().all(|&w| w == 86_400), "{waits:?}");
+    }
+
+    /// A binary that recovers (same identity, other behavior) is taken at
+    /// its retry time, and its `bin` line loses the backoff.
+    #[test]
+    fn success_clears_backoff() {
+        let f = Fix::new("bo-clear");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        let good = manifest_body("", &[act("x.a", "A")]);
+        script(&bin, &padded("exec sleep 10", good.len()));
+        let c = load_at(&dirs, &f, BASE);
+        assert!(c.get("x.a").is_none());
+        assert_eq!(backoff_of(&f, &bin), Some(Some((1, BASE + 60))));
+        swap(&bin, &good);
+        let c = load_at(&dirs, &f, BASE + 30);
+        assert!(c.get("x.a").is_none(), "rerun during the backoff");
+        let c = load_at(&dirs, &f, BASE + 60);
+        assert!(c.get("x.a").is_some(), "not rerun once due");
+        assert_eq!(backoff_of(&f, &bin), Some(None));
+        let text = std::fs::read_to_string(f.cache()).unwrap();
+        assert!(
+            !text.contains("fails=") && !text.contains("retry="),
+            "{text}"
+        );
+        let w = Catalog::load_cached_from(&dirs, &f.cache()).expect("a cache");
+        assert!(w.get("x.a").is_some());
+    }
+
+    /// A binary that changes during its backoff runs at once, and its
+    /// failures count from zero again.
+    #[test]
+    fn changed_binary_retries_at_once() {
+        let f = Fix::new("bo-change");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        script(&bin, "exit 3");
+        load_at(&dirs, &f, BASE);
+        load_at(&dirs, &f, BASE + 60);
+        assert_eq!(backoff_of(&f, &bin), Some(Some((2, BASE + 180))));
+        script(&bin, "exit 4 # changed");
+        load_at(&dirs, &f, BASE + 61);
+        assert_eq!(
+            backoff_of(&f, &bin),
+            Some(Some((1, BASE + 121))),
+            "not rerun at once, or the old count was kept"
+        );
+        manifest_script(&bin, &[act("x.a", "A")]);
+        let c = load_at(&dirs, &f, BASE + 62);
+        assert!(c.get("x.a").is_some(), "not rerun at once");
+        assert_eq!(backoff_of(&f, &bin), Some(None));
+    }
+
+    /// A binary that worked and hangs after an update keeps its old actions
+    /// on the wheel while it backs off, under its new identity.
+    #[test]
+    fn old_actions_stay_during_backoff() {
+        let f = Fix::new("bo-old");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        manifest_script(&bin, &[act("x.a", "old")]);
+        assert!(load_at(&dirs, &f, BASE).get("x.a").is_some());
+        script(&bin, "exec sleep 10");
+        let c = load_at(&dirs, &f, BASE + 1);
+        assert_eq!(c.get("x.a").map(|a| a.label.as_str()), Some("old"));
+        assert_eq!(backoff_of(&f, &bin), Some(Some((1, BASE + 61))));
+        let size = std::fs::metadata(&bin).unwrap().len();
+        let cached = read_cache(&f.cache()).unwrap();
+        assert_eq!(
+            cached[0].bin.size, size,
+            "not the binary's current identity"
+        );
+        let w = Catalog::load_cached_from(&dirs, &f.cache()).expect("a cache");
+        assert_eq!(w.get("x.a").map(|a| a.label.as_str()), Some("old"));
+        let t = Instant::now();
+        let c = load_at(&dirs, &f, BASE + 30);
+        assert!(t.elapsed() < DEADLINE, "rerun during the backoff");
+        assert_eq!(c.get("x.a").map(|a| a.label.as_str()), Some("old"));
+    }
+
+    /// The refresh budget is not the binary's fault: five hanging binaries
+    /// and a good one after them. The first four fill their own 2 s and back
+    /// off; the fifth is cut by the budget's end and the good one finds it
+    /// spent: neither backs off, and the next start runs both.
+    #[test]
+    fn budget_cut_is_not_penalized() {
+        let f = Fix::new("bo-budget");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let hangs: Vec<PathBuf> = (1..=5).map(|i| d.join(format!("a{i}"))).collect();
+        for h in &hangs {
+            script(h, "exec sleep 10");
+        }
+        let good = d.join("b-good");
+        manifest_script(&good, &[act("x.g", "G")]);
+        let c = load_at(&dirs, &f, BASE);
+        assert!(c.get("x.g").is_none(), "the budget was not spent");
+        for h in &hangs[..4] {
+            assert_eq!(backoff_of(&f, h), Some(Some((1, BASE + 60))), "{h:?}");
+        }
+        assert!(
+            !matches!(backoff_of(&f, &hangs[4]), Some(Some(_))),
+            "the binary cut by the budget backs off"
+        );
+        assert!(
+            !matches!(backoff_of(&f, &good), Some(Some(_))),
+            "the binary that found the budget spent backs off"
+        );
+        let t = Instant::now();
+        let c = load_at(&dirs, &f, BASE + 1);
+        assert!(
+            t.elapsed() < 2 * DEADLINE,
+            "backed-off binaries rerun: {:?}",
+            t.elapsed()
+        );
+        assert!(c.get("x.g").is_some(), "the good binary did not run");
+        assert_eq!(backoff_of(&f, &hangs[4]), Some(Some((1, BASE + 61))));
+        for h in &hangs[..4] {
+            assert_eq!(backoff_of(&f, h), Some(Some((1, BASE + 60))), "{h:?}");
+        }
+        let left = left_after_kill(&[&d.to_string_lossy()]);
+        assert!(left.is_empty(), "left alive: {left:?}");
+    }
+
+    /// A system failure (the sandbox gate) does not back a binary off: it
+    /// keeps its old entry and runs as soon as the gate passes.
+    #[test]
+    fn system_failures_are_not_penalized() {
+        use crate::sandbox::tests::{GATE_FAILURES, abi_or_skip, inject_failure};
+        if abi_or_skip("system_failures_are_not_penalized", 0).is_none() {
+            return;
+        }
+        for name in GATE_FAILURES {
+            let f = Fix::new("bo-gate");
+            let d = f.dir("a");
+            let dirs = [(d.clone(), true)];
+            let bin = d.join("tool");
+            manifest_script(&bin, &[act("x.a", "old")]);
+            load_at(&dirs, &f, BASE);
+            manifest_script(&bin, &[act("x.a", "new"), act("x.b", "B")]);
+            {
+                let _g = inject_failure(name);
+                let c = load_at(&dirs, &f, BASE + 1);
+                assert_eq!(c.get("x.a").map(|a| a.label.as_str()), Some("old"));
+            }
+            assert_eq!(backoff_of(&f, &bin), Some(None), "{name}: backed off");
+            let c = load_at(&dirs, &f, BASE + 2);
+            assert_eq!(
+                c.get("x.a").map(|a| a.label.as_str()),
+                Some("new"),
+                "{name}"
+            );
+        }
+    }
+
+    /// A crash (death by a signal) and a non-zero exit are the binary's own
+    /// failures: each backs off.
+    #[test]
+    fn crash_and_nonzero_exit_are_penalized() {
+        let f = Fix::new("bo-crash");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        script(&d.join("crash"), "kill -SEGV $$");
+        script(&d.join("exit"), "exit 3");
+        load_at(&dirs, &f, BASE);
+        for b in ["crash", "exit"] {
+            assert_eq!(
+                backoff_of(&f, &d.join(b)),
+                Some(Some((1, BASE + 60))),
+                "{b}"
+            );
+        }
+        // The crash is told as one (a signal), not as some other failure.
+        let (mut child, _) = spawn_plain(&f, "kill -SEGV $$");
+        let r = collect(&mut child, Instant::now() + Duration::from_secs(20), true);
+        assert!(
+            matches!(&r, Err(Fail::Penalized(m)) if m.contains("SIGSEGV")),
+            "{:?}",
+            why(r)
+        );
+    }
+
+    /// A broken manifest stays as today: cached without actions and without
+    /// a backoff, not rerun (even days later) until the binary changes.
+    #[test]
+    fn deterministic_failure_stays_permanent() {
+        let f = Fix::new("bo-det");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        let good = manifest_body("", &[act("x.a", "A")]);
+        script(
+            &bin,
+            &good.replace("inacircle-manifest 0", "inacircle-garbage-00"),
+        );
+        let c = load_at(&dirs, &f, BASE);
+        assert!(c.actions.is_empty());
+        assert_eq!(backoff_of(&f, &bin), Some(None));
+        swap(&bin, &good);
+        let c = load_at(&dirs, &f, BASE + 10 * 86_400);
+        assert!(c.actions.is_empty(), "the broken manifest was rerun");
+        // Positive control: once it changes, it runs.
+        manifest_script(&bin, &[act("x.a", "A"), act("x.b", "B")]);
+        let c = load_at(&dirs, &f, BASE + 10 * 86_400);
+        assert!(c.get("x.a").is_some());
+    }
+
+    /// A retry further away than the longest wait cannot be ours (the clock
+    /// went back): the binary is tried now. At exactly the longest wait it
+    /// is not.
+    #[test]
+    fn retry_far_in_future_retries_now() {
+        let f = Fix::new("bo-clock");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        let good = manifest_body("", &[act("x.a", "A")]);
+        script(&bin, &padded("exit 3", good.len()));
+        load_at(&dirs, &f, BASE);
+        assert_eq!(backoff_of(&f, &bin), Some(Some((1, BASE + 60))));
+        swap(&bin, &good);
+        // The clock goes back: `retry` is a day away, then a day and a second.
+        let c = load_at(&dirs, &f, BASE + 60 - 86_400);
+        assert!(c.get("x.a").is_none(), "tried at exactly a day away");
+        let c = load_at(&dirs, &f, BASE + 60 - 86_401);
+        assert!(c.get("x.a").is_some(), "not tried with retry > now + a day");
+        // Ten days ahead in the cache, written by hand.
+        script(&bin, &padded("exit 3", good.len()));
+        load_at(&dirs, &f, BASE);
+        let (_, retry) = backoff_of(&f, &bin).unwrap().unwrap();
+        let text = std::fs::read_to_string(f.cache()).unwrap();
+        let far = BASE + 10 * 86_400;
+        std::fs::write(
+            f.cache(),
+            text.replace(&format!("retry={retry}"), &format!("retry={far}")),
+        )
+        .unwrap();
+        assert_eq!(backoff_of(&f, &bin), Some(Some((1, far))));
+        swap(&bin, &good);
+        let c = load_at(&dirs, &f, BASE + 1);
+        assert!(
+            c.get("x.a").is_some(),
+            "retry ten days ahead was waited for"
+        );
+    }
+
+    /// A cache of the previous version is rejected loudly and rebuilt,
+    /// even when its binaries match the disk.
+    #[test]
+    fn cache_v0_is_rebuilt() {
+        let f = Fix::new("bo-v0");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let bin = d.join("tool");
+        manifest_script(&bin, &[act("x.a", "new")]);
+        load_at(&dirs, &f, BASE);
+        let text = std::fs::read_to_string(f.cache()).unwrap();
+        assert!(text.starts_with("inacircle-catalog 1\n"), "{text}");
+        let v0 = text
+            .replace("inacircle-catalog 1\n", "inacircle-catalog 0\n")
+            .replace("label=new", "label=old");
+        std::fs::write(f.cache(), &v0).unwrap();
+        assert!(read_cache(&f.cache()).is_none(), "a v0 cache was read");
+        let c = load_at(&dirs, &f, BASE + 1);
+        assert_eq!(c.get("x.a").map(|a| a.label.as_str()), Some("new"));
+        let text = std::fs::read_to_string(f.cache()).unwrap();
+        assert!(text.starts_with("inacircle-catalog 1\n"), "not rebuilt");
+    }
+
+    /// `fails` and `retry` are read strictly: plain decimal, `fails` 1 to
+    /// 64, `retry` at most 20 digits and a `u64`, both or neither. Anything
+    /// else rejects the cache, which is then rebuilt.
+    #[test]
+    fn rejects_bad_backoff_fields() {
+        let bin = "inacircle-catalog 1\nbin\tpath=/a/one\tmtime=5\tsize=7\tbuiltin=yes";
+        let parse = |extra: &str| {
+            parse_cache(format!("{bin}{extra}\n").as_bytes())
+                .map(|e| e[0].backoff.as_ref().map(|b| (b.fails, b.retry)))
+        };
+        assert_eq!(parse(""), Some(None));
+        assert_eq!(parse("\tfails=1\tretry=0"), Some(Some((1, 0))));
+        assert_eq!(parse("\tfails=64\tretry=9"), Some(Some((64, 9))));
+        assert_eq!(
+            parse("\tfails=12\tretry=18446744073709551615"),
+            Some(Some((12, u64::MAX)))
+        );
+        for bad in [
+            "\tfails=0\tretry=9",
+            "\tfails=65\tretry=9",
+            "\tfails=+1\tretry=9",
+            "\tfails=01\tretry=9",
+            "\tfails=\tretry=9",
+            "\tfails= 1\tretry=9",
+            "\tfails=1\tretry=x",
+            "\tfails=1\tretry=-1",
+            "\tfails=1\tretry=+9",
+            "\tfails=1\tretry=09",
+            "\tfails=1\tretry=",
+            "\tfails=1\tretry=100000000000000000000",
+            "\tfails=1\tretry=18446744073709551616",
+            "\tfails=1",
+            "\tretry=9",
+            "\tfails=99999999999\tretry=9",
+        ] {
+            assert_eq!(parse(bad), None, "{bad:?} accepted");
+        }
+        // A rejected cache is rebuilt: the bad line is gone afterwards.
+        let f = Fix::new("bo-badfield");
+        let d = f.dir("a");
+        let dirs = [(d.clone(), true)];
+        let tool = d.join("tool");
+        manifest_script(&tool, &[act("x.a", "A")]);
+        load_at(&dirs, &f, BASE);
+        let text = std::fs::read_to_string(f.cache()).unwrap();
+        let bad = text.replace("builtin=yes", "builtin=yes\tfails=0\tretry=9");
+        std::fs::write(f.cache(), &bad).unwrap();
+        assert!(read_cache(&f.cache()).is_none());
+        let c = load_at(&dirs, &f, BASE + 1);
+        assert!(c.get("x.a").is_some());
+        assert_eq!(backoff_of(&f, &tool), Some(None));
     }
 
     /// Benchmark, not a test: the cost of the sandboxed manifest run against
@@ -2325,7 +2977,7 @@ pub(crate) mod tests {
             let t = Instant::now();
             let mut c = spawn_manifest(&bin).ok().expect("sandboxed spawn");
             let spawned = t.elapsed();
-            let out = collect(&mut c, deadline()).ok().expect("output");
+            let out = collect(&mut c, deadline(), true).ok().expect("output");
             let total = t.elapsed();
             assert!(!out.is_empty());
             if i >= WARMUP {
@@ -2343,7 +2995,7 @@ pub(crate) mod tests {
                 .spawn()
                 .expect("plain spawn");
             let spawned = t.elapsed();
-            let out = collect(&mut c, deadline()).ok().expect("output");
+            let out = collect(&mut c, deadline(), true).ok().expect("output");
             let total = t.elapsed();
             assert!(!out.is_empty());
             if i >= WARMUP {
@@ -2540,7 +3192,7 @@ pub(crate) mod tests {
 
     // ---- bounded cache and manifest ----
 
-    const HDR: &str = "inacircle-catalog 0\n";
+    const HDR: &str = "inacircle-catalog 1\n";
 
     fn bin_rec(i: usize) -> String {
         format!("bin\tpath=/b/{i}\tmtime=5\tsize=7\tbuiltin=yes\n")
