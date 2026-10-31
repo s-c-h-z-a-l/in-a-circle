@@ -362,10 +362,13 @@ mod tests {
     impl Sparse {
         /// The guard exists before the file does, so no path leaks it.
         fn new() -> Self {
+            // One name per call: the tests of this module run in parallel.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             Sparse(std::path::PathBuf::from(format!(
-                "{}/zipw-unit-{}",
+                "{}/zipw-unit-{}-{}",
                 std::env::temp_dir().display(),
-                std::process::id()
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             )))
         }
 
@@ -413,5 +416,96 @@ mod tests {
         w.add("b", &mut &b"xyz"[..], 100).unwrap();
         let done = w.finish().unwrap();
         assert!(done.metadata().unwrap().len() <= MAX_ARCHIVE);
+    }
+
+    /// Serves `parts` one read at a time (an `Err` part is returned as that
+    /// error) and records the length of every buffer it was handed.
+    struct Script {
+        parts: std::collections::VecDeque<io::Result<Vec<u8>>>,
+        asked: Vec<usize>,
+    }
+
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.asked.push(buf.len());
+            match self.parts.pop_front() {
+                None => Ok(0),
+                Some(Err(e)) => Err(e),
+                Some(Ok(d)) => {
+                    let n = d.len().min(buf.len());
+                    buf[..n].copy_from_slice(&d[..n]);
+                    Ok(n)
+                }
+            }
+        }
+    }
+
+    fn script(parts: Vec<io::Result<Vec<u8>>>) -> Script {
+        Script {
+            parts: parts.into(),
+            asked: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_error_has_its_own_text() {
+        let io_err = || io::Error::other("boom");
+        for (e, text) in [
+            (WriteError::Io(io_err()), "write failed: boom"),
+            (WriteError::Read(io_err()), "read failed: boom"),
+            (WriteError::EntryTooLarge, "an entry is too large"),
+            (
+                WriteError::ArchiveTooLarge,
+                "the archive would be too large",
+            ),
+            (WriteError::TooManyEntries, "too many entries"),
+            (WriteError::BadName, "the entry name is not allowed"),
+            (WriteError::DuplicateName, "two entries have the same name"),
+            (WriteError::Poisoned, "an earlier write failed"),
+        ] {
+            assert_eq!(e.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn is_empty_follows_the_entries() {
+        let sp = Sparse::new();
+        let mut w = StoreWriter::new(sp.create(0));
+        assert!(w.is_empty());
+        w.add("a", &mut &b"x"[..], 10).unwrap();
+        assert!(!w.is_empty());
+    }
+
+    #[test]
+    fn a_read_asks_for_at_most_one_chunk_and_at_most_the_room_left() {
+        let sp = Sparse::new();
+        let mut w = StoreWriter::new(sp.create(0));
+        let mut big = script(vec![Ok(vec![1; CHUNK]), Ok(vec![2; 10])]);
+        w.add("a", &mut big, 1 << 30).unwrap();
+        assert_eq!(big.asked, [CHUNK, CHUNK, CHUNK], "one buffer of CHUNK");
+        assert_eq!(CHUNK, 65_536);
+        // max 10: the first read may take 11 (10 and one more, to see the
+        // limit passed); after 5 bytes, 6 more.
+        let mut small = script(vec![Ok(vec![3; 5]), Ok(vec![4; 5])]);
+        w.add("b", &mut small, 10).unwrap();
+        assert_eq!(small.asked, [11, 6, 1]);
+    }
+
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        let sp = Sparse::new();
+        let mut w = StoreWriter::new(sp.create(0));
+        let mut r = script(vec![
+            Err(io::ErrorKind::Interrupted.into()),
+            Ok(b"abc".to_vec()),
+        ]);
+        assert_eq!(w.add("a", &mut r, 10).unwrap(), 3);
+        // Another error is the entry's failure, and the entry is rolled back.
+        let mut r = script(vec![Err(io::Error::other("boom"))]);
+        assert!(matches!(
+            w.add("b", &mut r, 10),
+            Err(WriteError::Read(e)) if e.kind() == io::ErrorKind::Other
+        ));
+        assert_eq!(w.len(), 1);
     }
 }
