@@ -834,9 +834,11 @@ fn add_entry(
         Err(W::Read(e)) => Err(AddFail::Input(e.to_string())),
         Err(W::EntryTooLarge) => Err(AddFail::Input("image changed while it was read".into())),
         Err(W::ArchiveTooLarge) => Err(AddFail::Whole("CBZ would be larger than 4 GiB".into())),
-        // The count is checked by the projection first (and the input count
-        // is far below the limit), so this is not reached; the text must
-        // still be true if the limits ever change.
+        // Unreachable, hence untested here (the writer's own test covers the
+        // error): the run takes at most 1024 inputs, far below the 65 534
+        // entries a ZIP holds without the ZIP64 marker, and the projection
+        // checks the count before an entry is added. The text must still be
+        // true if the limits ever change.
         Err(W::TooManyEntries) => Err(AddFail::Whole(format!(
             "CBZ would have more than {} images",
             zip::MAX_ENTRIES
