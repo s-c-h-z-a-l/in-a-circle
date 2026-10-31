@@ -6,7 +6,9 @@ use crate::classify::Kind;
 /// A fixed wheel slot. `direction`: 0 = north, clockwise in 45 degree steps.
 pub struct Preset {
     pub id: &'static str,
-    pub input: &'static str,
+    /// The 1:1 form's input type; `None`: the preset has no 1:1 form (it
+    /// only joins many files into one).
+    pub input: Option<&'static str>,
     pub output: &'static str,
     pub label: &'static str,
     /// Direction within its group's wheel.
@@ -41,7 +43,7 @@ pub const GROUPS: &[Group] = &[
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "markdown",
-        input: "text/plain",
+        input: Some("text/plain"),
         output: "text/markdown",
         label: "Markdown",
         direction: 0,
@@ -50,7 +52,7 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         id: "plain-text",
-        input: "text/markdown",
+        input: Some("text/markdown"),
         output: "text/plain",
         label: "Plain text",
         direction: 4,
@@ -59,10 +61,19 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         id: "pdf",
-        input: "application/vnd.comicbook+zip",
+        input: Some("application/vnd.comicbook+zip"),
         output: "application/pdf",
         label: "PDF",
         direction: 0,
+        group: "book",
+        join: &["image/jpeg", "image/png"],
+    },
+    Preset {
+        id: "cbz",
+        input: None,
+        output: "application/vnd.comicbook+zip",
+        label: "CBZ",
+        direction: 4,
         group: "book",
         join: &["image/jpeg", "image/png"],
     },
@@ -228,11 +239,11 @@ fn join_action<'c>(cat: &'c Catalog, p: &Preset, tally: &Tally) -> Option<(&'c A
 /// A join action needs at least its `min` files. The one source of truth for
 /// "applicable": the wheel, the offer and the run all ask it.
 pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(Choice<'c>, usize)> {
-    let one = tally.of(preset.input).0;
-    let route = if one > 0 {
-        route(cat, preset.input, preset.output)
-    } else {
-        None
+    let (one, route) = match preset.input {
+        Some(input) if tally.of(input).0 > 0 => {
+            (tally.of(input).0, route(cat, input, preset.output))
+        }
+        _ => (0, None),
     };
     let join = join_action(cat, preset, tally);
     match (route, join) {
@@ -247,7 +258,7 @@ pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(C
 /// input or the join set, whichever has more, and the name of the first such
 /// file with the type to group presets by.
 fn raw_source<'t>(p: &Preset, tally: &'t Tally) -> (usize, &'t str, &'static str) {
-    let (one, one_name) = tally.of(p.input);
+    let (one, one_name) = p.input.map_or((0, ""), |i| tally.of(i));
     let join = count_of(tally, p.join.iter().copied());
     if join > one {
         let name = tally
@@ -257,7 +268,7 @@ fn raw_source<'t>(p: &Preset, tally: &'t Tally) -> (usize, &'t str, &'static str
             .map_or("", |t| t.2.as_str());
         (join, name, p.join[0])
     } else {
-        (one, one_name, p.input)
+        (one, one_name, p.input.unwrap_or(p.id))
     }
 }
 
@@ -267,7 +278,7 @@ fn disabled_reason(cat: &Catalog, p: &Preset, tally: &Tally) -> Option<String> {
         return None;
     }
     // The side the files are on: the join set when it has more files.
-    if count_of(tally, p.join.iter().copied()) > tally.of(p.input).0 {
+    if count_of(tally, p.join.iter().copied()) > p.input.map_or(0, |i| tally.of(i).0) {
         let mut joins = join_candidates(cat, p).peekable();
         if joins.peek().is_none() {
             return Some("no action installed".into());
@@ -279,7 +290,10 @@ fn disabled_reason(cat: &Catalog, p: &Preset, tally: &Tally) -> Option<String> {
             },
         );
     }
-    Some(match plan(cat, p.input, p.output, |_| true) {
+    let Some(input) = p.input else {
+        return Some("no action installed".into());
+    };
+    Some(match plan(cat, input, p.output, |_| true) {
         Some(r) => match r.iter().find_map(|a| missing_tools(a).into_iter().next()) {
             Some(t) => format!("needs {t}"),
             None => "no action installed".into(),
@@ -411,7 +425,10 @@ pub fn offer_tally(cat: &Catalog, tally: &Tally) -> Offer {
     // groups presets sharing a source. The count is `choose`'s when the
     // preset can run, else what it would take.
     let source = |p: &Preset| match choose(cat, p, tally) {
-        Some((Choice::Route(_), n)) => (n, tally.of(p.input).1, p.input),
+        Some((Choice::Route(_), n)) => {
+            let input = p.input.unwrap_or_default();
+            (n, tally.of(input).1, input)
+        }
         Some((Choice::Join(a), n)) => {
             let types = a.join.as_ref().map_or(&[][..], |j| &j.types[..]);
             let name = tally
@@ -716,7 +733,7 @@ mod tests {
     fn unknown_group_is_not_shown() {
         let presets = [Preset {
             id: "x",
-            input: "text/plain",
+            input: Some("text/plain"),
             output: "text/markdown",
             label: "X",
             direction: 0,
@@ -803,7 +820,13 @@ mod tests {
         assert_eq!((book.label, book.direction), ("Book", 2));
         let pdf = PRESETS.iter().find(|p| p.id == "pdf").unwrap();
         assert_eq!(
-            (pdf.input, pdf.output, pdf.label, pdf.direction, pdf.group),
+            (
+                pdf.input.unwrap(),
+                pdf.output,
+                pdf.label,
+                pdf.direction,
+                pdf.group
+            ),
             (
                 "application/vnd.comicbook+zip",
                 "application/pdf",
@@ -842,7 +865,9 @@ mod tests {
             ),
             ("pdf", "PDF", 1, None)
         );
-        assert_eq!(o.slices.iter().flatten().count(), 1);
+        // The CBZ slice is on the wheel too, dim: a comic book is not an image.
+        assert_eq!(o.slices.iter().flatten().count(), 2);
+        assert_eq!(o.slices[4].as_ref().unwrap().applicable, 0);
         // The flat offer for the same file offers it too.
         let o = offer(
             &cat,
@@ -899,6 +924,76 @@ mod tests {
 
     fn pdf_slice(o: &Offer) -> &Slice {
         o.slices[0].as_ref().unwrap()
+    }
+
+    /// The catalog of the real pages family: both joins and the CBZ reader.
+    fn book_catalog() -> Catalog {
+        let mut cat = pdf_catalog(true);
+        let mut j = act("pages.images-to-cbz", "image/jpeg", CBZ, 10, false);
+        j.group = "book".into();
+        j.batch = true;
+        j.join = Some(crate::catalog::Join {
+            types: vec!["image/jpeg".into(), "image/png".into()],
+            min: 1,
+        });
+        cat.actions.push(j);
+        cat
+    }
+
+    #[test]
+    fn cbz_preset_offers_join_for_images() {
+        let cat = book_catalog();
+        let t = tally_of(&[
+            many("image/jpeg", 2, "jpg"),
+            many("image/png", 1, "png"),
+            many("text/plain", 1, "txt"),
+        ]);
+        let o = offer_group(&cat, &t, "book");
+        let cbz = o.slices[4].as_ref().expect("cbz points south");
+        let pdf = o.slices[0].as_ref().expect("pdf points north");
+        assert_eq!(
+            (
+                cbz.preset,
+                cbz.label.as_str(),
+                cbz.applicable,
+                cbz.disabled.as_deref()
+            ),
+            ("cbz", "CBZ", 3, None)
+        );
+        assert_eq!(
+            (pdf.preset, pdf.applicable, pdf.disabled.as_deref()),
+            ("pdf", 3, None)
+        );
+        assert_eq!(o.hub, "3 / 4 files");
+        // Only a comic book: nothing to join, the CBZ slice is dim.
+        let t = tally(&[("x.cbz", CBZ)]);
+        let o = offer_group(&cat, &t, "book");
+        let cbz = o.slices[4].as_ref().unwrap();
+        assert_eq!(cbz.applicable, 0);
+        assert!(cbz.disabled.is_some());
+        let pdf = o.slices[0].as_ref().unwrap();
+        assert_eq!((pdf.applicable, pdf.disabled.as_deref()), (1, None));
+    }
+
+    #[test]
+    fn presets_without_one_to_one_never_route() {
+        let cat = book_catalog();
+        let cbz = PRESETS.iter().find(|p| p.id == "cbz").unwrap();
+        assert!(cbz.input.is_none());
+        for t in [
+            tally_of(&[many("image/png", 3, "png")]),
+            tally_of(&[many(CBZ, 2, "cbz"), many("image/jpeg", 1, "jpg")]),
+            tally_of(&[many("text/plain", 2, "txt")]),
+            Tally::default(),
+        ] {
+            assert!(
+                !matches!(choose(&cat, cbz, &t), Some((Choice::Route(_), _))),
+                "{t:?}"
+            );
+        }
+        // Without a join action it cannot run at all.
+        let t = tally_of(&[many("image/png", 3, "png")]);
+        assert!(choose(&pdf_catalog(false), cbz, &t).is_none());
     }
 
     #[test]

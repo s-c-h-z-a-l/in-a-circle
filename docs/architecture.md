@@ -402,7 +402,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   broken by the fixed preset order). The other files are skipped, and the
   hub says so ("15 / 20").
 - **Join presets.** A preset may name a set of MIME types (`Preset.join`);
-  the `pdf` preset names JPEG and PNG. `menu::choose` decides what a preset
+  the `pdf` and `cbz` presets name JPEG and PNG. A preset's 1:1 input is
+  optional: `cbz` has none (`Preset.input` is `None`), so `choose` only
+  looks at the join. `menu::choose` decides what a preset
   runs for a selection: the 1:1 route (for the preset's own input) or a join
   action, which is a catalog action whose type set covers the preset's set,
   with the preset's output, runnable, and with at least its `min` files in
@@ -702,7 +704,7 @@ compositor.
   target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south; `pdf` north in Book): lit if applicable, dim otherwise; the hub is
+  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has no one-to-one form, it only joins images into one comic book): lit if applicable, dim otherwise; the hub is
   the category's label, or `<n> / <total> files` when the most files any lit
   target of the category takes (`n`, the count the run would take) is below
   the number dropped. `inacircle offer --groups <files…>` prints level 1.

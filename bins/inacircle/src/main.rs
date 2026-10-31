@@ -431,9 +431,14 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 }
             }
             match menu::choose(&cat, p, &tally) {
-                Some((menu::Choice::Route(r), _)) => (vec![p.input], r, None, None),
+                Some((menu::Choice::Route(r), _)) => (p.input.into_iter().collect(), r, None, None),
                 Some((menu::Choice::Join(a), _)) => (join_types(a), Vec::new(), Some(a), None),
-                None => (vec![p.input], Vec::new(), None, Some(String::new())),
+                None => (
+                    p.input.into_iter().collect(),
+                    Vec::new(),
+                    None,
+                    Some(String::new()),
+                ),
             }
         }
         (Target::Action(id), _) => {
@@ -1395,6 +1400,61 @@ mod tests {
         assert!(g.slices[0].as_ref().is_some_and(|d| d.lit));
         let g = group_menu_for(vec![pdf], Some(md_catalog()));
         assert!(g.slices[0].as_ref().is_some_and(|d| !d.lit), "dim");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the drawn Book wheel is built from (`wheel::stage2` paints a
+    /// `Menu`'s labels, dim/normal states and hub as they are): images
+    /// light both joins, the CBZ slice sits south, the hub counts the
+    /// files they take.
+    #[test]
+    fn book_menu_offers_cbz_south_for_images() {
+        let join = |id: &str, out: &str, ext: &str| Action {
+            id: id.into(),
+            input: "image/jpeg".into(),
+            output: out.into(),
+            ext: ext.into(),
+            label: ext.to_uppercase(),
+            group: "book".into(),
+            join: Some(engine::catalog::Join {
+                types: vec!["image/jpeg".into(), "image/png".into()],
+                min: 1,
+            }),
+            ..md_catalog().actions.remove(0)
+        };
+        let cat = Catalog {
+            actions: vec![
+                join("pages.images-to-pdf", "application/pdf", "pdf"),
+                join(
+                    "pages.images-to-cbz",
+                    "application/vnd.comicbook+zip",
+                    "cbz",
+                ),
+            ],
+        };
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-book-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for (name, data) in [
+            ("1.jpg", &b"\xff\xd8\xff\xe0 j"[..]),
+            ("2.png", b"\x89PNG\r\n\x1a\n"),
+            ("3.png", b"\x89PNG\r\n\x1a\n"),
+            ("n.txt", b"words\n"),
+        ] {
+            let f = dir.join(name);
+            std::fs::write(&f, data).unwrap();
+            paths.push(f);
+        }
+        let g = group_menu_for(paths, Some(cat));
+        assert!(g.slices[2].as_ref().is_some_and(|b| b.lit), "Book lights");
+        let m = target_menu(&g, "book");
+        let slice = |k: usize| {
+            let c = m.slices[k].as_ref().unwrap();
+            (c.label.as_str(), c.preset.as_str(), c.applicable)
+        };
+        assert_eq!(slice(0), ("PDF", "pdf", true));
+        assert_eq!(slice(4), ("CBZ", "cbz", true));
+        assert_eq!(m.hub, "3 / 4 files");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

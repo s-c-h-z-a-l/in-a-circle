@@ -1871,7 +1871,10 @@ fn offer_images_shows_join_count() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\nhub\t2 / 3 files\n"
+        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\n\
+         slice\tdir=4\tpreset=cbz\tlabel=CBZ\tapplicable=2\tdisabled=no action installed\n\
+         hub\t2 / 3 files\n",
+        "the CBZ slice is on the wheel, dim: only the PDF join is installed"
     );
 }
 
