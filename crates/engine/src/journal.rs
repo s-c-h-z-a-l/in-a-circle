@@ -3684,6 +3684,64 @@ mod tests {
 
     // ---- history versions ----
 
+    /// The regression gate of the history format: a job written by hand in
+    /// the format of the runs before join actions (one input, one group,
+    /// one child; `job-start` without an owner, closed by its `job` line),
+    /// filled with the identities of real files, is undone today: its
+    /// wrapper goes whole to the Trash.
+    #[test]
+    fn old_history_still_undoes() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("old-history");
+        t.env(|| {
+            let wrapper = t.out().join("doc");
+            fs::create_dir(&wrapper).unwrap();
+            let child = wrapper.join("doc.md");
+            fs::write(&child, "# doc\n").unwrap();
+            let (w, c) = (
+                fs::metadata(&wrapper).unwrap(),
+                fs::metadata(&child).unwrap(),
+            );
+            let ns = |s: i64, n: i64| i128::from(s) * 1_000_000_000 + i128::from(n);
+            let j = "1790000000-1-0badc0de";
+            let place = enc(wrapper.as_os_str().as_bytes());
+            let fixture = format!(
+                "inacircle-history 1\n\
+                 job-start\tjob={j}\n\
+                 group-begin\tjob={j}\tgroup=00000000000000aa\top=00000000000000bb\twrapper_dev={}\twrapper_ino={}\twrapper_type=dir\twrapper_uid={}\twrapper_mode={:o}\tchildren=1\n\
+                 child\tjob={j}\tgroup=00000000000000aa\trel=doc.md\ttype=file\tdev={}\tino={}\tuid={}\tmode={:o}\tnlink=1\tsize={}\tmtime={}\tctime={}\n\
+                 group-end\tjob={j}\tgroup=00000000000000aa\tchildren=1\tbytes=6\n\
+                 publish-intent\top=00000000000000bb\tjob={j}\tgroup=00000000000000aa\tprivate={place}.private\ttarget={place}\n\
+                 publish-commit\top=00000000000000bb\tjob={j}\tgroup=00000000000000aa\tactual={place}\tdurability=synced\n\
+                 job\tid={j}\ttime=1790000001\taction=text.txt-to-md\tstatus=done\tsandbox=yes\n",
+                w.dev(),
+                w.ino(),
+                w.uid(),
+                w.mode() & 0o7777,
+                c.dev(),
+                c.ino(),
+                c.uid(),
+                c.mode() & 0o7777,
+                c.size(),
+                ns(c.mtime(), c.mtime_nsec()),
+                ns(c.ctime(), c.ctime_nsec()),
+            );
+            let dir = history_dir().unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            fs::write(history_path(), &fixture).unwrap();
+            fs::set_permissions(history_path(), fs::Permissions::from_mode(0o600)).unwrap();
+            let r = undo(&JobId(j.into())).unwrap();
+            assert!(all_moved(&r, std::slice::from_ref(&child)), "{:?}", r.groups);
+            assert!(!wrapper.exists());
+            assert_eq!(
+                fs::read_to_string(t.trash().join("files/doc/doc.md")).unwrap(),
+                "# doc\n"
+            );
+            // The fixture is still the file's head: nothing rewrote it.
+            assert!(history().starts_with(&fixture));
+        });
+    }
+
     const V0: &str = "inacircle-history 0\nout\tjob=1-1\tin=/i\tpath=/o/a\tsize=1\tmtime=2\tctime=3\tdev=4\tino=5\njob\tid=1-1\ttime=1\taction=a\tstatus=done\tsandbox=yes\n";
 
     /// A version 0 history is archived (no overwrite, no delete) under the

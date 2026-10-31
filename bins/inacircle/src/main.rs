@@ -16,7 +16,8 @@
 //! ends with `summary done=<n> skipped=<n> failed=<n>`, counted per input.
 //! Its exit code follows the batch rule: 0 if any input is done, else 1 if
 //! any failed, else 3 (all unsupported). A cancel fails the inputs that had
-//! not finished (`cancelled`); the batch rule then applies as usual.
+//! not finished (`cancelled`); the batch rule then applies as usual. A
+//! join run exits 0 once its one result is published.
 //! An invocation error (unknown subcommand, preset or action, no files, an
 //! empty path) is a message on stderr and exit 2, with nothing on stdout.
 //! The same file (by canonical path) given more than once counts once; the
@@ -59,6 +60,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
@@ -102,11 +104,15 @@ fn main() -> ExitCode {
     // SAFETY: prctl with integer arguments only; no pointers, no memory
     // is touched.
     let _ = unsafe { libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0) };
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let command = args.first().and_then(|a| a.to_str()).map(str::to_owned);
+    // `run` and `offer` take their arguments over: the paths are held
+    // once, not here and again as files.
+    let owned = |args: &mut Vec<OsString>| args.split_off(1);
     let rest = args.get(1..).unwrap_or_default();
-    let code = match args.first().and_then(|a| a.to_str()) {
-        Some("run") => cmd_run(rest),
-        Some("offer") => cmd_offer(rest),
+    let code = match command.as_deref() {
+        Some("run") => cmd_run(owned(&mut args)),
+        Some("offer") => cmd_offer(owned(&mut args)),
         Some("undo") => cmd_undo(rest),
         Some("jobs") => cmd_jobs(rest),
         Some("cancel") => cmd_cancel(rest),
@@ -185,7 +191,9 @@ fn absolute(p: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
 
 /// The files of a command as absolute paths, each file (by canonical path)
 /// once, first spelling kept; `None` after reporting an invocation error.
-fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
+/// Each argument is let go as soon as its path is made, so the paths are
+/// held once.
+fn files_of(args: Vec<OsString>) -> Option<Vec<PathBuf>> {
     if args.is_empty() {
         usage("no files");
         return None;
@@ -197,7 +205,7 @@ fn files_of(args: &[OsString]) -> Option<Vec<PathBuf>> {
     let cwd = std::env::current_dir().ok();
     let mut files = Vec::with_capacity(args.len());
     for a in args {
-        match absolute(Path::new(a), cwd.as_deref()) {
+        match absolute(Path::new(&a), cwd.as_deref()) {
             Some(p) => files.push(p),
             None => {
                 usage("relative path without a current directory");
@@ -333,7 +341,7 @@ impl Observer for Printer<'_> {
     }
 }
 
-fn cmd_run(args: &[OsString]) -> u8 {
+fn cmd_run(mut args: Vec<OsString>) -> u8 {
     // First, before anything that could start a thread: a thread without
     // SIGTERM blocked would take a cancel as a kill.
     let cancel = match CancelToken::install() {
@@ -343,28 +351,38 @@ fn cmd_run(args: &[OsString]) -> u8 {
             return EXIT_FAILED;
         }
     };
-    let (notify, args) = match args {
-        [flag, rest @ ..] if flag == "--notify" => (true, rest),
-        _ => (false, args),
-    };
-    let (target, rest) = match args {
-        [flag, id, rest @ ..] if flag == "--action" => (id, rest),
+    let notify = args.first().is_some_and(|f| f == "--notify");
+    if notify {
+        args.remove(0);
+    }
+    let (action, id) = match args.as_slice() {
+        [flag, id, ..] if flag == "--action" => (true, id),
         [flag] if flag == "--action" => return usage("--action needs an action id"),
-        [id, rest @ ..] => (id, rest),
+        [id, ..] => (false, id),
         [] => return usage("run needs a preset id"),
     };
-    let Some(id) = target.to_str() else {
+    let Some(id) = id.to_str().map(str::to_owned) else {
         return usage("invalid id");
     };
-    let target = if args[0] == "--action" {
-        Target::Action(id)
+    let target = if action {
+        Target::Action(&id)
     } else {
-        Target::Preset(id)
+        Target::Preset(&id)
     };
+    // The paths, taken over (see `files_of`).
+    let rest = args.split_off(if action { 2 } else { 1 });
     let Some(files) = files_of(rest) else {
         return EXIT_USAGE;
     };
     run(target, files, notify, cancel)
+}
+
+/// The input types `a` takes: its join set, else its one input type.
+fn join_types(a: &Action) -> Vec<&str> {
+    match &a.join {
+        Some(j) => j.types.iter().map(String::as_str).collect(),
+        None => vec![a.input.as_str()],
+    }
 }
 
 /// Runs `target` on `files` (absolute, each once): the shared tail of `run`
@@ -387,24 +405,55 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     };
     let cat = Catalog::load();
     mark("catalog");
-    // The input type, the route, and why a matching input cannot run.
-    let (mime, route, blocked): (&str, Vec<&Action>, Option<String>) = match (target, preset) {
-        (Target::Preset(_), Some(p)) => match menu::route(&cat, p.input, p.output) {
-            Some(r) => (p.input, r, None),
-            None => (p.input, Vec::new(), Some(String::new())),
-        },
+    // Classify once: the preset choice needs the selection's types, and the
+    // per-input verdicts below reuse the result.
+    let classified: Vec<(PathBuf, io::Result<Classified>)> = files
+        .into_iter()
+        .map(|f| {
+            let c = classify(&f);
+            (f, c)
+        })
+        .collect();
+    // The input types, the route (or the join action), and why a matching
+    // input cannot run.
+    type Plan<'c> = (
+        Vec<&'c str>,
+        Vec<&'c Action>,
+        Option<&'c Action>,
+        Option<String>,
+    );
+    let (accept, route, join, blocked): Plan = match (target, preset) {
+        (Target::Preset(_), Some(p)) => {
+            let mut tally = menu::Tally::default();
+            for (f, c) in &classified {
+                if let Ok(Classified::File(k)) = c {
+                    tally.add(&lossy(f.file_name().map_or(f.as_path(), Path::new)), k);
+                }
+            }
+            match menu::choose(&cat, p, &tally) {
+                Some((menu::Choice::Route(r), _)) => (vec![p.input], r, None, None),
+                Some((menu::Choice::Join(a), _)) => (join_types(a), Vec::new(), Some(a), None),
+                None => (vec![p.input], Vec::new(), None, Some(String::new())),
+            }
+        }
         (Target::Action(id), _) => {
             let Some(a) = cat.get(id) else {
                 return usage(&format!("unknown action `{id}`"));
             };
+            let (route, join) = match a.join {
+                Some(_) => (Vec::new(), Some(a)),
+                None => (vec![a], None),
+            };
             match missing_tools(a).first() {
-                None => (&a.input, vec![a], None),
-                Some(t) => (&a.input, Vec::new(), Some(format!("needs {t}"))),
+                None => (join_types(a), route, join, None),
+                Some(t) => (join_types(a), Vec::new(), None, Some(format!("needs {t}"))),
             }
         }
         (Target::Preset(_), None) => unreachable!("preset resolved above"),
     };
-    let name: String = route
+    // What runs: the route's steps, or the join action alone.
+    let steps: Vec<&Action> = join.map_or_else(|| route.clone(), |a| vec![a]);
+    let name: String = steps
         .iter()
         .map(|a| a.id.as_str())
         .collect::<Vec<_>>()
@@ -417,8 +466,8 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // Classify before routing.
     let mut pre = Vec::new();
     let mut inputs = Vec::new();
-    for f in files {
-        match classify(&f) {
+    for (f, c) in classified {
+        match c {
             Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
                 input: f,
                 reason: "not a regular file".into(),
@@ -427,17 +476,19 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 input: f,
                 reason: format!("cannot read: {e}"),
             }),
-            Ok(Classified::File(k)) if k.mime.as_deref() == Some(mime) => match &blocked {
-                None => inputs.push(f),
-                Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
-                    input: f,
-                    reason: why.clone(),
-                }),
-                Some(_) => pre.push(Outcome::Skipped {
-                    input: f,
-                    reason: "unsupported".into(),
-                }),
-            },
+            Ok(Classified::File(k)) if k.mime.as_deref().is_some_and(|m| accept.contains(&m)) => {
+                match &blocked {
+                    None => inputs.push(f),
+                    Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
+                        input: f,
+                        reason: why.clone(),
+                    }),
+                    Some(_) => pre.push(Outcome::Skipped {
+                        input: f,
+                        reason: "unsupported".into(),
+                    }),
+                }
+            }
             Ok(Classified::File(_)) => pre.push(Outcome::Skipped {
                 input: f,
                 reason: "unsupported".into(),
@@ -449,11 +500,12 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // `lossy` is only the gate (a warning of a lossless route says
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
-        let label = route.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(label, route.iter().any(|a| a.lossy), inputs.len())
+        let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
+        Notifier::new(label, steps.iter().any(|a| a.lossy), inputs.len())
     });
 
     mark("classify");
+    let pre_count = pre.len();
     let job = journal::new_job_id();
     let mut running = Running::start(&job, &name, inputs.len());
     let mut rec = Recorder::open(&job, &name);
@@ -466,7 +518,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             n.event(&o);
         }
     }
+    // Every file of the run, those settled above included: a join's
+    // notice counts its result against them.
+    let files = pre_count + inputs.len();
     let mut entry = None;
+    let mut joined = None;
     let sandboxed = if inputs.is_empty() {
         engine::sandbox::ready().is_ok()
     } else {
@@ -477,9 +533,13 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             last: None,
             entry: measure_on.then(Entry::default),
         };
-        let sandboxed = exec::run(&route, &inputs, &mut obs, &cancel).sandboxed;
+        let report = match join {
+            Some(a) => exec::run_join(a, inputs, &mut obs, &cancel),
+            None => exec::run(&route, inputs, &mut obs, &cancel),
+        };
         entry = obs.entry.take();
-        sandboxed
+        joined = report.joined;
+        report.sandboxed
     };
     mark("exec");
     // Read now: a cancel after this point stopped nothing.
@@ -524,6 +584,9 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // ends the window, not the process.
     if let Some(mut n) = notifier {
         n.record_warning(closed.warning.as_deref());
+        if let Some(j) = &joined {
+            n.record_join(j.taken, files, j.downloads);
+        }
         n.finish(
             &job,
             sandboxed,
@@ -538,7 +601,10 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     // are already failed, so the batch rule covers a cancelled run too.
     let _ = cancel.is_cancelled();
     drop(cancel);
-    if done > 0 {
+    // A join that published its result is done (its inputs are `done`
+    // too); one that did not falls to the rule below like any run.
+    let published = joined.is_some_and(|j| j.publication.is_some());
+    if done > 0 || published {
         EXIT_DONE
     } else if failed > 0 {
         EXIT_FAILED
@@ -600,11 +666,11 @@ fn measure() {
     );
 }
 
-fn cmd_offer(args: &[OsString]) -> u8 {
-    let (groups, args) = match args.split_first() {
-        Some((a, rest)) if a == "--groups" => (true, rest),
-        _ => (false, args),
-    };
+fn cmd_offer(mut args: Vec<OsString>) -> u8 {
+    let groups = args.first().is_some_and(|a| a == "--groups");
+    if groups {
+        args.remove(0);
+    }
     let Some(files) = files_of(args) else {
         return EXIT_USAGE;
     };
@@ -854,6 +920,10 @@ fn cmd_wheel() -> u8 {
     };
     let mut machine = wheel::Machine::new();
     let chosen = surface::run(&mut machine, &mut meter);
+    // The wheel is done with the list: the surface and its buffers went
+    // with `run`; the machine goes now, so the choice below holds the only
+    // copy of the paths and the supervisor phase does not carry the wheel.
+    drop(machine);
     // The surface is gone (its connection closed); free the hotkey.
     drop(lock);
     if let Some(meter) = meter {
@@ -870,7 +940,14 @@ fn cmd_wheel() -> u8 {
     // deadline and group kill). A choice's run loads the catalog itself,
     // which is that refresh.
     match chosen {
-        Ok(Some((files, preset))) => run_choice(files, &preset),
+        Ok(Some((files, preset))) => {
+            // Unique now (the machine is dropped): moved out, not copied.
+            // The fallback copy cannot happen, and is only a copy if so;
+            // a debug build catches a change that keeps a second owner.
+            debug_assert_eq!(Rc::strong_count(&files), 1, "the path list is shared");
+            let files = Rc::try_unwrap(files).unwrap_or_else(|shared| (*shared).clone());
+            run_choice(files, &preset)
+        }
         Ok(None) => {
             Catalog::load();
             EXIT_DONE
@@ -913,7 +990,7 @@ fn wheel_failed(e: &surface::StartupError) -> u8 {
 /// Runs the wheel's choice exactly as `inacircle run --notify <preset>
 /// <files…>`: the same function, so the same checks, output and exit code.
 fn run_choice(files: Vec<PathBuf>, preset: &str) -> u8 {
-    cmd_run(&choice_args(files, preset))
+    cmd_run(choice_args(files, preset))
 }
 
 /// The `run` arguments for a choice. The paths are absolute (from
@@ -999,12 +1076,14 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 }
 
 /// Level 1 for a `text/uri-list` (early or dropped). The list's bytes are
-/// freed by the caller after this; the catalog comes from the cache alone,
-/// loaded once here and kept in the menu for level 2: no action binary
-/// runs while the overlay is up (the cache is refreshed once the wheel is
-/// gone).
-fn group_menu(list: &[u8]) -> wheel::GroupMenu {
-    group_menu_for(dedup(uri::parse_uri_list(list)), Catalog::load_cached())
+/// given back as they become paths, before the catalog is loaded: the
+/// list, its paths and the catalog are never all held at once. The catalog
+/// comes from the cache alone, loaded once here and kept in the menu for
+/// level 2: no action binary runs while the overlay is up (the cache is
+/// refreshed once the wheel is gone).
+fn group_menu(list: Vec<u8>) -> wheel::GroupMenu {
+    let paths = dedup(uri::parse_uri_list_owned(list));
+    group_menu_for(paths, Catalog::load_cached())
 }
 
 /// Level 1 for `paths` (absolute, each once) with catalog `cat` (`None`:
@@ -1014,7 +1093,7 @@ fn group_menu(list: &[u8]) -> wheel::GroupMenu {
 /// draw it), or the count.
 fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu {
     let mut gm = wheel::GroupMenu {
-        paths: Vec::new(),
+        paths: wheel::PathList::default(),
         slices: Default::default(),
         hub: String::new(),
         tally: menu::Tally::default(),
@@ -1052,7 +1131,7 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
         }
         _ => gm.tally.source_text(),
     };
-    gm.paths = paths;
+    gm.paths = Rc::new(paths);
     gm.catalog = Some(cat);
     gm
 }
@@ -1065,7 +1144,7 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
     let mut slices: [Option<wheel::Choice>; 8] = Default::default();
     let Some(cat) = &gm.catalog else {
         return wheel::Menu {
-            paths: Vec::new(),
+            paths: wheel::PathList::default(),
             slices,
             hub: wheel::NO_ACTIONS.into(),
         };
@@ -1080,7 +1159,7 @@ fn target_menu(gm: &wheel::GroupMenu, group: &str) -> wheel::Menu {
         });
     }
     wheel::Menu {
-        paths: gm.paths.clone(),
+        paths: Rc::clone(&gm.paths),
         slices,
         hub: offer.hub,
     }
@@ -1186,6 +1265,7 @@ mod tests {
                 cost: 1,
                 lossy: false,
                 batch: true,
+                join: None,
                 requires: Vec::new(),
                 builtin: true,
             }],
@@ -1217,7 +1297,7 @@ mod tests {
             "file://{}/%E6%97%A5%E6%9C%AC.txt\n",
             dir.display()
         ));
-        assert_eq!(g.paths, [file]);
+        assert_eq!(*g.paths, [file]);
         assert_eq!(g.hub, "1 file · text");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1235,7 +1315,7 @@ mod tests {
                 .replace(' ', "%20")
                 .replace('ő', "%C5%91")
         ));
-        assert_eq!(g.paths, std::slice::from_ref(&file), "the same file once");
+        assert_eq!(*g.paths, std::slice::from_ref(&file), "the same file once");
         assert_eq!(g.hub, "notes ő.txt");
         let doc = g.slices[0].as_ref().expect("documents point north");
         assert_eq!(
@@ -1259,7 +1339,7 @@ mod tests {
         let (dir, file) = text_file("targets", "a.txt");
         let g = group_menu_for(vec![file.clone()], Some(md_catalog()));
         let m = target_menu(&g, "document");
-        assert_eq!(m.paths, std::slice::from_ref(&file));
+        assert_eq!(*m.paths, std::slice::from_ref(&file));
         assert_eq!(m.hub, "Document");
         let north = m.slices[0].as_ref().expect("markdown points north");
         assert_eq!(
@@ -1315,6 +1395,20 @@ mod tests {
         assert!(g.slices[0].as_ref().is_some_and(|d| d.lit));
         let g = group_menu_for(vec![pdf], Some(md_catalog()));
         assert!(g.slices[0].as_ref().is_some_and(|d| !d.lit), "dim");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Level 2 counts the files a target takes when that is not all of
+    /// them, and keeps the category label when it takes all.
+    #[test]
+    fn target_menu_hub_counts_files_when_not_all_apply() {
+        let (dir, a) = text_file("hubcount", "a.txt");
+        let pdf = dir.join("c.pdf");
+        std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
+        let g = group_menu_for(vec![a.clone(), pdf], Some(md_catalog()));
+        assert_eq!(target_menu(&g, "document").hub, "1 / 2 files");
+        let g = group_menu_for(vec![a], Some(md_catalog()));
+        assert_eq!(target_menu(&g, "document").hub, "Document");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

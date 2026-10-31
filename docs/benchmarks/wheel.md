@@ -182,10 +182,11 @@ stage 2 (about 3 µs per file to classify), reported, not budgeted.
 
 The drop path classifies every dropped file while both shm buffers are
 mapped, so a large drop is the memory worst case. Measured by
-`a_large_drop_stays_within_the_memory_budget` (`bins/inacircle/tests/wheel.rs`):
+`a_large_drop_stays_within_the_memory_budget` (`bins/inacircle/tests/wheel.rs`;
+since replaced by the largest-list tests below):
 the release binary against a fake compositor (Unix socket, registry,
 layer-shell configure, data device), 1024 small text files dropped as one
-`text/uri-list` (~31 KB, under the 64 KiB cap), the catalog cache primed
+`text/uri-list` (~31 KB; the read limit was then 64 KiB, now 1 MiB), the catalog cache primed
 with one action; `Pss` read from `/proc/<pid>/smaps_rollup` once stage 2
 is drawn (the cloud runs below read `VmHWM`, before the budget moved to
 PSS; on the reference machine: PSS 2281 kB for 1 file, 2403 kB for 1024). Five runs, cloud VM (not the reference machine), so the absolute
@@ -204,6 +205,31 @@ types (count and one name each) and dedups by a hash of the canonical path.
 What remains of the difference is mostly the dropped paths themselves
 (needed for the run) and file-backed pages that vary by tens of kB between
 runs.
+
+#### The largest list
+
+Since the read limit is the invocation's (1 MiB, 1024 URIs), the memory
+tests drop the largest list the wheel accepts: 1024 text files whose
+`file://` lines are 1024 B each, the list exactly 1,048,576 B.
+`the_largest_drop_stays_within_the_memory_budget` (early through stage 2,
+and after the drop through level 1) and
+`the_largest_drop_through_the_choice_stays_within_the_budget` (through the
+click and the run) sample PSS every 200 us per phase and gate every
+sample at 5,000,000 B in the release build. Reference machine, release,
+three runs each, one test at a time:
+
+| run | 1 file, stage 2 (higher of two) | early, stage 1 / at stage 2 | after the drop, level 1 | through the choice: stage 1 / stage 2 / run | VmHWM (through) |
+|---|---|---|---|---|---|
+| 1 | 2990 kB | 3966 / 3966 kB | 4077 kB | 3966 / 3966 / 3966 kB | 6412 kB |
+| 2 | 2998 kB | 4063 / 4063 kB | 4066 kB | 4094 / 4094 / 4094 kB | 6516 kB |
+| 3 | 2985 kB | 4095 / 4095 kB | 4066 kB | 3926 / 3926 / 3926 kB | 6352 kB |
+
+The peak, 4095 kB (4,193,280 B), is 16% under the budget; it is the paths
+held once (anonymous memory 184 kB for one file, 1284 kB for the largest
+list). The list's bytes are decoded from its end and given back in 64 KiB
+steps as they become paths. With the bytes kept until the paths were built
+(the previous code, same tests), level 1 peaked at 4968-5056 kB, over the
+budget in every run, and VmHWM was 7.3-7.4 MB.
 
 ### Binary size
 
@@ -258,9 +284,9 @@ Each run:
 Take the `measure wheel` lines from the log; p50 and max over the runs.
 
 **Large drop:** `cargo test --release -p inacircle --test wheel --
-a_large_drop_stays_within_the_memory_budget --nocapture` reports the lower
-of two stage-2 PSS samples for each workload and asserts that the 1024-file
-minimum is ≤5120 KiB (5,242,880 B). A debug build checks only the drop's
-increment. This smoke neither records every peak nor enforces the exact
-5,000,000 B acceptance ceiling; a passing result is not sufficient
+the_largest --nocapture --test-threads=1` runs both largest-list tests
+(above): every PSS sample of every phase is printed and gated at
+5,000,000 B. A debug build checks only the drop's increment (anonymous
+memory). These are sampled maxima from one machine; on their own they are
+not the full
 [memory acceptance evidence](acceptance.md#memory-and-idle-evidence).

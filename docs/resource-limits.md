@@ -103,6 +103,21 @@ nothing is created and no page is inflated. A running count of the bytes
 written is the second check; the half-written PDF is removed. So a CBZ of
 deflated flat pages cannot expand past the limit.
 
+The join action `pages.images-to-pdf` reads one image file at a time
+(bounded read, at most 64 MiB, `image is larger than 64 MiB`), checks it
+like a CBZ page (180 MP, PNG data walked once) and writes its page; the
+buffer is dropped before the next one. It keeps only the list of accepted
+inputs (a path each, at most 1,024 by the invocation limit) and the PDF
+writer's page offsets (about 100 B per page). 1,000 small images peak at
+3.3 MB `VmHWM` (debug build; the process baseline is about 1.7 MB); the
+test ceiling is 8 MB. The output ceiling is the same estimate as above,
+kept as a running sum over the accepted images (image size + 2,560 B per
+page + 1,024 B per file) and checked before each page is written, with the
+count of bytes actually written as the second check. Past it no input is
+taken: the inputs already taken and those not yet examined fail with
+`PDF would be larger than <N> MiB` (inputs already skipped or failed keep
+their own outcome), nothing is written, and the half-written PDF is removed.
+
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
 checking its scan data: the probe reads the markers, not the entropy
@@ -160,6 +175,41 @@ until they end (see [architecture.md](architecture.md), Invocation)
 ([sandbox-hardening.md](benchmarks/sandbox-hardening.md)). That limits how
 long a runaway tree lives, not how much memory it takes meanwhile.
 
+## The engine's own memory at the input limits
+
+The input limits (1024 paths, 1 MiB of paths) are also what the engine
+holds for a run, inside the `inacircle` budget (5,000,000 B PSS: wheel,
+engine and supervisor). It holds each input path once: the steps' inputs,
+the groups and the join's anchor borrow from the run's one list; the
+`--inputs-from` file is streamed to disk, not built in memory; the
+history's per-input tally keys an input by two hashes of its path under
+one random key of std's keyed default hasher (128 bits), not by a copy.
+Two inputs share both with a probability below n^2 / 2^129 (about 2^-109
+at 1024 inputs); they would then count as one, which can change the
+tally's counts and what is derived from them, the history job line's
+`status` (`partial` read as `done`) and the notice's summary. What is
+published, the per-input history lines and the refusal to undo a run
+with an unknown publication do not depend on the tally's keys.
+`inacircle run` takes its arguments over, so its argv on the heap becomes
+the list (the kernel's copy on the stack stays). The wheel decodes a
+dropped list from its end and gives its bytes back as they become paths
+(in 64 KiB steps), so the list's bytes and its paths overlap by at most
+64 KiB.
+
+Measured (release, reference machine, 1024 inputs with ~1 KiB paths, the
+list at its 1 MiB limit, one batch process, PSS sampled every 200 us
+until exit): `inacircle run` 3.4-3.9 MB (8.9 MB while the engine held the
+paths about seven times over). The wheel peaks at 4.2 MB (4095 kB, i.e.
+4,193,280 B, at most over three runs), within the 5,000,000 B budget with 16% to spare, at
+every phase: level 1 while the list becomes paths, stage 2, and the run
+after the click; its stage 2 holds the paths once. Before the list was
+given back as it was decoded, level 1 held the bytes and the paths
+together and peaked at 4.9-5.1 MB, over the budget. Tests:
+`many_long_paths_stay_within_the_pss_budget` (CLI),
+`the_largest_drop_through_the_choice_stays_within_the_budget` and
+`the_largest_drop_stays_within_the_memory_budget` (wheel, early and after
+the drop), all gated in the release build on every phase.
+
 ## Limits added by the hardening
 
 Every wait and every read of foreign or on-disk state is bounded while it
@@ -188,4 +238,5 @@ the source; the reason column is why that number.
 | Wheel start | 2000 ms wall (own clock, from the connection to the first commit) | 2 s is 400 times the normal start on the fake compositor (first commit 5.3 ms p50, see [wheel-startup-deadlines.md](benchmarks/wheel-startup-deadlines.md)); a policy bound, not a confidence bound. |
 | Wheel teardown | 1000 ms wall | Its own bound; the old observer's 5 s and the historic 30 s anomaly say nothing about a 1 s distribution. |
 | Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update; the wheel's start-failure notice: 500 ms to open plus 500 ms for its one call, under a 2 s `alarm` | One shared frame for the whole open; the wait never holds the desktop. |
+| Drop list (wheel) | 1 MiB read, 1024 URIs | The invocation's own limits (`INPUT_LIST_BYTES`, `INPUT_COUNT`): a longer list could not run anyway. Past either, the wheel shows "too many files" with nothing lit, accepts no drop and sends the source a cancel, never a truncated selection. The read is bounded to the limit plus one 4 KiB chunk. Memory at the limit: see the measurement above. |
 | User waits | 30 s per stage, 500 ms drop pipe, 500 ms soft margin | Unchanged from before; separate from the start clock. |

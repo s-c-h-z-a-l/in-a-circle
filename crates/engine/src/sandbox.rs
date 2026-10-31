@@ -155,7 +155,7 @@ pub struct Policy<'a> {
     pub exec: &'a [PathBuf],
     /// Read only, followed if a symlink (the user's inputs: a link to a
     /// file is the file the user meant). Must exist.
-    pub read: &'a [PathBuf],
+    pub read: &'a [&'a Path],
     /// Read only, made by the engine (the `--inputs-from` file;
     /// intermediate outputs go through [`allow_read_fd`]): a symlink is
     /// refused, never followed. Must exist.
@@ -1063,9 +1063,10 @@ pub(crate) mod tests {
 
     fn ruleset(read: &[PathBuf], write: &Path) -> Ruleset {
         let exec = system_exec();
+        let read: Vec<&Path> = read.iter().map(PathBuf::as_path).collect();
         let policy = Policy {
             exec: &exec,
-            read,
+            read: &read,
             read_exact: &[],
             write: Some(write),
         };
@@ -1432,7 +1433,8 @@ pub(crate) mod tests {
         }
         let work = Tmp::new("work");
         let exec = system_exec();
-        let read = [work.0.join("gone")];
+        let gone_file = work.0.join("gone");
+        let read = [gone_file.as_path()];
         let policy = Policy {
             exec: &exec,
             read: &read,

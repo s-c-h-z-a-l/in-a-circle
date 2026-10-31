@@ -12,6 +12,14 @@
 # commit 8cf5df2 (tree clean), same toolchain and profile: inacircle grew
 # 1112 B (file) and the pages family 3224 B; the shipped inacircle does not
 # link the new zip, flate, probe or pdf crates.
-inacircle 1106648 841832
+# Refreshed after the many-inputs-to-one-output work on this x86_64 desktop,
+# built from commit 9f808bcd (tree clean), same toolchain and profile: inacircle
+# grew 40472 B (file) and the pages family 13352 B (file, 12432 B of .text), both under the
+# 100 KB explanation threshold; the shipped inacircle still does not link
+# the zip, flate, probe or pdf crates.
+# Refreshed after the wheel drop-list and memory work (list limit, paths held
+# once, owned uri-list parser), same toolchain and profile: inacircle grew
+# 3592 B (file, 3024 B of .text); the other two binaries are unchanged.
+inacircle 1150712 883336
 inacircle-text 695000 397314
-inacircle-pages 451240 359779
+inacircle-pages 464592 372211

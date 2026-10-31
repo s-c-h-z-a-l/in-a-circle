@@ -80,10 +80,11 @@ limits() {
         # test that rejection. 1 s: a message that small decodes in us.
         # 64 MB malloc limit, 1024 MB RSS ceiling.
         dbus_message) echo "65536 1 64 1024" ;;
-        # 64 KiB = MAX_BYTES in bins/inacircle/src/uri.rs, the most read
-        # from a drop. 1 s: a line splitter plus percent-decoding is linear.
-        # 64 MB malloc limit, 1024 MB RSS ceiling.
-        uri_list) echo "65536 1 64 1024" ;;
+        # 1 MiB = MAX_BYTES in bins/inacircle/src/uri.rs, the most read
+        # from a drop. 1 s: a line splitter plus percent-decoding is linear
+        # and parses at most 1024 entries. 64 MB malloc limit (1024 paths of
+        # at most 1 MiB in all), 1024 MB RSS ceiling.
+        uri_list) echo "1048576 1 64 1024" ;;
         # The cache has no size cap in the code (read_cache reads the whole
         # file). 64 KiB = MAX_OUTPUT: an entry is one binary's manifest
         # output (capped at that) plus a bin line, so a cache of a few

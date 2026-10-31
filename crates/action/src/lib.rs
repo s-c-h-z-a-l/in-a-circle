@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 use manifest::Line;
 
+pub mod order;
+pub use order::natural_cmp;
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_FAILED: i32 = 1;
 /// Contract or invocation error (ours, not the file's).
@@ -293,6 +296,28 @@ impl<W: Write> Events<W> {
     pub fn warn(&mut self, input: &Path, message: &str) {
         self.emit("warn", &[&input.to_string_lossy(), message]);
     }
+
+    /// A join action took `input` into its one output.
+    pub fn take(&mut self, input: &Path) {
+        self.emit("take", &[&input.to_string_lossy()]);
+    }
+
+    /// A join action's one output, relative to `--work` (see
+    /// [`join_path`]); once, at the end.
+    pub fn joined(&mut self, output_rel: &Path) {
+        self.emit("joined", &[&output_rel.to_string_lossy()]);
+    }
+}
+
+/// The folder under `--work` that holds a join action's one output.
+pub const JOIN_DIR: &str = "join";
+
+/// `<work>/join/out.<ext>`, a join action's output. The action creates
+/// the `join` directory itself.
+pub fn join_path(work: &Path, ext: &str) -> PathBuf {
+    let mut name = std::ffi::OsString::from("out.");
+    name.push(ext);
+    work.join(JOIN_DIR).join(name)
 }
 
 /// `<work>/<index>/<stem>.<ext>`; creates the directory. A path without a
@@ -570,6 +595,30 @@ mod tests {
         let mut ev = Events::new(Broken);
         ev.progress(0.5);
         ev.done(Path::new("/a"), Path::new("b"));
+    }
+
+    #[test]
+    fn join_events_and_path() {
+        let weird = Path::new("/d/a -> b\tc.jpg");
+        let mut buf = Vec::new();
+        {
+            let mut ev = Events::new(&mut buf);
+            ev.take(weird);
+            ev.joined(Path::new("join/out.pdf"));
+        }
+        let text = String::from_utf8(buf).unwrap();
+        let p: Vec<Line> = text
+            .split_inclusive('\n')
+            .map(|l| manifest::parse_line(l).unwrap())
+            .collect();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].kind, "take");
+        assert_eq!(bares(&p[0]), [weird.to_str().unwrap()]);
+        assert_eq!(p[1].kind, "joined");
+        assert_eq!(bares(&p[1]), ["join/out.pdf"]);
+        let w = Path::new("/w");
+        assert_eq!(join_path(w, "pdf"), Path::new("/w/join/out.pdf"));
+        assert_eq!(join_path(w, "pdf").parent().unwrap(), w.join(JOIN_DIR));
     }
 
     #[test]

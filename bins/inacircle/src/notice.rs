@@ -105,7 +105,23 @@ pub struct Summary {
     /// The run's recording warning (no Undo, and why), from
     /// `journal::Recorded`.
     pub warning: Option<String>,
+    /// The run was a join action's: its one result's counts.
+    pub join: Option<JoinNote>,
 }
+
+/// What the final notification says of a join run (`exec::Joined`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinNote {
+    /// Inputs in the published result; 0 when nothing was published.
+    pub taken: usize,
+    /// Every file of the run, those settled before it included.
+    pub total: usize,
+    /// The result went to the download folder.
+    pub downloads: bool,
+}
+
+/// The body line of a result saved to the download folder.
+const DOWNLOADS_LINE: &str = "Saved to Downloads (source folder is read-only)";
 
 impl Summary {
     /// Keeps what the texts need from one outcome. The counts here are per
@@ -223,20 +239,29 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
         let rest = s.skipped + s.failed;
         body.push(format!("{} done, {rest} not converted", s.done_count));
         "Cancelled".to_owned()
+    } else if let (Some(j), Some((_, out))) = (&s.join, s.done.first()) {
+        // One result for every input it took: the place comes from the
+        // engine's anchor, not from each input's folder.
+        body.push(format!("{} / {} files", j.taken, j.total));
+        problem_lines(s, &mut body);
+        if j.downloads {
+            body.push(DOWNLOADS_LINE.to_owned());
+        }
+        name_of(out)
+    } else if let Some(j) = s.join.filter(|j| j.taken > 0 && s.unknown_count > 0) {
+        // The one result was published but its place is not proved: one
+        // file, however many inputs it holds (the 1:1 wording, "done", plus
+        // the sticky lines below).
+        body.push(format!("{} / {} files", j.taken, j.total));
+        problem_lines(s, &mut body);
+        "1 done".to_owned()
     } else if let ([(_, out)], 1, 0, 0) = (&s.done[..], s.done_count, s.skipped, s.failed) {
         if s.to_downloads {
-            body.push("Saved to Downloads (source folder is read-only)".to_owned());
+            body.push(DOWNLOADS_LINE.to_owned());
         }
         name_of(out)
     } else {
-        let shown = s.problems.len().min(PROBLEM_LINES);
-        for (name, why) in &s.problems[..shown] {
-            body.push(format!("{name}: {why}"));
-        }
-        let more = (s.skipped + s.failed).saturating_sub(shown);
-        if more > 0 {
-            body.push(format!("… and {more} more"));
-        }
+        problem_lines(s, &mut body);
         if s.done_count == 0 {
             "Nothing converted".to_owned()
         } else {
@@ -252,12 +277,16 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
     };
     // Sticky: converted, kept, but not where (or not as) it was proved.
     if s.unknown_count > 0 {
-        for (name, why, op) in s.unknown.iter().take(PROBLEM_LINES) {
+        // A join has one file, so one line however many inputs it took.
+        let (lines, files) = match s.join {
+            Some(j) if j.taken > 0 => (1, 1),
+            _ => (PROBLEM_LINES, s.unknown_count),
+        };
+        for (name, why, op) in s.unknown.iter().take(lines) {
             body.push(format!("{name}: {why} (op {op})"));
         }
         body.push(format!(
-            "{} not confirmed where it was saved; Undo unavailable.",
-            s.unknown_count
+            "{files} not confirmed where it was saved; Undo unavailable."
         ));
     }
     // Why Undo is not offered (the unknown lines above already say so).
@@ -271,6 +300,19 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
         body.push("Sandbox unavailable.".to_owned());
     }
     (fit(&summary, false), body_of(&body, markup))
+}
+
+/// Up to `PROBLEM_LINES` lines `<input>: <reason>` (failures first), then
+/// `… and <r> more`.
+fn problem_lines(s: &Summary, body: &mut Vec<String>) {
+    let shown = s.problems.len().min(PROBLEM_LINES);
+    for (name, why) in &s.problems[..shown] {
+        body.push(format!("{name}: {why}"));
+    }
+    let more = (s.skipped + s.failed).saturating_sub(shown);
+    if more > 0 {
+        body.push(format!("… and {more} more"));
+    }
 }
 
 /// The notification for a wheel that did not open: the summary and the
@@ -720,6 +762,16 @@ impl Notifier {
         }
     }
 
+    /// A join run's one result (`exec::Report::joined`), with `total` the
+    /// run's files, those settled before it included.
+    pub fn record_join(&mut self, taken: usize, total: usize, downloads: bool) {
+        self.summary.join = Some(JoinNote {
+            taken,
+            total,
+            downloads,
+        });
+    }
+
     /// The run's recording warning (`journal::Recorded::warning`), shown in
     /// the final notification.
     pub fn record_warning(&mut self, warning: Option<&str>) {
@@ -1122,6 +1174,126 @@ mod tests {
         ]);
         s.set_counts((1, 0, 0, 0));
         assert_eq!(final_text(&s, false).0, "1 done");
+    }
+
+    /// A join's result: the file name, `{taken} / {total} files`, then the
+    /// usual problem lines, whatever folders the inputs came from.
+    #[test]
+    fn notice_join_body() {
+        let out = "/d/Nyaralás/Nyaralás/Nyaralás.pdf";
+        let mut v: Vec<Outcome> = (0..27)
+            .map(|i| done(&format!("/d/Nyaralás/{i}.jpg"), out))
+            .collect();
+        // Not in the result's folder: still not "Saved to Downloads".
+        v.push(done("/d/Munka/ábra01.jpg", out));
+        v.push(skip("/d/Nyaralás/s1.png", "has alpha"));
+        v.push(skip("/d/Nyaralás/s2.png", "has alpha"));
+        let mut s = summary(&v);
+        s.join = Some(JoinNote {
+            taken: 28,
+            total: 30,
+            downloads: false,
+        });
+        s.set_counts((28, 2, 0, 0));
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "Nyaralás.pdf");
+        assert_eq!(
+            lines(&body),
+            ["28 / 30 files", "s1.png: has alpha", "s2.png: has alpha"]
+        );
+        // Without problems, the count alone; more than three, capped.
+        let mut s = summary(&[done("/d/a.jpg", out), done("/d/Munka/b.jpg", out)]);
+        s.join = Some(JoinNote {
+            taken: 2,
+            total: 2,
+            downloads: false,
+        });
+        assert_eq!(
+            final_text(&s, false),
+            ("Nyaralás.pdf".into(), "2 / 2 files".into())
+        );
+        let mut v = vec![done("/d/a.jpg", out)];
+        v.extend((0..5).map(|i| fail(&format!("/d/f{i}.jpg"), "bad")));
+        let mut s = summary(&v);
+        s.join = Some(JoinNote {
+            taken: 1,
+            total: 6,
+            downloads: true,
+        });
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "Nyaralás.pdf");
+        assert_eq!(
+            lines(&body),
+            [
+                "1 / 6 files",
+                "f0.jpg: bad",
+                "f1.jpg: bad",
+                "f2.jpg: bad",
+                "… and 2 more",
+                "Saved to Downloads (source folder is read-only)"
+            ]
+        );
+    }
+
+    /// A published join whose place is not proved is one file, reported as
+    /// done and not confirmed, never as "Nothing converted".
+    #[test]
+    fn notice_join_published_unknown_counts_files() {
+        use engine::exec::{AnchorHint, CheckPoint, GroupId, LocationEvidence, OperationId};
+        let unknown = |i: &str| Outcome::PublishedUnknown {
+            input: i.into(),
+            group: GroupId(1),
+            location: LocationEvidence {
+                path_at_check: None,
+                last_unverified_path: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 1,
+                    object_ino: 3,
+                    leaf: "d".into(),
+                    op: OperationId(0xcd),
+                },
+                checked_at: CheckPoint::PostPublish,
+            },
+            reason: PublicationReason::AncestorChanged,
+            durability: Durability::Synced,
+        };
+        let mut s = summary(&[
+            unknown("/d/a.jpg"),
+            unknown("/d/b.jpg"),
+            unknown("/d/c.jpg"),
+        ]);
+        s.join = Some(JoinNote {
+            taken: 3,
+            total: 3,
+            downloads: false,
+        });
+        s.set_counts((3, 0, 0, 3));
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "1 done");
+        let l = lines(&body);
+        assert_eq!(l.len(), 3, "{body}");
+        assert_eq!(l[0], "3 / 3 files");
+        assert!(l[1].starts_with("a.jpg: converted, but"), "{body}");
+        assert_eq!(
+            l[2],
+            "1 not confirmed where it was saved; Undo unavailable."
+        );
+    }
+
+    /// A join that published nothing takes today's path.
+    #[test]
+    fn notice_join_nothing_published() {
+        let mut s = summary(&[skip("/d/a.png", "has alpha"), fail("/d/b.jpg", "bad")]);
+        s.join = Some(JoinNote {
+            taken: 0,
+            total: 2,
+            downloads: false,
+        });
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "Nothing converted");
+        assert_eq!(lines(&body), ["b.jpg: bad", "a.png: has alpha"]);
     }
 
     #[test]

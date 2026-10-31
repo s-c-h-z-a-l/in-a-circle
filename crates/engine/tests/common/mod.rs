@@ -3,8 +3,8 @@
 
 #![allow(dead_code)]
 
-use engine::catalog::Action;
-use engine::exec::{self, CancelToken, Observer, Outcome};
+use engine::catalog::{Action, Join};
+use engine::exec::{self, CancelToken, Observer, Outcome, Report};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -95,9 +95,73 @@ pub fn action(bin: &Path, ext: &str) -> Action {
         cost: 1,
         lossy: false,
         batch: true,
+        join: None,
         requires: Vec::new(),
         builtin: true,
     }
+}
+
+/// A built-in join action taking JPEG and PNG, with at least `min` inputs.
+pub fn join_action(bin: &Path, min: u32) -> Action {
+    Action {
+        id: "test.join".into(),
+        input: "image/jpeg".into(),
+        output: "application/pdf".into(),
+        ext: "pdf".into(),
+        join: Some(Join {
+            types: vec!["image/jpeg".into(), "image/png".into()],
+            min,
+        }),
+        ..action(bin, "pdf")
+    }
+}
+
+/// A join action body: takes every input, appends it to
+/// `<work>/join/out.pdf`, and reports `joined` once.
+pub const JOIN_ALL: &str = "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+     while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+     printf 'joined\\tjoin/out.pdf\\n'";
+
+/// [`JOIN_ALL`] with `extra` run after the `joined` line.
+pub fn join_then(extra: &str) -> String {
+    format!("{JOIN_ALL}\n{extra}")
+}
+
+/// Runs the join action `act` on `inputs`; with `cancel_after`, a SIGTERM
+/// is sent to this thread after that long.
+pub fn run_join(act: &Action, inputs: &[PathBuf], cancel_after: Option<Duration>) -> (Ran, Report) {
+    let tok = CancelToken::install().unwrap();
+    // SAFETY: pthread_self has no preconditions.
+    let me = unsafe { libc::pthread_self() } as usize;
+    let sent = cancel_after.map(|d| {
+        std::thread::spawn(move || {
+            std::thread::sleep(d);
+            // SAFETY: `me` is the test thread, alive until `run_join`
+            // returns (which needs this signal); SIGTERM is blocked there.
+            unsafe { libc::pthread_kill(me as libc::pthread_t, libc::SIGTERM) };
+        })
+    });
+    let mut obs = Ran::default();
+    let report = exec::run_join(act, inputs.to_vec(), &mut obs, &tok);
+    if let Some(h) = sent {
+        h.join().unwrap();
+    }
+    // Consumed, so dropping the token does not deliver it.
+    let _ = tok.is_cancelled();
+    (obs, report)
+}
+
+/// Entries of `<tmp>/docs` that are not among `inputs` (outputs, and any
+/// work dir left behind), sorted.
+pub fn new_entries(t: &Tmp, inputs: &[PathBuf]) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(t.0.join("docs"))
+        .unwrap()
+        .flatten()
+        .filter(|e| !inputs.contains(&e.path()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
 }
 
 /// What the observer saw of a run.
@@ -142,7 +206,7 @@ pub fn run(
         })
     });
     let mut obs = Ran::default();
-    exec::run(route, inputs, &mut obs, &tok);
+    exec::run(route, inputs.to_vec(), &mut obs, &tok);
     let end = Instant::now();
     let from = sent.map_or(start, |h| h.join().unwrap());
     (obs, end.saturating_duration_since(from))
@@ -153,7 +217,7 @@ pub fn run(
 pub fn run_with(route: &[&Action], inputs: &[PathBuf], obs: &mut dyn Observer) -> Duration {
     let tok = CancelToken::install().unwrap();
     let start = Instant::now();
-    exec::run(route, inputs, obs, &tok);
+    exec::run(route, inputs.to_vec(), obs, &tok);
     start.elapsed()
 }
 

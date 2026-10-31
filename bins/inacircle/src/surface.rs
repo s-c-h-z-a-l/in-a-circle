@@ -37,7 +37,6 @@
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ui::damage::Screen;
@@ -46,7 +45,9 @@ use wire::{Arg::*, Conn, DISPLAY, Event, Iface, op};
 
 use crate::measure::Meter;
 use crate::uri::MAX_BYTES;
-use crate::wheel::{Effect, Input, KEY_ESC, Machine, STAGE, URI_LIST};
+use crate::wheel::{
+    Effect, Input, KEY_ESC, ListError, Machine, PathList, STAGE, URI_LIST, list_refused,
+};
 
 const FRAME: usize = (BOX * BOX * 4) as usize;
 /// Both wheel buffers, then the 1x1 background pixel.
@@ -101,7 +102,7 @@ const SEAT_POINTER: u32 = 1;
 const SEAT_KEYBOARD: u32 = 2;
 
 /// The files and preset chosen, or `None` if the wheel closed without one.
-pub type Chosen = Option<(Vec<PathBuf>, String)>;
+pub type Chosen = Option<(PathList, String)>;
 
 /// Why the wheel did not open (or broke on the way). A cancel, a close by
 /// the compositor and a second instance are not errors.
@@ -303,10 +304,9 @@ impl Reading {
         Reading {
             fd,
             offer,
-            // Room for the limit and one more read: never regrown (a
-            // doubling would hold two copies). Pages are touched only as
-            // data arrives.
-            data: Vec::with_capacity(MAX_BYTES + READ_CHUNK),
+            // Grows with the data (doubling): a normal drag of a few files
+            // costs one chunk, not the 1 MiB limit.
+            data: Vec::with_capacity(READ_CHUNK),
             until,
         }
     }
@@ -314,7 +314,7 @@ impl Reading {
     /// Reads what the (non-blocking) pipe has: the data at EOF, an error
     /// past `MAX_BYTES`, on a read error or once `now` reaches the
     /// deadline with the pipe still open; `None` to wait for more.
-    fn pump(&mut self, now: Instant) -> Option<Result<Vec<u8>, String>> {
+    fn pump(&mut self, now: Instant) -> Option<Result<Vec<u8>, ListError>> {
         let mut buf = [0u8; READ_CHUNK];
         loop {
             // SAFETY: buf is valid for buf.len() bytes.
@@ -322,9 +322,17 @@ impl Reading {
             match n {
                 0 => return Some(Ok(std::mem::take(&mut self.data))),
                 n if n > 0 => {
+                    if self.data.capacity() - self.data.len() < n as usize {
+                        // Doubling, but never past the limit plus one chunk:
+                        // `len <= MAX_BYTES` before this read and `n <=
+                        // READ_CHUNK`, so that always fits, and the
+                        // overflow chunk cannot double a 1 MiB buffer to 2.
+                        let cap = (2 * self.data.capacity()).min(MAX_BYTES + READ_CHUNK);
+                        self.data.reserve_exact(cap - self.data.len());
+                    }
                     self.data.extend_from_slice(&buf[..n as usize]);
                     if self.data.len() > MAX_BYTES {
-                        return Some(Err(format!("URI list over {MAX_BYTES} bytes")));
+                        return Some(Err(ListError::TooBig));
                     }
                 }
                 _ => {
@@ -333,7 +341,7 @@ impl Reading {
                         io::ErrorKind::Interrupted => {}
                         io::ErrorKind::WouldBlock if now < self.until => return None,
                         io::ErrorKind::WouldBlock => return Some(Err("URI list timed out".into())),
-                        _ => return Some(Err(e.to_string())),
+                        _ => return Some(Err(e.to_string().into())),
                     }
                 }
             }
@@ -1182,7 +1190,8 @@ impl Surface {
         let (r, w) = match drop_pipe() {
             Ok(p) => p,
             Err(e) => {
-                self.inputs.push(Input::DragList(seq, Err(e.to_string())));
+                self.inputs
+                    .push(Input::DragList(seq, Err(e.to_string().into())));
                 return Ok(());
             }
         };
@@ -1223,7 +1232,9 @@ impl Surface {
         if let Some(r) = rd.read.pump(Instant::now()) {
             let (offer, action) = (rd.read.offer, rd.action);
             self.reading = None;
-            self.end_offer(offer, r.is_ok() && action == DND_COPY);
+            // A list the wheel refuses (either limit) is a cancel, not a copy.
+            let taken = r.is_ok() && !list_refused(&r);
+            self.end_offer(offer, taken && action == DND_COPY);
             if let Some(meter) = &mut self.meter {
                 meter.dropped(
                     crate::cpu_us(libc::RUSAGE_SELF),
@@ -1629,9 +1640,9 @@ mod tests {
 
     /// Whatever the data, stage 2 has nothing: only the read's result
     /// matters here.
-    fn empty_groups(_: &[u8]) -> GroupMenu {
+    fn empty_groups(_: Vec<u8>) -> GroupMenu {
         GroupMenu {
-            paths: Vec::new(),
+            paths: PathList::default(),
             slices: Default::default(),
             hub: NOTHING.into(),
             tally: Default::default(),
@@ -1641,7 +1652,7 @@ mod tests {
 
     fn empty_targets(_: &GroupMenu, _: &str) -> Menu {
         Menu {
-            paths: Vec::new(),
+            paths: PathList::default(),
             slices: Default::default(),
             hub: NOTHING.into(),
         }
@@ -1674,7 +1685,11 @@ mod tests {
         assert_eq!(rd.pump(start), None, "still within the deadline");
         assert_eq!(rd.pump(start + READ_DROP / 2), None);
         let r = rd.pump(start + READ_DROP).expect("past the deadline");
-        assert!(r.as_ref().is_err_and(|e| e.contains("timed out")), "{r:?}");
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.to_string().contains("timed out")),
+            "{r:?}"
+        );
         assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
         drop(w);
     }
@@ -1705,8 +1720,78 @@ mod tests {
         let r = pump_all(MAX_BYTES).expect("the limit itself is fine");
         assert_eq!(r.len(), MAX_BYTES);
         let r = pump_all(MAX_BYTES + 1);
-        assert!(r.as_ref().is_err_and(|e| e.contains("bytes")), "{r:?}");
-        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Close]);
+        assert_eq!(r.as_ref().err(), Some(&ListError::TooBig));
+        // Said on the hub, not a silent close.
+        assert_eq!(dropped().on(Input::DropData(r)), [Effect::Draw]);
+    }
+
+    #[test]
+    fn read_capacity_never_passes_the_limit_plus_one_chunk() {
+        let (r, w) = drop_pipe().unwrap();
+        let mut rd = reading(r);
+        let writer = std::thread::spawn(move || {
+            let mut f = std::fs::File::from(w);
+            let _ = io::Write::write_all(&mut f, &vec![b'a'; MAX_BYTES + 1]);
+        });
+        let give_up = Instant::now() + Duration::from_secs(5);
+        let res = loop {
+            if let Some(res) = rd.pump(Instant::now()) {
+                break res;
+            }
+            assert!(Instant::now() < give_up, "no result");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(res, Err(ListError::TooBig));
+        assert!(
+            rd.data.capacity() <= MAX_BYTES + READ_CHUNK,
+            "{}",
+            rd.data.capacity()
+        );
+        drop(rd);
+        writer.join().unwrap();
+    }
+
+    /// The read buffer grows only when the next chunk does not fit, and
+    /// then to exactly double (`Vec::capacity` is deterministic for our own
+    /// `reserve_exact`): a chunk that fits exactly, or a small one with room
+    /// left, does not grow it.
+    #[test]
+    fn read_capacity_doubles_only_when_the_chunk_does_not_fit() {
+        let (r, w) = drop_pipe().unwrap();
+        let mut rd = reading(r);
+        let send = |n: usize| {
+            // SAFETY: writing n bytes from a live buffer to a valid fd.
+            let buf = vec![b'a'; n];
+            assert_eq!(
+                unsafe { libc::write(w.as_raw_fd(), buf.as_ptr().cast(), n) },
+                n as isize
+            );
+        };
+        let now = Instant::now();
+        // One byte into 4096 free: room left, no growth.
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!((rd.data.len(), rd.data.capacity()), (1, READ_CHUNK));
+        // Fills the buffer exactly (free == n): still no growth.
+        send(READ_CHUNK - 1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(
+            (rd.data.len(), rd.data.capacity()),
+            (READ_CHUNK, READ_CHUNK)
+        );
+        // One byte more with none free: doubled.
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 2 * READ_CHUNK);
+        // Fill to the doubled size exactly, then one more: doubled again,
+        // from a non-zero length (the `cap - len` size is the new room).
+        send(READ_CHUNK - 1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 2 * READ_CHUNK);
+        send(1);
+        assert_eq!(rd.pump(now), None);
+        assert_eq!(rd.data.capacity(), 4 * READ_CHUNK);
+        assert_eq!(rd.data.len(), 2 * READ_CHUNK + 1);
     }
 
     /// A `poll` that returns at one of our own deadlines (the stage's, or
@@ -1806,8 +1891,8 @@ mod tests {
     }
 
     /// Two lit categories (north and south).
-    fn two_lit(_: &[u8]) -> GroupMenu {
-        let mut gm = empty_groups(b"");
+    fn two_lit(_: Vec<u8>) -> GroupMenu {
+        let mut gm = empty_groups(Vec::new());
         for (k, name) in [(0, "North"), (4, "South")] {
             gm.slices[k] = Some(crate::wheel::GroupChoice {
                 label: name.into(),
@@ -2363,6 +2448,46 @@ mod tests {
         );
     }
 
+    /// A list the wheel refuses is a cancel toward the source, whichever
+    /// limit it passed: no `finish`, only the offer's `destroy`. A
+    /// positive control reads a list within both limits: it is finished.
+    #[test]
+    fn a_refused_drop_list_is_not_finished_either_way() {
+        let uris = |n: usize| "file:///x\r\n".repeat(n).into_bytes();
+        let too_big = vec![b'a'; MAX_BYTES + 1];
+        for (list, finished) in [
+            (uris(1), true),
+            (uris(crate::uri::MAX_URIS), true),
+            (uris(crate::uri::MAX_URIS + 1), false),
+            (too_big, false),
+        ] {
+            let (mut s, server) = fake_compositor();
+            let mut ev = drag_enters(&s, DEVICE_OFFER_A, 1);
+            ev.extend(msg(s.id.data_device, op::wl_data_device::DROP, &[]));
+            deliver(&mut s, &server, &ev);
+            s.start_read().unwrap();
+            let (_, mut fds) = requests(&mut s, &server);
+            let w = fds.remove(0);
+            let writer = std::thread::spawn(move || {
+                let mut f = std::fs::File::from(w);
+                // The reader may stop at the limit and close: EPIPE is fine.
+                let _ = io::Write::write_all(&mut f, &list);
+            });
+            let give_up = Instant::now() + Duration::from_secs(5);
+            while s.reading.is_some() {
+                s.pump_read();
+                assert!(Instant::now() < give_up, "no result");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            writer.join().unwrap();
+            let mut want = vec![(DEVICE_OFFER_A, op::wl_data_offer::DESTROY)];
+            if finished {
+                want.insert(0, (DEVICE_OFFER_A, op::wl_data_offer::FINISH));
+            }
+            assert_eq!(requests(&mut s, &server).0, want);
+        }
+    }
+
     /// A second drop while the first is read must not replace the keep:
     /// the first offer is the one read, finished and destroyed.
     #[test]
@@ -2463,7 +2588,7 @@ mod tests {
     }
 
     /// Level 1 that burns measurable CPU, like a real classification.
-    fn slow_groups(b: &[u8]) -> GroupMenu {
+    fn slow_groups(b: Vec<u8>) -> GroupMenu {
         let t = crate::cpu_us(libc::RUSAGE_SELF);
         while crate::cpu_us(libc::RUSAGE_SELF) - t < 5000 {
             std::hint::spin_loop();
@@ -2484,8 +2609,11 @@ mod tests {
             crate::cpu_us(libc::RUSAGE_SELF),
             crate::monotonic_us().unwrap(),
         );
-        s.apply(Effect::Run(vec![], "p".into()), &Machine::new())
-            .unwrap();
+        s.apply(
+            Effect::Run(PathList::default(), "p".into()),
+            &Machine::new(),
+        )
+        .unwrap();
         let (cpu1, mono1) = (
             crate::cpu_us(libc::RUSAGE_SELF),
             crate::monotonic_us().unwrap(),

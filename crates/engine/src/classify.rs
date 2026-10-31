@@ -27,11 +27,13 @@ const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 /// The MIME type of a comic book archive (ZIP of page images, `.cbz`).
 const CBZ_MIME: &str = "application/vnd.comicbook+zip";
 
-/// Binary signatures: (prefix, mime the engine knows, label).
+/// Binary signatures: (prefix, mime the engine knows, label). JPEG and PNG
+/// are known because the join action `images-to-pdf` takes them; whether a
+/// given PNG is one it can place (alpha, interlacing) is the action's call.
 const MAGIC: &[(&[u8], Option<&str>, &str)] = &[
     (b"%PDF-", None, "PDF"),
-    (b"\x89PNG\r\n\x1a\n", None, "PNG"),
-    (b"\xff\xd8\xff", None, "JPEG"),
+    (b"\x89PNG\r\n\x1a\n", Some("image/png"), "PNG"),
+    (b"\xff\xd8\xff", Some("image/jpeg"), "JPEG"),
     (b"GIF87a", None, "GIF"),
     (b"GIF89a", None, "GIF"),
     (ZIP_MAGIC, None, "ZIP"),
@@ -252,17 +254,17 @@ mod tests {
     fn magic_beats_extension() {
         let d = Dir::new("magic");
         let p = d.file("kép.txt", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
-        assert_eq!(kind(&p), is(None, "PNG"));
-        let cases: [(&str, &[u8], &str); 5] = [
-            ("a.bin", b"%PDF-1.7\n", "PDF"),
-            ("b.bin", b"\xff\xd8\xff\xe0", "JPEG"),
-            ("c.bin", b"GIF89a..", "GIF"),
-            ("d.bin", b"PK\x03\x04..", "ZIP"),
-            ("e.bin", b"\x1f\x8b\x08", "gzip"),
+        assert_eq!(kind(&p), is(Some("image/png"), "PNG"));
+        let cases: [(&str, &[u8], Option<&str>, &str); 5] = [
+            ("a.bin", b"%PDF-1.7\n", None, "PDF"),
+            ("b.bin", b"\xff\xd8\xff\xe0", Some("image/jpeg"), "JPEG"),
+            ("c.bin", b"GIF89a..", None, "GIF"),
+            ("d.bin", b"PK\x03\x04..", None, "ZIP"),
+            ("e.bin", b"\x1f\x8b\x08", None, "gzip"),
         ];
-        for (n, b, l) in cases {
+        for (n, b, m, l) in cases {
             let p = d.file(n, b);
-            assert_eq!(kind(&p), is(None, l), "{n}");
+            assert_eq!(kind(&p), is(m, l), "{n}");
         }
         let p = d.file("f.bin", b"GIF87a");
         assert_eq!(kind(&p), is(None, "GIF"));

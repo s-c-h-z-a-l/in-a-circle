@@ -18,6 +18,7 @@
 //! output-local too. The wheel is placed once, at the first position known.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use engine::catalog::Catalog;
@@ -36,6 +37,51 @@ pub const URI_LIST: &str = "text/uri-list";
 
 pub const DROP_HERE: &str = "Drop here";
 pub const NOTHING: &str = "Nothing to do";
+/// The hub text for a drop list past the byte or URI limit. Short on
+/// purpose: "too many files (max 1024)" is 184 px, the hub shows 108
+/// (`HUB_TEXT_W`) and would cut it to "too many file…"; this one is 101 px
+/// (a test keeps it whole and in the atlas). The limit is in the docs.
+pub const TOO_MANY: &str = "too many files";
+/// Why a list's read gave no bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListError {
+    /// The list passed `uri::MAX_BYTES`: it ends in the same hub text as
+    /// a list with too many URIs.
+    TooBig,
+    /// Anything else (no offer, timeout, I/O error): the wheel falls back.
+    Failed(String),
+}
+
+impl From<&str> for ListError {
+    fn from(s: &str) -> Self {
+        ListError::Failed(s.to_owned())
+    }
+}
+
+impl From<String> for ListError {
+    fn from(s: String) -> Self {
+        ListError::Failed(s)
+    }
+}
+
+impl std::fmt::Display for ListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListError::TooBig => f.write_str("URI list over the byte limit"),
+            ListError::Failed(s) => f.write_str(s),
+        }
+    }
+}
+
+/// Whether the wheel refuses this read's result for its size (a list past
+/// the byte or the URI limit): the drop is not taken, so the source must
+/// see a cancel, not a `finish`, whichever limit was passed.
+pub fn list_refused(r: &Result<Vec<u8>, ListError>) -> bool {
+    match r {
+        Ok(bytes) => crate::uri::too_many(bytes),
+        Err(e) => *e == ListError::TooBig,
+    }
+}
 /// Stage 2 before the catalog was ever cached: nothing can be offered.
 pub const NO_ACTIONS: &str = "No actions yet";
 
@@ -58,12 +104,12 @@ pub enum Input {
     DragLeave,
     Drop,
     /// The dropped `text/uri-list`, or why it could not be read.
-    DropData(Result<Vec<u8>, String>),
+    DropData(Result<Vec<u8>, ListError>),
     /// The early read's `text/uri-list` (started at `enter`), or why it
     /// could not be read, tagged with the `ReadEarly` tag it was started
     /// with; one that is not the latest is ignored. Not used after the
     /// drop.
-    DragList(u32, Result<Vec<u8>, String>),
+    DragList(u32, Result<Vec<u8>, ListError>),
     /// The stage's deadline passed.
     Deadline,
     /// The compositor closed the surface or the connection failed.
@@ -99,7 +145,7 @@ pub enum Effect {
     /// Tear down and exit, no action.
     Close,
     /// Tear down, then run preset `.1` on the files.
-    Run(Vec<PathBuf>, String /* preset id */),
+    Run(PathList, String /* preset id */),
 }
 
 /// One level-1 slice.
@@ -112,10 +158,16 @@ pub struct GroupChoice {
     pub lit: bool,
 }
 
+/// The dropped files, held once: levels 1 and 2, the click's effect and the
+/// machine share one list (a clone is a count, not a copy of up to a
+/// mebibyte of paths). Once the machine is dropped the list is unique, and
+/// `Rc::try_unwrap` hands the vector to the run without a copy.
+pub type PathList = Rc<Vec<PathBuf>>;
+
 /// Level 1, made from the early or the dropped list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMenu {
-    pub paths: Vec<PathBuf>,
+    pub paths: PathList,
     /// By wheel slice index: the compass, 0 = north, clockwise.
     pub slices: [Option<GroupChoice>; 8],
     /// The source: a name, or the count.
@@ -139,15 +191,16 @@ pub struct Choice {
 /// Level 2, the targets of one category.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
-    pub paths: Vec<PathBuf>,
+    pub paths: PathList,
     /// By wheel slice index: the compass, 0 = north, clockwise.
     pub slices: [Option<Choice>; 8],
     pub hub: String,
 }
 
-/// Builds level 1 from a `text/uri-list`. The real one classifies files;
-/// tests pass a pure one.
-pub type GroupsFn = fn(&[u8]) -> GroupMenu;
+/// Builds level 1 from a `text/uri-list`, which it consumes (the real one
+/// frees the list's bytes as it decodes them). The real one classifies
+/// files; tests pass a pure one.
+pub type GroupsFn = fn(Vec<u8>) -> GroupMenu;
 
 /// Builds level 2 for one category of level 1.
 pub type TargetsFn = fn(&GroupMenu, &str) -> Menu;
@@ -367,14 +420,12 @@ impl Machine {
                 if let (Phase::Dragging { .. }, Early::Pending) = (self.phase, self.early)
                     && seq == self.early_seq
                 {
-                    match r {
-                        Ok(bytes) => {
-                            self.show_groups(&bytes);
-                            self.early = Early::Ready;
-                            self.settle(&mut fx, true);
-                            self.update_accept(&mut fx);
-                        }
-                        Err(_) => self.early = Early::Failed,
+                    if self.show_list(r) {
+                        self.early = Early::Ready;
+                        self.settle(&mut fx, true);
+                        self.update_accept(&mut fx);
+                    } else {
+                        self.early = Early::Failed;
                     }
                 }
             }
@@ -402,13 +453,11 @@ impl Machine {
             },
             Input::DropData(r) => {
                 if self.phase == Phase::Reading {
-                    match r {
-                        Ok(bytes) => {
-                            self.show_groups(&bytes);
-                            self.phase = Phase::Grouping;
-                            self.settle(&mut fx, true);
-                        }
-                        Err(_) => self.close(&mut fx),
+                    if self.show_list(r) {
+                        self.phase = Phase::Grouping;
+                        self.settle(&mut fx, true);
+                    } else {
+                        self.close(&mut fx);
                     }
                 }
             }
@@ -442,8 +491,37 @@ impl Machine {
         self.early == Early::Ready
     }
 
+    /// Level 1 from a read's result; false if the list could not be read.
+    /// A list past the limits shows `TOO_MANY` with nothing lit (fail
+    /// closed: no truncated selection), like an empty one shows `Nothing
+    /// to do`.
+    fn show_list(&mut self, r: Result<Vec<u8>, ListError>) -> bool {
+        if list_refused(&r) {
+            self.show_refused();
+            return true;
+        }
+        match r {
+            Ok(bytes) => self.show_groups(bytes),
+            Err(_) => return false,
+        }
+        true
+    }
+
+    /// Level 1 with nothing on offer and `TOO_MANY` in the hub.
+    fn show_refused(&mut self) {
+        let gm = GroupMenu {
+            paths: PathList::default(),
+            slices: Default::default(),
+            hub: TOO_MANY.into(),
+            tally: Tally::default(),
+            catalog: None,
+        };
+        self.set_wheel(group_wheel(&gm), gm.hub.clone());
+        self.groups = Some(gm);
+    }
+
     /// Level 1 from the list, onto the wheel.
-    fn show_groups(&mut self, list: &[u8]) {
+    fn show_groups(&mut self, list: Vec<u8>) {
         let gm = (self.groups_fn)(list);
         self.set_wheel(group_wheel(&gm), gm.hub.clone());
         self.groups = Some(gm);
@@ -587,7 +665,7 @@ impl Machine {
                 if let Some(c) = &menu.slices[usize::from(k)]
                     && c.applicable
                 {
-                    let run = Effect::Run(menu.paths.clone(), c.preset.clone());
+                    let run = Effect::Run(Rc::clone(&menu.paths), c.preset.clone());
                     self.phase = Phase::Done;
                     fx.push(run);
                 }
@@ -681,11 +759,11 @@ mod tests {
 
     /// Empty: nothing. Else one file; category `g0` at 0 is lit, `g4` at 4
     /// is dim.
-    fn fake_groups(bytes: &[u8]) -> GroupMenu {
+    fn fake_groups(bytes: Vec<u8>) -> GroupMenu {
         let mut slices: [Option<GroupChoice>; 8] = Default::default();
         if bytes.is_empty() {
             return GroupMenu {
-                paths: Vec::new(),
+                paths: PathList::default(),
                 slices,
                 hub: NOTHING.into(),
                 tally: Tally::default(),
@@ -695,7 +773,7 @@ mod tests {
         slices[0] = group("Zero", "g0", true);
         slices[4] = group("Four", "g4", false);
         GroupMenu {
-            paths: vec![PathBuf::from("/x")],
+            paths: vec![PathBuf::from("/x")].into(),
             slices,
             hub: "x".into(),
             tally: Tally::default(),
@@ -719,7 +797,7 @@ mod tests {
             });
         }
         Menu {
-            paths: gm.paths.clone(),
+            paths: Rc::clone(&gm.paths),
             slices,
             hub: "Zero".into(),
         }
@@ -727,12 +805,12 @@ mod tests {
 
     /// Two files; categories: 3 lit (`g3`), 1 dim (`g1`). `g3` runs `p3`
     /// at 3 and has a dim `p1` at 1.
-    fn two_groups(_: &[u8]) -> GroupMenu {
+    fn two_groups(_: Vec<u8>) -> GroupMenu {
         let mut slices: [Option<GroupChoice>; 8] = Default::default();
         slices[3] = group("Three", "g3", true);
         slices[1] = group("One", "g1", false);
         GroupMenu {
-            paths: vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+            paths: vec![PathBuf::from("/a"), PathBuf::from("/b c")].into(),
             slices,
             hub: "2 files".into(),
             tally: Tally::default(),
@@ -753,7 +831,7 @@ mod tests {
             applicable: false,
         });
         Menu {
-            paths: gm.paths.clone(),
+            paths: Rc::clone(&gm.paths),
             slices,
             hub: "Three".into(),
         }
@@ -785,8 +863,8 @@ mod tests {
     }
 
     /// A group menu with files, none of its categories lit.
-    fn dim_groups(_: &[u8]) -> GroupMenu {
-        let mut gm = fake_groups(b"a");
+    fn dim_groups(_: Vec<u8>) -> GroupMenu {
+        let mut gm = fake_groups(b"a".to_vec());
         gm.slices[0] = group("Zero", "g0", false);
         gm
     }
@@ -899,7 +977,7 @@ mod tests {
         assert_eq!(m.on(Input::DragLeave), []);
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         assert_eq!(m.stage(), Stage::Done);
         assert_eq!(m.on(Input::Deadline), []);
@@ -945,7 +1023,7 @@ mod tests {
         assert_eq!((m.stage(), m.hub()), (Stage::Choosing, "Zero"));
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         assert_eq!(m.on(Input::Click(BTN_LEFT)), []);
     }
@@ -966,7 +1044,7 @@ mod tests {
         assert_eq!(
             m.on(Input::Click(BTN_LEFT)),
             [Effect::Run(
-                vec![PathBuf::from("/a"), PathBuf::from("/b c")],
+                vec![PathBuf::from("/a"), PathBuf::from("/b c")].into(),
                 "p3".into()
             )]
         );
@@ -1179,7 +1257,7 @@ mod tests {
         assert_eq!(m.stage(), Stage::Choosing);
         assert_eq!(
             m.on_at(ms(1500), Input::Click(BTN_LEFT)),
-            [Effect::Run(vec![PathBuf::from("/x")], "p0".into())]
+            [Effect::Run(vec![PathBuf::from("/x")].into(), "p0".into())]
         );
         // The guard does not delay closing outside the wheel.
         let mut m = fake_machine();
@@ -1407,6 +1485,46 @@ mod tests {
         m.on(Input::Click(BTN_LEFT));
         assert_eq!(m.stage(), Stage::Choosing);
         assert_eq!(m.hover(), Some(0));
+    }
+
+    /// A list past the limits (bytes, or more than 1024 URIs) says why and
+    /// offers nothing, early and after the drop; it never offers a
+    /// truncated selection.
+    #[test]
+    fn a_list_over_the_limits_is_refused_with_a_reason() {
+        let many: Vec<u8> = (0..=crate::uri::MAX_URIS)
+            .flat_map(|i| format!("file:///f{i}\n").into_bytes())
+            .collect();
+        for r in [Ok(many), Err(ListError::TooBig)] {
+            let mut m = dragging();
+            let fx = m.on(Input::DragList(1, r.clone()));
+            assert_eq!(fx, [Effect::Draw, Effect::Accept(false)]);
+            assert_eq!(m.hub(), TOO_MANY);
+            assert_eq!(m.on(Input::Drop), [Effect::Close]);
+            // After the drop: the reason stays until a click closes.
+            let mut m = reading();
+            assert_eq!(m.on(Input::DropData(r)), [Effect::Draw]);
+            assert_eq!(m.hub(), TOO_MANY);
+            assert_eq!(m.on(Input::PointerAt(HUB.0, HUB.1)), []);
+            assert_eq!(m.on(Input::Click(BTN_LEFT)), [Effect::Close]);
+        }
+        // Another read error is not this: the fallback / close as before.
+        let mut m = reading();
+        assert_eq!(
+            m.on(Input::DropData(Err("timed out".into()))),
+            [Effect::Close]
+        );
+        // The same words as a different failure are not the refusal: the
+        // error is typed, not matched by its text.
+        let mut m = reading();
+        let same_text = ListError::Failed(ListError::TooBig.to_string());
+        assert_eq!(m.on(Input::DropData(Err(same_text))), [Effect::Close]);
+    }
+
+    #[test]
+    fn the_refusal_text_fits_the_hub_whole() {
+        assert_eq!(ui::text::fit(TOO_MANY, ui::wheel::HUB_TEXT_W), TOO_MANY);
+        assert!(ui::atlas::get().has_all(TOO_MANY));
     }
 
     #[test]

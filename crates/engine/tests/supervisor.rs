@@ -9,7 +9,10 @@
 
 mod common;
 
-use common::{Tmp, action, failed, process_with, run, run_with};
+use common::{
+    JOIN_ALL, Tmp, action, failed, join_action, join_then, new_entries, process_with, run,
+    run_join, run_with,
+};
 use engine::exec::{Observer, Outcome, Wake};
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
@@ -1509,7 +1512,7 @@ fn publication_cancel_stops_before_the_next_commit() {
     };
     engine::exec::run(
         &[&action(&bin, "md")],
-        &[a.clone(), b.clone()],
+        vec![a.clone(), b.clone()],
         &mut obs,
         &tok,
     );
@@ -1721,4 +1724,616 @@ fn a_killed_supervisor_takes_its_leader_with_it() {
         assert!(ends_within(pid, Duration::from_secs(10)));
     }
     assert!(ended, "the leader outlived its supervisor");
+}
+
+// ---- join actions ----
+
+/// Three images in `<tmp>/docs`, in input order `a`, `b`, `c`.
+fn three_images(t: &Tmp) -> Vec<std::path::PathBuf> {
+    ["a", "b", "c"]
+        .iter()
+        .map(|n| t.input(&format!("{n}.jpg"), n))
+        .collect()
+}
+
+/// The `Done` outcomes: (input, output).
+fn done_pairs(r: &common::Ran) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    r.outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Done { input, output, .. } => Some((input.clone(), output.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Nothing reached the folder (no output, no work dir left), no input is
+/// `Done`, nothing was published, and every input not settled by the
+/// action's own `skip` failed with a reason starting with `reason`.
+fn assert_nothing_published(
+    t: &Tmp,
+    ins: &[std::path::PathBuf],
+    r: &common::Ran,
+    rep: &engine::exec::Report,
+    reason: &str,
+) {
+    assert_eq!(
+        new_entries(t, ins),
+        Vec::<String>::new(),
+        "{:?}",
+        r.outcomes
+    );
+    assert!(done_pairs(r).is_empty(), "{:?}", r.outcomes);
+    let j = rep.joined.as_ref().expect("a join run reports its join");
+    assert!(j.publication.is_none());
+    assert_eq!(j.taken, 0);
+    let skipped: Vec<_> = r
+        .outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Skipped { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .collect();
+    let f = failed(r);
+    for i in ins.iter().filter(|i| !skipped.contains(i)) {
+        let why = f.iter().find(|(p, _)| p == i).map(|(_, w)| w.as_str());
+        assert!(
+            why.is_some_and(|w| w.starts_with(reason)),
+            "{}: {why:?} (want {reason})",
+            i.display()
+        );
+    }
+}
+
+#[test]
+fn join_publishes_one_result() {
+    let t = Tmp::new("join-one");
+    let ins = three_images(&t);
+    let bin = t.script("join", JOIN_ALL);
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    let j = rep.joined.expect("a join run reports its join");
+    assert_eq!((j.taken, j.total), (3, 3));
+    assert!(j.publication.is_some());
+    let d = done_pairs(&r);
+    assert_eq!(
+        d.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>(),
+        ins,
+        "{:?}",
+        r.outcomes
+    );
+    // One output, shared by every input.
+    assert!(d.iter().all(|(_, o)| *o == d[0].1));
+    assert_eq!(std::fs::read_to_string(&d[0].1).unwrap(), "abc");
+    assert_eq!(
+        new_entries(&t, &ins).len(),
+        1,
+        "{:?}",
+        new_entries(&t, &ins)
+    );
+    assert_eq!(r.dirs.len(), 1);
+    assert!(failed(&r).is_empty());
+}
+
+#[test]
+fn join_skips_and_still_publishes() {
+    let t = Tmp::new("join-skip");
+    let ins = three_images(&t);
+    let bin = t.script(
+        "join",
+        "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do case \"$in\" in\n\
+         *b.jpg) printf 'skip\\t%s\\thas alpha\\n' \"$in\";;\n\
+         *) cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\";;\n\
+         esac; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    let j = rep.joined.unwrap();
+    assert_eq!((j.taken, j.total), (2, 3));
+    assert!(j.publication.is_some());
+    let d = done_pairs(&r);
+    assert_eq!(
+        d.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>(),
+        [ins[0].clone(), ins[2].clone()]
+    );
+    assert_eq!(std::fs::read_to_string(&d[0].1).unwrap(), "ac");
+    assert!(r.outcomes.iter().any(
+        |o| matches!(o, Outcome::Skipped { input, reason } if *input == ins[1] && reason == "has alpha")
+    ));
+    assert_eq!(new_entries(&t, &ins).len(), 1);
+    // A skipped input is settled by its skip: it is not failed as well.
+    assert!(failed(&r).is_empty(), "{:?}", r.outcomes);
+}
+
+#[test]
+fn skip_then_take_of_one_input_is_a_violation() {
+    rejects(
+        "join-skip-take",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         in=$(head -n1 \"$6\"); printf 'skip\\t%s\\tno\\n' \"$in\"; printf 'take\\t%s\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+}
+
+#[test]
+fn skipped_input_is_not_also_failed_when_the_run_is_refused() {
+    let t = Tmp::new("join-skip-refused");
+    let ins = three_images(&t);
+    let bin = t.script(
+        "join",
+        "in=$(head -n1 \"$6\"); printf 'skip\\t%s\\tno\\n' \"$in\"; exit 1",
+    );
+    let (r, _rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert!(
+        r.outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Skipped { input, .. } if *input == ins[0])),
+        "{:?}",
+        r.outcomes
+    );
+    assert!(
+        failed(&r).iter().all(|(p, _)| *p != ins[0]),
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(failed(&r).len(), 2, "{:?}", r.outcomes);
+}
+
+#[test]
+fn below_min_publishes_nothing() {
+    let t = Tmp::new("join-min");
+    let a = t.input("a.jpg", "a");
+    let b = t.input("b.jpg", "b");
+    let ins = vec![a, b];
+    // Takes the first input only; says nothing of the second.
+    let bin = t.script(
+        "join",
+        "work=$4; mkdir -p \"$work/join\"; in=$(head -n1 \"$6\")\n\
+         cat \"$in\" > \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let (r, rep) = run_join(&join_action(&bin, 2), &ins, None);
+    assert_nothing_published(
+        &t,
+        &ins,
+        &r,
+        &rep,
+        "action reported fewer inputs than its minimum",
+    );
+    // The same run with a minimum of one publishes.
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert_eq!(rep.joined.unwrap().taken, 1);
+    assert_eq!(done_pairs(&r).len(), 1);
+}
+
+/// Runs the join action `body` on three images and checks that a contract
+/// violation published nothing.
+fn rejects(tag: &str, body: &str) {
+    let t = Tmp::new(tag);
+    let ins = three_images(&t);
+    let bin = t.script("join", body);
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert_nothing_published(&t, &ins, &r, &rep, "contract violation: ");
+}
+
+#[test]
+fn rejects_joined_without_take() {
+    rejects(
+        "join-notake",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+}
+
+#[test]
+fn rejects_second_joined() {
+    rejects(
+        "join-twice",
+        &join_then("printf 'joined\\tjoin/out.pdf\\n'"),
+    );
+}
+
+#[test]
+fn rejects_joined_outside_join_dir() {
+    rejects(
+        "join-outside",
+        "work=$4; mkdir -p \"$work/0\"; echo x > \"$work/0/out.pdf\"\n\
+         while IFS= read -r in; do printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+         printf 'joined\\t0/out.pdf\\n'",
+    );
+}
+
+#[test]
+fn rejects_joined_symlink() {
+    let t = Tmp::new("join-symlink");
+    let ins = three_images(&t);
+    let s = secret(&t);
+    let bin = t.script(
+        "join",
+        &format!(
+            "work=$4; mkdir -p \"$work/join\"; ln -s '{}' \"$work/join/out.pdf\"\n\
+             while IFS= read -r in; do printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+             printf 'joined\\tjoin/out.pdf\\n'",
+            s.display()
+        ),
+    );
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert_nothing_published(&t, &ins, &r, &rep, "contract violation: ");
+}
+
+#[test]
+fn rejects_take_of_unknown_input() {
+    rejects(
+        "join-unknown",
+        &format!("printf 'take\\t/nowhere/x.jpg\\n'\n{JOIN_ALL}"),
+    );
+}
+
+#[test]
+fn rejects_double_take() {
+    rejects(
+        "join-double",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         in=$(head -n1 \"$6\"); printf 'take\\t%s\\n' \"$in\"; printf 'take\\t%s\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+}
+
+#[test]
+fn rejects_done_from_join_action() {
+    rejects(
+        "join-done",
+        "work=$4; mkdir -p \"$work/join\" \"$work/0\"; echo x > \"$work/join/out.pdf\"; echo x > \"$work/0/a.pdf\"\n\
+         in=$(head -n1 \"$6\"); printf 'take\\t%s\\n' \"$in\"; printf 'done\\t%s\\t0/a.pdf\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+}
+
+/// A one-to-one action that speaks the join events: a violation, its
+/// output is not placed.
+#[test]
+fn rejects_take_from_one_to_one_action() {
+    let t = Tmp::new("join-1to1");
+    let a = t.input("a.txt", "a");
+    let bin = t.script(
+        "one",
+        "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\" \"$work/join\"\n\
+         echo x > \"$work/0/a.md\"; echo x > \"$work/join/out.md\"\n\
+         printf 'take\\t%s\\n' \"$in\"; printf 'done\\t%s\\t0/a.md\\n' \"$in\"\n\
+         printf 'joined\\tjoin/out.md\\n'",
+    );
+    let (r, _) = run(&[&action(&bin, "md")], std::slice::from_ref(&a), None);
+    let f = failed(&r);
+    assert_eq!(f.len(), 1, "{:?}", r.outcomes);
+    assert!(f[0].1.starts_with("contract violation: "), "{}", f[0].1);
+    assert!(done_pairs(&r).is_empty());
+    assert_eq!(new_entries(&t, &[a]), Vec::<String>::new());
+}
+
+/// A join action never runs on the one-to-one path, where it would get
+/// one process per folder.
+#[test]
+fn join_action_on_the_one_to_one_path_is_an_invalid_route() {
+    let t = Tmp::new("join-route");
+    let ins = three_images(&t);
+    let bin = t.script("join", JOIN_ALL);
+    let (r, _) = run(&[&join_action(&bin, 1)], &ins, None);
+    assert_eq!(failed(&r).len(), 3);
+    assert!(failed(&r).iter().all(|(_, w)| w == "invalid route"));
+    assert_eq!(new_entries(&t, &ins), Vec::<String>::new());
+}
+
+#[test]
+fn nonzero_exit_after_joined_publishes_nothing() {
+    let t = Tmp::new("join-exit");
+    let ins = three_images(&t);
+    let bin = t.script("join", &join_then("exit 1"));
+    let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+    assert_nothing_published(&t, &ins, &r, &rep, "action exited with status 1");
+}
+
+#[test]
+fn cancel_before_joined_publishes_nothing() {
+    let t = Tmp::new("join-cancel-before");
+    let ins = three_images(&t);
+    // Takes every input, then waits (30 s at most) before its `joined`.
+    let bin = t.script(
+        "join",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+         sleep 30; printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let (r, rep) = run_join(
+        &join_action(&bin, 1),
+        &ins,
+        Some(Duration::from_millis(300)),
+    );
+    assert_nothing_published(&t, &ins, &r, &rep, "cancelled");
+    assert!(failed(&r).iter().all(|(_, w)| w == "cancelled"));
+}
+
+/// The cancel comes after `joined` and the process's end, while the one
+/// result is being prepared, right before its commit: nothing is published.
+#[test]
+fn cancel_after_joined_before_publish_publishes_nothing() {
+    let t = Tmp::new("join-cancel-after");
+    let ins = three_images(&t);
+    let bin = t.script("join", JOIN_ALL);
+    let tok = engine::exec::CancelToken::install().unwrap();
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(|_, _| {
+            // SAFETY: SIGTERM to this thread, where the token blocks it.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+            Ok(())
+        })),
+        ..Pub::default()
+    };
+    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
+    assert!(tok.is_cancelled());
+    assert_eq!(obs.prepared.len(), 1);
+    assert!(obs.groups.is_empty());
+    assert_nothing_published(&t, &ins, &obs.ran, &rep, "cancelled");
+}
+
+/// A join action that takes the first input, reports `joined`, then sends
+/// `late` about the second input (`$b`).
+fn late_after_joined(late: &str) -> String {
+    format!(
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         {{ read -r a; read -r b; }} < \"$6\"\n\
+         printf 'take\\t%s\\n' \"$a\"; printf 'joined\\tjoin/out.pdf\\n'\n{late}"
+    )
+}
+
+/// `joined` is the last result event: a `take`, `skip` or `fail` after it
+/// is a contract violation, and nothing is published.
+#[test]
+fn result_after_joined_is_a_violation() {
+    for (tag, late) in [
+        ("join-late-take", "printf 'take\\t%s\\n' \"$b\""),
+        ("join-late-skip", "printf 'skip\\t%s\\tlate\\n' \"$b\""),
+        ("join-late-fail", "printf 'fail\\t%s\\tlate\\n' \"$b\""),
+    ] {
+        rejects(tag, &late_after_joined(late));
+    }
+}
+
+/// A `take` after `joined` never counts toward the minimum: with a minimum
+/// of two, the run is refused as a violation, not published with two.
+#[test]
+fn late_take_never_counts_toward_min() {
+    let t = Tmp::new("join-late-min");
+    let ins = three_images(&t);
+    let bin = t.script("join", &late_after_joined("printf 'take\\t%s\\n' \"$b\""));
+    let (r, rep) = run_join(&join_action(&bin, 2), &ins, None);
+    assert_nothing_published(&t, &ins, &r, &rep, "contract violation: ");
+}
+
+/// After `joined`, an invocation error (exit 2) and a death by signal
+/// publish nothing either.
+#[test]
+fn exit_2_or_signal_after_joined_publishes_nothing() {
+    for (tag, extra, reason) in [
+        ("join-exit2", "exit 2", "action invocation error"),
+        ("join-signal", "kill -KILL $$", "killed by signal 9"),
+    ] {
+        let t = Tmp::new(tag);
+        let ins = three_images(&t);
+        let bin = t.script("join", &join_then(extra));
+        let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+        assert_nothing_published(&t, &ins, &r, &rep, reason);
+    }
+}
+
+/// Three images in `<tmp>/Nyaralás`: the result is named after the folder
+/// and wrapped like any output, `Nyaralás/Nyaralás/Nyaralás.pdf`; a second
+/// run gets the next free wrapper name.
+#[test]
+fn join_output_lands_as_folder_folder_pdf() {
+    let t = Tmp::new("join-anchor");
+    let dir = t.0.join("Nyaralás");
+    std::fs::create_dir(&dir).unwrap();
+    let ins: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|n| {
+            let p = dir.join(format!("{n}.jpg"));
+            std::fs::write(&p, n).unwrap();
+            p
+        })
+        .collect();
+    let bin = t.script("join", JOIN_ALL);
+    for want in ["Nyaralás/Nyaralás.pdf", "Nyaralás (1)/Nyaralás.pdf"] {
+        let (r, rep) = run_join(&join_action(&bin, 1), &ins, None);
+        let j = rep.joined.unwrap();
+        assert!(!j.downloads);
+        let d = done_pairs(&r);
+        assert_eq!(d.len(), 3, "{:?}", r.outcomes);
+        assert!(d.iter().all(|(_, o)| *o == dir.join(want)), "{d:?}");
+        assert_eq!(std::fs::read_to_string(dir.join(want)).unwrap(), "abc");
+    }
+}
+
+/// The publication fails right before its commit (no space left, as the
+/// observer's last step before the rename): nothing reaches the folder, no
+/// group is reported, and every input fails.
+#[test]
+fn publish_failure_leaves_nothing() {
+    let t = Tmp::new("join-enospc");
+    let ins = three_images(&t);
+    let bin = t.script("join", JOIN_ALL);
+    let tok = engine::exec::CancelToken::install().unwrap();
+    let mut obs = Pub {
+        on_prepare: Some(Box::new(|_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+        })),
+        ..Pub::default()
+    };
+    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
+    assert_eq!(obs.prepared.len(), 1, "the failure came before the commit");
+    assert!(obs.groups.is_empty());
+    assert!(obs.ran.dirs.is_empty());
+    assert_nothing_published(&t, &ins, &obs.ran, &rep, "cannot publish output: ");
+    assert_eq!(failed(&obs.ran).len(), 3);
+}
+
+#[test]
+fn join_inputs_arrive_sorted() {
+    let t = Tmp::new("join-sorted");
+    let ins: Vec<_> = ["b10", "b2", "a"]
+        .iter()
+        .map(|n| t.input(&format!("{n}.jpg"), n))
+        .collect();
+    // A warning per input, in the order of the input list.
+    let bin = t.script(
+        "join",
+        &format!(
+            "while IFS= read -r in; do printf 'warn\\t%s\\tseen\\n' \"$in\"; done < \"$6\"\n{JOIN_ALL}"
+        ),
+    );
+    let (r, _) = run_join(&join_action(&bin, 1), &ins, None);
+    let seen: Vec<_> = r
+        .outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Warned { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seen, [ins[2].clone(), ins[1].clone(), ins[0].clone()]);
+    let d = done_pairs(&r);
+    assert_eq!(std::fs::read_to_string(&d[0].1).unwrap(), "ab2b10");
+}
+
+/// `RLIMIT_FSIZE` comes from the sum of every input of the run: three
+/// 6 MiB inputs give 16 x 18 MiB = 288 MiB; each alone would stay at the
+/// 256 MiB floor. `ulimit -f` counts 512-byte blocks in dash.
+#[test]
+fn fsize_limit_uses_the_sum() {
+    let t = Tmp::new("join-fsize");
+    let ins: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|n| {
+            let p = t.input(&format!("{n}.jpg"), "");
+            // Sparse: the size counts, no disk is used.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_len(6 << 20)
+                .unwrap();
+            p
+        })
+        .collect();
+    let bin = t.script(
+        "join",
+        "work=$4; mkdir -p \"$work/join\"; echo x > \"$work/join/out.pdf\"\n\
+         in=$(head -n1 \"$6\"); printf 'warn\\t%s\\tfsize %s\\n' \"$in\" \"$(ulimit -f)\"\n\
+         while IFS= read -r in; do printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let (r, _) = run_join(&join_action(&bin, 1), &ins, None);
+    let want = format!("fsize {}", (288u64 << 20) / 512);
+    assert!(
+        r.outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Warned { message, .. } if *message == want)),
+        "{:?}",
+        r.outcomes
+    );
+}
+
+/// Plays a supervisor for `supervisor_kill_leaves_nothing_published`
+/// (only with `INACIRCLE_JOINKILL_BIN` and `INACIRCLE_JOINKILL_IN` set):
+/// runs the join action and prints `child <pid>` on its first event and
+/// `joined` on its first progress past zero, which the fixture sends after
+/// its `joined` line.
+#[test]
+fn helper_join_kill_run() {
+    use std::io::Write;
+    struct Say(common::Ran);
+    impl Observer for Say {
+        fn event(&mut self, o: &Outcome) {
+            self.0.event(o);
+        }
+        fn dir(&mut self, path: &std::path::Path) {
+            self.0.dir(path);
+        }
+        fn progress(&mut self, d: usize, t: usize, f: f32) {
+            self.0.progress(d, t, f);
+            if f > 0.0 {
+                let mut out = std::io::stdout();
+                writeln!(out, "\njoined").unwrap();
+                out.flush().unwrap();
+            }
+        }
+        fn started(&mut self, pid: u32) {
+            let mut out = std::io::stdout();
+            writeln!(out, "\nchild {pid}").unwrap();
+            out.flush().unwrap();
+        }
+    }
+    let (Some(bin), Some(input)) = (
+        std::env::var_os("INACIRCLE_JOINKILL_BIN"),
+        std::env::var_os("INACIRCLE_JOINKILL_IN"),
+    ) else {
+        return;
+    };
+    let ins: Vec<std::path::PathBuf> = std::env::split_paths(&input).collect();
+    let act = join_action(std::path::Path::new(&bin), 1);
+    let tok = engine::exec::CancelToken::install().unwrap();
+    let mut obs = Say(common::Ran::default());
+    engine::exec::run_join(&act, ins.clone(), &mut obs, &tok);
+}
+
+/// The supervisor is killed with `SIGKILL` after the action's `joined`,
+/// while the action still runs: nothing reaches the folder but the work
+/// dir, which a later run removes once it is stale.
+#[test]
+fn supervisor_kill_leaves_nothing_published() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    let t = Tmp::new("join-kill");
+    let ins = three_images(&t);
+    let bin = t.script(
+        "join",
+        &join_then("printf 'progress\\t0.5\\n'; exec sleep 60"),
+    );
+    let mut sup = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "helper_join_kill_run",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("INACIRCLE_JOINKILL_BIN", &bin)
+        .env("INACIRCLE_JOINKILL_IN", std::env::join_paths(&ins).unwrap())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(sup.stdout.take().unwrap())
+        .lines()
+        .map_while(Result::ok);
+    let pid: libc::pid_t = lines
+        .find_map(|l| l.strip_prefix("child ").map(|p| p.parse().unwrap()))
+        .expect("the helper names the leader");
+    assert!(lines.any(|l| l == "joined"), "the helper saw the joined");
+    sup.kill().unwrap();
+    sup.wait().unwrap();
+    // The leader follows its supervisor (see the pdeath test); 10 s is
+    // slack for a loaded machine.
+    let ended = ends_within(pid, Duration::from_secs(10));
+    if !ended {
+        // SAFETY: kill has no memory preconditions; the pid is the sleep
+        // just seen alive.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let left = new_entries(&t, &ins);
+    assert!(
+        left.iter().all(|n| n.starts_with(".inacircle-")),
+        "published after a kill: {left:?}"
+    );
+    assert_eq!(left.len(), 1, "the work dir stays: {left:?}");
 }

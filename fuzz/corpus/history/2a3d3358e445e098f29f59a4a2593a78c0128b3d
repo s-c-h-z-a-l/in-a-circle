@@ -1,5 +1,0 @@
-inacircle-history 0
-outIjob=1	mtimep	job=10-1	in=/2i2r
-fail	job=11-=/i2reason=exists
-fail	job=10-1	in=/i3	id=0-0b	id=1	in=/i2	reason=exists
-fail	job=1job=0-00-1	in==1	ke0

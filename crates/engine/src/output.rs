@@ -406,6 +406,66 @@ pub fn writable_target(source_dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// The name of a join result whose anchor folder's own name cannot name
+/// it (the root has none; a hidden one would hide the result). The join
+/// actions take images, so the word says what the result holds.
+const JOIN_FALLBACK_NAME: &str = "images";
+
+/// Where a join action's one result goes, and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    /// The anchor folder's target ([`writable_target`]).
+    pub target: PathBuf,
+    /// The result's wrapper and file stem (`<name>/<name>.<ext>`).
+    pub name: String,
+    /// The anchor folder was not writable: `target` is the download folder.
+    pub downloads: bool,
+}
+
+/// The place and name of a join result made of `accepted` (in the order
+/// the action gets them). The anchor is the folder with the most of them;
+/// on a tie, the folder of the earliest input among the tied. The name is
+/// that folder's name for two or more inputs ([`JOIN_FALLBACK_NAME`] when
+/// it has none, or one starting with a dot), and the input's stem for one.
+/// The only filesystem access is [`writable_target`]'s probe of the
+/// anchor folder. `accepted` empty is `InvalidInput`.
+pub fn anchor<P: AsRef<Path>>(accepted: &[P]) -> io::Result<Anchor> {
+    let Some(first) = accepted.first().map(AsRef::as_ref) else {
+        return Err(invalid("no input for the result"));
+    };
+    fn folder(p: &Path) -> &Path {
+        p.parent().unwrap_or(Path::new("/"))
+    }
+    // Per folder: (inputs, index of its first input). One entry per
+    // distinct folder, so bounded by the invocation's input count.
+    let mut count: std::collections::HashMap<&Path, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (i, p) in accepted.iter().enumerate() {
+        count.entry(folder(p.as_ref())).or_insert((0, i)).0 += 1;
+    }
+    // The most inputs; among equals, the smallest first index.
+    let dir = count
+        .into_iter()
+        .max_by(|(_, (na, ia)), (_, (nb, ib))| na.cmp(nb).then(ib.cmp(ia)))
+        .map_or(folder(first), |(d, _)| d);
+    let usable = |s: &OsStr| -> Option<String> {
+        let s = s.to_str()?;
+        (!s.is_empty() && !s.starts_with('.')).then(|| s.to_owned())
+    };
+    let name = if accepted.len() >= 2 {
+        dir.file_name().and_then(usable)
+    } else {
+        first.file_stem().and_then(usable)
+    }
+    .unwrap_or_else(|| JOIN_FALLBACK_NAME.to_owned());
+    let target = writable_target(dir)?;
+    Ok(Anchor {
+        downloads: target != dir,
+        target,
+        name,
+    })
+}
+
 /// A name relative to a directory fd (`AT_FDCWD` for a plain path).
 #[derive(Clone, Copy)]
 struct At<'a> {
@@ -3419,5 +3479,133 @@ pub(crate) mod tests {
             seen.borrow()
         );
         assert!(!target.join("a").exists());
+    }
+
+    // ---- the join result's anchor ----
+
+    /// `n` names `<prefix><i>.jpg` in `dir`, as paths only (the anchor
+    /// reads no input).
+    fn images_in(dir: &Path, prefix: &str, n: usize) -> Vec<PathBuf> {
+        (0..n)
+            .map(|i| dir.join(format!("{prefix}{i:02}.jpg")))
+            .collect()
+    }
+
+    /// The environment of an anchor test: the download folder is
+    /// `<tmp>/home/Downloads`.
+    fn anchor_env<R>(t: &Tmp, f: impl FnOnce() -> R) -> R {
+        let home = t.0.join("home");
+        with_env(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("XDG_CONFIG_HOME", None),
+            ],
+            f,
+        )
+    }
+
+    #[test]
+    fn anchor_uses_the_folder_with_most_inputs() {
+        let t = Tmp::new("anchor-most");
+        let (trip, work) = (t.0.join("Nyaralás"), t.0.join("Munka"));
+        fs::create_dir(&trip).unwrap();
+        fs::create_dir(&work).unwrap();
+        // The lone image sorts first: the count wins, not the order.
+        let mut ins = vec![work.join("ábra01.jpg")];
+        ins.extend(images_in(&trip, "kép", 25));
+        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        assert_eq!(a.target, trip);
+        assert_eq!(a.name, "Nyaralás");
+        assert!(!a.downloads);
+    }
+
+    #[test]
+    fn anchor_tie_goes_to_the_earlier_input() {
+        let t = Tmp::new("anchor-tie");
+        let (x, y) = (t.0.join("x"), t.0.join("y"));
+        fs::create_dir(&x).unwrap();
+        fs::create_dir(&y).unwrap();
+        // Sorted: y/a, x/b, y/c, x/d: y's first input comes first.
+        let ins = vec![
+            y.join("a.jpg"),
+            x.join("b.jpg"),
+            y.join("c.jpg"),
+            x.join("d.jpg"),
+        ];
+        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        assert_eq!((a.target.as_path(), a.name.as_str()), (y.as_path(), "y"));
+        // The other way round, the other folder.
+        let ins = vec![
+            x.join("a.jpg"),
+            y.join("b.jpg"),
+            x.join("c.jpg"),
+            y.join("d.jpg"),
+        ];
+        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        assert_eq!((a.target.as_path(), a.name.as_str()), (x.as_path(), "x"));
+    }
+
+    #[test]
+    fn anchor_single_input_uses_its_stem() {
+        let t = Tmp::new("anchor-one");
+        let d = t.0.join("Nyaralás");
+        fs::create_dir(&d).unwrap();
+        let a = anchor_env(&t, || anchor(&[d.join("IMG_1234.jpg")])).unwrap();
+        assert_eq!(a.name, "IMG_1234");
+        assert_eq!(a.target, d);
+        assert!(!a.downloads);
+    }
+
+    #[test]
+    fn anchor_unusable_folder_name_falls_back_to_images() {
+        let t = Tmp::new("anchor-images");
+        // A hidden folder would hide the result.
+        let hidden = t.0.join(".photos");
+        fs::create_dir(&hidden).unwrap();
+        let a = anchor_env(&t, || anchor(&images_in(&hidden, "p", 2))).unwrap();
+        assert_eq!(
+            (a.target.as_path(), a.name.as_str()),
+            (hidden.as_path(), "images")
+        );
+        // The root has no name at all. Unless the tests run as root, it is
+        // not writable either: the result goes to the download folder.
+        let a = anchor_env(&t, || anchor(&images_in(Path::new("/"), "p", 2))).unwrap();
+        assert_eq!(a.name, "images");
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(a.downloads);
+            assert_eq!(a.target, t.0.join("home/Downloads"));
+        }
+        // One input keeps its stem even there.
+        let a = anchor_env(&t, || anchor(&[PathBuf::from("/x.jpg")])).unwrap();
+        assert_eq!(a.name, "x");
+    }
+
+    #[test]
+    fn anchor_read_only_folder_goes_to_downloads() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root ignores directory permissions");
+            return;
+        }
+        let t = Tmp::new("anchor-ro");
+        let ro = t.0.join("Nyaralás");
+        fs::create_dir(&ro).unwrap();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+        let a = anchor_env(&t, || anchor(&images_in(&ro, "kép", 3)));
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        let a = a.unwrap();
+        assert!(a.downloads);
+        assert_eq!(a.target, t.0.join("home/Downloads"));
+        // The name is still the folder's.
+        assert_eq!(a.name, "Nyaralás");
+        assert_eq!(fs::read_dir(&ro).unwrap().count(), 0, "probe left behind");
+    }
+
+    #[test]
+    fn anchor_of_nothing_is_an_error() {
+        let t = Tmp::new("anchor-none");
+        let e = anchor_env(&t, || anchor::<PathBuf>(&[])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }

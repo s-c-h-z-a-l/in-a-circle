@@ -66,8 +66,18 @@ are in `CLAUDE.md`.
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
   As a fallback, the planner chains two edges through a lossless
   intermediate file, mostly for external tools.
-- **`pages`** (`inacircle-pages`): page-image books to PDF. Today one
-  action, `pages.cbz-to-pdf`: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
+- **`pages`** (`inacircle-pages`): page-image books to PDF. Two
+  actions. `pages.images-to-pdf` is a join action: any number of JPEG and
+  PNG files (the same image rules as below) become one PDF, one page per
+  file in the given order. An image that cannot be taken is left out and
+  reported: unsupported ones (alpha, interlaced, 16-bit PNG, unusual JPEG)
+  as `skip`, damaged or over-limit ones as `fail`; the rest is joined.
+  When none can be taken nothing is written. If the PDF as a whole would
+  pass the output size limit, nothing is written; the inputs already taken
+  and those not yet examined fail with the size copy, while those already
+  skipped or failed keep their own outcome. It is
+  `lossy=yes` for the same reasons as the other action.
+  `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
   CBZ, one PDF, all or nothing. It sits in the **Book** category. It is
@@ -125,6 +135,17 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- A join action turns many inputs into one output (`join=yes`; absent
+  means `no`). It may take a set of input types: `in=` is then a
+  comma-separated MIME set of at most 16 members (the roadmap's image
+  types and a document-with-assets role both stay far below; the menu
+  matches a member at a time), none empty, none repeated. `min=<n>` is the
+  fewest accepted inputs a run needs, 1 to 1024 (the invocation's input
+  limit; absent means 1). `min` and a type set are valid only with
+  `join=yes`; any other value or combination rejects the line
+  ("invalid action line ignored"). For display the engine takes the set's
+  first member as the action's input type. The catalog cache stores the
+  manifest lines verbatim, so its format does not change.
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
   the action reports it (blank lines at the start or end of the text and
@@ -145,6 +166,7 @@ inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 ```
 
 ## Invocation
@@ -158,6 +180,8 @@ action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=applic
   temp dir. Very long input lists go through `--inputs-from <file>`; the
   list (read bounded: 1 MiB, 8 KiB per encoded line) and argv together
   hold at most 1024 paths of at most 4096 bytes each and 1 MiB in all.
+  The engine writes the list streamed and holds each input path once for
+  the whole run (see `docs/resource-limits.md`).
 - **An action writes only into the temp dir.** Once its whole process
   group is gone, the engine copies each input's results into fresh files
   of its own and publishes them with one atomic no-replace `rename` (see
@@ -183,6 +207,17 @@ action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=applic
   escaped path per line; inputs and `--work` must be absolute, and non-UTF-8
   paths are out of scope for v0.
 
+  A join action (`join=yes`) reports per input `take<TAB><input>` (the
+  input went into its one result), `skip`, `fail` or `warn`, and once, at
+  the end, `joined<TAB>join/<file>`: its one result, written directly in
+  `<work>/join/` (`<work>/join/out.<ext>` by convention). It never writes
+  `done`; a one-to-one action never writes `take` or `joined`. Each of
+  these is a contract violation, and so are a second `take` of an input,
+  a `take` of an input it was not given, a `joined` before any `take`, a
+  second `joined`, a `take`, `skip` or `fail` after `joined`, and a
+  `joined` path that is not a regular file directly in `join/` (reached
+  through no symlink).
+
   An action may open with `progress<TAB>0.00` before any input work
   (`inacircle-text run` always does), so a script that parses stdout must
   not take the first `progress` line for the end of a run.
@@ -192,7 +227,17 @@ action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=applic
   the file's), 3 unsupported input. For a batch: 0 if at least one input
   produced `done`; otherwise 1 if any input produced `fail`; 3 only when
   every input was unsupported. Exit 1 also covers a batch that cannot run
-  at all (`--work` missing or not writable).
+  at all (`--work` missing or not writable). A join action exits 0 if it
+  reported `joined`; 3 if it took nothing and skipped every input;
+  otherwise 1.
+- A join action's result is published only if it reported `joined`, took
+  at least `min` inputs, broke no rule of the contract, exited 0, and no
+  cancel came before the commit. Otherwise nothing reaches the user's
+  folder: every input it did not settle with its own `skip` or `fail`
+  fails (with the violation, the exit status, "action reported fewer
+  inputs than its minimum", or "cancelled"). An input it said nothing of
+  fails ("no result reported") even when the result is published. Once
+  published, every input it took is done, with the same one output.
 - Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
   later; the engine removes the temp dir either way.
 - If the supervisor itself dies abnormally (`SIGKILL`, an abort), nobody
@@ -204,7 +249,8 @@ action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=applic
   no longer see them. A cgroup would bound that; it is not used (no
   systemd dependency).
 - Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
-  writes at 16 × the total input size, clamped to 256 MiB – 16 GiB
+  writes at 16 × the total input size (all the inputs of that one
+  process, a join's included), clamped to 256 MiB – 16 GiB
   (archive bombs, with no plugin code; many files can still fill a disk);
   `RLIMIT_CORE` is 0.
 - The supervisor caps what it accepts: at most 16 `warn` per input (then
@@ -309,11 +355,15 @@ Every action runs sandboxed, set up in the child between `fork` and
   `Comic book`. Only the head already read and the name decide; the engine
   does not open the archive. Any other ZIP stays a label ("ZIP") without a
   type.
+- **Images:** a PNG or JPEG signature gives `image/png` or `image/jpeg`
+  (the join action `images-to-pdf` takes them). Whether a given file is one
+  the action can place (a PNG with alpha, say) is the action's call, not the
+  classifier's.
 - **Planned, not built yet:** zip containers are looked into: ODF and
   EPUB declare their type in the `mimetype` entry; OOXML is told apart by
   the central directory at the end of the file (`word/document.xml`,
-  `xl/workbook.xml`, …). Today the binary signatures give a label but no
-  type, so no action is offered for them.
+  `xl/workbook.xml`, …). Today the remaining binary signatures (PDF, GIF, ZIP,
+  gzip) give a label but no type, so no action is offered for them.
 - Text: no magic and valid UTF-8 without NUL bytes means text; the exact
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
   content cannot tell them apart. Today that is plain text and Markdown;
@@ -336,10 +386,19 @@ Every action runs sandboxed, set up in the child between `fork` and
   point. The actual layout is a design decision.
 - At most eight slices per ring and at most one sub-level, used only when
   the presets do not fit; then the first ring holds the target groups.
-- **Mixed selections** offer the presets of the most common type (ties
-  broken by a fixed type order). The other files are skipped, and the hub
-  says so ("15 / 20"). Actions that make sense for many files ("all into
-  one archive") are planned; they need the many-to-one contract.
+- **Mixed selections** offer the presets of the most common source (ties
+  broken by the fixed preset order). The other files are skipped, and the
+  hub says so ("15 / 20").
+- **Join presets.** A preset may name a set of MIME types (`Preset.join`);
+  the `pdf` preset names JPEG and PNG. `menu::choose` decides what a preset
+  runs for a selection: the 1:1 route (for the preset's own input) or a join
+  action, which is a catalog action whose type set covers the preset's set,
+  with the preset's output, runnable, and with at least its `min` files in
+  the selection. The two compete on how many files each takes; the larger
+  wins and a tie goes to the 1:1 route. The count is the slice's
+  `applicable` and the hub's N. The wheel's levels, the flat offer and the
+  run all ask `choose`, so they cannot disagree. A join action is never a
+  step of a chain: the planner skips it.
 
 ## Executor and supervisor
 
@@ -351,7 +410,13 @@ Every action runs sandboxed, set up in the child between `fork` and
 - **One process per target folder** of a batch (each folder gets its own
   temp dir, so the final move stays an atomic `rename`); actions declaring
   `batch=no` run per file, one after the other (parallel runs may come
-  later). A two-step route runs both steps in the same temp dir; only the
+  later). A **join** action runs once over every accepted input, whatever
+  folders they come from and whatever its `batch=` says, in natural order
+  (`natural_cmp` on the file name's bytes, then on the whole path), in one
+  temp dir in its result's target folder (its anchor, see
+  [Output policy](#output-policy)), and its one result is published once,
+  as one group, by the same staging and no-replace rename as any other
+  output. A two-step route runs both steps in the same temp dir; only the
   last step's outputs are placed. Step 1's outputs are checked again once
   its whole group is gone (a regular file, no symlink on the way), so an
   action cannot swap one for a link before step 2 reads it.
@@ -395,7 +460,12 @@ Every action runs sandboxed, set up in the child between `fork` and
   same text is the CLI's stderr warning. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. An output whose lossy action reported a
   loss (a `warn` for an input that has an output) starts the body with
-  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  `Formatting was lost.`; a run that lost nothing does not say it. A join
+  run that published its result: the result's file name, then `<taken> /
+  <total> files` (the inputs in the result, of every file of the run) and
+  the same problem lines, plus the Downloads line when its anchor folder
+  was read-only; a join that published nothing reads like any run that
+  converted nothing. A run
   the sandbox gate refused ends it with `Sandbox unavailable.`. Text is cut to 200 characters on a UTF-8
   boundary, and `&`, `<`, `>` are escaped when the server has `body-markup`.
 - The bus connection is lazy: made at the one-second mark or at the end,
@@ -482,7 +552,17 @@ In the engine, in one place:
    at most four). A published group renamed to that pattern holds its
    outputs' names and is never removed. An output folder never takes that
    pattern.
-7. Undo never deletes. It moves each input's output group (the wrapper
+7. A join action's one result has one place and one name, its anchor:
+   the target (rule 1) of the folder that holds the most of its accepted
+   inputs (those of its type set), on a tie the folder of the input that
+   comes first in its order. Its name is that folder's name for two or
+   more inputs (`Nyaralás/Nyaralás/Nyaralás.pdf`), the input's stem for
+   one; a folder without a usable name (the root, or a hidden one, which
+   would hide the result) gives `images`. The wrapper and a taken name
+   (`Nyaralás (1)/`) follow rule 3; inputs from other folders change
+   nothing. It goes to the download folder only when the anchor folder is
+   not writable.
+8. Undo never deletes. It moves each input's output group (the wrapper
    folder, whole) into the freedesktop.org Trash with one
    `renameat2(RENAME_NOREPLACE)`: the home Trash
    (`$XDG_DATA_HOME/Trash`) when it is on the same mount and device, else
@@ -611,10 +691,12 @@ compositor.
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
   north, `plain-text` south; `pdf` north in Book): lit if applicable, dim otherwise; the hub is
-  the category's label. `inacircle offer --groups <files…>` prints level 1.
+  the category's label, or `<n> / <total> files` when the most files any lit
+  target of the category takes (`n`, the count the run would take) is below
+  the number dropped. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
-  it into a pipe at once, read in the `poll` loop (500 ms, 64 KiB, 1024
+  it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
   URIs). The result carries the tag (seq) of the `enter` that started it; a
   new `enter` (another offer, or out and back in) closes the pipe and the
   machine ignores an older tag, so an old list never shows. When the list
@@ -649,9 +731,15 @@ compositor.
   beyond it, `Outside`. `Hub` is a drop target and ignores clicks;
   `Outside` closes on click.
 - A `text/uri-list` read (early or after the drop) goes through a pipe with
-  a 500 ms deadline, at most 64 KiB and 1024 URIs. A source that never
+  a 500 ms deadline, at most 1 MiB (the action invocation's path-list
+  limit) and 1024 URIs (its input count). A list over either shows `too many
+  files` in the hub and offers nothing (no truncated selection), early and
+  after the drop. A source that never
   writes or never closes times out. A failed early read falls back; a
-  failed read after the drop closes the wheel.
+  failed read after the drop closes the wheel. The list is decoded from
+  its end and its bytes are given back as they become paths, so the
+  wheel never holds a whole list and all of its paths at once (see
+  `docs/resource-limits.md`).
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`
   decodes to bytes; a non-`file` URI, another host, a bad escape or a
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
@@ -680,7 +768,9 @@ files` for several (`n` is what the wheel offers on, `total` what was
 dropped). Text wider than the hub is cut with `…`. If a character of the
 name is missing from the atlas (or the name is empty), the name is
 replaced by `1 file · <type label>` (e.g. `1 file · text`), until a larger
-atlas exists.
+atlas exists. On level 2 the hub keeps the category's label when one file
+was dropped or the category's lit targets take every dropped file;
+otherwise it shows `<n> / <total> files` as above.
 
 **Text**
 
@@ -763,7 +853,12 @@ No daemon:
   (`history.v0`, `history.v0.1`, …, never overwritten) under the
   history's lock by the first run that writes; its jobs are refused with
   the reason, their outputs kept. A run that dies midway leaves its
-  complete groups, which undo still finds. Nothing of a run is kept in
+  complete groups, which undo still finds. A join run is one group like
+  any other (its result's wrapper); the inputs it did not take have their
+  usual `skip`/`fail` lines, and which inputs went into the result is not
+  recorded (undo does not need it): undo moves that one wrapper to the
+  Trash, the inputs are never touched. The format is the same as before
+  join actions, and older jobs still undo. Nothing of a run is kept in
   memory per outcome;
 - state files (history, registry entries, the catalog cache) are created
   exclusively under random names, never through a symlink, in a folder
@@ -840,7 +935,10 @@ inacircle cancel <job-id>
   the whole run, and ends with `summary done=… skipped=… failed=…`,
   counted per input.
 - `run` exits by the batch rule above. A cancel fails the inputs not yet
-  finished (`cancelled`), then the same rule applies.
+  finished (`cancelled`), then the same rule applies. A join run exits 0
+  once its result is published (each input in it gets its `done` line,
+  with the one result's path); otherwise the same rule (1 if an input
+  failed, 3 if every one was skipped).
 - The same file (by canonical path) given twice counts once. A non-UTF-8
   input path is skipped ("non-UTF-8 path").
 - `undo` of a job that is still running is refused (exit 1): cancel it

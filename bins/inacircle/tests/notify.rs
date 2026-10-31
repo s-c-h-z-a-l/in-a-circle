@@ -534,6 +534,38 @@ fn final_notice_shows_what_the_pages_action_left_out() {
     );
 }
 
+/// A join run says `taken / total files` with the run's files, those
+/// settled before it included, under the result's file name.
+#[test]
+fn final_notice_of_a_join_counts_every_file() {
+    let e = Env::with("final-join", &["inacircle-pages"]);
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let page = testzip::png(8, 8, 0, None, false, false, &rows);
+    e.bytes("1.png", &page);
+    e.bytes("2.png", &page);
+    e.file("note.txt", "not an image\n");
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    let (fake, rx) = server(move |p, g| {
+        std::thread::sleep(Duration::from_millis(50));
+        let out = seen2.lock().unwrap().clone();
+        assert!(out.lines().any(|l| l.starts_with("done\t")), "{out}");
+        close(p, g.id);
+    });
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "pdf", "1.png", "2.png", "note.txt"],
+    );
+    c.env("INACIRCLE_UNDO_WAIT_MS", "20000");
+    let r = run(c, &seen);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].summary, "files.pdf");
+    assert!(n[0].body.starts_with("2 / 3 files"), "{:?}", n[0].body);
+}
+
 #[test]
 fn measure_reports_the_notification_cpu_before_the_undo_window() {
     let e = Env::new("measure");

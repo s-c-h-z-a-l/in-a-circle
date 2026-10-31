@@ -287,6 +287,154 @@ fn cbz_to_pdf_end_to_end() {
     assert!(o.stdout.contains("preset=pdf"), "{}", o.stdout);
 }
 
+/// A PNG page for the image-join tests: 8x8, 8-bit gray, no alpha.
+fn gray_png() -> Vec<u8> {
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    testzip::png(8, 8, 0, None, false, false, &rows)
+}
+
+/// A JPEG page for the image-join tests (a probe fixture, not duplicated).
+fn rgb_jpeg() -> Vec<u8> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// Two images and a text file through the real `inacircle-pages` under the
+/// real sandbox: one PDF of two pages in the folder-named wrapper, one
+/// history group, the text file skipped, and Undo trashes the wrapper.
+#[test]
+fn images_to_pdf_end_to_end() {
+    let e = Env::with_actions("img2pdf", &["inacircle-pages"]);
+    let jpg = rgb_jpeg();
+    let png = gray_png();
+    e.file("Nyaralás/1.jpg", &jpg);
+    e.file("Nyaralás/2.png", &png);
+    e.file("Nyaralás/jegyzet.txt", b"nem kep\n");
+    let o = e.run(&[
+        "run",
+        "pdf",
+        "Nyaralás/1.jpg",
+        "Nyaralás/2.png",
+        "Nyaralás/jegyzet.txt",
+    ]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let wrapper = e.files().join("Nyaralás/Nyaralás");
+    let out = wrapper.join("Nyaralás.pdf");
+    assert_eq!(o.summary(), (2, 1, 0), "{}", o.stdout);
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| Path::new(p) == out), "{done:?}");
+    assert_eq!(
+        o.pairs("skip"),
+        [(
+            e.files().join("Nyaralás/jegyzet.txt"),
+            "unsupported".to_owned()
+        )]
+    );
+    let pdf = fs::read(&out).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    // Two pages: one `/Type /Page ` object per image (`/Pages` is the tree).
+    let pages = pdf.windows(12).filter(|w| w == b"/Type /Page ").count();
+    assert_eq!(pages, 2, "page objects in the PDF");
+
+    let job = o.job();
+    let h = e.history();
+    let mine: Vec<&str> = h.lines().filter(|l| l.contains(&job)).collect();
+    let count = |kind: &str| {
+        mine.iter()
+            .filter(|l| l.split('\t').next() == Some(kind))
+            .count()
+    };
+    assert_eq!(count("group-begin"), 1, "{h}");
+    assert_eq!(count("publish-commit"), 1, "{h}");
+    assert_eq!(count("skip"), 1, "{h}");
+    assert!(
+        mine.iter()
+            .any(|l| l.starts_with("skip\t") && l.contains("reason=unsupported")),
+        "{h}"
+    );
+
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    let trash = e.root.join("home/.local/share/Trash/files");
+    assert!(!wrapper.exists(), "the wrapper is still there");
+    assert!(trash.join("Nyaralás/Nyaralás.pdf").is_file());
+    // The inputs are untouched.
+    assert_eq!(fs::read(e.files().join("Nyaralás/1.jpg")).unwrap(), jpg);
+    assert_eq!(fs::read(e.files().join("Nyaralás/2.png")).unwrap(), png);
+}
+
+/// `run --action <id>` reaches a join action too: the same single PDF the
+/// preset makes, with its inputs as one group; a preset id is not an action
+/// id, and a bare `--action` is a usage error.
+#[test]
+fn direct_action_runs_a_join_action() {
+    let e = Env::with_actions("direct-join", &["inacircle-pages"]);
+    e.file("a/1.jpg", &rgb_jpeg());
+    e.file("a/2.png", &gray_png());
+    let o = e.run(&[
+        "run",
+        "--action",
+        "pages.images-to-pdf",
+        "a/1.jpg",
+        "a/2.png",
+    ]);
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 0, 0), "{}", o.stdout);
+    let pdf = fs::read(e.files().join("a/a/a.pdf")).expect("no PDF written");
+    assert_eq!(
+        pdf.windows(12).filter(|w| w == b"/Type /Page ").count(),
+        2,
+        "page objects in the PDF"
+    );
+    // A preset id after `--action` is no action: nothing runs.
+    let o = e.run(&["run", "--action", "pdf", "a/1.jpg"]);
+    assert_ne!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert!(o.pairs("done").is_empty(), "{}", o.stdout);
+    // The flag without an id is a usage error, not a preset named "--action".
+    let o = e.run(&["run", "--action"]);
+    assert!(
+        o.stderr.contains("--action needs an action id"),
+        "{}",
+        o.stderr
+    );
+    // A lone preset id is a preset with no files, not a bare flag.
+    let o = e.run(&["run", "pdf"]);
+    assert!(
+        o.stderr.contains("no files") && !o.stderr.contains("needs an action id"),
+        "{}",
+        o.stderr
+    );
+}
+
+/// An action whose tool is missing fails the inputs it would take, with the
+/// missing tool named; an input it does not take is still skipped.
+#[test]
+fn missing_tool_fails_matching_inputs() {
+    let e = Env::with_actions("needy", &[]);
+    let bin = e.root.join("actions/needy");
+    fs::write(
+        &bin,
+        "#!/bin/sh\n\
+         printf 'inacircle-manifest 0\\naction\\tp.needy\\tfamily=p\\tin=text/plain\\tout=text/markdown\\text=md\\tlabel=n\\tgroup=p\\tcost=1\\tlossy=no\\tbatch=yes\\trequires=no-such-tool-inacircle\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let t = e.file("doc.txt", b"text\n");
+    let o = e.run(&["run", "--action", "p.needy", "doc.txt"]);
+    if skip_unsandboxed("missing_tool_fails_matching_inputs", &o) {
+        return;
+    }
+    assert_eq!(
+        o.pairs("fail"),
+        [(t, "needs no-such-tool-inacircle".to_owned())],
+        "{}{}",
+        o.stdout,
+        o.stderr
+    );
+    assert!(o.pairs("skip").is_empty(), "{}", o.stdout);
+}
+
 // ---- text conversions through the real inacircle-text ----
 
 #[test]
@@ -1476,6 +1624,107 @@ fn many_groups_many_outputs_stay_within_rss_budget() {
     );
 }
 
+/// The largest of a `/proc` field's values (`None` while the file is
+/// unreadable, e.g. the process just exited).
+fn proc_field_kb(path: &str, key: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix(key))
+        .and_then(|v| v.split_whitespace().next()?.parse().ok())
+}
+
+/// One path of the invocation's worst realistic case: ~1 KiB, so 1024 of
+/// them fill the 1 MiB input list limit (`action::INPUT_LIST_BYTES`) with
+/// the escape's newline; the same length as the wheel's large-drop test
+/// (a 1023-byte `file://` URI line).
+const LONG_PATH: usize = 1014;
+/// The invocation's own input count limit (`action::INPUT_COUNT`).
+const MANY_INPUTS: usize = 1024;
+
+/// The budget holds through a whole run at the invocation's limits:
+/// `inacircle run` over 1024 inputs whose paths are ~1 KiB each (~1 MiB
+/// of paths), one batch process, one output group per input. Peak PSS of
+/// the `inacircle` process (engine and supervisor) is sampled from
+/// `smaps_rollup` every 200 us until exit (the run takes about 100 ms, so
+/// a few hundred samples; a sample costs about as long) and must stay within
+/// 5,000,000 B in the release build the budget is for; a debug build
+/// prints it.
+#[test]
+fn many_long_paths_stay_within_the_pss_budget() {
+    let release = Path::new(BIN)
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == "release");
+    let e = Env::new("longpaths");
+    let mut dir = e.files();
+    for c in ['a', 'b', 'c', 'd'] {
+        dir = dir.join(c.to_string().repeat(240));
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let mut paths = Vec::with_capacity(MANY_INPUTS);
+    for i in 0..MANY_INPUTS {
+        let plen = dir.join(format!("{i:04}.txt")).as_os_str().len();
+        let pad = LONG_PATH.saturating_sub(plen);
+        let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
+        fs::write(&p, "w\n").unwrap();
+        paths.push(p);
+    }
+    let bytes: usize = paths.iter().map(|p| p.as_os_str().len() + 1).sum();
+    assert!(bytes <= 1_048_576, "{bytes} bytes of paths");
+    let stdout = e.root.join("stdout");
+    let mut c = e.cmd(&["run", "markdown"]);
+    c.args(&paths)
+        .stdout(fs::File::create(&stdout).unwrap())
+        .stderr(Stdio::piped());
+    let child = c.spawn().unwrap();
+    let pid = child.id();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let (mut pss, mut hwm, mut n) = (0u64, 0u64, 0u64);
+            let (roll, status) = (
+                format!("/proc/{pid}/smaps_rollup"),
+                format!("/proc/{pid}/status"),
+            );
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(kb) = proc_field_kb(&roll, "Pss:") {
+                    pss = pss.max(kb);
+                    n += 1;
+                }
+                hwm = hwm.max(proc_field_kb(&status, "VmHWM:").unwrap_or(0));
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            (pss, hwm, n)
+        }
+    });
+    let o = child.wait_with_output().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (pss, hwm, samples) = sampler.join().unwrap();
+    let mut out = parse_out(o);
+    out.stdout = fs::read_to_string(&stdout).unwrap();
+    out.lines = out
+        .stdout
+        .split_inclusive('\n')
+        .map(|l| parse_line(l).unwrap_or_else(|e| panic!("bad line {l:?}: {e:?}")))
+        .collect();
+    if skip_unsandboxed("many_long_paths_stay_within_the_pss_budget", &out) {
+        return;
+    }
+    eprintln!(
+        "{MANY_INPUTS} x ~1 KiB paths, CLI run: sampled max PSS {pss} kB, VmHWM {hwm} kB, \
+         {samples} samples"
+    );
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.summary(), (MANY_INPUTS, 0, 0), "{}", out.stderr);
+    assert!(samples > 0, "no PSS sample: incomplete evidence");
+    if release {
+        // 5,000,000 B (CLAUDE.md); `Pss` is in KiB: multiply by 1024.
+        assert!(pss * 1024 <= 5_000_000, "PSS {pss} kB over the budget");
+    }
+}
+
 #[test]
 fn work_dirs_never_left_behind() {
     let e = Env::new("workdirs");
@@ -1572,6 +1821,198 @@ fn offer_pdfs_and_one_txt() {
         o.stdout,
         "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\t1 / 6 files\n"
     );
+}
+
+/// A `#!/bin/sh` plugin that declares the image join action (its manifest
+/// line is the shipped one) and runs [`JOIN_ALL`]. Installed like `plugin`.
+fn join_plugin(e: &Env) {
+    join_plugin_with(e, JOIN_ALL);
+}
+
+/// Takes every input into `<work>/join/out.pdf` and reports `joined` once.
+const JOIN_ALL: &str = "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+     while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+     printf 'joined\\tjoin/out.pdf\\n'";
+
+/// [`join_plugin`] running `body` (`$4` the work dir, `$6` the input list).
+fn join_plugin_with(e: &Env, body: &str) {
+    let src = e.root.join("joiner.src");
+    fs::write(
+        &src,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = --manifest ]; then\n\
+             printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
+             exit 0\nfi\n{body}\n"
+        ),
+    )
+    .unwrap();
+    let tmp = e.root.join("actions").join(".joiner.tmp");
+    assert!(
+        Command::new("cp")
+            .arg(&src)
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, e.root.join("actions").join("joiner")).unwrap();
+}
+
+#[test]
+fn offer_images_shows_join_count() {
+    let e = Env::with_actions("offer-images", &[]);
+    join_plugin(&e);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["offer", "a.jpg", "b.png", "c.txt"]);
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert_eq!(
+        o.stdout,
+        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\nhub\t2 / 3 files\n"
+    );
+}
+
+/// The preset runs the join action once over every image of its set, in
+/// natural order, and publishes one result; the text file is unsupported.
+#[test]
+fn run_join_preset_publishes_one_result() {
+    let e = Env::with_actions("run-join", &[]);
+    join_plugin(&e);
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["run", "pdf", "b.png", "a.jpg", "c.txt"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 1, 0));
+    let done = o.pairs("done");
+    let ins: Vec<_> = done.iter().map(|(i, _)| i.clone()).collect();
+    assert_eq!(ins, [e.files().join("a.jpg"), e.files().join("b.png")]);
+    assert_eq!(done[0].1, done[1].1, "one result for both");
+    let mut want = b"\xff\xd8\xff\xe0 jpeg".to_vec();
+    want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
+    assert_eq!(fs::read(&done[0].1).unwrap(), want);
+    assert_eq!(
+        o.pairs("skip"),
+        [(e.files().join("c.txt"), "unsupported".to_owned())]
+    );
+}
+
+/// `run --action` with a join action takes the join path too.
+#[test]
+fn run_join_action_by_id() {
+    let e = Env::with_actions("run-join-id", &[]);
+    join_plugin(&e);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.jpg", b"\xff\xd8\xff\xe0 two");
+    let o = e.run(&["run", "--action", "p.images-to-pdf", "a.jpg", "b.jpg"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert_eq!(done[0].1, done[1].1, "one result for both");
+}
+
+/// A join run exits 0 once its result is published (one input skipped
+/// by the action or not), 3 when every input was skipped, 1 when one
+/// failed and nothing was published.
+#[test]
+fn images_to_pdf_exit_codes() {
+    let e = Env::with_actions("join-exit", &[]);
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    let run = || e.run(&["run", "--action", "p.images-to-pdf", "a.jpg", "b.png"]);
+    join_plugin(&e);
+    let o = run();
+    if skip_no_sandbox("images_to_pdf_exit_codes", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 0, 0));
+    // Every input skipped by the action: nothing published, exit 3.
+    join_plugin_with(
+        &e,
+        "while IFS= read -r in; do printf 'skip\\t%s\\thas alpha\\n' \"$in\"; done < \"$6\"; exit 3",
+    );
+    let o = run();
+    assert_eq!(o.code, Some(3), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 2, 0));
+    // One skipped, one failed, no result: exit 1.
+    join_plugin_with(
+        &e,
+        "{ read -r a; read -r b; } < \"$6\"\n\
+         printf 'skip\\t%s\\thas alpha\\n' \"$a\"; printf 'fail\\t%s\\tbroken\\n' \"$b\"; exit 1",
+    );
+    let o = run();
+    assert_eq!(o.code, Some(1), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (0, 1, 1));
+}
+
+/// A join is one group in the history; the inputs it did not take keep
+/// their `skip` lines. Undo moves the one wrapper to the Trash and leaves
+/// every input as it was.
+#[test]
+fn join_history_has_one_group_and_undoes() {
+    let e = Env::with_actions("join-history", &[]);
+    join_plugin_with(
+        &e,
+        "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do case \"$in\" in\n\
+         *b.png) printf 'skip\\t%s\\thas alpha\\n' \"$in\";;\n\
+         *) cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\";;\n\
+         esac; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let ins = [
+        e.file("a.jpg", b"\xff\xd8\xff\xe0 a"),
+        e.file("b.png", b"\x89PNG\r\n\x1a\n...."),
+        e.file("c.jpg", b"\xff\xd8\xff\xe0 c"),
+    ];
+    let o = e.run(&["run", "pdf", "a.jpg", "b.png", "c.jpg"]);
+    if skip_no_sandbox("join_history_has_one_group_and_undoes", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (2, 1, 0));
+    // Named after the folder of the inputs (`files`).
+    let wrapper = e.files().join("files");
+    let result = wrapper.join("files.pdf");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 2, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| Path::new(p) == result), "{done:?}");
+    let job = o.job();
+    let h = e.history();
+    let mine: Vec<&str> = h.lines().filter(|l| l.contains(&job)).collect();
+    let count = |kind: &str| {
+        mine.iter()
+            .filter(|l| l.split('\t').next() == Some(kind))
+            .count()
+    };
+    assert_eq!(count("group-begin"), 1, "{h}");
+    assert_eq!(count("publish-commit"), 1, "{h}");
+    assert_eq!(count("skip"), 1, "{h}");
+    assert!(
+        mine.iter().any(|l| l.starts_with("skip\t")
+            && l.contains("b.png")
+            && l.contains("reason=has alpha")),
+        "{h}"
+    );
+    let before: Vec<Vec<u8>> = ins.iter().map(|p| fs::read(p).unwrap()).collect();
+
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    let trash = e.root.join("home/.local/share/Trash/files");
+    let moved: Vec<String> = u
+        .kind("moved")
+        .iter()
+        .map(|l| l.bare_at(0).unwrap().to_owned())
+        .collect();
+    assert_eq!(moved, [trash.join("files").display().to_string()]);
+    assert!(!wrapper.exists());
+    assert!(trash.join("files/files.pdf").is_file());
+    let after: Vec<Vec<u8>> = ins.iter().map(|p| fs::read(p).unwrap()).collect();
+    assert_eq!(before, after, "an input changed");
 }
 
 #[test]
