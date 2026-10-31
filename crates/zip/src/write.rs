@@ -356,29 +356,46 @@ mod tests {
         assert_eq!(w.projected_len(1, u64::MAX), None);
     }
 
-    /// A sparse temp file, `len` bytes long, for a writer near 4 GiB.
-    fn sparse(len: u64) -> (std::path::PathBuf, File) {
-        let path = std::path::PathBuf::from(format!(
-            "{}/zipw-unit-{}",
-            std::env::temp_dir().display(),
-            std::process::id()
-        ));
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .unwrap();
-        f.set_len(len).unwrap();
-        (path, f)
+    /// A sparse temp file path, removed on drop (also when a test fails).
+    struct Sparse(std::path::PathBuf);
+
+    impl Sparse {
+        /// The guard exists before the file does, so no path leaks it.
+        fn new() -> Self {
+            Sparse(std::path::PathBuf::from(format!(
+                "{}/zipw-unit-{}",
+                std::env::temp_dir().display(),
+                std::process::id()
+            )))
+        }
+
+        /// The file, `len` bytes long (sparse: no disk is used).
+        fn create(&self, len: u64) -> File {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&self.0)
+                .unwrap();
+            f.set_len(len).unwrap();
+            f
+        }
+    }
+
+    impl Drop for Sparse {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     #[test]
     fn mid_entry_archive_limit_rolls_back() {
-        // Room for a small entry only: header 30 + name 1, CD 46 + 1, EOCD 22.
-        let start = MAX_ARCHIVE - 8192;
-        let (path, f) = sparse(start);
+        // 1.5 chunks of room: the first 64 KiB chunk of data is written,
+        // the second passes the limit, and the cut must undo the first.
+        let start = MAX_ARCHIVE - (CHUNK + CHUNK / 2) as u64;
+        let sp = Sparse::new();
+        let f = sp.create(start);
         let probe = f.try_clone().unwrap();
         let mut w = StoreWriter::at(f, start);
         let big = vec![1u8; 3 * CHUNK];
@@ -386,12 +403,15 @@ mod tests {
             w.add("a", &mut &big[..], 1 << 30),
             Err(WriteError::ArchiveTooLarge)
         ));
-        assert_eq!(probe.metadata().unwrap().len(), start, "cut back");
+        assert_eq!(
+            probe.metadata().unwrap().len(),
+            start,
+            "cut back to the entry start"
+        );
         assert_eq!(w.len(), 0);
         // A small entry still fits and the archive finishes.
         w.add("b", &mut &b"xyz"[..], 100).unwrap();
         let done = w.finish().unwrap();
         assert!(done.metadata().unwrap().len() <= MAX_ARCHIVE);
-        std::fs::remove_file(path).unwrap();
     }
 }
