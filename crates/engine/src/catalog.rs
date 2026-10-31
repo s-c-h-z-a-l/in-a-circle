@@ -2589,6 +2589,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn wall_secs_is_the_unix_clock() {
+        // 2020-01-01 is long past; a constant 0 or 1 is not the clock.
+        assert!(wall_secs() > 1_577_836_800);
+    }
+
+    #[test]
+    fn decimal_enforces_the_digit_limit() {
+        assert_eq!(decimal("99", 2), Some(99));
+        assert_eq!(decimal("100", 2), None, "three digits past a limit of two");
+        assert_eq!(decimal("", 2), None);
+        assert_eq!(decimal("01", 2), None);
+    }
+
+    #[test]
     fn transient_rerun_failure_keeps_the_old_entry() {
         let f = Fix::new("keep-old");
         let d = f.dir("a");
