@@ -1,17 +1,57 @@
 #!/usr/bin/env bash
-# Pre-commit hook: formatting and "every target compiles".
+# Pre-commit hook: formatting and "every target compiles", checked on the
+# STAGED tree.
 #
-# Checks (read-only, never modifies files):
+# Checks (never modifies the user's files):
 #   1. cargo fmt --all --check
-#   2. cargo check --workspace --all-targets --quiet
+#   2. cargo check --workspace --all-targets --locked --quiet
 #
-# Why: a commit whose test target did not compile was once pushed.
-# `--all-targets` builds tests, benches and examples too, which is exactly
-# what a plain `cargo check` misses. Incrementally it takes a few seconds.
+# Why the index and not the working tree: this hook used to check the
+# working tree, so a commit that staged only part of a change passed
+# whenever the rest of the change sat unstaged next to it. Two such commits
+# reached main (82781bb, de5c989); neither built on its own. The hook now
+# exports exactly the tree being committed (the index, or the temporary
+# index of `git commit <paths>`) and checks that. Unstaged edits and
+# untracked files cannot influence the result; a path deleted in the index
+# is absent from the export.
+#
+# Why `--all-targets`: it builds tests, benches and examples too, which is
+# exactly what a plain `cargo check` misses (a commit whose test target did
+# not compile was once pushed).
 #
 # Why not the full test suite: its cost per commit would slow the many
 # small commits down by minutes. The suite runs at the end of each task and
 # in CI.
+#
+# Cache: everything the hook owns lives in <repo>/target/pre-commit/
+# (target/ is gitignored, so nothing lands in tracked files or the home
+# directory):
+#   tree/      the export of the last checked index
+#   target/    CARGO_TARGET_DIR for that export. Separate from the user's
+#              own target/: cargo fingerprints workspace crates by path, so
+#              sharing one dir between two source paths would rebuild
+#              everything on every alternation.
+#   tree.id    git tree id that tree/ currently holds
+#   delta      scratch: the tree difference of the running update
+#   lock       serialises two commits running at the same time
+# Only these files are ever replaced or removed. A commit updates tree/ by
+# the difference between tree.id and the new index (`git diff-tree`), so a
+# file is rewritten, and gets a new mtime, only when it changed; cargo then
+# rebuilds only the crates that changed. A missing or unusable tree.id,
+# a failed update, or a file count in tree/ that differs from the index
+# means a full export into an emptied tree/. The stamp is trusted for file
+# CONTENT: do not edit files under target/pre-commit/tree by hand (an
+# edited file that the index did not change would stay edited; delete
+# target/pre-commit/tree.id to force a full export).
+#
+# Differences between the export and the repository:
+#   - `rustup override set` is per directory and does not apply to the
+#     export; a rust-toolchain(.toml) file does, because it is exported.
+#   - A path dependency outside the repository does not resolve from the
+#     export. Keep path dependencies inside the repository.
+#   - `cargo check --locked`: Cargo.lock must be tracked and staged up to
+#     date. A commit whose Cargo.toml changes need a new lock is rejected
+#     until the updated Cargo.lock is staged too.
 #
 # Enable (once per clone; shared by all its worktrees):
 #   git config core.hooksPath scripts/git-hooks
@@ -20,15 +60,104 @@
 set -eu
 
 # Doc- and notes-only commits stay instant: nothing to compile or format
-# unless Rust or Cargo inputs are part of the commit.
-if ! git diff --cached --name-only | grep -qE '(\.rs$|(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|^\.cargo/)'; then
+# unless Rust or Cargo inputs are part of the commit. No rename detection
+# and NUL-delimited names: both sides of `x.rs` -> `x.md` are listed (the
+# old name no longer builds), and odd file names are not quoted by git.
+if ! git diff --cached --no-renames --name-only -z | grep -zqE '(\.rs$|(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|^\.cargo/|(^|/)rust-toolchain(\.toml)?$|(^|/)rustfmt\.toml$|(^|/)\.rustfmt\.toml$)'; then
   exit 0
 fi
 
-cd "$(git rev-parse --show-toplevel)"
+top=$(git rev-parse --show-toplevel)
+cache="$top/target/pre-commit"
+tree="$cache/tree"
+mkdir -p "$cache"
+
+# One checker at a time: the export and its stamp are shared state. The
+# lock is released when this shell exits. No flock (not Linux): the risk is
+# two overlapping commits in one clone, which a person does not do.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$cache/lock"
+  flock 9
+fi
+
+new=$(git write-tree) || {
+  echo "pre-commit: FAILED to read the index ('git write-tree'); resolve unmerged paths first." >&2
+  exit 1
+}
+old=
+[ -f "$cache/tree.id" ] && old=$(cat "$cache/tree.id")
+# The stamp is dropped before the tree is touched, so an interrupted
+# update is never mistaken for a complete export.
+rm -f "$cache/tree.id"
+
+refresh_failed() {
+  echo "pre-commit: FAILED to refresh target/pre-commit/tree; it is rebuilt from scratch on the next commit." >&2
+  exit 1
+}
+
+# Empty tree/ and export everything. tree/ holds only files this hook
+# wrote, so it is safe to empty; the cargo target dir beside it is kept.
+full_export() {
+  rm -rf -- "$tree"
+  mkdir -p "$tree"
+  git checkout-index -a -f --prefix="$tree/" || refresh_failed
+}
+
+if [ -n "$old" ] && [ -d "$tree" ] && git cat-file -e "$old^{tree}" 2>/dev/null; then
+  # Incremental: apply only the difference between the two trees. The diff
+  # goes to a file first: a failing `git diff-tree` inside a process
+  # substitution would not stop `set -e`, and a half-read difference would
+  # leave a stale tree/ under a fresh stamp.
+  git diff-tree -r -z --no-renames --name-status "$old" "$new" >"$cache/delta" || {
+    echo "pre-commit: FAILED to compute the staged changes ('git diff-tree'); the export is rebuilt on the next commit." >&2
+    exit 1
+  }
+  # Deletions first, so a file that became a directory (or back) is
+  # replaced cleanly.
+  adds=()
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+    case "$status" in
+      D)
+        rm -f -- "$tree/$path"
+        # Remove directories the deletion emptied, but never tree/ itself
+        # (dirname of a top-level path is "."): stop at the first non-empty one.
+        d=$(dirname -- "$path")
+        while [ "$d" != . ] && [ "$d" != / ] && rmdir -- "$tree/$d" 2>/dev/null; do
+          d=$(dirname -- "$d")
+        done
+        ;;
+      *) adds+=("$path") ;;
+    esac
+  done <"$cache/delta"
+  rm -f "$cache/delta"
+  ok=1
+  if [ "${#adds[@]}" -gt 0 ]; then
+    # A failure here is typically a directory that became a file while it
+    # still holds files this hook did not write (build-script output): not
+    # an error of the commit, so fall back to a full export.
+    printf '%s\0' "${adds[@]}" | git checkout-index -f -z --stdin --prefix="$tree/" 2>/dev/null || ok=0
+  fi
+  # Cheap guard against a stale or hand-edited export: the number of
+  # non-directory entries must equal the index's (symlinks count, gitlinks
+  # do not, which only costs a full export). Content is not compared.
+  have=$(find "$tree" -not -type d -print0 | tr -cd '\0' | wc -c)
+  want=$(git ls-tree -r -z --full-tree --name-only "$new" | tr -cd '\0' | wc -c)
+  [ "$((have))" -eq "$((want))" ] || ok=0
+  [ "$ok" -eq 1 ] || full_export
+else
+  full_export
+fi
+printf '%s\n' "$new" >"$cache/tree.id"
+
+# The export is checked as a stand-alone tree: git variables of this commit
+# must not leak into cargo, rustfmt or build scripts running there.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
+mkdir -p "$tree"
+cd "$tree"
+export CARGO_TARGET_DIR="$cache/target"
 
 if ! cargo fmt --all --check >/dev/null 2>&1; then
-  echo "pre-commit: FAILED step 'cargo fmt --all --check'; fix: run 'cargo fmt --all' and re-stage." >&2
+  echo "pre-commit: FAILED step 'cargo fmt --all --check' (on the staged tree); fix: run 'cargo fmt --all' and re-stage." >&2
   cargo fmt --all --check 2>&1 | head -20 >&2 || true
   exit 1
 fi
@@ -44,7 +173,7 @@ else
   run=()
 fi
 
-if ! ${run[@]+"${run[@]}"} cargo check --workspace --all-targets --quiet; then
-  echo "pre-commit: FAILED step 'cargo check --workspace --all-targets'; fix the compile errors above (tests and benches included) and re-stage." >&2
+if ! ${run[@]+"${run[@]}"} cargo check --workspace --all-targets --locked --quiet; then
+  echo "pre-commit: FAILED step 'cargo check --workspace --all-targets --locked' (on the staged tree); fix the compile errors above (tests and benches included) and re-stage. If the error is about Cargo.lock needing an update, run 'cargo check' and stage the updated Cargo.lock." >&2
   exit 1
 fi
