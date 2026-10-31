@@ -118,10 +118,10 @@ are in `CLAUDE.md`.
   its own 2 s deadline, crashed (died by a signal), exited non-zero, left
   processes behind (also ones still there when the cleanup gives up),
   kept its output open after its exit, or did not exit after SIGKILL. Then
-  the binary backs off (the negative cache): its `bin` line keeps its current identity plus `fails=<n>` and `retry=<unix
-  seconds>`, and its old actions, if any, stay on the wheel. Its manifest
-  is not rerun before `retry`: 60 s after the first failure in a row,
-  doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
+  the binary backs off (the negative cache): its `bin` line keeps its
+  current identity plus `fails=<n>` and `retry=<unix seconds>`, and its old
+  actions, if any, stay on the wheel. Its manifest is not rerun before
+  `retry`: 60 s after the first failure in a row, doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
   stops at 64. A success clears both fields; a changed binary (mtime or
   size) is tried at once and counts from zero. `retry` is wall-clock time
   (`CLOCK_REALTIME`, which survives a reboot); one more than 24 h ahead
