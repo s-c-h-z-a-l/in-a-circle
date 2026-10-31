@@ -117,8 +117,8 @@ are in `CLAUDE.md`.
 - A failed run is the binary's own fault, or not. Its own: it hung past
   its own 2 s deadline, crashed (died by a signal), exited non-zero, left
   processes behind (also ones still there when the cleanup gives up),
-  kept its output open after its exit, or did not exit after SIGKILL. Then the binary backs off (the negative cache): its `bin`
-  line keeps its current identity plus `fails=<n>` and `retry=<unix
+  kept its output open after its exit, or did not exit after SIGKILL. Then
+  the binary backs off (the negative cache): its `bin` line keeps its current identity plus `fails=<n>` and `retry=<unix
   seconds>`, and its old actions, if any, stay on the wheel. Its manifest
   is not rerun before `retry`: 60 s after the first failure in a row,
   doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
@@ -728,14 +728,16 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not shown, one stderr line per run). A category is **lit** when any dragged file has a
-  target in it, dim when it exists but nothing fits, and a direction
+  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not
+  shown, one stderr line per run). A category is **lit** when any dragged
+  file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has no one-to-one form, it only joins images into one comic book): lit if applicable, dim otherwise; the hub is
-  the category's label, or `<n> / <total> files` when the most files any lit
-  target of the category takes (`n`, the count the run would take) is below
-  the number dropped. `inacircle offer --groups <files…>` prints level 1.
+  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
+  no one-to-one form, it only joins images into one comic book): lit if
+  applicable, dim otherwise; the hub is the category's label, or
+  `<n> / <total> files` when the most files any lit target of the category
+  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
