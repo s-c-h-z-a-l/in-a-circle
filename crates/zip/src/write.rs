@@ -39,7 +39,7 @@ const EOCD_LEN: u64 = 22;
 /// The entry count fields are 16 bits wide; 0xFFFF is the ZIP64 marker
 /// (APPNOTE 4.4.1.4) and our own reader rejects it as ZIP64, so the largest
 /// count that reads back is one less.
-const MAX_ENTRIES: usize = 65_534;
+pub const MAX_ENTRIES: usize = 65_534;
 /// Every offset, size and the archive itself must fit the 32 bits fields:
 /// past them a reader would need ZIP64.
 const MAX_ARCHIVE: u64 = u32::MAX as u64;

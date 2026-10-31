@@ -1610,9 +1610,31 @@ fn a_fifo_input_fails_without_blocking_and_the_rest_joins() {
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     let good = image_file(&t, "a.png", &rgb_png(8, 8));
     let work = t.join("work");
-    let o = run_cbz(&work, &[fifo.clone(), good]);
+    // A deadline: a regression that blocks on the FIFO is killed here and
+    // fails the test instead of hanging the run. 20 s is far above the few
+    // milliseconds a correct run takes.
+    let child = cbz_command(&work)
+        .args([&fifo, &good])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let dog = std::thread::spawn(move || {
+        if wait
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_err()
+        {
+            // SAFETY: plain kill(2) on the child of this test, which is
+            // still unreaped here (the main thread waits on it).
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    });
+    let o = child.wait_with_output().unwrap();
+    let _ = done.send(());
+    dog.join().unwrap();
     let out = stdout(&o);
-    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(o.status.code(), Some(0), "blocked on the FIFO? {out}");
     let f = lines(&out, "fail");
     assert_eq!(f.len(), 1, "{out}");
     assert_eq!(f[0][1], fifo.to_str().unwrap());
@@ -1728,7 +1750,8 @@ fn cbz_reads_back_as_pdf() {
 #[test]
 fn many_large_images_stay_within_memory() {
     let t = tmp("cbz-many");
-    // 1024 sparse 1 MiB files that each start with a valid PNG header.
+    // 1024 sparse 128 KiB files that each start with a valid PNG header: a
+    // 128 MiB archive, small enough for a RAM-backed temp dir.
     let png = rgb_png(64, 64);
     let ins: Vec<PathBuf> = (0..1024)
         .map(|i| {
@@ -1737,7 +1760,7 @@ fn many_large_images_stay_within_memory() {
                 .write(true)
                 .open(&p)
                 .unwrap()
-                .set_len(1 << 20)
+                .set_len(128 << 10)
                 .unwrap();
             p
         })
@@ -1753,10 +1776,10 @@ fn many_large_images_stay_within_memory() {
     assert!(status.success(), "{text}");
     assert_eq!(lines(&text, "take").len(), 1024, "{text}");
     assert_eq!(lines(&text, "joined").len(), 1, "{text}");
-    println!("many_large_images_stay_within_memory: 1024 x 1 MiB, VmHWM {peak_kb} kB");
+    println!("many_large_images_stay_within_memory: 1024 x 128 KiB, VmHWM {peak_kb} kB");
     assert!(peak_kb <= 6 * 1024, "VmHWM {peak_kb} kB");
     if let Some(got) = read_cbz(&t, &work.join("join/out.cbz"), false) {
         assert_eq!(got.len(), 1024);
-        assert!(got.iter().all(|e| e.1 == "0" && e.2 == "1048576"));
+        assert!(got.iter().all(|e| e.1 == "0" && e.2 == "131072"));
     }
 }

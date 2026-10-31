@@ -147,9 +147,10 @@ the CBZ keeps the rest. A failed write (disk full) leaves the archive in
 an unknown state, so the whole join fails and `join/out.cbz` is removed:
 image data can contain a ZIP end record, so a leftover prefix is never
 kept. Memory is the 64 KiB copy buffer, the accepted-input list and the
-name set (about 100 B per entry). 1,024 sparse 1 MiB images (a 1 GiB
-archive) peak at 3.5 MB `VmHWM` (debug build; the baseline is about
-1.7 MB), not the sum of the images; the test ceiling is 6 MB.
+name set (about 100 B per entry). 1,024 sparse 128 KiB images (a 128 MiB
+archive) peak at about 3.5 MB `VmHWM` (debug build; the baseline is about
+1.7 MB), not the sum of the images; the test ceiling is 6 MB, far below the
+archive size, so memory that grew with the archive would fail it.
 
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without

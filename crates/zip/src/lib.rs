@@ -26,7 +26,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
 pub mod write;
-pub use write::{StoreWriter, WriteError};
+pub use write::{MAX_ENTRIES, StoreWriter, WriteError};
 
 use flate::{Crc32, InflateError, inflate};
 
