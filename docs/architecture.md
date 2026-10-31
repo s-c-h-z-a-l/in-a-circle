@@ -186,6 +186,22 @@ are in `CLAUDE.md`.
   the spaces of whitespace-only lines count). The planner therefore never
   takes it as a lossless intermediate, and the notice says formatting was
   lost for a run whose output actually lost something.
+- `text.md-to-txt` writes GFM tables as aligned columns in a full line of
+  80 characters (the prefix of an enclosing list or quote counts): two
+  spaces between columns, a row of dashes under the header, the column
+  alignment kept as padding. When the table is wider, the widest columns
+  give up width one character at a time, none below 10 (a column that is
+  narrower stays as it is) and a cell wraps inside its column, at spaces,
+  a longer word at a character boundary. If the minimums and gaps do not
+  fit the line, each row becomes `header: cell` lines (`Column <n>` for an
+  empty header) with a blank line between rows, and the action reports
+  that the table was listed. Widths count characters, so a wide or
+  combining character (East Asian Wide and Fullwidth, emoji, combining
+  marks) is reported as possible misalignment. Strikethrough loses its
+  marks (reported); a task list item is written `- [x] ` or `- [ ] `
+  before its text, and that loses nothing. Padding and the repeated
+  headers of the listed form count against the output budget like any
+  other byte.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
