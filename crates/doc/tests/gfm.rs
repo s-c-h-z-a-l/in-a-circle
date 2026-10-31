@@ -20,13 +20,6 @@ use doc::{Dialect, md};
 /// are the extensions the reader does not parse yet; an entry goes when its
 /// extension lands, and the harness fails an entry that passes.
 const SKIP: &[(u32, &str)] = &[
-    (198, "extension not implemented yet: table"),
-    (199, "extension not implemented yet: table"),
-    (200, "extension not implemented yet: table"),
-    (201, "extension not implemented yet: table"),
-    (202, "extension not implemented yet: table"),
-    (204, "extension not implemented yet: table"),
-    (205, "extension not implemented yet: table"),
     (279, "extension not implemented yet: task list"),
     (280, "extension not implemented yet: task list"),
     (491, "extension not implemented yet: strikethrough"),
