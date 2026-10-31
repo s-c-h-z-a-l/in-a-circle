@@ -47,14 +47,22 @@ fuzz_target!(|data: &[u8]| {
         Image::Png(p) => (Format::Png, p.width, p.height),
     };
     // The exceptions, each reported by the sniff itself: the probe has no
-    // marker limit, skips a hierarchical (DHP) header, whose size the sniff
-    // reports and checks, and does not read the sampling factors and table
-    // selectors the sniff range-checks.
-    if why.is_none() {
-        match sniffed {
-            Ok(got) => assert_eq!((got.format, got.width, got.height), want),
-            Err(e) => panic!("the probe accepted, the sniff said {e:?}"),
-        }
+    // marker limit and does not read the sampling factors and table
+    // selectors the sniff range-checks, so the sniff may say no (or stop)
+    // where the probe accepts. Compare only when neither applies.
+    match (why, sniffed) {
+        (None, Ok(got)) => assert_eq!((got.format, got.width, got.height), want),
+        (None, Err(e)) => panic!("the probe accepted, the sniff said {e:?}"),
+        // A hierarchical (DHP) header changes the outcome in two ways only:
+        // the sniff reports the completed image's size instead of the
+        // frame's, and it may refuse that size (or a damaged DHP). The
+        // format is still the probe's.
+        (Some("hierarchical"), Ok(got)) => assert_eq!(got.format, want.0),
+        (Some("hierarchical"), Err(e)) => assert!(
+            matches!(e, ProbeError::TooLarge | ProbeError::Damaged),
+            "the probe accepted, the sniff said {e:?} past a DHP"
+        ),
+        _ => {}
     }
     match probed.image {
         Image::Jpeg(j) => {
