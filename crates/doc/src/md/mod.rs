@@ -15,7 +15,7 @@ mod punct;
 mod scan;
 
 use crate::budget::{Meter, Sink};
-use crate::{Block, Document, Inline, LimitError, Limits, Loss, ReadError};
+use crate::{Block, Dialect, Document, Inline, LimitError, Limits, Loss, ReadError};
 use std::collections::{BTreeSet, HashMap};
 
 /// Reads CommonMark 0.31.2. NUL characters become U+FFFD; invalid UTF-8
@@ -34,11 +34,26 @@ pub fn read(bytes: &[u8]) -> Result<Document, ReadError> {
     read_limited(bytes, Limits::UNLIMITED)
 }
 
+/// [`read`] in the given dialect. `CommonMark` is exactly [`read`].
+pub fn read_with(bytes: &[u8], dialect: Dialect) -> Result<Document, ReadError> {
+    read_limited_with(bytes, Limits::UNLIMITED, dialect)
+}
+
 /// [`read`] under `limits`: the input size is checked first; the NUL
 /// replacement copy, every block and inline node, every owned string and
 /// every copy of a reference's destination and title is charged before it
 /// is made, so the parse stops at the budget (`ReadError::Limit`).
 pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<Document, ReadError> {
+    read_limited_with(bytes, limits, Dialect::CommonMark)
+}
+
+/// [`read_limited`] in the given dialect; `CommonMark` is exactly
+/// [`read_limited`].
+pub fn read_limited_with(
+    bytes: &[u8],
+    limits: Limits,
+    dialect: Dialect,
+) -> Result<Document, ReadError> {
     if bytes.len() > limits.input_bytes {
         return Err(LimitError::Exceeded("input").into());
     }
@@ -56,9 +71,9 @@ pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<Document, ReadError>
         for c in text.chars() {
             copy.push(if c == '\0' { '\u{fffd}' } else { c });
         }
-        block::parse(&copy, &mut m)?
+        block::parse(&copy, dialect, &mut m)?
     } else {
-        block::parse(text, &mut m)?
+        block::parse(text, dialect, &mut m)?
     };
     Ok(doc)
 }
@@ -78,8 +93,8 @@ pub(crate) type Refs = HashMap<String, LinkDef>;
 /// content: lines joined with `\n`, each line's leading spaces/tabs and the
 /// block's final whitespace removed; interior trailing spaces are kept (they
 /// decide hard breaks). `refs` holds every definition of the document.
-fn inlines(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
-    inline::parse(raw, refs, m)
+fn inlines(raw: &str, refs: &Refs, dialect: Dialect, m: &mut Meter) -> Vec<Inline> {
+    inline::parse(raw, refs, dialect, m)
 }
 
 /// Matching form of a link label: Unicode case fold (approximated as
@@ -311,7 +326,8 @@ fn needs_blank(prev: &Block, next: &Block) -> bool {
         Block::Paragraph(_) => match next {
             Block::Paragraph(_) | Block::HtmlBlock(_) | Block::ThematicBreak => true,
             Block::List { start, items, .. } => {
-                !(matches!(start, None | Some(1)) && items.first().is_some_and(|i| !i.is_empty()))
+                !(matches!(start, None | Some(1))
+                    && items.first().is_some_and(|i| !i.blocks.is_empty()))
             }
             _ => false,
         },
@@ -378,7 +394,19 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                         if alt { ')' } else { '.' }
                     ),
                 };
-                let mut body = blocks_to_string(item, !*tight, losses, sink);
+                let mut body = blocks_to_string(&item.blocks, !*tight, losses, sink);
+                if let Some(done) = item.checked {
+                    // The GFM task marker; plain text never starts with an
+                    // unescaped `[`, so it reads back as a marker.
+                    let mark = if done { "[x]" } else { "[ ]" };
+                    let mut marked = String::new();
+                    sink.push_str(&mut marked, mark);
+                    if !body.is_empty() {
+                        sink.push(&mut marked, ' ');
+                        sink.push_str(&mut marked, &body);
+                    }
+                    body = marked;
+                }
                 // "- ---" would be a thematic break, not an item.
                 if marker == "- " && (body == "---" || body.starts_with("---\n")) {
                     body.replace_range(..3, "***");
@@ -406,6 +434,25 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                 }
             }
             out
+        }
+        Block::Table { head, rows, .. } => {
+            // Flattened to one line per row, cells separated by a space.
+            losses.insert(Loss::TableLayout);
+            let mut w = InlineWriter::new(true, false, losses, sink);
+            let all = std::iter::once(head).chain(rows.iter());
+            let n = rows.len() + 1;
+            for (i, row) in all.enumerate() {
+                for (j, cell) in row.iter().enumerate() {
+                    if j > 0 {
+                        w.sink.push(&mut w.out, ' ');
+                    }
+                    w.inlines(cell, i + 1 == n && j + 1 == row.len());
+                }
+                if i + 1 < n {
+                    w.line_break("\n");
+                }
+            }
+            w.out
         }
         Block::ThematicBreak => "---".to_string(),
         Block::HtmlBlock(h) => h.trim_end_matches('\n').to_string(),
@@ -501,11 +548,16 @@ impl<'a> InlineWriter<'a> {
                 }
                 Inline::Emph(c) => self.wrapped("*", c),
                 Inline::Strong(c) => self.wrapped("**", c),
+                Inline::Strikethrough(c) => {
+                    self.losses.insert(Loss::Strikethrough);
+                    self.inlines(c, end_of_line && next.is_none());
+                }
                 Inline::Code(t) => self.code_span(t),
                 Inline::Link {
                     dest,
                     title,
                     content,
+                    ..
                 } => {
                     self.line_start = false;
                     self.sink.push(&mut self.out, '[');
@@ -809,7 +861,7 @@ mod tests {
         Block::List {
             start,
             tight,
-            items,
+            items: crate::plain_items(items),
         }
     }
 
@@ -1084,6 +1136,7 @@ mod tests {
                 dest: "https://x/a(b)".into(),
                 title: "t\"q".into(),
                 content: vec![t("l")],
+                auto: false,
             },
             Inline::Image {
                 dest: "a b".into(),
@@ -1094,6 +1147,7 @@ mod tests {
                 dest: String::new(),
                 title: String::new(),
                 content: vec![],
+                auto: false,
             },
         ])]);
         assert_eq!(
@@ -1109,5 +1163,30 @@ mod tests {
             content: vec![t("1. a"), Inline::HardBreak, t("b")],
         }]);
         assert_eq!(write(&d).0, "# 1. a b\n");
+    }
+
+    #[test]
+    fn dialect_cm_keeps_old_behaviour() {
+        for input in [
+            "| a | b |\n| - | - |\n| c | d |\n",
+            "~~x~~ www.x.y http://x.y\n",
+            "- [ ] a\n- [x] b\n",
+            "<script>\n",
+        ] {
+            let old = read(input.as_bytes()).unwrap();
+            assert_eq!(
+                read_with(input.as_bytes(), Dialect::CommonMark).unwrap(),
+                old
+            );
+            assert_eq!(
+                read_limited_with(input.as_bytes(), Limits::DEFAULT, Dialect::CommonMark).unwrap(),
+                read_limited(input.as_bytes(), Limits::DEFAULT).unwrap()
+            );
+            assert!(
+                !format!("{old:?}").contains("Table")
+                    && !format!("{old:?}").contains("Strikethrough"),
+                "{input:?}"
+            );
+        }
     }
 }

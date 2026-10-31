@@ -6,10 +6,13 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(d) = doc::md::read(data) {
-        let _ = doc::html::write(&d);
-        let _ = doc::txt::write(&d);
-        let _ = doc::md::write(&d);
+    for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
+        if let Ok(d) = doc::md::read_with(data, dialect) {
+            let _ = doc::html::write(&d);
+            let _ = doc::html::write_with(&d, doc::html::Options { tagfilter: true });
+            let _ = doc::txt::write(&d);
+            let _ = doc::md::write(&d);
+        }
     }
     if let Ok((d, _losses)) = doc::txt::read(data) {
         let _ = doc::html::write(&d);
@@ -25,9 +28,11 @@ fuzz_target!(|data: &[u8]| {
         text_bytes: n * 4,
         output_bytes: n * 8,
     };
-    if let Ok(d) = doc::md::read_limited(data, tight) {
-        let _ = doc::txt::write_limited(&d, tight);
-        let _ = doc::md::write_limited(&d, tight);
+    for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
+        if let Ok(d) = doc::md::read_limited_with(data, tight, dialect) {
+            let _ = doc::txt::write_limited(&d, tight);
+            let _ = doc::md::write_limited(&d, tight);
+        }
     }
     if let Ok((d, _)) = doc::txt::read_limited(data, tight) {
         let _ = doc::md::write_limited(&d, tight);
@@ -35,9 +40,11 @@ fuzz_target!(|data: &[u8]| {
     // The official budgets (what the shipped conversion uses): a short
     // input stays far below them, so this is the accept path.
     let official = doc::Limits::DEFAULT;
-    if let Ok(d) = doc::md::read_limited(data, official) {
-        let _ = doc::txt::write_limited(&d, official);
-        let _ = doc::md::write_limited(&d, official);
+    for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
+        if let Ok(d) = doc::md::read_limited_with(data, official, dialect) {
+            let _ = doc::txt::write_limited(&d, official);
+            let _ = doc::md::write_limited(&d, official);
+        }
     }
     if let Ok((d, _)) = doc::txt::read_limited(data, official) {
         let _ = doc::md::write_limited(&d, official);

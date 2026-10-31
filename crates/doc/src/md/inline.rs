@@ -17,8 +17,8 @@
 
 use super::scan::{close_tag, link_destination, link_label, link_title, open_tag, utf8};
 use super::{Refs, char_ref, decode, decoded_len, normalize_label, punct::PUNCT, unescape};
-use crate::Inline;
 use crate::budget::Meter;
+use crate::{Dialect, Inline};
 use std::collections::HashMap;
 
 /// Deepest inline nesting kept in the tree.
@@ -37,9 +37,10 @@ const HEAD: usize = 0;
 /// Every node, every owned string and every copy of a reference's
 /// destination and title is charged to `m` before it is made; once `m`
 /// has failed the pass stops and the (partial) result is discarded.
-pub(super) fn parse(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
+pub(super) fn parse(raw: &str, refs: &Refs, dialect: Dialect, m: &mut Meter) -> Vec<Inline> {
     let mut p = Parser {
         m,
+        dialect,
         s: raw,
         b: raw.as_bytes(),
         pos: 0,
@@ -143,6 +144,9 @@ const ENDS: [&[u8]; 4] = [b"-->", b"?>", b"]]>", b">"];
 
 struct Parser<'a> {
     m: &'a mut Meter,
+    /// Which syntax is read.
+    #[allow(dead_code)] // read once the GFM extensions are parsed
+    dialect: Dialect,
     s: &'a str,
     b: &'a [u8],
     pos: usize,
@@ -920,6 +924,7 @@ impl Parser<'_> {
                     dest,
                     title,
                     content: children(self),
+                    auto: false,
                 },
                 Kind::Image { dest, title } => Inline::Image {
                     dest,

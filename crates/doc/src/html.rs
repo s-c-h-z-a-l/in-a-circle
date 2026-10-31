@@ -1,15 +1,78 @@
-//! HTML writer reproducing the CommonMark reference renderer (cmark).
+//! HTML writer reproducing the CommonMark and GFM reference renderers
+//! (cmark, cmark-gfm).
 //!
-//! Exists so a Markdown reader can be checked against the CommonMark spec
-//! examples (markdown -> expected HTML); not a user-facing format.
+//! Exists so a Markdown reader can be checked against the spec examples
+//! (markdown -> expected HTML); not a user-facing format.
 
-use crate::{Block, Document, Inline};
+use crate::{Align, Block, Document, Inline, ListItem};
+
+/// Writer switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// The GFM tagfilter: the `<` of nine raw HTML tags (see [`FILTERED`])
+    /// is written as `&lt;`. Off by default, as in cmark.
+    pub tagfilter: bool,
+}
+
+/// The tags the GFM tagfilter neutralizes, lowercase.
+const FILTERED: [&str; 9] = [
+    "title",
+    "textarea",
+    "style",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "script",
+    "plaintext",
+];
 
 /// Renders `doc` the way cmark does.
 pub fn write(doc: &Document) -> String {
+    write_with(doc, Options::default())
+}
+
+/// Renders `doc` the way cmark-gfm does, with `opts`.
+pub fn write_with(doc: &Document, opts: Options) -> String {
     let mut out = String::new();
-    blocks(&mut out, &doc.blocks, false);
+    blocks(&mut out, &doc.blocks, false, opts);
     out
+}
+
+/// Raw HTML `h` into `out`; under the tagfilter, a `<` that opens or closes
+/// one of [`FILTERED`] (the name case-insensitive, followed by whitespace,
+/// `>`, `/>` or the end) becomes `&lt;`.
+fn raw(out: &mut String, h: &str, opts: Options) {
+    if !opts.tagfilter {
+        out.push_str(h);
+        return;
+    }
+    let b = h.as_bytes();
+    let mut last = 0;
+    for (i, _) in h.match_indices('<') {
+        let name = &b[i + 1 + usize::from(b.get(i + 1) == Some(&b'/'))..];
+        let len = name
+            .iter()
+            .position(|c| !c.is_ascii_alphanumeric())
+            .unwrap_or(name.len());
+        let (tag, after) = name.split_at(len);
+        let ends = match after {
+            [] => true,
+            [c, ..] if c.is_ascii_whitespace() || *c == b'>' => true,
+            [b'/', b'>', ..] => true,
+            _ => false,
+        };
+        if ends
+            && FILTERED
+                .iter()
+                .any(|f| f.as_bytes().eq_ignore_ascii_case(tag))
+        {
+            out.push_str(&h[last..i]);
+            out.push_str("&lt;");
+            last = i + 1;
+        }
+    }
+    out.push_str(&h[last..]);
 }
 
 /// Ensures the output ends with a newline (cmark's `cr`).
@@ -45,28 +108,28 @@ fn href(out: &mut String, s: &str) {
     }
 }
 
-fn blocks(out: &mut String, bs: &[Block], tight: bool) {
+fn blocks(out: &mut String, bs: &[Block], tight: bool, opts: Options) {
     for b in bs {
-        block(out, b, tight);
+        block(out, b, tight, opts);
     }
 }
 
-fn block(out: &mut String, b: &Block, tight: bool) {
+fn block(out: &mut String, b: &Block, tight: bool, opts: Options) {
     match b {
         Block::Paragraph(c) => {
             if tight {
-                inlines(out, c);
+                inlines(out, c, opts);
             } else {
                 cr(out);
                 out.push_str("<p>");
-                inlines(out, c);
+                inlines(out, c, opts);
                 out.push_str("</p>\n");
             }
         }
         Block::Heading { level, content } => {
             cr(out);
             out.push_str(&format!("<h{level}>"));
-            inlines(out, content);
+            inlines(out, content, opts);
             out.push_str(&format!("</h{level}>\n"));
         }
         Block::CodeBlock { info, text } => {
@@ -88,7 +151,7 @@ fn block(out: &mut String, b: &Block, tight: bool) {
         Block::BlockQuote(c) => {
             cr(out);
             out.push_str("<blockquote>\n");
-            blocks(out, c, false);
+            blocks(out, c, false, opts);
             cr(out);
             out.push_str("</blockquote>\n");
         }
@@ -106,11 +169,25 @@ fn block(out: &mut String, b: &Block, tight: bool) {
             for item in items {
                 cr(out);
                 out.push_str("<li>");
-                blocks(out, item, *tight);
+                list_item(out, item, *tight, opts);
                 out.push_str("</li>\n");
             }
             cr(out);
             out.push_str(&format!("</{tag}>\n"));
+        }
+        Block::Table { align, head, rows } => {
+            cr(out);
+            out.push_str("<table>\n<thead>\n");
+            table_row(out, "th", align, head, opts);
+            out.push_str("</thead>\n");
+            if !rows.is_empty() {
+                out.push_str("<tbody>\n");
+                for row in rows {
+                    table_row(out, "td", align, row, opts);
+                }
+                out.push_str("</tbody>\n");
+            }
+            out.push_str("</table>\n");
         }
         Block::ThematicBreak => {
             cr(out);
@@ -118,25 +195,85 @@ fn block(out: &mut String, b: &Block, tight: bool) {
         }
         Block::HtmlBlock(s) => {
             cr(out);
-            out.push_str(s);
+            raw(out, s, opts);
             cr(out);
         }
     }
 }
 
-fn inlines(out: &mut String, is: &[Inline]) {
+/// One `<tr>`; a row shorter than `align` is padded with empty cells, a
+/// longer one cut (the reader already makes every row exactly as wide).
+fn table_row(out: &mut String, tag: &str, align: &[Align], cells: &[Vec<Inline>], opts: Options) {
+    out.push_str("<tr>\n");
+    for (i, a) in align.iter().enumerate() {
+        out.push_str(&format!("<{tag}"));
+        match a {
+            Align::None => {}
+            Align::Left => out.push_str(" align=\"left\""),
+            Align::Center => out.push_str(" align=\"center\""),
+            Align::Right => out.push_str(" align=\"right\""),
+        }
+        out.push('>');
+        if let Some(cell) = cells.get(i) {
+            inlines(out, cell, opts);
+        }
+        out.push_str(&format!("</{tag}>\n"));
+    }
+    out.push_str("</tr>\n");
+}
+
+/// The blocks of a list item; a task item gets its disabled checkbox at the
+/// start of the first paragraph (inside it), or before the blocks when the
+/// item does not start with one.
+fn list_item(out: &mut String, item: &ListItem, tight: bool, opts: Options) {
+    let Some(done) = item.checked else {
+        blocks(out, &item.blocks, tight, opts);
+        return;
+    };
+    let input = if done {
+        "<input checked=\"\" disabled=\"\" type=\"checkbox\"> "
+    } else {
+        "<input disabled=\"\" type=\"checkbox\"> "
+    };
+    match item.blocks.split_first() {
+        Some((Block::Paragraph(c), rest)) => {
+            if tight {
+                out.push_str(input);
+                inlines(out, c, opts);
+            } else {
+                cr(out);
+                out.push_str("<p>");
+                out.push_str(input);
+                inlines(out, c, opts);
+                out.push_str("</p>\n");
+            }
+            blocks(out, rest, tight, opts);
+        }
+        _ => {
+            out.push_str(input);
+            blocks(out, &item.blocks, tight, opts);
+        }
+    }
+}
+
+fn inlines(out: &mut String, is: &[Inline], opts: Options) {
     for i in is {
         match i {
             Inline::Text(s) => escape(out, s),
             Inline::Emph(c) => {
                 out.push_str("<em>");
-                inlines(out, c);
+                inlines(out, c, opts);
                 out.push_str("</em>");
             }
             Inline::Strong(c) => {
                 out.push_str("<strong>");
-                inlines(out, c);
+                inlines(out, c, opts);
                 out.push_str("</strong>");
+            }
+            Inline::Strikethrough(c) => {
+                out.push_str("<del>");
+                inlines(out, c, opts);
+                out.push_str("</del>");
             }
             Inline::Code(s) => {
                 out.push_str("<code>");
@@ -147,6 +284,7 @@ fn inlines(out: &mut String, is: &[Inline]) {
                 dest,
                 title,
                 content,
+                ..
             } => {
                 out.push_str("<a href=\"");
                 href(out, dest);
@@ -157,7 +295,7 @@ fn inlines(out: &mut String, is: &[Inline]) {
                     out.push('"');
                 }
                 out.push('>');
-                inlines(out, content);
+                inlines(out, content, opts);
                 out.push_str("</a>");
             }
             Inline::Image { dest, title, alt } => {
@@ -175,7 +313,7 @@ fn inlines(out: &mut String, is: &[Inline]) {
             }
             Inline::SoftBreak => out.push('\n'),
             Inline::HardBreak => out.push_str("<br />\n"),
-            Inline::Html(s) => out.push_str(s),
+            Inline::Html(s) => raw(out, s, opts),
         }
     }
 }
@@ -185,7 +323,7 @@ fn plain(out: &mut String, is: &[Inline]) {
     for i in is {
         match i {
             Inline::Text(s) | Inline::Code(s) | Inline::Html(s) => escape(out, s),
-            Inline::Emph(c) | Inline::Strong(c) => plain(out, c),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => plain(out, c),
             Inline::Link { content, .. } => plain(out, content),
             Inline::Image { alt, .. } => plain(out, alt),
             Inline::SoftBreak | Inline::HardBreak => out.push(' '),
@@ -196,6 +334,7 @@ fn plain(out: &mut String, is: &[Inline]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plain_items;
 
     fn t(s: &str) -> Vec<Inline> {
         vec![Inline::Text(s.into())]
@@ -211,6 +350,7 @@ mod tests {
             dest: dest.into(),
             title: String::new(),
             content: t("x"),
+            auto: false,
         }])
     }
 
@@ -251,13 +391,13 @@ mod tests {
         let tight = Block::List {
             start: None,
             tight: true,
-            items: items.clone(),
+            items: plain_items(items.clone()),
         };
         assert_eq!(doc(vec![tight]), "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n");
         let loose = Block::List {
             start: None,
             tight: false,
-            items,
+            items: plain_items(items),
         };
         assert_eq!(
             doc(vec![loose]),
@@ -270,7 +410,7 @@ mod tests {
         let inner = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![p("b")]],
+            items: plain_items(vec![vec![p("b")]]),
         };
         let code = Block::CodeBlock {
             info: String::new(),
@@ -279,7 +419,7 @@ mod tests {
         let l = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![p("a"), inner], vec![code], vec![]],
+            items: plain_items(vec![vec![p("a"), inner], vec![code], vec![]]),
         };
         assert_eq!(
             doc(vec![l]),
@@ -292,7 +432,7 @@ mod tests {
         let l = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![Block::BlockQuote(vec![p("a")])]],
+            items: plain_items(vec![vec![Block::BlockQuote(vec![p("a")])]]),
         };
         assert_eq!(
             doc(vec![l]),
@@ -309,7 +449,7 @@ mod tests {
         let mk = |n| Block::List {
             start: Some(n),
             tight: true,
-            items: vec![vec![p("a")]],
+            items: plain_items(vec![vec![p("a")]]),
         };
         assert_eq!(doc(vec![mk(1)]), "<ol>\n<li>a</li>\n</ol>\n");
         assert_eq!(doc(vec![mk(3)]), "<ol start=\"3\">\n<li>a</li>\n</ol>\n");
@@ -394,6 +534,7 @@ mod tests {
             dest: "u".into(),
             title: "a\"b".into(),
             content: t("x"),
+            auto: false,
         }]);
         assert_eq!(
             doc(vec![l]),
@@ -414,6 +555,7 @@ mod tests {
                     dest: "u".into(),
                     title: String::new(),
                     content: t("l"),
+                    auto: false,
                 },
             ],
         }]);
@@ -449,6 +591,90 @@ mod tests {
         assert_eq!(
             doc(vec![i]),
             "<p><img src=\"u\" alt=\"a&lt;b&gt;  in&quot;\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn tagfilter_escapes_the_nine_tags() {
+        let on = Options { tagfilter: true };
+        for tag in FILTERED {
+            let h = format!("<{tag}>x</{tag}>\n");
+            let d = Document {
+                blocks: vec![Block::HtmlBlock(h.clone())],
+            };
+            assert_eq!(
+                write_with(&d, on),
+                format!("&lt;{tag}>x&lt;/{tag}>\n"),
+                "{tag}"
+            );
+            assert_eq!(write(&d), h, "off: {tag}");
+        }
+        // Case-insensitive, attributes, self-closing, inline HTML.
+        let d = Document {
+            blocks: vec![Block::Paragraph(vec![
+                Inline::Html("<SCRIPT src=x>".into()),
+                Inline::Html("<style/>".into()),
+                Inline::Html("<scripts>".into()),
+                Inline::Html("<b>".into()),
+            ])],
+        };
+        assert_eq!(
+            write_with(&d, on),
+            "<p>&lt;SCRIPT src=x>&lt;style/><scripts><b></p>\n"
+        );
+    }
+
+    #[test]
+    fn write_is_write_with_default() {
+        assert_eq!(Options::default(), Options { tagfilter: false });
+        let d = Document {
+            blocks: vec![
+                Block::HtmlBlock("<script>\n".into()),
+                p("a & b"),
+                Block::Table {
+                    align: vec![Align::None],
+                    head: vec![t("h")],
+                    rows: vec![],
+                },
+            ],
+        };
+        assert_eq!(write(&d), write_with(&d, Options::default()));
+    }
+
+    #[test]
+    fn gfm_nodes_follow_the_reference() {
+        let d = doc(vec![Block::Table {
+            align: vec![Align::Left, Align::Center, Align::Right, Align::None],
+            head: vec![t("a"), t("b"), t("c"), t("d")],
+            rows: vec![vec![t("1"), t("2"), t("3"), vec![]]],
+        }]);
+        assert_eq!(
+            d,
+            "<table>\n<thead>\n<tr>\n<th align=\"left\">a</th>\n<th align=\"center\">b</th>\n\
+<th align=\"right\">c</th>\n<th>d</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n\
+<td align=\"left\">1</td>\n<td align=\"center\">2</td>\n<td align=\"right\">3</td>\n\
+<td></td>\n</tr>\n</tbody>\n</table>\n"
+        );
+        let s = doc(vec![Block::Paragraph(vec![Inline::Strikethrough(t("x"))])]);
+        assert_eq!(s, "<p><del>x</del></p>\n");
+        let item = |done, blocks| ListItem {
+            checked: Some(done),
+            blocks,
+        };
+        let l = |tight| Block::List {
+            start: None,
+            tight,
+            items: vec![item(false, vec![p("a")]), item(true, vec![p("b")])],
+        };
+        assert_eq!(
+            doc(vec![l(true)]),
+            "<ul>\n<li><input disabled=\"\" type=\"checkbox\"> a</li>\n\
+<li><input checked=\"\" disabled=\"\" type=\"checkbox\"> b</li>\n</ul>\n"
+        );
+        assert_eq!(
+            doc(vec![l(false)]),
+            "<ul>\n<li>\n<p><input disabled=\"\" type=\"checkbox\"> a</p>\n</li>\n\
+<li>\n<p><input checked=\"\" disabled=\"\" type=\"checkbox\"> b</p>\n</li>\n</ul>\n"
         );
     }
 }

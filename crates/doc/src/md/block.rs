@@ -23,6 +23,7 @@ use super::scan::{
 use super::{LinkDef, Refs, decoded_len, inlines, normalize_label, unescape};
 use crate::budget::Meter;
 use crate::{Block, Document};
+use crate::{Dialect, ListItem};
 
 const TAB_STOP: usize = 4;
 const CODE_INDENT: usize = 4;
@@ -90,16 +91,20 @@ struct Node {
 /// Parses `text` (valid UTF-8, NUL already replaced) into a document. The
 /// meter is charged while the arena and the tree are built (`Err` is the
 /// first budget that ran out).
-pub(super) fn parse(text: &str, m: &mut Meter) -> Result<Document, crate::LimitError> {
-    let mut p = run(text, m);
+pub(super) fn parse(
+    text: &str,
+    dialect: Dialect,
+    m: &mut Meter,
+) -> Result<Document, crate::LimitError> {
+    let mut p = run(text, dialect, m);
     let blocks = p.convert_children(ROOT);
     p.m.result()?;
     Ok(Document { blocks })
 }
 
 /// The block phase alone: every block closed, definitions collected.
-fn run<'m>(text: &str, m: &'m mut Meter) -> Parser<'m> {
-    let mut p = Parser::new(m);
+fn run<'m>(text: &str, dialect: Dialect, m: &'m mut Meter) -> Parser<'m> {
+    let mut p = Parser::new(dialect, m);
     let mut line = String::new();
     let mut rest = text;
     while !rest.is_empty() && !p.m.failed() {
@@ -133,6 +138,9 @@ struct Parser<'m> {
     /// The budget; the first failure stops the line loop and the
     /// conversion, and `add_child` stops allocating.
     m: &'m mut Meter,
+    /// Which syntax the block and inline phases read.
+    #[allow(dead_code)] // read once the GFM extensions are parsed
+    dialect: Dialect,
     nodes: Vec<Node>,
     refs: Refs,
     /// The innermost open block.
@@ -150,9 +158,10 @@ struct Parser<'m> {
 }
 
 impl<'m> Parser<'m> {
-    fn new(m: &'m mut Meter) -> Self {
+    fn new(dialect: Dialect, m: &'m mut Meter) -> Self {
         Parser {
             m,
+            dialect,
             nodes: vec![Node {
                 kind: Kind::Document,
                 parent: ROOT,
@@ -764,14 +773,14 @@ impl<'m> Parser<'m> {
         match std::mem::replace(&mut self.nodes[n].kind, Kind::Document) {
             Kind::Paragraph => {
                 let raw = content.trim_end_matches([' ', '\t', '\n']);
-                Block::Paragraph(inlines(raw, &self.refs, self.m))
+                Block::Paragraph(inlines(raw, &self.refs, self.dialect, self.m))
             }
             Kind::Heading { level, .. } => {
                 let raw = content.trim_matches([' ', '\t', '\n']);
                 let content = if raw.is_empty() {
                     Vec::new()
                 } else {
-                    inlines(raw, &self.refs, self.m)
+                    inlines(raw, &self.refs, self.dialect, self.m)
                 };
                 Block::Heading { level, content }
             }
@@ -797,7 +806,13 @@ impl<'m> Parser<'m> {
                                 break;
                             }
                             let blocks = self.convert_children(i);
-                            self.m.push(&mut out, blocks);
+                            self.m.push(
+                                &mut out,
+                                ListItem {
+                                    checked: None,
+                                    blocks,
+                                },
+                            );
                         }
                         out
                     },
@@ -1141,7 +1156,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn parse(md: &str) -> Document {
-        super::parse(md, &mut Meter::new(crate::Limits::UNLIMITED)).unwrap()
+        super::parse(
+            md,
+            Dialect::CommonMark,
+            &mut Meter::new(crate::Limits::UNLIMITED),
+        )
+        .unwrap()
     }
 
     fn html(md: &str) -> String {
@@ -1150,7 +1170,7 @@ mod tests {
 
     fn refs(md: &str) -> Refs {
         let mut m = Meter::new(crate::Limits::UNLIMITED);
-        run(md, &mut m).refs
+        run(md, Dialect::CommonMark, &mut m).refs
     }
 
     fn timed(input: &str) -> (Document, Duration) {
@@ -1202,7 +1222,7 @@ mod tests {
         let mut cur = &d.blocks[..];
         while let [Block::List { items, .. }] = cur {
             depth += 1;
-            cur = &items[0];
+            cur = &items[0].blocks;
         }
         assert_eq!(depth, cap);
         let _ = html::write(&d);

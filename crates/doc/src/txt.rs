@@ -191,7 +191,14 @@ impl Writer {
                         None => "- ".to_string(),
                         Some(n) => format!("{}. ", n.saturating_add(i as u64)),
                     };
-                    let body = self.blocks(item, !*tight);
+                    let mut body = self.blocks(&item.blocks, !*tight);
+                    if let Some(done) = item.checked {
+                        let mut marked = String::new();
+                        self.sink
+                            .push_str(&mut marked, if done { "[x] " } else { "[ ] " });
+                        self.sink.push_str(&mut marked, &body);
+                        body = marked;
+                    }
                     let pad = if start.is_none() { 2 } else { marker.len() };
                     for (j, line) in body.split('\n').enumerate() {
                         if j == 0 {
@@ -208,6 +215,23 @@ impl Writer {
                     }
                     if body.is_empty() {
                         out.truncate(out.trim_end().len());
+                    }
+                }
+                out
+            }
+            Block::Table { head, rows, .. } => {
+                // One line per row, cells separated by two spaces.
+                self.losses.insert(Loss::TableLayout);
+                let mut out = String::new();
+                for (i, row) in std::iter::once(head).chain(rows.iter()).enumerate() {
+                    if i > 0 {
+                        self.sink.push(&mut out, '\n');
+                    }
+                    for (j, cell) in row.iter().enumerate() {
+                        if j > 0 {
+                            self.sink.push_str(&mut out, "  ");
+                        }
+                        self.push_inlines(cell, &mut out);
                     }
                 }
                 out
@@ -251,6 +275,10 @@ impl Writer {
                     self.losses.insert(Loss::Emphasis);
                     self.push_inlines(c, out);
                 }
+                Inline::Strikethrough(c) => {
+                    self.losses.insert(Loss::Strikethrough);
+                    self.push_inlines(c, out);
+                }
                 Inline::Code(t) => {
                     self.losses.insert(Loss::InlineCode);
                     self.sink.push_str(out, t);
@@ -287,6 +315,7 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plain_items;
 
     fn t(s: &str) -> Inline {
         Inline::Text(s.to_string())
@@ -405,6 +434,7 @@ mod tests {
             dest: "https://x".into(),
             title: String::new(),
             content: vec![t(text)],
+            auto: false,
         };
         let d = Document {
             blocks: vec![Block::Paragraph(vec![link("x")])],
@@ -462,12 +492,12 @@ mod tests {
         let inner = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![para("b")]],
+            items: plain_items(vec![vec![para("b")]]),
         };
         let outer = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![para("a"), inner], vec![para("c")]],
+            items: plain_items(vec![vec![para("a"), inner], vec![para("c")]]),
         };
         assert_eq!(
             write(&Document {
@@ -483,7 +513,7 @@ mod tests {
         let l = Block::List {
             start: Some(3),
             tight: true,
-            items: vec![vec![para("a")], vec![para("b")]],
+            items: plain_items(vec![vec![para("a")], vec![para("b")]]),
         };
         assert_eq!(write(&Document { blocks: vec![l] }).0, "3. a\n4. b\n");
     }
@@ -493,7 +523,7 @@ mod tests {
         let l = Block::List {
             start: None,
             tight: false,
-            items: vec![vec![para("a")], vec![para("b")]],
+            items: plain_items(vec![vec![para("a")], vec![para("b")]]),
         };
         assert_eq!(write(&Document { blocks: vec![l] }).0, "- a\n\n- b\n");
     }
@@ -561,7 +591,7 @@ mod tests {
                 Block::List {
                     start: None,
                     tight: true,
-                    items: vec![],
+                    items: plain_items(vec![]),
                 },
                 para("b"),
             ],
@@ -574,12 +604,12 @@ mod tests {
         let inner = Block::List {
             start: None,
             tight: true,
-            items: vec![vec![para("b")]],
+            items: plain_items(vec![vec![para("b")]]),
         };
         let l = Block::List {
             start: Some(1),
             tight: true,
-            items: vec![vec![para("a"), inner]],
+            items: plain_items(vec![vec![para("a"), inner]]),
         };
         assert_eq!(write(&Document { blocks: vec![l] }).0, "1. a\n   - b\n");
     }
