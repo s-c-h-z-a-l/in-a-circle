@@ -24,9 +24,10 @@
 # image header probe, the catalog's failure backoff), same toolchain and
 # profile, built from commit 62f592bd (tree clean; later commits touch only
 # fuzz corpora and tests, and the shrinking-source check in the ZIP writer,
-# which added 32 B to inacircle-pages): inacircle grew 9312 B (file, 8544 B of .text), from the
-# backoff bookkeeping and the typed stop reason; inacircle-pages grew 39088 B
-# (file, 31072 B of .text), from the ZIP writer, the PNG/JPEG header sniffer and
+# which added 32 B to inacircle-pages): inacircle grew 9312 B (file, 8544 B
+# of .text), from the backoff bookkeeping and the typed stop reason;
+# inacircle-pages grew 39088 B (file, 31056 B of .text), from the ZIP writer,
+# the PNG/JPEG header sniffer and
 # the CBZ join action. Both are under the 100 KB explanation threshold;
 # inacircle-text is unchanged; the shipped inacircle still does not link the
 # zip, flate, probe or pdf crates.

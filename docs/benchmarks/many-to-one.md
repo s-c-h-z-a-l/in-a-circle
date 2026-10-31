@@ -120,6 +120,7 @@ stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
 | `inacircle-pages` file / `.text` (x86_64) | 503,712 B / 403,267 B |
 | Drop to stage 2 with PNG/JPEG, p95, reference desktop | pending (manual run) |
 | Drop to stage 2 with PNG/JPEG, p95, second machine | pending (manual run) |
+| `main` to exit CPU, warm cache, p95 | pending (two-machine run) |
 
 The two timing rows are the user's manual drag runs (50 or more valid
 observations per condition, nearest-rank p95); nothing is recorded for
