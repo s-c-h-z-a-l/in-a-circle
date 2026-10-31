@@ -98,6 +98,45 @@ clean; wheel PSS 2,796 kB; drop to stage 2 357 us.
 The second machine is outside the reference timing gate by policy and is
 shown for the absolute overrun check; nothing is over.
 
+## Images to CBZ
+
+The join action `pages.images-to-cbz` writes a stored (method 0) ZIP: each
+image is copied byte for byte into one archive named `001.jpg`, `002.png`
+and so on, with no recompression.
+
+**Method.** The release `inacircle-pages` joins 1,024 sparse 128 KiB
+images (a 128 MiB archive) and the test samples `/proc/<pid>/status`
+`VmHWM` until the child exits (limit in the test: 6 MiB).
+`scripts/check-sizes.sh` gives the stripped release sizes. The drop to
+stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
+
+**Machine.** The reference desktop (Ryzen 7 5700X, 96 GB, CachyOS, kernel
+7.2.9, repository release profile), x86_64.
+
+| Measurement | Result |
+|---|---|
+| 1,024 images x 128 KiB to one CBZ, peak `VmHWM` | 3,232 kB |
+| `inacircle` file (x86_64) | 1,160,024 B |
+| `inacircle-pages` file / `.text` (x86_64) | 503,712 B / 403,267 B |
+| Drop to stage 2 with PNG/JPEG, p95, reference desktop | pending (manual run) |
+| Drop to stage 2 with PNG/JPEG, p95, second machine | pending (manual run) |
+
+The two timing rows are the user's manual drag runs (50 or more valid
+observations per condition, nearest-rank p95); nothing is recorded for
+them yet and no value is implied.
+
+**Verdict.** Memory and sizes are inside their bounds (peak memory 3.2 MB
+for the largest accepted workload; `inacircle` under 1.5 MB, `.text` of
+`inacircle-pages` under 1 MB). The timing verdict stays open until the
+two rows above are filled.
+
+**Reproduce.**
+
+```
+cargo test --release -p inacircle-pages many_large_images_stay_within_memory -- --nocapture
+scripts/check-sizes.sh
+```
+
 ## Verdict
 
 Within every measured bound: 1,000 images join in under 3 MB of peak
