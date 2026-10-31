@@ -885,6 +885,80 @@ mod tests {
         }
     }
 
+    /// SOI, the first marker's 0xFF, `fills` more fill bytes, then a SOF0
+    /// segment: the walk takes `fills + 1` steps to reach the frame header.
+    fn jpeg_after_fills(fills: usize) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8, 0xFF];
+        v.extend(std::iter::repeat_n(0xFF, fills));
+        v.extend_from_slice(&[0xC0, 0x00, 0x0B]);
+        v.extend_from_slice(&frame_body(8, 5, 7, 1, 0x11, 0));
+        v
+    }
+
+    #[test]
+    fn the_marker_walk_allows_exactly_the_step_limit() {
+        let max = MAX_STEPS as usize;
+        assert_eq!(s(&jpeg_after_fills(max - 1)), ok(Format::Jpeg, 7, 5));
+        assert_eq!(s(&jpeg_after_fills(max)), Err(ProbeError::Damaged));
+        assert_eq!(s(&jpeg_after_fills(max + 1)), Err(ProbeError::Damaged));
+    }
+
+    #[test]
+    fn a_png_dimension_of_exactly_31_bits_is_valid() {
+        let p = png(5, 3, 2, None, false, false);
+        for (w, h) in [(MAX_31, 1u32), (1, MAX_31)] {
+            let q = patch_ihdr(p.clone(), |d| {
+                d[0..4].copy_from_slice(&w.to_be_bytes());
+                d[4..8].copy_from_slice(&h.to_be_bytes());
+            });
+            assert_eq!(sniff(&mut &q[..], u64::MAX), ok(Format::Png, w, h));
+        }
+    }
+
+    #[test]
+    fn a_wrong_signature_is_not_an_image_even_if_the_rest_matches() {
+        // The first three bytes are not the PNG signature's, the next five
+        // are: only the whole signature makes a PNG.
+        let mut q = png(5, 3, 2, None, false, false);
+        q[..3].copy_from_slice(b"abc");
+        assert_eq!(s(&q), Err(ProbeError::NotImage));
+    }
+
+    #[test]
+    fn a_frame_shorter_than_its_header_is_damaged_before_any_read() {
+        // Length 2 (no body) and 8 (body of 6, which is a header with no
+        // components): the first is damaged by its length alone, the second
+        // is read, and the stream ends in it.
+        let head = [0xFF, 0xD8, 0xFF, 0xC0];
+        let mut a = head.to_vec();
+        a.extend_from_slice(&[0x00, 0x02]);
+        assert_eq!(s(&a), Err(ProbeError::Damaged));
+        let mut b = head.to_vec();
+        b.extend_from_slice(&[0x00, 0x08, 8, 0]);
+        assert_eq!(s(&b), Err(ProbeError::Truncated));
+    }
+
+    /// Fails the test if asked to read into an empty buffer.
+    struct NoEmptyReads<'a>(&'a [u8]);
+    impl Read for NoEmptyReads<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Err(io::Error::other("read into an empty buffer"));
+            }
+            let n = buf.len().min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_full_buffer_is_not_read_into_again() {
+        assert_eq!(sniff(&mut NoEmptyReads(RGB), MAX), ok(Format::Jpeg, 32, 24));
+        let p = png(5, 3, 2, None, false, false);
+        assert_eq!(sniff(&mut NoEmptyReads(&p), MAX), ok(Format::Png, 5, 3));
+    }
+
     #[test]
     fn sniff_stops_on_an_endless_stream() {
         // An endless run of fill bytes, and endless empty segments: the
