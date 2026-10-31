@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	pat	path=n	n	mtime=+1	size=5	builtin=yes
+#Res
+bin	path=/usr/on	mtime=+5c

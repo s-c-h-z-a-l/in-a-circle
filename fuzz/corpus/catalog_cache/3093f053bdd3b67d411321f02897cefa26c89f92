@@ -1,0 +1,13 @@
+inacircle-catalog 1
+bin	path=cton	mtime=1792398757807	size=59366	builtin=yes
+action	test.
+action	es
+action	test.s
+action	test.sces
+action	t.?script	es
+action	t
+action	tes
+action	t
+action
+action	test.s=yes
+action	text.txp-to-17ftc=ses(
