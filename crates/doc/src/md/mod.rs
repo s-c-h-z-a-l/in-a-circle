@@ -947,6 +947,25 @@ mod tests {
         assert_eq!(md("a ~~~ b"), "a \\~\\~\\~ b\n");
     }
 
+    /// The escape looks at what was written, not at one text node: two
+    /// tildes split over adjacent nodes still count as a run (the second is
+    /// escaped, so the reader sees a literal tilde, never a pair), and a tilde
+    /// separated by emphasis or a code span stays alone.
+    #[test]
+    fn tilde_runs_split_over_nodes_and_neighbours() {
+        let inline = |v: Vec<Inline>| write(&doc(vec![Block::Paragraph(v)])).0;
+        assert_eq!(inline(vec![t("~"), t("~")]), "\\~\\~\n");
+        assert_eq!(inline(vec![t("a~"), t("~b")]), "a~\\~b\n");
+        assert_eq!(inline(vec![t("~"), t("~"), t("~")]), "\\~\\~\\~\n");
+        assert_eq!(inline(vec![t("x~"), Inline::Emph(vec![t("~")])]), "x~*~*\n");
+        assert_eq!(inline(vec![Inline::Emph(vec![t("~")]), t("~")]), "*~*~\n");
+        assert_eq!(
+            inline(vec![t("~"), Inline::Code("~".into()), t("~")]),
+            "\\~`~`~\n"
+        );
+        assert_eq!(inline(vec![Inline::Code("~~".into()), t("~")]), "`~~`~\n");
+    }
+
     #[test]
     fn table_in_tight_item_is_separated_from_a_paragraph() {
         let table = Block::Table {
