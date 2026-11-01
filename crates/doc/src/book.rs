@@ -19,7 +19,8 @@ fn heading_text(content: &[crate::Inline]) -> String {
     s.trim().to_string()
 }
 
-/// The plain text of the first top-level H1, if it has any.
+/// The plain text of the first top-level H1 that has any: an empty H1 is
+/// not a title, so the next non-empty one is taken, else `None`.
 pub fn title(doc: &Document) -> Option<String> {
     doc.blocks.iter().find_map(|b| match b {
         Block::Heading { level: 1, content } => {
@@ -172,6 +173,30 @@ mod tests {
         let mut b = vec![h(2, "top")];
         b.extend(nested(2));
         assert_eq!(split(&doc(b)), vec![0..3]);
+        // Two top-level headings with nested ones between and after: the
+        // nested ones neither add split points nor change which level wins.
+        let mut b = vec![h(1, "a")];
+        b.extend(nested(1));
+        b.push(h(1, "b"));
+        b.extend(nested(1));
+        assert_eq!(split(&doc(b)), vec![0..3, 3..6]);
+        // One top-level H1 and one top-level H2, nested H2s: still one chapter.
+        let mut b = vec![h(1, "a"), h(2, "b")];
+        b.extend(nested(2));
+        assert_eq!(split(&doc(b)), vec![0..4]);
+    }
+
+    #[test]
+    fn title_skips_empty_h1() {
+        let empty = Block::Heading {
+            level: 1,
+            content: vec![Inline::Text("  ".into())],
+        };
+        assert_eq!(
+            title(&doc(vec![empty.clone(), h(1, "Real")])).as_deref(),
+            Some("Real")
+        );
+        assert_eq!(title(&doc(vec![empty.clone(), empty])), None);
     }
 
     #[test]
