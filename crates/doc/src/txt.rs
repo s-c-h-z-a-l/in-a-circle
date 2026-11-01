@@ -246,15 +246,23 @@ fn wrap(text: &str, width: usize) -> Vec<&str> {
     let (mut start, mut end, mut chars) = (0usize, 0usize, 0usize);
     let mut open = false;
     let mut at = 0usize;
+    // Empty words after the first (a run of spaces): they only count once
+    // a real word follows on the same line, so a break never leaves a
+    // space at the end of a line or at the start of the next.
+    let mut pending = 0usize;
     for word in text.split(' ') {
         let wc = word.chars().count();
-        if open && chars + 1 + wc <= width {
+        if open && wc == 0 {
+            pending += 1;
+        } else if open && chars + pending + 1 + wc <= width {
             end = at + word.len();
-            chars += 1 + wc;
+            chars += pending + 1 + wc;
+            pending = 0;
         } else {
             if open {
                 lines.push(&text[start..end]);
             }
+            pending = 0;
             start = at;
             end = at + word.len();
             chars = wc;
@@ -272,6 +280,11 @@ fn wrap(text: &str, width: usize) -> Vec<&str> {
             }
         }
         at += word.len() + 1;
+    }
+    // Spaces at the very end of the cell are text, not a break: kept when
+    // they fit, dropped when they would overflow the line.
+    if open && pending > 0 && chars + pending <= width {
+        end += pending;
     }
     if open {
         lines.push(&text[start..end]);
@@ -1285,6 +1298,20 @@ mod tests {
         // The 70 left over still share a line with a short word.
         let short = format!("{} yy", "x".repeat(150));
         assert_eq!(wrap(&short, 80), vec![&short[..80], &short[80..]]);
+    }
+
+    #[test]
+    fn wrap_never_leaves_a_space_at_a_break() {
+        // Two spaces at the break: neither line has one at the edge.
+        assert_eq!(wrap("aaaa  bbbb", 5), vec!["aaaa", "bbbb"]);
+        assert_eq!(wrap("aaaa     bbbb", 6), vec!["aaaa", "bbbb"]);
+        // Spaces inside a line stay.
+        assert_eq!(wrap("aa  bb cccc", 7), vec!["aa  bb", "cccc"]);
+        // An unwrapped cell keeps its spaces.
+        assert_eq!(wrap("a  b", 80), vec!["a  b"]);
+        assert_eq!(wrap("  a  ", 80), vec!["  a  "]);
+        // Trailing spaces that do not fit are dropped, not wrapped on.
+        assert_eq!(wrap("aaaa  ", 5), vec!["aaaa"]);
     }
 
     #[test]
