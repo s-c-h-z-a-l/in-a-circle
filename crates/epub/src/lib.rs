@@ -513,3 +513,83 @@ fn pack(
     zip.finish()?;
     Ok(losses)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn days_in_month(y: i64, m: i64) -> i64 {
+        match m {
+            2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        }
+    }
+
+    /// `utc` against a calendar that counts the days one by one from
+    /// 0001-01-01 to 9999-12-31 (the proleptic Gregorian calendar, as the
+    /// format wants). Every day of 1600 to 2500 is compared (the leap-year
+    /// rules of 1700, 1800, 1900, 2000 and 2100, 1970, 2038); outside,
+    /// the first and the last day of every month (so every 29 February
+    /// that closes a 400-year cycle, 0400 to 9600, and the ends of the
+    /// range). The seconds of the day differ from day to day.
+    #[test]
+    fn utc_matches_a_day_by_day_calendar() {
+        let (mut y, mut m, mut d) = (1_i64, 1_i64, 1_i64);
+        let mut day = MIN_TIME.div_euclid(DAY);
+        let last = MAX_TIME.div_euclid(DAY);
+        let mut compared = 0_u32;
+        while day <= last {
+            if (1600..=2500).contains(&y) || d == 1 || d == days_in_month(y, m) {
+                let secs = (day * 7919).rem_euclid(DAY);
+                let want = format!(
+                    "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+                    secs / 3600,
+                    secs % 3600 / 60,
+                    secs % 60
+                );
+                assert_eq!(utc(day * DAY + secs), want, "day {day}");
+                compared += 1;
+            }
+            day += 1;
+            d += 1;
+            if d > days_in_month(y, m) {
+                d = 1;
+                m += 1;
+                if m > 12 {
+                    m = 1;
+                    y += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (y, m, d),
+            (10_000, 1, 1),
+            "the calendar ends with the range"
+        );
+        assert!(compared > 329_000, "{compared}");
+    }
+
+    #[test]
+    fn utc_known_instants() {
+        for (t, want) in [
+            (0, "1970-01-01T00:00:00Z"),
+            (1, "1970-01-01T00:00:01Z"),
+            (86_399, "1970-01-01T23:59:59Z"),
+            (86_400, "1970-01-02T00:00:00Z"),
+            (-1, "1969-12-31T23:59:59Z"),
+            (951_782_400, "2000-02-29T00:00:00Z"),
+            (951_868_800, "2000-03-01T00:00:00Z"),
+            (2_147_483_647, "2038-01-19T03:14:07Z"),
+            (2_147_483_648, "2038-01-19T03:14:08Z"),
+            (4_107_542_399, "2100-02-28T23:59:59Z"),
+            (4_107_542_400, "2100-03-01T00:00:00Z"),
+            (-2_203_891_201, "1900-02-28T23:59:59Z"),
+            (-2_203_891_200, "1900-03-01T00:00:00Z"),
+            (1_700_000_000, "2023-11-14T22:13:20Z"),
+        ] {
+            assert_eq!(utc(t), want, "{t}");
+        }
+    }
+}

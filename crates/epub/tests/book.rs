@@ -438,6 +438,96 @@ fn chapter_limit() {
     assert_eq!(s.bytes().len(), 0, "the caller's file stays empty");
 }
 
+/// The first level the table of contents lists below the chapters is the
+/// split's, not the first heading's: a preface heading of another level
+/// does not shift it; a single chapter takes its first heading's level.
+#[test]
+fn nav_levels_follow_the_split() {
+    // One H1, two H2: split at H2, the H3s are the level below.
+    let (s, _) = book("# T\n\n## x\n\n### x1\n\n## y\n", "Book");
+    let nav = text(&entries(&s.0), "OEBPS/nav.xhtml");
+    assert!(
+        nav.contains("<li><a href=\"ch0002.xhtml\">x</a>\n<ol>\n<li><a href=\"ch0002.xhtml#x1\">x1</a></li>\n</ol>\n</li>"),
+        "{nav}"
+    );
+    assert!(!nav.contains("ch0002.xhtml#x\""), "{nav}");
+    // One chapter: the level of its first heading, past a paragraph.
+    let (s, _) = book("text\n\n## x\n\n### x1\n", "Book");
+    let nav = text(&entries(&s.0), "OEBPS/nav.xhtml");
+    assert!(nav.contains("<a href=\"ch0001.xhtml#x1\">x1</a>"), "{nav}");
+}
+
+/// The table of contents links to heading ids with the characters of
+/// `-` and `_` as they are and every other byte percent-encoded.
+#[test]
+fn nav_fragments_are_percent_encoded() {
+    let (s, _) = book(
+        "# Top\n\n## a-b_c\n\n## \u{c1}ttekint\u{e9}s 9\n\n# Two\n",
+        "Book",
+    );
+    let nav = text(&entries(&s.0), "OEBPS/nav.xhtml");
+    for want in [
+        "<a href=\"ch0001.xhtml#a-b_c\">a-b_c</a>",
+        "<a href=\"ch0001.xhtml#%C3%A1ttekint%C3%A9s-9\">",
+    ] {
+        assert!(nav.contains(want), "{want}\n{nav}");
+    }
+    epubcheck(&s.0);
+}
+
+/// Quotes and carriage returns in a title are escaped in the package
+/// document, the table of contents and the chapter head.
+#[test]
+fn title_is_escaped_where_it_is_written() {
+    let (s, _) = book("x\n", "a\"b\rc&d<e>f");
+    let es = entries(&s.0);
+    let want = "a&quot;b&#13;c&amp;d&lt;e&gt;f";
+    assert!(
+        text(&es, "OEBPS/content.opf").contains(&format!("<dc:title>{want}</dc:title>")),
+        "{}",
+        text(&es, "OEBPS/content.opf")
+    );
+    let nav = text(&es, "OEBPS/nav.xhtml");
+    assert!(nav.contains(&format!("<title>{want}</title>")), "{nav}");
+    assert!(nav.contains(&format!("<h1>{want}</h1>")), "{nav}");
+    assert!(nav.contains(&format!(">{want}</a></li>")), "{nav}");
+    let ch = text(&es, "OEBPS/ch0001.xhtml");
+    assert!(ch.contains(&format!("<title>{want}</title>")), "{ch}");
+}
+
+/// The output budget is charged for exactly the XHTML of the book (the
+/// package document, the table of contents, every chapter's head, body and
+/// end): a limit of that many bytes passes, one byte less fails, and so
+/// does every smaller one.
+#[test]
+fn output_budget_is_charged_exactly() {
+    let src = "# One\n\ntext & more\n\n# Two\n\n- a\n- b\n";
+    let (s, _) = book(src, "T");
+    let total: usize = entries(&s.0)
+        .iter()
+        .filter(|(n, _)| n.ends_with(".xhtml") || n.ends_with(".opf"))
+        .map(|(_, v)| v.len())
+        .sum();
+    assert!(total > 1000, "{total}");
+    for limit in 0..=total + 2 {
+        let limits = Limits {
+            output_bytes: limit,
+            ..Limits::DEFAULT
+        };
+        let (s, r) = book_with(&md(src), &meta("T"), limits);
+        if limit >= total {
+            r.unwrap_or_else(|e| panic!("limit {limit} of {total}: {e}"));
+        } else {
+            let e = r.unwrap_err();
+            assert!(
+                matches!(e, BookError::Limit(LimitError::Exceeded("output"))),
+                "limit {limit} of {total}: {e:?}"
+            );
+            assert_eq!(s.bytes().len(), 0, "limit {limit}");
+        }
+    }
+}
+
 #[test]
 fn failed_book_leaves_the_file_empty() {
     // The output budget ends in the second chapter: entries were already
