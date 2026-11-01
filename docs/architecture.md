@@ -524,17 +524,24 @@ Every action runs sandboxed, set up in the child between `fork` and
   broken by the fixed preset order). The other files are skipped, and the
   hub says so ("15 / 20").
 - **Join presets.** A preset may name a set of MIME types (`Preset.join`);
-  the `pdf` and `cbz` presets name JPEG and PNG. A preset's 1:1 input is
+  the `pdf` and `cbz` presets name JPEG and PNG, the `epub` preset names
+  Markdown. A preset's 1:1 input is
   optional: `cbz` has none (`Preset.input` is `None`), so `choose` only
   looks at the join. A run of a preset that matches no input is named
   (the history's `action=`) after the 1:1 route it would have taken, or the
   preset's id when it has none. `menu::choose` decides what a preset
   runs for a selection: the 1:1 route (for the preset's own input) or a join
   action, which is a catalog action whose type set covers the preset's set,
-  with the preset's output, runnable, and with at least its `min` files in
-  the selection. The two compete on how many files each takes; the larger
-  wins and a tie goes to the 1:1 route. The count is the slice's
-  `applicable` and the hub's N. The wheel's levels, the flat offer and the
+  with the preset's output, runnable, and with at least its `min`
+  documents in the selection. A join's count is its documents plus, beside
+  at least one document, its assets (`assets=`); assets alone count
+  nothing. A join without assets and the 1:1 route compete on how many
+  files each takes; the larger wins and a tie goes to the 1:1 route. A
+  join with assets wins whenever it takes two or more documents, or a
+  document and an asset (unless the 1:1 route takes more files): two
+  Markdown files, or one with its images, make one book; one Markdown file
+  alone keeps its 1:1 form, and images alone offer no EPUB. The count is
+  the slice's `applicable` and the hub's N. The wheel's levels, the flat offer and the
   run all ask `choose`, so they cannot disagree. A join action is never a
   step of a chain: the planner skips it.
 

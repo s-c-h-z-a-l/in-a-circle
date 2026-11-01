@@ -260,6 +260,14 @@ pub struct Join {
     pub assets: Vec<String>,
 }
 
+impl Join {
+    /// Whether `mime` is one of the join's asset types (never a document
+    /// type: the two sets are disjoint).
+    pub fn is_asset(&self, mime: &str) -> bool {
+        self.assets.iter().any(|a| a == mime)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Catalog {
     pub actions: Vec<Action>,
@@ -3376,6 +3384,9 @@ pub(crate) mod tests {
         );
         // The display input is the first document type, never an asset.
         assert_eq!(a.input, "text/markdown");
+        let j = a.join.as_ref().unwrap();
+        assert!(j.is_asset("image/png") && j.is_asset("image/jpeg"));
+        assert!(!j.is_asset("text/markdown") && !j.is_asset("image/gif"));
         // A set of documents beside the assets is taken too.
         let two = EPUB_LINE.replace("in=text/markdown", "in=text/markdown,text/plain");
         assert_eq!(
