@@ -825,10 +825,9 @@ impl Writer<'_> {
     /// the path before the first `#`, percent-decoded, joined to the folder
     /// of this document's key and normalized, must be a document's key
     /// (every key is relative to the same common folder, see
-    /// [`Refs::keys`]); no
-    /// fragment (or an empty one) is that document's first chapter file,
-    /// else the fragment must find a heading of that document. Outside a
-    /// book, an absolute path or no match: `None`.
+    /// [`Refs::keys`]); no fragment (or an empty one) is that document's
+    /// first chapter file, else the fragment must find a heading of that
+    /// document. Outside a book, an absolute path or no match: `None`.
     fn resolve_document(&self, dest: &str) -> Option<(String, Option<String>)> {
         let refs = self.refs?;
         let (path, fragment) = match dest.split_once('#') {
