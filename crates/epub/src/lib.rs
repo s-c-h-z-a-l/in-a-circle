@@ -150,17 +150,30 @@ fn utc(t: i64) -> String {
 /// longer one is `und`.
 const MAX_LANG: usize = 35;
 
-/// `lang` if it is a well-formed tag: a primary subtag of 2-3 ASCII
-/// letters, then subtags of 1-8 ASCII letters or digits, joined by `-`;
-/// else `und` (undetermined). Fail closed: the value goes into attributes
-/// and readers pick fonts and hyphenation by it.
+/// `lang` if it is a well-formed tag of this subset of the RFC 5646
+/// grammar, subtags joined by `-`: a language of 2-3 ASCII letters, then
+/// optionally a script (4 letters), then optionally a region (2 letters or
+/// 3 digits), then any variants (5-8 letters or digits, or a digit and 3
+/// letters or digits). Anything else, extensions and private use
+/// included, is `und` (undetermined). Fail closed: the value goes into
+/// attributes and readers pick fonts and hyphenation by it.
 fn lang_tag(lang: &str) -> &str {
-    let mut parts = lang.split('-');
+    let alpha = |p: &str| p.bytes().all(|b| b.is_ascii_alphabetic());
+    let digit = |p: &str| p.bytes().all(|b| b.is_ascii_digit());
+    let alnum = |p: &str| p.bytes().all(|b| b.is_ascii_alphanumeric());
+    let script = |p: &str| p.len() == 4 && alpha(p);
+    let region = |p: &str| (p.len() == 2 && alpha(p)) || (p.len() == 3 && digit(p));
+    let variant = |p: &str| {
+        ((5..=8).contains(&p.len()) && alnum(p))
+            || (p.len() == 4 && p.as_bytes()[0].is_ascii_digit() && alnum(p))
+    };
+    let mut parts = lang.split('-').peekable();
     let primary_ok = parts
         .next()
-        .is_some_and(|p| (2..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphabetic()));
-    let rest_ok =
-        parts.all(|p| (1..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()));
+        .is_some_and(|p| (2..=3).contains(&p.len()) && alpha(p));
+    parts.next_if(|p| script(p));
+    parts.next_if(|p| region(p));
+    let rest_ok = parts.all(variant);
     if lang.len() <= MAX_LANG && primary_ok && rest_ok {
         lang
     } else {

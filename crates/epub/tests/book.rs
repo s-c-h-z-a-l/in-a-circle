@@ -323,6 +323,26 @@ fn opf_metadata() {
         ("", "und"),
         ("hu\"x", "und"),
         ("pt-BR", "pt-BR"),
+        // Language, script, region (letters or digits), variants.
+        ("hu", "hu"),
+        ("zh-Hant-TW", "zh-Hant-TW"),
+        ("es-419", "es-419"),
+        ("de-CH-1996", "de-CH-1996"),
+        ("sl-rozaj", "sl-rozaj"),
+        // Not well-formed: a lone singleton, a one-character subtag, a
+        // three-character subtag that is neither region nor variant, a
+        // singleton with nothing after it, an empty subtag, a script after
+        // the region, extensions and private use (not taken).
+        ("hu-a", "und"),
+        ("hu-1", "und"),
+        ("hu-ab1", "und"),
+        ("hu-x", "und"),
+        ("hu--HU", "und"),
+        ("hu-", "und"),
+        ("sr-RS-Latn", "und"),
+        ("en-x-private", "und"),
+        ("en-a-bbb", "und"),
+        ("hu1", "und"),
     ] {
         let mut m = meta("A");
         m.lang = lang.to_string();
