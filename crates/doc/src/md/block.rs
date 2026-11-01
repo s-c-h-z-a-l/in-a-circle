@@ -2198,4 +2198,115 @@ mod tests {
         assert_eq!(table(&wide(MAX_COLUMNS + 1).blocks[0]), None);
         assert_eq!(table(&wide(MAX_COLUMNS).blocks[0]), Some((MAX_COLUMNS, 0)));
     }
+
+    #[test]
+    fn delimiter_row_must_end_at_the_line_end() {
+        // Anything after the last marker, even one byte, is not a table.
+        for md in ["a|b\n-|-x\n", "a|b\n-|-|x\n", "|a|\n|-|y\n", "a|b\n-|- x\n"] {
+            assert_eq!(gfm_html(md), html(md), "{md:?}");
+            assert!(!gfm_html(md).contains("<table>"), "{md:?}");
+        }
+        // A trailing pipe or spaces are part of the row.
+        assert!(gfm_html("a|b\n-|-|  \n").contains("<table>"));
+    }
+
+    #[test]
+    fn crlf_tables() {
+        let want = table_html(&["a", "b"], &[&["c", "d"], &["e", "f"]]);
+        for md in [
+            "a|b\r\n-|-\r\nc|d\r\ne|f\r\n",
+            "a|b  \r\n-|-  \r\nc|d \r\ne|f   \r\n",
+            "| a | b |\r\n| - | - |\r\n| c | d |\r\n| e | f |",
+        ] {
+            assert_eq!(gfm_html(md), want, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn extra_cells_are_dropped() {
+        let md = "a|b\n-|-\n1|2|3|4\n5\n";
+        assert_eq!(
+            gfm_html(md),
+            table_html(&["a", "b"], &[&["1", "2"], &["5", ""]])
+        );
+        // The rows themselves hold exactly the header's cells (a writer
+        // may zip them with the alignments and hide an extra one).
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let doc = super::parse(md, Dialect::Gfm, &mut m).unwrap();
+        let Block::Table { head, rows, .. } = &doc.blocks[0] else {
+            panic!("not a table");
+        };
+        assert_eq!(head.len(), 2);
+        assert!(rows.iter().all(|r| r.len() == 2), "{rows:?}");
+    }
+
+    #[test]
+    fn dropped_cells_are_not_charged() {
+        // Fewest text bytes a read of `md` needs.
+        let need = |md: &str| {
+            (0..)
+                .find(|&text_bytes| {
+                    let limits = crate::Limits {
+                        text_bytes,
+                        ..crate::Limits::UNLIMITED
+                    };
+                    super::parse(md, Dialect::Gfm, &mut Meter::new(limits)).is_ok()
+                })
+                .unwrap()
+        };
+        let long = "x".repeat(64);
+        assert_eq!(
+            need(&format!("a|b\n-|-\n1|2|{long}\n")),
+            need("a|b\n-|-\n1|2\n")
+        );
+    }
+
+    #[test]
+    fn line_end_helpers_take_crlf() {
+        // The block phase hands the table code lines that end in a bare
+        // line feed, so these carriage-return arms are pinned directly.
+        assert!(is_newline(b"\n", 0));
+        assert!(is_newline(b"\r\n", 0));
+        assert!(is_newline(b"x\r\n", 1));
+        assert!(!is_newline(b"\r", 0));
+        assert!(!is_newline(b"\rx", 0));
+        assert!(!is_newline(b"x\n", 0));
+        assert!(!is_newline(b"", 0));
+        assert_eq!(table_row_end(b"abc\n", 3), 1);
+        assert_eq!(table_row_end(b"abc  \n", 3), 3);
+        assert_eq!(table_row_end(b"abc\r\n", 3), 2);
+        assert_eq!(table_row_end(b"abc  \r\n", 3), 4);
+        assert_eq!(table_row_end(b"abc \rx", 3), 0);
+        assert_eq!(table_row_end(b"abc x", 3), 0);
+    }
+
+    #[test]
+    fn scan_row_stops_at_a_stray_carriage_return() {
+        // A carriage return not followed by a line feed is no row end: the
+        // text is no row, and the scan ends instead of looping on it.
+        assert_eq!(scan_row(b"a|b\rc\n", |_, _| {}), None);
+        assert_eq!(scan_row(b"a|b\r", |_, _| {}), None);
+        assert_eq!(scan_row(b"a|b\r\n", |_, _| {}), Some((0, 2)));
+    }
+
+    #[test]
+    fn padding_cap_is_inclusive() {
+        // 513 columns over one-cell rows: before row k (0-based) the table
+        // has padded 512 * k cells, so row 1024 is the one that stands
+        // exactly on the cap, and it is still taken.
+        let cols = 513;
+        assert_eq!((cols - 1) * 1024, MAX_PADDING_CELLS);
+        let md = format!(
+            "{}|\n{}|\n{}",
+            "|a".repeat(cols),
+            "|-".repeat(cols),
+            "x\n".repeat(1100)
+        );
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let doc = super::parse(&md, Dialect::Gfm, &mut m).unwrap();
+        let Block::Table { rows, .. } = &doc.blocks[0] else {
+            panic!("not a table");
+        };
+        assert_eq!(rows.len(), 1025);
+    }
 }
