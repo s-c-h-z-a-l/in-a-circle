@@ -264,6 +264,23 @@ are in `CLAUDE.md`.
   gives the same bytes. One chapter's XHTML is in memory at a time; the
   table of contents and the package document are built first from the
   headings. On a failure the packer cuts the file back to empty.
+- A book of several documents (`epub::write_book`) splits each document
+  the same way; the chapter files are numbered across the book and the
+  1,024 limit counts them all. The table of contents lists each document
+  under its title (its first H1, else its file stem, from the caller),
+  with its chapters below it when it has more than one; a book of one
+  document lists its chapters at the top, as above. Images come from the
+  caller (the packer opens no file): it resolves each image destination
+  of each document once, before anything is written, to one of the
+  JPEG or PNG images it was given, and copies each packaged image's bytes
+  exactly, streamed, never held whole; a short or long copy fails the
+  book. An image is packaged once however many destinations refer to it,
+  as `OEBPS/img/0001.<jpg|png>` onwards in the order the documents first
+  refer to it, and written as an `<img>`; an image no document refers to
+  goes, in the caller's order, to a last chapter `Images`, one figure per
+  page with the file name as its alt text, and counts toward the chapter
+  limit. Image bytes are not charged to the output budget (the caller
+  bounds each image and the archive is bounded by the ZIP writer).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always

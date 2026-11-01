@@ -837,6 +837,11 @@ impl Writer<'_> {
             Some(i) => normalize(&format!("{}/{path}", &own[..i])),
             None => normalize(&path),
         };
+        if target.is_empty() {
+            // `./` or `x/..`: a folder, never a document (an empty key
+            // names none).
+            return None;
+        }
         let part = refs.keys.iter().position(|k| *k == target)?;
         let anchors = &refs.anchors[part];
         match fragment {

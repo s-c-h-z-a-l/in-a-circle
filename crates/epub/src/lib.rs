@@ -1,27 +1,30 @@
-//! EPUB 3 packer: a [`Document`] as a reflowable book, through the stored
-//! ZIP writer.
+//! EPUB 3 packer: one or several [`Document`]s and their images as a
+//! reflowable book, through the stored ZIP writer.
 //!
 //! Layout: `mimetype` first and stored (no extra field), then
 //! `META-INF/container.xml`, `OEBPS/content.opf`, `OEBPS/nav.xhtml` (the
-//! EPUB 3 table of contents; no NCX), `OEBPS/style.css` and one XHTML file
-//! per chapter, `OEBPS/ch0001.xhtml` onwards. The chapters are the split of
-//! [`doc::book::split`]; the table of contents lists them and, one level
-//! below, their top-level headings of the next level.
+//! EPUB 3 table of contents; no NCX), `OEBPS/style.css`, one XHTML file
+//! per chapter, `OEBPS/ch0001.xhtml` onwards, and the images,
+//! `OEBPS/img/0001.jpg` onwards. The chapters are each document's split
+//! of [`doc::book::split`]; the table of contents lists them (under their
+//! document's entry in a book of several) and, one level below, their
+//! top-level headings of the next level.
 //!
 //! Memory: the package document and the table of contents are built first
-//! from the chapters' titles and heading ids (bounded by the headings'
-//! text); then one chapter's XHTML at a time is written and streamed into
-//! the archive. Nothing depends on the clock or chance: the identifier is
+//! from the chapters' titles and heading ids and the images' destinations
+//! (bounded by the documents' text); then one chapter's XHTML at a time is
+//! written and streamed into the archive, and the images are copied from
+//! the caller's [`ImageSource`] through a fixed buffer. Nothing depends on the clock or chance: the identifier is
 //! a hash of [`Meta::id_seed`], the modification time is the caller's, so
 //! the same input gives the same bytes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::{fmt, ops::Range};
 
 use doc::book::{self, MAX_CHAPTERS};
-use doc::xhtml::{self, Anchors, Chapter, Mode};
+use doc::xhtml::{self, Anchors, Chapter};
 use doc::{Block, Document, LimitError, Limits, Loss};
 use zip::{StoreWriter, WriteError};
 
@@ -44,8 +47,12 @@ pub struct Meta {
 
 #[derive(Debug)]
 pub enum BookError {
+    /// No document was given; nothing was written.
+    NoDocuments,
     /// The split gives more than [`MAX_CHAPTERS`]; nothing was written.
     TooManyChapters,
+    /// An image could not be opened for copying.
+    Image(io::Error),
     Zip(WriteError),
     /// The output budget ran out (or memory for the next piece).
     Limit(LimitError),
@@ -66,9 +73,11 @@ impl BookError {
 impl fmt::Display for BookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoDocuments => f.write_str("book has no documents"),
             Self::TooManyChapters => {
                 write!(f, "book would have more than {MAX_CHAPTERS} chapters")
             }
+            Self::Image(e) => write!(f, "reading an image failed: {e}"),
             Self::Zip(e) => e.fmt(f),
             Self::Limit(e) => e.fmt(f),
             Self::Io(e) => write!(f, "write failed: {e}"),
@@ -255,11 +264,16 @@ fn chapter_file(i: usize) -> String {
     format!("ch{:04}.xhtml", i + 1)
 }
 
-/// One chapter's entry in the table of contents.
+/// One entry of the table of contents: a chapter, or a document whose
+/// chapters are listed below it.
 struct Toc {
+    /// The chapter file the entry opens.
+    file: String,
     title: String,
     /// (id, text) of the top-level headings one level below the chapter's.
     below: Vec<(String, String)>,
+    /// A document's chapters, when it has more than one.
+    children: Vec<Toc>,
 }
 
 /// The heading level the chapters start at: the split's, or for a book of
@@ -280,11 +294,13 @@ fn chapter_level(doc: &Document, ranges: &[Range<usize>]) -> Option<u8> {
     }
 }
 
+/// The entries of one document's `chapters`; a single chapter without a
+/// heading is named `doc_title`.
 fn toc(
     chapters: &[Chapter],
     anchors: &Anchors,
     level: Option<u8>,
-    book_title: &str,
+    doc_title: &str,
     losses: &mut BTreeSet<Loss>,
 ) -> Vec<Toc> {
     let single = chapters.len() == 1;
@@ -294,7 +310,7 @@ fn toc(
         .map(|(i, ch)| {
             let has_heading = ch.blocks.iter().any(|b| matches!(b, Block::Heading { .. }));
             let title = if single && !has_heading {
-                book_title.to_string()
+                doc_title.to_string()
             } else {
                 clean(&book::chapter_title(ch.blocks, i), losses)
             };
@@ -318,9 +334,43 @@ fn toc(
                     }
                 }
             }
-            Toc { title, below }
+            Toc {
+                file: ch.file.clone(),
+                title,
+                below,
+                children: Vec::new(),
+            }
         })
         .collect()
+}
+
+fn nav_entries(s: &mut String, toc: &[Toc]) {
+    for t in toc {
+        s.push_str("<li><a href=\"");
+        s.push_str(&t.file);
+        s.push_str("\">");
+        esc(s, &t.title);
+        s.push_str("</a>");
+        if !t.below.is_empty() {
+            s.push_str("\n<ol>\n");
+            for (id, text) in &t.below {
+                s.push_str("<li><a href=\"");
+                s.push_str(&t.file);
+                s.push('#');
+                fragment(s, id);
+                s.push_str("\">");
+                esc(s, text);
+                s.push_str("</a></li>\n");
+            }
+            s.push_str("</ol>\n");
+        }
+        if !t.children.is_empty() {
+            s.push_str("\n<ol>\n");
+            nav_entries(s, &t.children);
+            s.push_str("</ol>\n");
+        }
+        s.push_str("</li>\n");
+    }
 }
 
 fn nav(toc: &[Toc], title: &str, lang: &str) -> String {
@@ -334,33 +384,20 @@ fn nav(toc: &[Toc], title: &str, lang: &str) -> String {
     s.push_str("</title>\n</head>\n<body>\n<nav epub:type=\"toc\" id=\"toc\">\n<h1>");
     esc(&mut s, title);
     s.push_str("</h1>\n<ol>\n");
-    for (i, t) in toc.iter().enumerate() {
-        let file = chapter_file(i);
-        s.push_str("<li><a href=\"");
-        s.push_str(&file);
-        s.push_str("\">");
-        esc(&mut s, &t.title);
-        s.push_str("</a>");
-        if !t.below.is_empty() {
-            s.push_str("\n<ol>\n");
-            for (id, text) in &t.below {
-                s.push_str("<li><a href=\"");
-                s.push_str(&file);
-                s.push('#');
-                fragment(&mut s, id);
-                s.push_str("\">");
-                esc(&mut s, text);
-                s.push_str("</a></li>\n");
-            }
-            s.push_str("</ol>\n");
-        }
-        s.push_str("</li>\n");
-    }
+    nav_entries(&mut s, toc);
     s.push_str("</ol>\n</nav>\n</body>\n</html>\n");
     s
 }
 
-fn opf(meta: &Meta, title: &str, lang: &str, chapters: usize) -> String {
+/// The package document; `images` are the packaged images' names inside
+/// `OEBPS/` with their kinds, in package order.
+fn opf(
+    meta: &Meta,
+    title: &str,
+    lang: &str,
+    chapters: usize,
+    images: &[(String, ImageKind)],
+) -> String {
     let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     s.push_str("<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"uid\" xml:lang=\"");
     s.push_str(lang);
@@ -382,6 +419,13 @@ fn opf(meta: &Meta, title: &str, lang: &str, chapters: usize) -> String {
             n = i + 1
         ));
     }
+    for (i, (name, kind)) in images.iter().enumerate() {
+        s.push_str(&format!(
+            "<item id=\"img{:04}\" href=\"{name}\" media-type=\"{}\"/>\n",
+            i + 1,
+            kind.media_type()
+        ));
+    }
     s.push_str("</manifest>\n<spine>\n");
     for i in 0..chapters {
         s.push_str(&format!("<itemref idref=\"ch{:04}\"/>\n", i + 1));
@@ -390,8 +434,8 @@ fn opf(meta: &Meta, title: &str, lang: &str, chapters: usize) -> String {
     s
 }
 
-/// The chapter file around a body from [`xhtml::write_chapter`]'s
-/// fragment mode, up to and including `<body>`.
+/// The chapter file around a body from [`xhtml::write_book_chapter`], up
+/// to and including `<body>`.
 fn chapter_head(title: &str, lang: &str) -> String {
     let mut s = String::from(XHTML_START);
     s.push_str("<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"");
@@ -423,28 +467,229 @@ fn add(zip: &mut StoreWriter, name: &str, parts: &[&str]) -> Result<(), WriteErr
     Ok(())
 }
 
-/// Writes `doc` as an EPUB 3 book to `out`, which must be a new, empty file
-/// opened for writing (the first byte is written at offset 0, and an error
-/// cuts the file back to empty). Returns what the conversion lost. The whole book's
-/// XHTML (chapters, table of contents, package document) is charged to
-/// `limits.output_bytes`.
-///
-/// More than [`MAX_CHAPTERS`] chapters is `TooManyChapters`, before
-/// anything is written. On any other error the file is cut back to empty
-/// (best effort; removing it stays the caller's job), so no half book is
-/// left that a reader might open.
+/// One document of a book.
+#[derive(Debug, Clone)]
+pub struct Part<'a> {
+    pub doc: &'a Document,
+    /// The document's entry in the table of contents of a book of several
+    /// documents (the caller's choice: its first H1, else its file stem).
+    /// A book of one document lists its chapters at the top level and uses
+    /// [`Meta::title`] instead.
+    pub title: String,
+    /// The document's path as the other documents' links name it, relative
+    /// to the folder of their own key: the file name for documents side by
+    /// side (see [`xhtml::Refs::keys`]). An empty key is never a target.
+    pub file_key: String,
+}
+
+/// The two image formats a book packages (what EPUB 3 calls core media
+/// types and every reader shows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Jpeg,
+    Png,
+}
+
+impl ImageKind {
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+        }
+    }
+
+    fn media_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+        }
+    }
+}
+
+/// An image the caller offers the book.
+#[derive(Debug, Clone)]
+pub struct Image {
+    /// What the caller checked the bytes to be; the packer does not look.
+    pub kind: ImageKind,
+    /// Its exact size: the copy must give this many bytes.
+    pub len: u64,
+    /// The alt text in the `Images` chapter (the file name).
+    pub alt: String,
+}
+
+/// The images of a book, held by the caller: the packer opens no file and
+/// never holds an image whole.
+pub trait ImageSource {
+    /// The image (an index below [`count`](Self::count)) that the image
+    /// destination `dest` of document `part` refers to, as the document
+    /// writes it; `None` keeps the alt text. Called at most once per
+    /// document and destination, before anything is written; an index out
+    /// of range counts as `None`.
+    fn resolve(&mut self, part: usize, dest: &str) -> Option<usize>;
+    /// How many images there are. The ones no document refers to go to the
+    /// `Images` chapter at the end, in index order.
+    fn count(&self) -> usize;
+    fn image(&self, i: usize) -> &Image;
+    /// The bytes of image `i` from the first, exactly [`Image::len`] of
+    /// them (fewer or more fails the book). Called once per packaged image,
+    /// after the chapters.
+    fn open(&mut self, i: usize) -> io::Result<Box<dyn Read + '_>>;
+}
+
+/// A book without images.
+pub struct NoImages;
+
+impl ImageSource for NoImages {
+    fn resolve(&mut self, _: usize, _: &str) -> Option<usize> {
+        None
+    }
+    fn count(&self) -> usize {
+        0
+    }
+    fn image(&self, _: usize) -> &Image {
+        unreachable!("NoImages has no image")
+    }
+    fn open(&mut self, _: usize) -> io::Result<Box<dyn Read + '_>> {
+        Err(io::ErrorKind::NotFound.into())
+    }
+}
+
+/// Title of the chapter of images no document refers to.
+const IMAGES_TITLE: &str = "Images";
+
+/// Added to the stylesheet of a book with an `Images` chapter: one image
+/// per page, centered.
+const STYLE_IMAGES: &str = "figure{margin:0;text-align:center;page-break-after:always}\n";
+
+/// Which images go into the book, and under which names.
+struct Packing {
+    /// (document, destination) -> package number, for the ones resolved.
+    by_dest: HashMap<(usize, String), usize>,
+    /// Source index per package number: the referenced ones in the order
+    /// the documents first refer to them, then the unreferenced ones.
+    order: Vec<usize>,
+    /// Name inside `OEBPS/` per package number (`img/0001.jpg`: four
+    /// digits, as the input limit of 1024 needs; more digits past 9999).
+    names: Vec<(String, ImageKind)>,
+    /// The first package number of the `Images` chapter.
+    unreferenced: usize,
+}
+
+impl Packing {
+    fn new(parts: &[Part], images: &mut dyn ImageSource) -> Packing {
+        let count = images.count();
+        let mut asked: HashSet<(usize, String)> = HashSet::new();
+        let mut by_dest = HashMap::new();
+        let mut number: Vec<Option<usize>> = vec![None; count];
+        let mut order = Vec::new();
+        for (p, part) in parts.iter().enumerate() {
+            xhtml::image_dests(&part.doc.blocks, &mut |dest| {
+                if !asked.insert((p, dest.to_string())) {
+                    return;
+                }
+                let Some(i) = images.resolve(p, dest).filter(|&i| i < count) else {
+                    return;
+                };
+                let n = *number[i].get_or_insert_with(|| {
+                    order.push(i);
+                    order.len() - 1
+                });
+                by_dest.insert((p, dest.to_string()), n);
+            });
+        }
+        let unreferenced = order.len();
+        order.extend((0..count).filter(|&i| number[i].is_none()));
+        let names = order
+            .iter()
+            .enumerate()
+            .map(|(n, &i)| {
+                let kind = images.image(i).kind;
+                (format!("img/{:04}.{}", n + 1, kind.ext()), kind)
+            })
+            .collect();
+        Packing {
+            by_dest,
+            order,
+            names,
+            unreferenced,
+        }
+    }
+
+    fn has_images_chapter(&self) -> bool {
+        self.unreferenced < self.order.len()
+    }
+}
+
+/// The packaged images as one document's chapters see them.
+struct PartImages<'a> {
+    part: usize,
+    packing: &'a Packing,
+}
+
+impl xhtml::Images for PartImages<'_> {
+    fn src(&self, dest: &str) -> Option<String> {
+        let n = *self.packing.by_dest.get(&(self.part, dest.to_string()))?;
+        Some(self.packing.names[n].0.clone())
+    }
+}
+
+/// Writes `doc` as an EPUB 3 book to `out`: [`write_book`] with `doc` as
+/// the only document and no images.
 pub fn write(
     doc: &Document,
     meta: &Meta,
     out: File,
     limits: Limits,
 ) -> Result<BTreeSet<Loss>, BookError> {
-    let ranges = book::split(doc);
-    if ranges.len() > MAX_CHAPTERS {
+    let part = Part {
+        doc,
+        title: meta.title.clone(),
+        file_key: String::new(),
+    };
+    write_book(&[part], &mut NoImages, meta, out, limits)
+}
+
+/// Writes `parts` as one EPUB 3 book to `out`, which must be a new, empty
+/// file opened for writing (the first byte is written at offset 0, and an
+/// error cuts the file back to empty). Returns what the conversion lost.
+/// The whole book's XHTML (chapters, table of contents, package document)
+/// is charged to `limits.output_bytes`; the images are copied as they are
+/// and not charged (the caller bounds them).
+///
+/// Every document is split into chapters, one XHTML file each, numbered
+/// across the book. A book of one document lists its chapters at the top
+/// of the table of contents; a book of several lists each document under
+/// its [`Part::title`], its chapters below it when it has more than one.
+/// Images the documents refer to are packaged once each and written as
+/// `<img>`; the ones no document refers to make a last chapter, `Images`,
+/// one figure each.
+///
+/// No document is `NoDocuments`, and more than [`MAX_CHAPTERS`] chapters
+/// (the `Images` chapter included) is `TooManyChapters`, both before
+/// anything is written. On any other error the file is cut back to empty
+/// (best effort; removing it stays the caller's job), so no half book is
+/// left that a reader might open.
+pub fn write_book(
+    parts: &[Part],
+    images: &mut dyn ImageSource,
+    meta: &Meta,
+    out: File,
+    limits: Limits,
+) -> Result<BTreeSet<Loss>, BookError> {
+    if parts.is_empty() {
+        return Err(BookError::NoDocuments);
+    }
+    let splits: Vec<Vec<Range<usize>>> = parts.iter().map(|p| book::split(p.doc)).collect();
+    let chapters: usize = splits.iter().map(Vec::len).sum();
+    if chapters > MAX_CHAPTERS {
+        return Err(BookError::TooManyChapters);
+    }
+    let packing = Packing::new(parts, images);
+    if chapters + usize::from(packing.has_images_chapter()) > MAX_CHAPTERS {
         return Err(BookError::TooManyChapters);
     }
     let guard = out.try_clone().map_err(BookError::Io)?;
-    let r = pack(doc, meta, out, limits, &ranges);
+    let r = pack(parts, &splits, images, &packing, meta, out, limits);
     if r.is_err() {
         let _ = guard.set_len(0);
     }
@@ -452,63 +697,165 @@ pub fn write(
 }
 
 fn pack(
-    doc: &Document,
+    parts: &[Part],
+    splits: &[Vec<Range<usize>>],
+    images: &mut dyn ImageSource,
+    packing: &Packing,
     meta: &Meta,
     out: File,
     limits: Limits,
-    ranges: &[Range<usize>],
 ) -> Result<BTreeSet<Loss>, BookError> {
     let mut losses = BTreeSet::new();
     let lang = lang_tag(&meta.lang);
     let title = clean(&meta.title, &mut losses);
     let title = if title.is_empty() { UNTITLED } else { &title };
 
-    let chapters: Vec<Chapter> = ranges
+    // Chapters numbered across the book, grouped by document.
+    let mut next = 0;
+    let chapters: Vec<Vec<Chapter>> = parts
         .iter()
-        .enumerate()
-        .map(|(i, r)| Chapter {
-            blocks: &doc.blocks[r.clone()],
-            file: chapter_file(i),
+        .zip(splits)
+        .map(|(part, ranges)| {
+            ranges
+                .iter()
+                .map(|r| {
+                    next += 1;
+                    Chapter {
+                        blocks: &part.doc.blocks[r.clone()],
+                        file: chapter_file(next - 1),
+                    }
+                })
+                .collect()
         })
         .collect();
-    let anchors = Anchors::build(&chapters);
-    let toc = toc(
-        &chapters,
-        &anchors,
-        chapter_level(doc, ranges),
-        title,
-        &mut losses,
-    );
+    let anchors: Vec<Anchors> = chapters.iter().map(|c| Anchors::build(c)).collect();
+    let keys: Vec<String> = parts
+        .iter()
+        .map(|p| xhtml::normalize(&p.file_key))
+        .collect();
+
+    let mut toc_entries = Vec::new();
+    // Each chapter's title, for its head, in book order.
+    let mut heads = Vec::new();
+    if parts.len() == 1 {
+        let t = toc(
+            &chapters[0],
+            &anchors[0],
+            chapter_level(parts[0].doc, &splits[0]),
+            title,
+            &mut losses,
+        );
+        heads.extend(t.iter().map(|t| t.title.clone()));
+        toc_entries = t;
+    } else {
+        for (p, part) in parts.iter().enumerate() {
+            let doc_title = clean(&part.title, &mut losses);
+            let doc_title = if doc_title.is_empty() {
+                UNTITLED.to_string()
+            } else {
+                doc_title
+            };
+            let mut t = toc(
+                &chapters[p],
+                &anchors[p],
+                chapter_level(part.doc, &splits[p]),
+                &doc_title,
+                &mut losses,
+            );
+            if t.len() == 1 {
+                // One chapter: the document's own entry.
+                t[0].title = doc_title;
+                heads.push(t[0].title.clone());
+                toc_entries.append(&mut t);
+            } else {
+                heads.extend(t.iter().map(|t| t.title.clone()));
+                toc_entries.push(Toc {
+                    file: t[0].file.clone(),
+                    title: doc_title,
+                    below: Vec::new(),
+                    children: t,
+                });
+            }
+        }
+    }
+    let images_file = chapter_file(next);
+    if packing.has_images_chapter() {
+        toc_entries.push(Toc {
+            file: images_file.clone(),
+            title: IMAGES_TITLE.to_string(),
+            below: Vec::new(),
+            children: Vec::new(),
+        });
+    }
 
     let mut used = 0;
-    let nav = nav(&toc, title, lang);
+    let nav = nav(&toc_entries, title, lang);
     charge(&mut used, nav.len(), limits)?;
-    let opf = opf(meta, title, lang, chapters.len());
+    let spine = next + usize::from(packing.has_images_chapter());
+    let opf = opf(meta, title, lang, spine, &packing.names);
     charge(&mut used, opf.len(), limits)?;
+    drop(toc_entries);
 
     let mut zip = StoreWriter::new(out);
     add(&mut zip, "mimetype", &[MIMETYPE])?;
     add(&mut zip, "META-INF/container.xml", &[CONTAINER])?;
     add(&mut zip, "OEBPS/content.opf", &[&opf])?;
     add(&mut zip, "OEBPS/nav.xhtml", &[&nav])?;
-    add(&mut zip, "OEBPS/style.css", &[xhtml::STYLE_EPUB])?;
+    let style: &[&str] = if packing.has_images_chapter() {
+        &[xhtml::STYLE_EPUB, STYLE_IMAGES]
+    } else {
+        &[xhtml::STYLE_EPUB]
+    };
+    add(&mut zip, "OEBPS/style.css", style)?;
     drop((nav, opf));
 
-    for (ch, t) in chapters.iter().zip(&toc) {
-        let head = chapter_head(&t.title, lang);
-        charge(&mut used, head.len() + CHAPTER_END.len(), limits)?;
-        let budget = Limits {
-            output_bytes: limits.output_bytes - used,
-            ..limits
+    let mut heads = heads.iter();
+    for (p, chs) in chapters.iter().enumerate() {
+        let part_images = PartImages { part: p, packing };
+        let refs = xhtml::Refs {
+            anchors: &anchors,
+            keys: &keys,
+            part: p,
+            images: &part_images,
         };
-        let (body, lost) = xhtml::write_chapter(ch, &anchors, &Mode::Fragment, budget)?;
+        for ch in chs {
+            let head = chapter_head(heads.next().map_or("", String::as_str), lang);
+            charge(&mut used, head.len() + CHAPTER_END.len(), limits)?;
+            let budget = Limits {
+                output_bytes: limits.output_bytes - used,
+                ..limits
+            };
+            let (body, lost) = xhtml::write_book_chapter(ch, &refs, budget)?;
+            charge(&mut used, body.len(), limits)?;
+            losses.extend(lost);
+            add(
+                &mut zip,
+                &format!("OEBPS/{}", ch.file),
+                &[&head, &body, CHAPTER_END],
+            )?;
+        }
+    }
+    if packing.has_images_chapter() {
+        let mut body = chapter_head(IMAGES_TITLE, lang);
+        body.push_str("<h1>");
+        body.push_str(IMAGES_TITLE);
+        body.push_str("</h1>\n");
+        for n in packing.unreferenced..packing.order.len() {
+            let alt = clean(&images.image(packing.order[n]).alt, &mut losses);
+            body.push_str("<figure><img src=\"");
+            body.push_str(&packing.names[n].0);
+            body.push_str("\" alt=\"");
+            esc(&mut body, &alt);
+            body.push_str("\"/></figure>\n");
+        }
+        body.push_str(CHAPTER_END);
         charge(&mut used, body.len(), limits)?;
-        losses.extend(lost);
-        add(
-            &mut zip,
-            &format!("OEBPS/{}", ch.file),
-            &[&head, &body, CHAPTER_END],
-        )?;
+        add(&mut zip, &format!("OEBPS/{images_file}"), &[&body])?;
+    }
+    for (n, &i) in packing.order.iter().enumerate() {
+        let len = images.image(i).len;
+        let mut r = images.open(i).map_err(BookError::Image)?;
+        zip.add_exact(&format!("OEBPS/{}", packing.names[n].0), &mut r, len)?;
     }
     zip.finish()?;
     Ok(losses)
