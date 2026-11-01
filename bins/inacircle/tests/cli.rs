@@ -1798,17 +1798,17 @@ fn offer_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tgroup=document\tdir=2\tpreset=html\tlabel=HTML\tapplicable=2\tdisabled=no action installed\n\
+        "slice\tgroup=document\tdir=2\tpreset=html\tlabel=HTML\tapplicable=2\n\
          slice\tgroup=document\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\n\
-         slice\tgroup=book\tdir=2\tpreset=epub\tlabel=EPUB\tapplicable=2\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub\tlabel=EPUB\tapplicable=2\n\
          hub\t2 / 3 files\n"
     );
     let o = e.run(&["offer", "a.txt"]);
     assert_eq!(
         o.stdout,
         "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
-         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
-         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
          hub\ta.txt\n"
     );
 }
@@ -1823,12 +1823,12 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
@@ -1850,8 +1850,8 @@ fn offer_counts_the_same_file_once() {
     assert_eq!(
         o.stdout,
         "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
-         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
-         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
          hub\ta.txt\n"
     );
 }
@@ -1870,8 +1870,8 @@ fn offer_pdfs_and_one_txt() {
     assert_eq!(
         o.stdout,
         "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
-         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
-         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
          hub\t1 / 6 files\n"
     );
 }

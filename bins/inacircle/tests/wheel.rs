@@ -684,6 +684,87 @@ fn wheel_offers_and_runs_txt_to_md() {
     );
 }
 
+/// The history holds one group for the run; undoing its job moves the
+/// wrapper folder `wrapper` (under `f/`) to the Trash with `file` in it.
+fn assert_one_group_and_undo(root: &Root, wrapper: &str, file: &str) {
+    let history = fs::read_to_string(root.0.join("state/inacircle/history")).unwrap();
+    let begins = history
+        .lines()
+        .filter(|l| l.starts_with("group-begin\t"))
+        .count();
+    assert_eq!(begins, 1, "{history}");
+    let job = history
+        .lines()
+        .find(|l| l.starts_with("job-start\t"))
+        .and_then(|l| l.split('\t').find_map(|f| f.strip_prefix("job=")))
+        .unwrap_or_else(|| panic!("no job in {history}"));
+    let u = root.cmd().args(["undo", job]).output().unwrap();
+    assert!(u.status.success(), "{u:?}");
+    assert!(
+        !root.0.join("f").join(wrapper).exists(),
+        "the wrapper stayed"
+    );
+    assert!(
+        root.0
+            .join("home/.local/share/Trash/files")
+            .join(wrapper)
+            .join(file)
+            .is_file()
+    );
+}
+
+/// Real `inacircle-text` on the wheel: a dropped `.md` lights Book (east),
+/// whose east slice is EPUB; clicking it writes the book next to the
+/// source in its wrapper folder, as one history group that Undo trashes.
+/// The drawn wheel's slices are pinned by
+/// `markdown_menus_offer_epub_and_html_east` in the binary's unit tests.
+#[test]
+fn wheel_offers_and_runs_md_to_epub() {
+    let root = Root::new("md2epub");
+    root.real_action_cached("inacircle-text", ("primer.md", b"# x\n"), "epub");
+    let src = root.0.join("f/jegyzet.md");
+    fs::write(&src, "# Első fejezet\n\nSzöveg.\n").unwrap();
+    // The flat offer names the book slice for this file.
+    let offer = root.cmd().arg("offer").arg(&src).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(offer.contains("preset=epub"), "{offer}");
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Book is east of the center, EPUB is its east slice.
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (1110, 540));
+    assert_eq!(code, Some(0));
+    let epub = fs::read(root.0.join("f/jegyzet/jegyzet.epub")).expect("no EPUB written");
+    assert!(epub.starts_with(b"PK\x03\x04"));
+    assert!(
+        epub.windows(8).any(|w| w == b"mimetype"),
+        "the first entry is mimetype"
+    );
+    assert_eq!(
+        fs::read_to_string(&src).unwrap(),
+        "# Első fejezet\n\nSzöveg.\n",
+        "the source changed"
+    );
+    assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
+}
+
+/// The same with HTML: Document (north), its east slice HTML.
+#[test]
+fn wheel_offers_and_runs_md_to_html() {
+    let root = Root::new("md2html");
+    root.real_action_cached("inacircle-text", ("primer.md", b"# x\n"), "html");
+    let src = root.0.join("f/jegyzet.md");
+    fs::write(&src, "# Üdv\n\nSzöveg.\n").unwrap();
+    let offer = root.cmd().arg("offer").arg(&src).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(offer.contains("preset=html"), "{offer}");
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let code = choose_on_the_wheel(&root, &list, (960, 390), (1110, 540));
+    assert_eq!(code, Some(0));
+    let html = fs::read_to_string(root.0.join("f/jegyzet/jegyzet.html")).expect("no HTML written");
+    assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+    assert!(html.contains("<title>Üdv</title>"), "{html}");
+    assert_one_group_and_undo(&root, "jegyzet", "jegyzet.html");
+}
+
 /// Stage 2 comes from the catalog cache: an action binary the cache does
 /// not know, whose `--manifest` hangs, is not run while the overlay is up.
 /// Once the wheel closed, the catalog is refreshed in the same process

@@ -1493,6 +1493,66 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What the drawn wheels are built from for a Markdown file (`wheel::stage2`
+    /// paints a `Menu`'s labels, dim/normal states and hub as they are): Book
+    /// lights and its east slice is EPUB; Document's east slice is HTML.
+    #[test]
+    fn markdown_menus_offer_epub_and_html_east() {
+        let act = |id: &str, input: &str, out: &str, ext: &str, label: &str, group: &str| Action {
+            id: id.into(),
+            input: input.into(),
+            output: out.into(),
+            ext: ext.into(),
+            label: label.into(),
+            group: group.into(),
+            lossy: true,
+            ..md_catalog().actions.remove(0)
+        };
+        let mut actions = Vec::new();
+        for (name, input) in [("md", "text/markdown"), ("txt", "text/plain")] {
+            actions.push(act(
+                &format!("text.{name}-to-epub"),
+                input,
+                "application/epub+zip",
+                "epub",
+                "EPUB",
+                "book",
+            ));
+            actions.push(act(
+                &format!("text.{name}-to-html"),
+                input,
+                "text/html",
+                "html",
+                "HTML",
+                "document",
+            ));
+        }
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-md-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "# Title\n\ntext\n").unwrap();
+        let g = group_menu_for(vec![file], Some(Catalog { actions }));
+        assert_eq!(g.hub, "notes.md");
+        for (slice, group) in [(0, "document"), (2, "book")] {
+            let c = g.slices[slice].as_ref().unwrap();
+            assert_eq!((c.group.as_str(), c.lit), (group, true));
+        }
+        for (group, label, preset, hub) in [
+            ("book", "EPUB", "epub", "Book"),
+            ("document", "HTML", "html", "Document"),
+        ] {
+            let m = target_menu(&g, group);
+            let east = m.slices[2].as_ref().unwrap();
+            assert_eq!(
+                (east.label.as_str(), east.preset.as_str(), east.applicable),
+                (label, preset, true),
+                "{group}"
+            );
+            assert_eq!(m.hub, hub);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A selection nothing applies to says so on the hub, with the first
     /// file's type; one lit category keeps the usual hub.
     #[test]
