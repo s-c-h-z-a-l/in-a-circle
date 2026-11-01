@@ -1687,6 +1687,44 @@ mod tests {
         assert_eq!(losses, BTreeSet::from([Loss::Links]));
     }
 
+    /// A leading `/` (also written `%2F`) names no document of the book,
+    /// whatever folder the linking document is in; an external address is
+    /// kept as it is even when a document has the same name.
+    #[test]
+    fn absolute_and_external_links_never_name_a_document() {
+        let parts = [
+            ("d/a.md", "[1](/b.md) [2](%2Fb.md) [3](b.md)\n"),
+            ("d/b.md", "# B\n"),
+        ];
+        let out = render_book(&parts, &Packaged(vec![]));
+        let (a, losses) = &out[0];
+        assert!(a.contains("<a href=\"ch0002.xhtml\">3</a>"), "{a}");
+        assert!(!a.contains("href=\"ch0002.xhtml\">1<"), "{a}");
+        assert!(!a.contains("href=\"ch0002.xhtml\">2<"), "{a}");
+        assert!(a.starts_with("<p>1 2 <a "), "{a}");
+        assert_eq!(*losses, BTreeSet::from([Loss::Links]));
+
+        let parts = [
+            (
+                "a.md",
+                "[m](mailto:b.md) [h](http://x/b.md) [s](https://x/b.md)\n",
+            ),
+            ("mailto:b.md", "# M\n"),
+            ("http:/x/b.md", "# H\n"),
+            ("https:/x/b.md", "# S\n"),
+        ];
+        let out = render_book(&parts, &Packaged(vec![]));
+        let (a, losses) = &out[0];
+        for want in [
+            "<a href=\"mailto:b.md\">m</a>",
+            "<a href=\"http://x/b.md\">h</a>",
+            "<a href=\"https://x/b.md\">s</a>",
+        ] {
+            assert!(a.contains(want), "{want}\n{a}");
+        }
+        assert!(losses.is_empty(), "{losses:?}");
+    }
+
     /// `image_dests` lists exactly the images the writer asks the book
     /// for, in its order: every place an image can be written, and the
     /// places where it is not.
