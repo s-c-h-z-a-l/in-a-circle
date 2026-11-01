@@ -97,6 +97,43 @@ impl Anchors {
         }
         a
     }
+
+    /// The ids of the top-level headings of chapter `chapter` (its index in
+    /// the chapters given to [`Anchors::build`]), each with the heading's
+    /// index in `blocks`, which must be that chapter's blocks. A book's
+    /// table of contents links to these. Empty for a chapter it does not
+    /// know.
+    pub fn top_level_ids<'a>(&'a self, chapter: usize, blocks: &[Block]) -> Vec<(usize, &'a str)> {
+        let Some(ids) = self.headings.get(chapter) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        // Position in `ids`, which hold every heading depth first.
+        let mut k = 0;
+        for (i, b) in blocks.iter().enumerate() {
+            if let Block::Heading { .. } = b {
+                if let Some(id) = ids.get(k) {
+                    out.push((i, id.as_str()));
+                }
+                k += 1;
+            } else {
+                k += count_headings(std::slice::from_ref(b));
+            }
+        }
+        out
+    }
+}
+
+/// How many headings [`headings`] finds in `bs` (the same walk).
+fn count_headings(bs: &[Block]) -> usize {
+    bs.iter()
+        .map(|b| match b {
+            Block::Heading { .. } => 1,
+            Block::BlockQuote(c) => count_headings(c),
+            Block::List { items, .. } => items.iter().map(|i| count_headings(&i.blocks)).sum(),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Plain texts of the headings in `bs`, depth first in document order (the
@@ -121,7 +158,7 @@ fn headings(bs: &[Block], out: &mut Vec<String>) {
 }
 
 /// The text of `is` without any markup: what a heading id is made from.
-pub(crate) fn plain(is: &[Inline], out: &mut String) {
+pub fn plain(is: &[Inline], out: &mut String) {
     for i in is {
         match i {
             Inline::Text(t) | Inline::Code(t) => out.push_str(t),
@@ -210,7 +247,7 @@ img{max-width:100%}
 /// a noncharacter. The noncharacters are U+FDD0..=U+FDEF and the last two
 /// code points of every plane (U+FFFE, U+FFFF, U+1FFFE, ...); XML allows
 /// those of planes 1-16, but the standalone page must also be valid HTML.
-fn xml_char(c: char) -> bool {
+pub fn xml_char(c: char) -> bool {
     let noncharacter = ('\u{FDD0}'..='\u{FDEF}').contains(&c) || (c as u32) & 0xFFFE == 0xFFFE;
     !noncharacter
         && matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
@@ -849,6 +886,28 @@ mod tests {
         assert!(out.contains("<a href=\"#first\">self</a>"), "{out}");
         assert!(losses.is_empty());
         well_formed(&out).unwrap();
+    }
+
+    #[test]
+    fn top_level_ids_skip_nested_headings() {
+        // The nested headings (in a quote and a list) take ids first, so the
+        // top-level ones must be found past them, as the writer numbers them.
+        let d1 = doc("# Intro\n");
+        let d2 = doc("# Intro\n\n> ## Intro\n\n- ### Intro\n\n## Intro\n\ntext\n");
+        let chapters = [
+            chapter(&d1.blocks, "c1.xhtml"),
+            chapter(&d2.blocks, "c2.xhtml"),
+        ];
+        let a = Anchors::build(&chapters);
+        assert_eq!(a.top_level_ids(0, &d1.blocks), [(0, "intro")]);
+        assert_eq!(
+            a.top_level_ids(1, &d2.blocks),
+            [(0, "intro-1"), (3, "intro-4")]
+        );
+        let (out, _) = write_chapter(&chapters[1], &a, &Mode::Fragment, Limits::UNLIMITED).unwrap();
+        assert!(out.contains("<h2 id=\"intro-4\">"), "{out}");
+        // A chapter the anchors do not know has no ids.
+        assert!(a.top_level_ids(2, &d1.blocks).is_empty());
     }
 
     #[test]

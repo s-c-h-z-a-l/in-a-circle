@@ -228,6 +228,26 @@ are in `CLAUDE.md`.
   `left`, `center` or `right` class, so the output needs no form element and
   no inline style. Every piece counts against the output budget before it
   is appended.
+- The book packer, `crates/epub` (doc and zip, no XML parser), writes a
+  document as an EPUB 3 book through the stored ZIP writer: `mimetype`
+  first and stored, `META-INF/container.xml`, `OEBPS/content.opf`,
+  `OEBPS/nav.xhtml` (the EPUB 3 table of contents; no NCX),
+  `OEBPS/style.css` (tables and code only; typeface, size and measure
+  stay the reader's) and one XHTML file per chapter,
+  `OEBPS/ch0001.xhtml` onwards. Chapters split at the top-level H1s when
+  there are at least two, else at the H2s when there are at least two,
+  else the document is one chapter; content before the first split
+  heading is its own chapter; at most 1,024 chapters
+  (`book would have more than 1024 chapters`, nothing written). The table
+  of contents lists the chapters and, one level below, their top-level
+  headings of the next level. The metadata is deterministic: `dc:title`
+  and `dc:language` (a tag that is not well-formed is `und`) from the
+  caller, `dc:identifier` `urn:uuid:` plus a version 8 UUID made from a
+  128-bit FNV-1a hash of the input, and `dcterms:modified` the input's
+  modification time in UTC (`YYYY-MM-DDThh:mm:ssZ`), so the same input
+  gives the same bytes. One chapter's XHTML is in memory at a time; the
+  table of contents and the package document are built first from the
+  headings. On a failure the packer cuts the file back to empty.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -1077,15 +1097,16 @@ inacircle cancel <job-id>
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
-          probe, pdf (planned: toml)
+crates/   wire, dbus, ui, engine, manifest, action, doc, epub, flate,
+          zip, probe, pdf (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
           `inacircle-pages`, zip also writes archives with stored
-          entries only; the shipped `inacircle` links wire, dbus, ui,
-          engine, manifest and action, never `doc`, `flate`, `zip`,
-          `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
+          entries only; epub: the EPUB packer of `inacircle-text`; the
+          shipped `inacircle` links wire, dbus, ui, engine, manifest and
+          action, never `doc`, `epub`, `flate`, `zip`, `probe` or `pdf`;
+          `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,
           inacircle-testaction (test-only)
 tools/    gen-entities, bake-atlas, testzip (dev tools; bake-atlas alone
