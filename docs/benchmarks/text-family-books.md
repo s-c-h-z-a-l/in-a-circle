@@ -37,7 +37,7 @@ repository profile (fat LTO, `panic=abort`, strip).
 | Input (Markdown to EPUB) | Chapters | Table rows | Peak RSS |
 |---|---|---|---|
 | 8,387,584 B (limit 8,388,608) | 879 | 50,000 | 107,712 KiB |
-| 8,232,707 B | 1,000 | 40,000 | 92,076 KiB |
+| not recorded | 1,000 | 40,000 | 92,076 KiB |
 | 8,232,707 B | 1,000 | 10,000 | 46,276 KiB |
 
 The 107,712 KiB run produced an 11 MB book. In these runs the peak grows with the
@@ -49,10 +49,12 @@ shape above is the largest that is accepted.
 | Binary | Arch | File (B) | `.text` (B) |
 |---|---|---|---|
 | `inacircle` | x86_64 | 1,166,392 (+6,368) | 896,760 (+4,880) |
-| `inacircle-text` | x86_64 | 859,968 (+103,096) | 538,472 (+87,606) |
+| `inacircle-text` | x86_64 | 861,520 (+104,648) | 539,672 (+88,806) |
 | `inacircle-pages` | x86_64 | 504,208 | 403,763 (+496) |
 
-`inacircle-text` grew by more than 100 KB: the XHTML writer is about
+`inacircle-text` grew by more than 100 KB (the closing fixes of the
+link URLs and the page write account for 1,552 B of it; the itemised
+parts below are from the build before them): the XHTML writer is about
 39 KB, the EPUB packer about 20 KB, the ZIP writer about 3 KB, the book and
 action code about 30 KB, and the rest is `std` formatting, hashing and
 allocation. Its `.text` stays under the 1 MB budget. `inacircle` links
