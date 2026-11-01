@@ -111,31 +111,32 @@ jobs:
           sudo apt-get install -y --no-install-recommends qpdf poppler-utils libjpeg-turbo-progs
 
       # The book tests check whole EPUBs with W3C EPUBCheck and pages with
-      # the W3C Nu HTML validator (vnu), both Java. Pinned releases from
-      # GitHub, verified by SHA-256 (EPUBCheck's matches the digest GitHub
-      # publishes for the asset; vnu's zip matches its upstream .sha1),
-      # run through wrappers on PATH. vnu 20.6.30 is the latest release
-      # with a fixed tag (`latest` is rebuilt in place, so it cannot be
-      # pinned). INACIRCLE_REQUIRE_BOOK_TOOLS=1 makes a missing one a
-      # failure instead of a skip.
+      # the W3C Nu HTML validator (vnu), both Java. Pinned versions,
+      # verified by SHA-256 and run through wrappers on PATH: EPUBCheck's
+      # GitHub release zip (the hash matches the digest GitHub publishes
+      # for the asset) and vnu's npm package `vnu-jar` (a fixed version;
+      # the hash is of the registry tarball, whose sha512 matches the
+      # registry's integrity field; GitHub's `latest` vnu is rebuilt in
+      # place and cannot be pinned). INACIRCLE_REQUIRE_BOOK_TOOLS=1 makes
+      # a missing one a failure instead of a skip.
       - name: Install book test tools
         env:
           EPUBCHECK_VERSION: 5.4.0
           EPUBCHECK_SHA256: 33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c
-          VNU_VERSION: 20.6.30
-          VNU_SHA256: f6dc1464229756f582bdd6c083df11ec13e0d7389dd50b56e63133aa8b0dd200
+          VNU_VERSION: 26.10.12
+          VNU_SHA256: 3925f07364f5e5a111cef54a7baefa575b22d05c70f8ced048f0616d4579b7ab
         run: |
           sudo apt-get install -y --no-install-recommends default-jre-headless
           cd "$RUNNER_TEMP"
           curl -fsSLo epubcheck.zip "https://github.com/w3c/epubcheck/releases/download/v$EPUBCHECK_VERSION/epubcheck-$EPUBCHECK_VERSION.zip"
           echo "$EPUBCHECK_SHA256  epubcheck.zip" | sha256sum -c -
-          curl -fsSLo vnu.zip "https://github.com/validator/validator/releases/download/$VNU_VERSION/vnu.jar_$VNU_VERSION.zip"
-          echo "$VNU_SHA256  vnu.zip" | sha256sum -c -
+          curl -fsSLo vnu.tgz "https://registry.npmjs.org/vnu-jar/-/vnu-jar-$VNU_VERSION.tgz"
+          echo "$VNU_SHA256  vnu.tgz" | sha256sum -c -
           sudo mkdir -p /opt/book-tools
           sudo unzip -q epubcheck.zip -d /opt/book-tools
-          sudo unzip -q vnu.zip -d /opt/book-tools
+          sudo tar -xzf vnu.tgz -C /opt/book-tools package/build/dist/vnu.jar
           printf '#!/bin/sh\nexec java -jar /opt/book-tools/epubcheck-%s/epubcheck.jar "$@"\n' "$EPUBCHECK_VERSION" | sudo tee /usr/local/bin/epubcheck >/dev/null
-          printf '#!/bin/sh\nexec java -jar /opt/book-tools/dist/vnu.jar "$@"\n' | sudo tee /usr/local/bin/vnu >/dev/null
+          printf '#!/bin/sh\nexec java -jar /opt/book-tools/package/build/dist/vnu.jar "$@"\n' | sudo tee /usr/local/bin/vnu >/dev/null
           sudo chmod 755 /usr/local/bin/epubcheck /usr/local/bin/vnu
           epubcheck --version
           vnu --version
