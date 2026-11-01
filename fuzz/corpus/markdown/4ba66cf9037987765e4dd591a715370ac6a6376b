@@ -1,0 +1,11 @@
+[fo]
+
+[baz]: /url1
+[bar]:fobar][baz]
+
+[baz]: /url1
+[bar]: /urlbaz]
+
+[baz]: /ur
+[baz]:url
+]rb[1a2
