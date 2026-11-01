@@ -423,7 +423,8 @@ pub struct Anchor {
 }
 
 /// The place and name of a join result made of `accepted` (in the order
-/// the action gets them). The anchor is the folder with the most of them;
+/// the action gets them): a join's documents only, never its assets (the
+/// result is built around its documents). The anchor is the folder with the most of them;
 /// on a tie, the folder of the earliest input among the tied. The name is
 /// that folder's name for two or more inputs ([`JOIN_FALLBACK_NAME`] when
 /// it has none, or one starting with a dot), and the input's stem for one.

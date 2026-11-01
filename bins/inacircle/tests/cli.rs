@@ -1889,13 +1889,23 @@ const JOIN_ALL: &str = "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.p
 
 /// [`join_plugin`] running `body` (`$4` the work dir, `$6` the input list).
 fn join_plugin_with(e: &Env, body: &str) {
+    join_plugin_line(
+        e,
+        "action\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1",
+        body,
+    );
+}
+
+/// [`join_plugin_with`] whose manifest has the one action `line` (as a
+/// `printf` format: tabs as `\\t`).
+fn join_plugin_line(e: &Env, line: &str, body: &str) {
     let src = e.root.join("joiner.src");
     fs::write(
         &src,
         format!(
             "#!/bin/sh\n\
              if [ \"$1\" = --manifest ]; then\n\
-             printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
+             printf 'inacircle-manifest 0\\n{line}\\n'\n\
              exit 0\nfi\n{body}\n"
         ),
     )
@@ -1950,6 +1960,41 @@ fn run_join_preset_publishes_one_result() {
     let mut want = b"\xff\xd8\xff\xe0 jpeg".to_vec();
     want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
     assert_eq!(fs::read(&done[0].1).unwrap(), want);
+    assert_eq!(
+        o.pairs("skip"),
+        [(e.files().join("c.txt"), "unsupported".to_owned())]
+    );
+}
+
+/// The epub preset runs a document join with its images: the action gets
+/// the Markdown file first, then the images in natural order; the result
+/// is named after the one document; a file of neither role is skipped.
+#[test]
+fn run_document_join_with_assets() {
+    let e = Env::with_actions("run-join-assets", &[]);
+    join_plugin_line(
+        &e,
+        "action\\tp.md-join-epub\\tfamily=p\\tin=text/markdown\\tassets=image/jpeg,image/png\\tout=application/epub+zip\\text=epub\\tlabel=EPUB\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1",
+        JOIN_ALL,
+    );
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("notes.md", b"# Notes\n");
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["run", "epub", "b.png", "notes.md", "a.jpg", "c.txt"]);
+    if skip_no_sandbox("run_document_join_with_assets", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 1, 0));
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    let out = e.files().join("notes/notes.epub");
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let mut want = b"# Notes\n".to_vec();
+    want.extend_from_slice(b"\xff\xd8\xff\xe0 jpeg");
+    want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
+    assert_eq!(fs::read(&out).unwrap(), want);
     assert_eq!(
         o.pairs("skip"),
         [(e.files().join("c.txt"), "unsupported".to_owned())]

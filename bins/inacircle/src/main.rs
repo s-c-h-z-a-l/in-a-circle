@@ -377,10 +377,16 @@ fn cmd_run(mut args: Vec<OsString>) -> u8 {
     run(target, files, notify, cancel)
 }
 
-/// The input types `a` takes: its join set, else its one input type.
+/// The input types `a` takes: its join set and assets, else its one input
+/// type.
 fn join_types(a: &Action) -> Vec<&str> {
     match &a.join {
-        Some(j) => j.types.iter().map(String::as_str).collect(),
+        Some(j) => j
+            .types
+            .iter()
+            .chain(&j.assets)
+            .map(String::as_str)
+            .collect(),
         None => vec![a.input.as_str()],
     }
 }
@@ -477,9 +483,15 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         (true, Target::Preset(id) | Target::Action(id)) => id.to_owned(),
     };
 
-    // Classify before routing.
+    // Classify before routing. A join's assets go apart from its documents
+    // (`exec::run_join` orders and anchors on the documents).
     let mut pre = Vec::new();
     let mut inputs = Vec::new();
+    let mut assets = Vec::new();
+    let is_asset = |m: &str| {
+        join.and_then(|a| a.join.as_ref())
+            .is_some_and(|j| j.is_asset(m))
+    };
     for (f, c) in classified {
         match c {
             Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
@@ -492,6 +504,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             }),
             Ok(Classified::File(k)) if k.mime.as_deref().is_some_and(|m| accept.contains(&m)) => {
                 match &blocked {
+                    None if k.mime.as_deref().is_some_and(is_asset) => assets.push(f),
                     None => inputs.push(f),
                     Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
                         input: f,
@@ -515,13 +528,17 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
         let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(label, steps.iter().any(|a| a.lossy), inputs.len())
+        Notifier::new(
+            label,
+            steps.iter().any(|a| a.lossy),
+            inputs.len() + assets.len(),
+        )
     });
 
     mark("classify");
     let pre_count = pre.len();
     let job = journal::new_job_id();
-    let mut running = Running::start(&job, &name, inputs.len());
+    let mut running = Running::start(&job, &name, inputs.len() + assets.len());
     let mut rec = Recorder::open(&job, &name);
     out(&Line::new("job").bare(&job.0));
     let _ = io::stdout().flush();
@@ -534,11 +551,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     }
     // Every file of the run, those settled above included: a join's
     // notice counts its result against them.
-    let files = pre_count + inputs.len();
+    let files = pre_count + inputs.len() + assets.len();
     let mut entry = None;
     let mut joined = None;
     let mut cut = 0;
-    let sandboxed = if inputs.is_empty() {
+    let sandboxed = if inputs.is_empty() && assets.is_empty() {
         engine::sandbox::ready().is_ok()
     } else {
         let mut obs = Printer {
@@ -549,7 +566,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             entry: measure_on.then(Entry::default),
         };
         let report = match join {
-            Some(a) => exec::run_join(a, inputs, &mut obs, &cancel),
+            Some(a) => exec::run_join(a, inputs, assets, &mut obs, &cancel),
             None => exec::run(&route, inputs, &mut obs, &cancel),
         };
         entry = obs.entry.take();

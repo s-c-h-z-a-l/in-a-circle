@@ -346,6 +346,11 @@ action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/
   `joined` path that is not a regular file directly in `join/` (reached
   through no symlink).
 
+  A join action with assets (`assets=`) gets one list: its documents
+  first, in natural order, then its assets, in natural order. The engine
+  does not mark the roles; the action tells them apart by content. It
+  reports `take` for an asset as for a document.
+
   An action may open with `progress<TAB>0.00` before any input work
   (`inacircle-text run` always does), so a script that parses stdout must
   not take the first `progress` line for the end of a run.
@@ -359,7 +364,7 @@ action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/
   reported `joined`; 3 if it took nothing and skipped every input;
   otherwise 1.
 - A join action's result is published only if it reported `joined`, took
-  at least `min` inputs, broke no rule of the contract, exited 0, and no
+  at least `min` documents (assets never count), broke no rule of the contract, exited 0, and no
   cancel came before the commit. Otherwise nothing reaches the user's
   folder: every input it did not settle with its own `skip` or `fail`
   fails (with the violation, the exit status, "action reported fewer
@@ -557,7 +562,10 @@ Every action runs sandboxed, set up in the child between `fork` and
   `batch=no` run per file, one after the other (parallel runs may come
   later). A **join** action runs once over every accepted input, whatever
   folders they come from and whatever its `batch=` says, in natural order
-  (`natural_cmp` on the file name's bytes, then on the whole path), in one
+  (`natural_cmp` on the file name's bytes, then on the whole path; a join
+  with assets gets its documents in that order, then its assets in that
+  order; assets without an admitted document are skipped, "no document to
+  join", and the action does not start), in one
   temp dir in its result's target folder (its anchor, see
   [Output policy](#output-policy)), and its one result is published once,
   as one group, by the same staging and no-replace rename as any other
@@ -702,10 +710,11 @@ In the engine, in one place:
    pattern.
 7. A join action's one result has one place and one name, its anchor:
    the target (rule 1) of the folder that holds the most of its accepted
-   inputs (those of its type set), on a tie the folder of the input that
-   comes first in its order. Its name is that folder's name for two or
-   more inputs (`Nyaralás/Nyaralás/Nyaralás.pdf`), the input's stem for
-   one; a folder without a usable name (the root, or a hidden one, which
+   documents (the inputs of its `in=` set; assets have no say), on a tie
+   the folder of the document that comes first in its order. Its name is
+   that folder's name for two or more documents
+   (`Nyaralás/Nyaralás/Nyaralás.pdf`), the document's stem for one, however
+   many assets come with it; a folder without a usable name (the root, or a hidden one, which
    would hide the result) gives `images`. The wrapper and a taken name
    (`Nyaralás (1)/`) follow rule 3; inputs from other folders change
    nothing. It goes to the download folder only when the anchor folder is

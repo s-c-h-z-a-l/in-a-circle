@@ -493,27 +493,42 @@ fn stem_of(p: &Path) -> String {
 }
 
 /// Runs the join action `action` once over every input and publishes its
-/// one result, made of the inputs it took. The inputs (each once) go to
-/// the action in [`join_order`]; the caller has already settled those
-/// outside the action's type set. Never panics on a misbehaving action;
-/// every input ends with at least one outcome. The result's place and name
-/// are its [`output::anchor`] over the admitted inputs, and it is published
-/// once, as one group, like any other output.
+/// one result, made of the inputs it took. `documents` are the inputs of
+/// the action's document types, `assets` those of its asset types
+/// ([`Join::is_asset`]); the caller has already settled those of neither.
+/// The inputs (each once; a path given as both stays a document) go to the
+/// action in one list: the documents in [`join_order`], then the assets in
+/// [`join_order`]. Never panics on a misbehaving action; every input ends
+/// with at least one outcome. The result's place and name are its
+/// [`output::anchor`] over the admitted documents only, and it is published
+/// once, as one group, like any other output. Assets without an admitted
+/// document never run: each is skipped.
 ///
 /// The result is published only if the action reported `joined` after at
-/// least `min` `take`s, broke no rule of the contract, exited 0, and no
-/// cancel came before the commit. Otherwise nothing reaches the folder and
-/// every input the action did not settle with its own `skip` or `fail`
-/// fails.
+/// least `min` `take`s of documents, broke no rule of the contract, exited
+/// 0, and no cancel came before the commit. Otherwise nothing reaches the
+/// folder and every input the action did not settle with its own `skip` or
+/// `fail` fails.
+///
+/// [`Join::is_asset`]: crate::catalog::Join::is_asset
 pub fn run_join(
     action: &Action,
-    inputs: Vec<PathBuf>,
+    documents: Vec<PathBuf>,
+    assets: Vec<PathBuf>,
     obs: &mut dyn Observer,
     cancel: &CancelToken,
 ) -> Report {
     let gate = sandbox::ready();
-    let mut uniq = unique(inputs);
+    let mut uniq = unique(documents);
     uniq.sort_by(|a, b| join_order(a, b));
+    let documents = uniq.len();
+    let mut assets = unique(assets);
+    {
+        let docs: HashSet<&Path> = uniq.iter().map(PathBuf::as_path).collect();
+        assets.retain(|a| !docs.contains(a.as_path()));
+    }
+    assets.sort_by(|a, b| join_order(a, b));
+    uniq.extend(assets);
     let mut joined = Joined {
         taken: 0,
         total: uniq.len(),
@@ -534,7 +549,10 @@ pub fn run_join(
         joined: Some(joined),
         ..sink.report(sandboxed)
     };
-    let Some(min) = action.join.as_ref().map(|j| j.min as usize) else {
+    let Some(need) = action.join.as_ref().map(|j| JoinNeed {
+        min: j.min as usize,
+        documents,
+    }) else {
         all(&mut sink, &every, Stop::Failed("invalid route"));
         return end(&mut sink, gate.is_ok(), joined);
     };
@@ -550,8 +568,20 @@ pub fn run_join(
     if ok.is_empty() {
         return end(&mut sink, true, joined);
     }
-    // References for the anchor only, dropped before the action runs.
-    let accepted: Vec<&Path> = ok.iter().map(|&i| uniq[i].as_path()).collect();
+    // `ok` keeps the list's order: the admitted documents come first.
+    if ok.first().is_none_or(|&i| i >= documents) {
+        for &i in &ok {
+            sink.skip(i, "no document to join".to_owned());
+        }
+        return end(&mut sink, true, joined);
+    }
+    // References for the anchor only, dropped before the action runs: the
+    // book is built around its documents, so the assets have no say.
+    let accepted: Vec<&Path> = ok
+        .iter()
+        .take_while(|&&i| i < documents)
+        .map(|&i| uniq[i].as_path())
+        .collect();
     let placed = output::anchor(&accepted);
     drop(accepted);
     let anchor = match placed {
@@ -573,7 +603,7 @@ pub fn run_join(
         let _ = fs::create_dir_all(&anchor.target);
         output::clean_stale(&anchor.target);
         let (target, name) = (&anchor.target, &anchor.name);
-        if let Some((taken, p)) = join_group(action, &ok, min, target, name, cancel, &mut sink) {
+        if let Some((taken, p)) = join_group(action, &ok, need, target, name, cancel, &mut sink) {
             joined.downloads = anchor.downloads;
             joined.taken = taken;
             joined.publication = Some(p);
@@ -589,7 +619,7 @@ pub fn run_join(
 fn join_group(
     action: &Action,
     members: &[usize],
-    min: usize,
+    need: JoinNeed,
     target: &Path,
     stem: &str,
     cancel: &CancelToken,
@@ -614,7 +644,7 @@ fn join_group(
             .collect(),
         origin: members.to_vec(),
         intermediate: false,
-        join: Some(min),
+        join: Some(need),
     };
     let dir = work.path.join("step1");
     let list = work.path.join("step1.inputs");
@@ -853,9 +883,17 @@ struct StepIn<'a> {
     origin: Vec<usize>,
     /// The paths are the previous step's outputs, not the user's inputs.
     intermediate: bool,
-    /// `Some(min)`: a join action's process, whose one result needs at
-    /// least `min` taken inputs; `None`: one-to-one.
-    join: Option<usize>,
+    /// A join action's process; `None`: one-to-one.
+    join: Option<JoinNeed>,
+}
+
+/// What a join action's one result needs: at least `min` taken documents.
+/// The documents are the inputs before `documents` in the run's list
+/// ([`Sink::inputs`]); the rest are assets, which never count toward `min`.
+#[derive(Clone, Copy)]
+struct JoinNeed {
+    min: usize,
+    documents: usize,
 }
 
 fn run_group(
@@ -1603,8 +1641,9 @@ struct Supervisor<'a> {
     output_bytes: usize,
     /// A join action's `joined` output, once reported.
     joined: Option<PathBuf>,
-    /// A join action's `take`s so far.
+    /// A join action's `take`s so far, and those of its documents.
     taken: usize,
+    taken_documents: usize,
     violation: Option<String>,
     /// The input whose event caused the violation, and its failure reason:
     /// it fails and nothing of it is placed.
@@ -1913,6 +1952,7 @@ impl<'a> Supervisor<'a> {
             output_bytes: 0,
             joined: None,
             taken: 0,
+            taken_documents: 0,
             violation: None,
             offender: None,
             cancelled: false,
@@ -2212,6 +2252,13 @@ impl<'a> Supervisor<'a> {
             Event::Take { index } => {
                 self.reported[index] = Reported::Done;
                 self.taken += 1;
+                if self
+                    .step_in
+                    .join
+                    .is_some_and(|j| origin[index] < j.documents)
+                {
+                    self.taken_documents += 1;
+                }
             }
             Event::Joined { .. } if self.joined.is_some() => {
                 self.violate("second joined event".to_owned());
@@ -2374,8 +2421,8 @@ impl<'a> Supervisor<'a> {
             }
             return None;
         }
-        if let Some(min) = self.step_in.join {
-            return Some(self.settle_join(sink, end, min));
+        if let Some(need) = self.step_in.join {
+            return Some(self.settle_join(sink, end, need.min));
         }
         // The offending input fails, and none of its outputs (nor those of
         // other fan-out parts of the same original input) is placed.
@@ -2404,7 +2451,7 @@ impl<'a> Supervisor<'a> {
 
     /// Settles a join action's inputs once its whole group is gone and its
     /// pipes are read: the one result goes back under each input it took,
-    /// only if the action reported `joined`, took at least `min` inputs,
+    /// only if the action reported `joined`, took at least `min` documents,
     /// broke no rule and exited 0. Otherwise every input it did not settle
     /// itself (`skip`, `fail`) fails, and nothing is returned to publish.
     /// An input it said nothing of fails either way.
@@ -2425,7 +2472,7 @@ impl<'a> Supervisor<'a> {
             (None, End::Exit(c), Some(_)) if c != action::EXIT_OK => {
                 Some(format!("action exited with status {c}"))
             }
-            (None, End::Exit(_), Some(_)) if self.taken < min => {
+            (None, End::Exit(_), Some(_)) if self.taken_documents < min => {
                 Some("action reported fewer inputs than its minimum".to_owned())
             }
             (None, End::Exit(_), Some(_)) => None,
@@ -3248,7 +3295,13 @@ pub(crate) mod tests {
             unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         })));
         let mut seen = Seen::default();
-        let report = run_join(&action, vec![a.clone(), b.clone()], &mut seen, &tok);
+        let report = run_join(
+            &action,
+            vec![a.clone(), b.clone()],
+            Vec::new(),
+            &mut seen,
+            &tok,
+        );
         AFTER_PUBLISH.set(None);
         assert_eq!(report.cut, 0, "{:?}", seen.0);
         let j = report.joined.unwrap();

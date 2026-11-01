@@ -2069,7 +2069,13 @@ fn cancel_after_joined_before_publish_publishes_nothing() {
         })),
         ..Pub::default()
     };
-    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
+    let rep = engine::exec::run_join(
+        &join_action(&bin, 1),
+        ins.clone(),
+        Vec::new(),
+        &mut obs,
+        &tok,
+    );
     assert!(tok.is_cancelled());
     assert_eq!(obs.prepared.len(), 1);
     assert!(obs.groups.is_empty());
@@ -2169,7 +2175,13 @@ fn publish_failure_leaves_nothing() {
         })),
         ..Pub::default()
     };
-    let rep = engine::exec::run_join(&join_action(&bin, 1), ins.clone(), &mut obs, &tok);
+    let rep = engine::exec::run_join(
+        &join_action(&bin, 1),
+        ins.clone(),
+        Vec::new(),
+        &mut obs,
+        &tok,
+    );
     assert_eq!(obs.prepared.len(), 1, "the failure came before the commit");
     assert!(obs.groups.is_empty());
     assert!(obs.ran.dirs.is_empty());
@@ -2203,6 +2215,160 @@ fn join_inputs_arrive_sorted() {
     assert_eq!(seen, [ins[2].clone(), ins[1].clone(), ins[0].clone()]);
     let d = done_pairs(&r);
     assert_eq!(std::fs::read_to_string(&d[0].1).unwrap(), "ab2b10");
+}
+
+/// A join of Markdown documents with JPEG and PNG assets beside them.
+fn book_join(bin: &std::path::Path, min: u32) -> engine::catalog::Action {
+    let mut a = join_action(bin, min);
+    a.input = "text/markdown".into();
+    a.join = Some(engine::catalog::Join {
+        types: vec!["text/markdown".into()],
+        min,
+        assets: vec!["image/jpeg".into(), "image/png".into()],
+    });
+    a
+}
+
+/// Files `names` in `dir` (made if missing), each holding its own stem.
+fn files_in(dir: &std::path::Path, names: &[&str]) -> Vec<std::path::PathBuf> {
+    std::fs::create_dir_all(dir).unwrap();
+    names
+        .iter()
+        .map(|n| {
+            let p = dir.join(n);
+            std::fs::write(&p, n.split('.').next().unwrap()).unwrap();
+            p
+        })
+        .collect()
+}
+
+/// The order the action got its inputs in, from one warning per input.
+fn warned(r: &common::Ran) -> Vec<std::path::PathBuf> {
+    r.outcomes
+        .iter()
+        .filter_map(|o| match o {
+            Outcome::Warned { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+const WARN_EACH: &str =
+    "while IFS= read -r in; do printf 'warn\\t%s\\tseen\\n' \"$in\"; done < \"$6\"";
+
+/// The documents come first in natural order, then the assets in natural
+/// order, whatever order the caller gives; a path given as both is a
+/// document, once.
+#[test]
+fn assets_sorted_after_documents() {
+    let t = Tmp::new("join-assets-order");
+    let docs = files_in(&t.0.join("docs"), &["b10.md", "b2.md", "a.md"]);
+    let imgs = files_in(&t.0.join("docs"), &["z.png", "c.jpg", "a10.png", "a2.png"]);
+    let bin = t.script("join", &format!("{WARN_EACH}\n{JOIN_ALL}"));
+    let mut assets = imgs.clone();
+    assets.push(docs[1].clone());
+    let (r, rep) = common::run_join_assets(&book_join(&bin, 1), &docs, &assets, None);
+    let want = [
+        &docs[2], &docs[1], &docs[0], &imgs[3], &imgs[2], &imgs[1], &imgs[0],
+    ];
+    assert_eq!(warned(&r).iter().collect::<Vec<_>>(), want);
+    let j = rep.joined.unwrap();
+    assert_eq!((j.taken, j.total), (7, 7));
+    let d = done_pairs(&r);
+    assert_eq!(
+        std::fs::read_to_string(&d[0].1).unwrap(),
+        "ab2b10a2a10cz",
+        "{:?}",
+        r.outcomes
+    );
+}
+
+/// The anchor counts the documents only: five images in one folder do not
+/// outweigh two Markdown files in another. One document names the result
+/// after its stem, however many images come with it.
+#[test]
+fn anchor_counts_documents_only() {
+    let t = Tmp::new("join-assets-anchor");
+    let trip = t.0.join("Utazás");
+    let docs = files_in(&trip, &["1.md", "2.md"]);
+    let imgs = files_in(
+        &t.0.join("Képek"),
+        &["a.jpg", "b.jpg", "c.png", "d.png", "e.png"],
+    );
+    let bin = t.script("join", JOIN_ALL);
+    let (r, rep) = common::run_join_assets(&book_join(&bin, 1), &docs, &imgs, None);
+    let j = rep.joined.unwrap();
+    assert_eq!((j.taken, j.total, j.downloads), (7, 7, false));
+    let d = done_pairs(&r);
+    assert_eq!(d.len(), 7, "{:?}", r.outcomes);
+    let want = trip.join("Utazás/Utazás.pdf");
+    assert!(d.iter().all(|(_, o)| *o == want), "{d:?}");
+    assert!(!t.0.join("Képek/Képek").exists());
+    // One document and its images: the document's stem names the result.
+    let notes = files_in(&t.0.join("Jegyzetek"), &["napló.md"]);
+    let (r, _) = common::run_join_assets(&book_join(&bin, 1), &notes, &imgs, None);
+    let want = t.0.join("Jegyzetek/napló/napló.pdf");
+    let d = done_pairs(&r);
+    assert_eq!(d.len(), 6, "{:?}", r.outcomes);
+    assert!(d.iter().all(|(_, o)| *o == want), "{d:?}");
+}
+
+/// `min=` counts documents: one Markdown file and five images taken by an
+/// action of `min=2` publish nothing; a second document does.
+#[test]
+fn min_counts_documents() {
+    let t = Tmp::new("join-assets-min");
+    let docs = files_in(&t.0.join("docs"), &["a.md"]);
+    let imgs = files_in(
+        &t.0.join("docs"),
+        &["1.png", "2.png", "3.png", "4.jpg", "5.jpg"],
+    );
+    let bin = t.script("join", JOIN_ALL);
+    let (r, rep) = common::run_join_assets(&book_join(&bin, 2), &docs, &imgs, None);
+    let all = [docs.clone(), imgs.clone()].concat();
+    assert_nothing_published(
+        &t,
+        &all,
+        &r,
+        &rep,
+        "action reported fewer inputs than its minimum",
+    );
+    let docs = files_in(&t.0.join("docs"), &["a.md", "b.md"]);
+    let (r, rep) = common::run_join_assets(&book_join(&bin, 2), &docs, &imgs, None);
+    assert_eq!(rep.joined.unwrap().taken, 7);
+    assert_eq!(done_pairs(&r).len(), 7);
+}
+
+/// Assets without an admitted document never run: each is skipped, and
+/// the action is not started (it would leave a mark).
+#[test]
+fn assets_alone_never_run() {
+    let t = Tmp::new("join-assets-alone");
+    let imgs = files_in(&t.0.join("docs"), &["a.png", "b.jpg"]);
+    let mark = t.0.join("ran");
+    let bin = t.script("join", &format!(": > '{}'\n{JOIN_ALL}", mark.display()));
+    let gone = t.0.join("docs/gone.md");
+    for docs in [Vec::new(), vec![gone.clone()]] {
+        let (r, rep) = common::run_join_assets(&book_join(&bin, 1), &docs, &imgs, None);
+        let all = [docs.clone(), imgs.clone()].concat();
+        assert_nothing_published(&t, &all, &r, &rep, "cannot read input: ");
+        let skipped: Vec<_> = r
+            .outcomes
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Skipped { input, reason } => Some((input.clone(), reason.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                (imgs[0].clone(), "no document to join"),
+                (imgs[1].clone(), "no document to join")
+            ]
+        );
+        assert!(!mark.exists(), "the action ran");
+    }
 }
 
 /// `RLIMIT_FSIZE` comes from the sum of every input of the run: three
@@ -2283,7 +2449,7 @@ fn helper_join_kill_run() {
     let act = join_action(std::path::Path::new(&bin), 1);
     let tok = engine::exec::CancelToken::install().unwrap();
     let mut obs = Say(common::Ran::default());
-    engine::exec::run_join(&act, ins.clone(), &mut obs, &tok);
+    engine::exec::run_join(&act, ins.clone(), Vec::new(), &mut obs, &tok);
 }
 
 /// The supervisor is killed with `SIGKILL` after the action's `joined`,
