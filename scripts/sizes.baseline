@@ -57,5 +57,8 @@
 # language environment passed to the child; inacircle-pages grew 496 B. The
 # shipped inacircle still does not link the doc, zip or epub crates.
 inacircle 1166392 896760
-inacircle-text 859968 538472
+# After the closing fixes: inacircle-text grew 1552 B (file, 1200 B of .text)
+# from the URL validity checks in the XHTML writer (percent escapes, one
+# fragment, authority brackets) and the create-new write of the HTML page.
+inacircle-text 861520 539672
 inacircle-pages 504208 403763
