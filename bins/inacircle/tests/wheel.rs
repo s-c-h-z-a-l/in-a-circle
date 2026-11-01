@@ -773,7 +773,8 @@ fn wheel_offers_and_runs_txt_to_epub() {
     let root = Root::new("txt2epub");
     root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "epub-txt");
     let src = root.0.join("f/jegyzet.txt");
-    fs::write(&src, "Első sor.\n\nMásodik.\n").unwrap();
+    // Read as Markdown this would be a heading and a title.
+    fs::write(&src, "# Not a heading\n\nMásodik.\n").unwrap();
     let list = format!("file://{}\r\n", src.display()).into_bytes();
     let code = choose_on_the_wheel(&root, &list, (1110, 540), (1110, 540));
     assert_eq!(code, Some(0));
@@ -785,8 +786,14 @@ fn wheel_offers_and_runs_txt_to_epub() {
     );
     assert_eq!(
         fs::read_to_string(&src).unwrap(),
-        "Első sor.\n\nMásodik.\n",
+        "# Not a heading\n\nMásodik.\n",
         "the source changed"
+    );
+    // The txt variant ran: the `#` stayed text (Markdown makes a heading).
+    let marker = b"<p># Not a heading</p>";
+    assert!(
+        epub.windows(marker.len()).any(|w| w == marker),
+        "the text was read as Markdown"
     );
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
 }
@@ -798,14 +805,15 @@ fn wheel_offers_and_runs_txt_to_html() {
     let root = Root::new("txt2html");
     root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "html-txt");
     let src = root.0.join("f/jegyzet.txt");
-    fs::write(&src, "Üdv\n\nSzöveg.\n").unwrap();
+    // Read as Markdown this would be a heading and the title.
+    fs::write(&src, "# Not a heading\n\nSzöveg.\n").unwrap();
     let list = format!("file://{}\r\n", src.display()).into_bytes();
     let code = choose_on_the_wheel(&root, &list, (960, 390), (1110, 540));
     assert_eq!(code, Some(0));
     let html = fs::read_to_string(root.0.join("f/jegyzet/jegyzet.html")).expect("no HTML written");
     assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
     assert!(html.contains("<title>jegyzet</title>"), "{html}");
-    assert!(html.contains("Szöveg."), "{html}");
+    assert!(html.contains("<p># Not a heading</p>"), "{html}");
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.html");
 }
 
