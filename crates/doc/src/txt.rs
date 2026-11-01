@@ -238,10 +238,11 @@ fn is_wide_or_combining(c: char) -> bool {
 }
 
 /// Splits `text` (no newline) into lines of at most `width` characters
-/// (`width >= 1`): at spaces, the space at a break consumed; a word longer
-/// than `width` is cut at character boundaries. Joining the lines with a
-/// space where a space was consumed gives the text back. Always at least
-/// one line.
+/// (`width >= 1`): at spaces, every space at a break consumed (no line
+/// starts or ends with a space there); spaces at the end of the text are
+/// kept when they fit and dropped when they do not; a word longer than
+/// `width` is cut at character boundaries. The visible characters come
+/// back in order. Always at least one line.
 fn wrap(text: &str, width: usize) -> Vec<&str> {
     let mut lines = Vec::new();
     // The line being built: byte range and character count.
@@ -486,7 +487,8 @@ impl Writer {
         let mut first = true;
         let line = |w: &mut Self, out: &mut String, pieces: &[(&str, usize, Align)]| {
             // Trailing empty columns are left out, and the last column
-            // written has no right padding: no line ends in a space.
+            // written has no right padding: no padding at the end of a line (a cell's
+            // own trailing spaces, as in a code span, are text and stay).
             let Some(last) = pieces.iter().rposition(|(t, ..)| !t.is_empty()) else {
                 return;
             };
@@ -1323,6 +1325,10 @@ mod tests {
         assert_eq!(wrap("  a  ", 80), vec!["  a  "]);
         // Trailing spaces that do not fit are dropped, not wrapped on.
         assert_eq!(wrap("aaaa  ", 5), vec!["aaaa"]);
+        assert_eq!(wrap("a  ", 2), vec!["a"]);
+        // A line filled exactly stays one line.
+        assert_eq!(wrap("ab cd ef", 8), vec!["ab cd ef"]);
+        assert!(wrap(" a b c d", 3).iter().all(|l| l.chars().count() <= 3));
     }
 
     #[test]
