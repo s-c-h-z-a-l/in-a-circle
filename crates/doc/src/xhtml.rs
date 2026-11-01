@@ -1190,4 +1190,101 @@ mod tests {
         assert!(!out.contains("<a"), "{out}");
         assert_eq!(losses, BTreeSet::from([Loss::Links]));
     }
+
+    /// Text and attribute escaping, arm by arm: `>` and a carriage return
+    /// are escaped everywhere; quotes, tab and newline only in an
+    /// attribute (in text they stay as written).
+    #[test]
+    fn every_escape_arm() {
+        let d = Document {
+            blocks: vec![Block::Paragraph(vec![
+                Inline::Text("a>b<c&d\"e'f\tg\nh\ri".into()),
+                Inline::Link {
+                    dest: "https://x.y/".into(),
+                    title: "a>b<c&d\"e'f\tg\nh\ri".into(),
+                    content: vec![Inline::Text("l".into())],
+                    auto: false,
+                },
+            ])],
+        };
+        let ch = chapter(&d.blocks, "c.xhtml");
+        let a = Anchors::build(std::slice::from_ref(&ch));
+        let (out, _) = write_chapter(&ch, &a, &Mode::Fragment, Limits::UNLIMITED).unwrap();
+        assert_eq!(
+            out,
+            "<p>a&gt;b&lt;c&amp;d\"e'f\tg\nh&#13;i\
+<a href=\"https://x.y/\" title=\"a&gt;b&lt;c&amp;d&quot;e&#39;f&#9;g&#10;h&#13;i\">l</a></p>\n"
+        );
+    }
+
+    /// An ordered list says where it starts only when that is not 1.
+    #[test]
+    fn list_start_is_written_when_not_one() {
+        let (out, _) = render("1. a\n2. b\n", &Mode::Fragment);
+        assert_eq!(out, "<ol>\n<li>a</li>\n<li>b</li>\n</ol>\n");
+        let (out, _) = render("3. a\n4. b\n", &Mode::Fragment);
+        assert_eq!(out, "<ol start=\"3\">\n<li>a</li>\n<li>b</li>\n</ol>\n");
+        let (out, _) = render("0. a\n", &Mode::Fragment);
+        assert_eq!(out, "<ol start=\"0\">\n<li>a</li>\n</ol>\n");
+        let (out, _) = render("- a\n", &Mode::Fragment);
+        assert_eq!(out, "<ul>\n<li>a</li>\n</ul>\n");
+    }
+
+    /// The count of headings in a block is what the heading ids are
+    /// numbered by: a block without a heading takes none, a quote with two
+    /// takes two.
+    #[test]
+    fn top_level_ids_count_the_headings_before_them() {
+        let d = doc("text\n\n# Top\n");
+        let ch = chapter(&d.blocks, "c.xhtml");
+        let a = Anchors::build(std::slice::from_ref(&ch));
+        assert_eq!(a.top_level_ids(0, &d.blocks), [(1, "top")]);
+        let d = doc("> # Q\n>\n> # Q\n\ntext\n\n# Top\n");
+        let ch = chapter(&d.blocks, "c.xhtml");
+        let a = Anchors::build(std::slice::from_ref(&ch));
+        assert_eq!(a.top_level_ids(0, &d.blocks), [(2, "top")]);
+    }
+
+    #[test]
+    fn percent_decoding_edges() {
+        assert_eq!(percent_decode(""), "");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("%41"), "A");
+        assert_eq!(percent_decode("ab%41cd"), "abAcd");
+        assert_eq!(percent_decode("abcd%41"), "abcdA");
+        assert_eq!(percent_decode("%41%42%43"), "ABC");
+        assert_eq!(percent_decode("%c3%A1"), "\u{e1}");
+        assert_eq!(percent_decode("%2f%3a"), "/:");
+        assert_eq!(percent_decode("%7e%20"), "~ ");
+        // The two digits weigh 16 and 1.
+        assert_eq!(percent_decode("%10"), "\u{10}");
+        assert_eq!(percent_decode("%01"), "\u{1}");
+        // A bad or cut escape stays as written.
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("ab%4"), "ab%4");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%4z"), "%4z");
+        assert_eq!(percent_decode("%z4"), "%z4");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%%41"), "%A");
+        // Bytes that are not UTF-8 become U+FFFD.
+        assert_eq!(percent_decode("%ff"), "\u{fffd}");
+        assert_eq!(percent_decode("%C3"), "\u{fffd}");
+    }
+
+    /// A link to an escaped heading id finds the heading.
+    #[test]
+    fn percent_encoded_link_finds_its_heading() {
+        let (out, losses) = render(
+            "# \u{c1}ttekint\u{e9}s\n\n[x](#%C3%A1ttekint%C3%A9s) [y](#%c3%81ttekint%c3%a9s)\n",
+            &Mode::Fragment,
+        );
+        assert_eq!(
+            out.matches("href=\"#%C3%A1ttekint%C3%A9s\"").count(),
+            2,
+            "{out}"
+        );
+        assert!(losses.is_empty());
+    }
 }
