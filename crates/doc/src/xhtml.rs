@@ -256,8 +256,8 @@ pub fn xml_char(c: char) -> bool {
 /// Writes one chapter. `anchors` must have been built from the chapters of
 /// the whole document, this one included (found by its file name, so the
 /// chapter file names must be unique; a chapter it does not know gets
-/// headings without ids, and its links to other chapters still resolve). Every piece is charged to `limits.output_bytes`
-/// before it is appended.
+/// headings without ids, and its links to other chapters still resolve). Every piece is charged to
+/// `limits.output_bytes` before it is appended.
 pub fn write_chapter(
     ch: &Chapter,
     anchors: &Anchors,

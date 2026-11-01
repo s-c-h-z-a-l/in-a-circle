@@ -423,8 +423,9 @@ fn add(zip: &mut StoreWriter, name: &str, parts: &[&str]) -> Result<(), WriteErr
     Ok(())
 }
 
-/// Writes `doc` as an EPUB 3 book to `out`, which should be an empty file
-/// opened for writing. Returns what the conversion lost. The whole book's
+/// Writes `doc` as an EPUB 3 book to `out`, which must be a new, empty file
+/// opened for writing (the first byte is written at offset 0, and an error
+/// cuts the file back to empty). Returns what the conversion lost. The whole book's
 /// XHTML (chapters, table of contents, package document) is charged to
 /// `limits.output_bytes`.
 ///
