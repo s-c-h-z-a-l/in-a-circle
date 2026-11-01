@@ -2332,3 +2332,89 @@ fn action_entry_marker_is_observed_once_and_absent_without_events() {
     let o = run_test_action(&e, &[&ok]);
     assert!(!o.stderr.contains("action_entry"), "{}", o.stderr);
 }
+
+/// Whether the ZIP `book` has an entry named `name`: entry names sit
+/// uncompressed in every header, so a byte search finds them.
+fn zip_names(book: &[u8], name: &str) -> bool {
+    book.windows(name.len()).any(|w| w == name.as_bytes())
+}
+
+/// The history's job group is one group, and Undo moves `wrapper` to the
+/// Trash with `file` in it.
+fn one_group_and_undo(e: &Env, o: &Out, wrapper: &Path, file: &str) {
+    let job = o.job();
+    let h = e.history();
+    let begins = h
+        .lines()
+        .filter(|l| l.starts_with("group-begin\t") && l.contains(&job))
+        .count();
+    assert_eq!(begins, 1, "{h}");
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert!(!wrapper.exists(), "the wrapper stayed");
+    let name = wrapper.file_name().unwrap();
+    assert!(
+        e.root
+            .join("home/.local/share/Trash/files")
+            .join(name)
+            .join(file)
+            .is_file()
+    );
+}
+
+/// `run epub` with Markdown and images: one document and its images give
+/// `<stem>/<stem>.epub`, two documents give `<dir>/<dir>/<dir>.epub`, the
+/// referenced image and the unreferenced one are both packaged, the run is
+/// one history group, and Undo moves the wrapper to the Trash.
+#[test]
+fn cli_md_and_images_to_epub() {
+    let png = gray_png();
+    let jpg = rgb_jpeg();
+
+    // One document and two images.
+    let e = Env::new("md-img-epub1");
+    let md = e.file("notes.md", b"# Notes\n\n![pic](a.png)\n");
+    let a = e.file("a.png", &png);
+    let b = e.file("b.jpg", &jpg);
+    let o = e.run(&["run", "epub", "notes.md", "a.png", "b.jpg"]);
+    if skip_no_sandbox("cli_md_and_images_to_epub", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 0, 0));
+    let wrapper = e.files().join("notes");
+    let out = wrapper.join("notes.epub");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let book = fs::read(&out).unwrap();
+    assert!(book.starts_with(b"PK\x03\x04"));
+    assert!(zip_names(&book, "OEBPS/img/0001.png"), "referenced image");
+    assert!(zip_names(&book, "OEBPS/img/0002.jpg"), "unreferenced image");
+    assert!(!zip_names(&book, "OEBPS/img/0003"), "no third image");
+    for (p, bytes) in [
+        (&md, &b"# Notes\n\n![pic](a.png)\n"[..]),
+        (&a, &png),
+        (&b, &jpg),
+    ] {
+        assert_eq!(fs::read(p).unwrap(), bytes, "an input changed");
+    }
+    one_group_and_undo(&e, &o, &wrapper, "notes.epub");
+
+    // Two documents and an image, in their own folder.
+    let e = Env::new("md-img-epub2");
+    e.file("kotet/a.md", b"# A\n\n![](k.png)\n");
+    e.file("kotet/b.md", b"# B\n");
+    e.file("kotet/k.png", &png);
+    let o = e.run(&["run", "epub", "kotet/a.md", "kotet/b.md", "kotet/k.png"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 0, 0));
+    let wrapper = e.files().join("kotet/kotet");
+    let out = wrapper.join("kotet.epub");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let book = fs::read(&out).unwrap();
+    assert!(zip_names(&book, "OEBPS/img/0001.png"));
+    one_group_and_undo(&e, &o, &wrapper, "kotet.epub");
+}
