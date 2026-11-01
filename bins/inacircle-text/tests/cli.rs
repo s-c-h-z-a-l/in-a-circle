@@ -771,6 +771,11 @@ fn losses_reported() {
 /// enough to reach with little data. SIGXFSZ is not ignored here: the
 /// action must stay under the ceiling or fail the input itself.
 fn run_with_fsize(id: &str, work: &Path, inputs: &[&Path]) -> Output {
+    run_with_fsize_of(id, work, inputs, 1 << 20)
+}
+
+/// `run_with_fsize` with the ceiling `cap` bytes.
+fn run_with_fsize_of(id: &str, work: &Path, inputs: &[&Path], cap: u64) -> Output {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(env!("CARGO_BIN_EXE_inacircle-text"));
     c.args(["run", id, "--work"])
@@ -781,10 +786,10 @@ fn run_with_fsize(id: &str, work: &Path, inputs: &[&Path]) -> Output {
     // `setrlimit`, which is async-signal-safe, on a local struct; it
     // touches no memory of the parent and takes no lock.
     unsafe {
-        c.pre_exec(|| {
+        c.pre_exec(move || {
             let rl = libc::rlimit {
-                rlim_cur: 1 << 20,
-                rlim_max: 1 << 20,
+                rlim_cur: cap as libc::rlim_t,
+                rlim_max: cap as libc::rlim_t,
             };
             if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -824,6 +829,39 @@ fn over_the_output_ceiling_fails_one_input_and_the_batch_goes_on() {
         let left: Vec<_> = snapshot(&work).into_iter().map(|(p, _)| p).collect();
         assert_eq!(left.len(), 1, "{id}: {left:?}");
     }
+}
+
+/// Regression: a ceiling under 1 MiB was printed as "0 MiB"; it is KiB now.
+#[test]
+fn a_ceiling_under_one_mib_is_printed_in_kib() {
+    let (root, work) = workdir("ceiling-kib");
+    let big = root.join("big.md");
+    fs::write(&big, "a".repeat(600 * 1024)).unwrap();
+    let o = run_with_fsize_of("text.md-to-html", &work, &[&big], 512 * 1024);
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(fails[0][2], "HTML would be larger than 512 KiB");
+}
+
+/// The page is created new, like the book: a file already at its path
+/// fails the input instead of being written over.
+#[test]
+fn an_existing_html_is_never_overwritten() {
+    let (root, work) = workdir("html-no-overwrite");
+    let a = root.join("a.md");
+    fs::write(&a, "x\n").unwrap();
+    let first = run_raw("text.md-to-html", &work, &[&a]);
+    let first_out = stdout(&first);
+    let done = lines(&first_out, "done");
+    assert_eq!(done.len(), 1);
+    let page = work.join(done[0][2]);
+    assert!(page.is_file());
+    let second = stdout(&run_raw("text.md-to-html", &work, &[&a]));
+    let fails = lines(&second, "fail");
+    assert_eq!(fails.len(), 1, "{second}");
+    assert!(fails[0][2].starts_with("cannot create output"), "{second}");
+    assert!(lines(&second, "done").is_empty(), "{second}");
 }
 
 /// The book's modification time is the input's, in UTC, also before 1970.

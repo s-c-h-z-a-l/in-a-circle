@@ -263,7 +263,8 @@ are in `CLAUDE.md`.
   `<title>` (the same rule as the book's title), an embedded stylesheet
   of at most 1.5 KiB with a dark mode through `prefers-color-scheme`, no
   script and nothing loaded from outside. The losses are those of the
-  book.
+  book. The page is created new too (never overwritten) and checked
+  against the output size ceiling before it is written.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned

@@ -271,11 +271,14 @@ fn output_cap() -> Result<Option<u64>, ConvertError> {
 }
 
 /// The copy for an output past the ceiling (N rounded down, so it never
-/// overstates the limit). If the ceiling cannot be read now, the generic
-/// copy.
+/// overstates the limit; in KiB below 1 MiB, so it never reads "0 MiB").
+/// If the ceiling cannot be read now, the generic copy.
 fn too_large(what: &str) -> ConvertError {
     match output_cap() {
-        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20)),
+        Ok(Some(c)) if c >= 1 << 20 => {
+            ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20))
+        }
+        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} KiB", c >> 10)),
         _ => ConvertError::Other(format!("{what} would be too large")),
     }
 }
@@ -350,7 +353,14 @@ fn publish(
             if output_cap()?.is_some_and(|c| page.len() as u64 > c) {
                 return Err(too_large("HTML"));
             }
-            fs::write(out, page)
+            // Created new, like the book: an existing file is never
+            // overwritten.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(out)
+                .map_err(|e| ConvertError::Other(format!("cannot create output: {e}")))?;
+            file.write_all(page.as_bytes())
                 .map_err(|e| ConvertError::Other(format!("cannot write output: {e}")))?;
             more
         }
