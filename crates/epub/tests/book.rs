@@ -616,6 +616,71 @@ fn fnv_test_vectors() {
     );
 }
 
+/// A reader that fails first with `kind`, then gives `rest`.
+struct FailsOnce {
+    kind: Option<io::ErrorKind>,
+    rest: &'static [u8],
+}
+
+impl Read for FailsOnce {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(kind) = self.kind.take() {
+            return Err(kind.into());
+        }
+        self.rest.read(buf)
+    }
+}
+
+/// An interrupted read is retried (the hash is the same as without it);
+/// any other read error ends the hash and is returned.
+#[test]
+fn streamed_hash_retries_interrupts_and_returns_other_errors() {
+    let r = FailsOnce {
+        kind: Some(io::ErrorKind::Interrupted),
+        rest: b"foobar",
+    };
+    assert_eq!(fnv1a_128_read(r).unwrap(), fnv1a_128(&[b"foobar"]));
+    let r = FailsOnce {
+        kind: Some(io::ErrorKind::PermissionDenied),
+        rest: b"foobar",
+    };
+    assert_eq!(
+        fnv1a_128_read(r).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+/// A book without images finds none, whatever is asked, and has none to
+/// open.
+#[test]
+fn no_images_resolves_nothing() {
+    let mut none = NoImages;
+    assert_eq!(none.resolve(0, "a.png"), None);
+    assert_eq!(none.resolve(3, ""), None);
+    assert_eq!(none.count(), 0);
+    assert!(none.open(0).is_err());
+}
+
+/// With no output ceiling at all the chapters are still written (the
+/// budget left to a chapter is the ceiling minus what is used, which must
+/// not overflow).
+#[test]
+fn book_without_an_output_ceiling() {
+    let (s, r) = book_with(
+        &md("# One\n\ntext\n\n# Two\n\nmore\n"),
+        &meta("T"),
+        Limits::UNLIMITED,
+    );
+    r.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        entries(&s.0)
+            .iter()
+            .filter(|(n, _)| n.starts_with("OEBPS/ch"))
+            .count(),
+        2
+    );
+}
+
 #[test]
 fn memory_is_one_chapter_at_a_time() {
     // 256 chapters of ~32 KiB each: ~8 MiB of chapter XHTML in all.
