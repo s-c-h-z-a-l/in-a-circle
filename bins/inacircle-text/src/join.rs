@@ -597,4 +597,164 @@ mod tests {
             assert!(!has_scheme(s), "{s}");
         }
     }
+
+    /// A unique, empty scratch folder, removed by the caller.
+    fn scratch(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("inacircle-join-unit-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn png_file(path: &Path) {
+        // 2x2 RGB, one shade: a valid image of a few dozen bytes.
+        let rows: Vec<u8> = [vec![0u8], vec![9u8; 6], vec![0u8], vec![9u8; 6]].concat();
+        fs::write(path, testzip::png(2, 2, 2, None, false, false, &rows)).unwrap();
+    }
+
+    fn fcntl(f: &File, cmd: libc::c_int) -> libc::c_int {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a valid open descriptor and a command that takes no
+        // argument.
+        let r = unsafe { libc::fcntl(f.as_raw_fd(), cmd) };
+        assert!(r >= 0, "{}", io::Error::last_os_error());
+        r
+    }
+
+    /// Both flags are set: `O_NONBLOCK` (a FIFO never waits for a writer)
+    /// and `O_CLOEXEC` (no child inherits the image).
+    #[test]
+    fn open_is_nonblocking_and_close_on_exec() {
+        let d = scratch("flags");
+        let p = d.join("a.png");
+        png_file(&p);
+        let f = open_nonblocking(&p).unwrap();
+        assert_ne!(fcntl(&f, libc::F_GETFL) & libc::O_NONBLOCK, 0);
+        assert_ne!(fcntl(&f, libc::F_GETFD) & libc::FD_CLOEXEC, 0);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Each header-check failure has its own reason; the rest is damage.
+    #[test]
+    fn image_reasons() {
+        assert_eq!(
+            image_reason(ProbeError::TooLarge),
+            "image is larger than 180 megapixels"
+        );
+        assert_eq!(
+            image_reason(ProbeError::TooManyChunks),
+            format!("PNG has more than {} data chunks", probe::MAX_IDAT_CHUNKS)
+        );
+        for e in [
+            ProbeError::Truncated,
+            ProbeError::Damaged,
+            ProbeError::NotImage,
+        ] {
+            assert_eq!(image_reason(e), "damaged image data");
+        }
+    }
+
+    /// The image limit is inclusive: a file of exactly `IMAGE_BYTES` is an
+    /// image, one byte more fails with the size reason; a header past the
+    /// pixel limit fails with the pixel reason.
+    #[test]
+    fn image_size_limit_is_inclusive() {
+        let d = scratch("limit");
+        let p = d.join("big.png");
+        png_file(&p);
+        // Bytes after the IEND chunk: the header check reads none of them.
+        let f = OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len(IMAGE_BYTES).unwrap();
+        drop(f);
+        let item = check_image(&p).unwrap().expect("an image");
+        assert_eq!(item.image.len, IMAGE_BYTES);
+        let f = OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len(IMAGE_BYTES + 1).unwrap();
+        drop(f);
+        assert_eq!(
+            check_image(&p).err().as_deref(),
+            Some("image is larger than 64 MiB")
+        );
+
+        // 20,000 x 20,000 = 400 MP: the header alone is past the limit.
+        let wide = d.join("wide.png");
+        fs::write(
+            &wide,
+            testzip::png(20_000, 20_000, 2, None, false, false, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            check_image(&wide).err().as_deref(),
+            Some("image is larger than 180 megapixels")
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `open` gives back only the file that was checked: another file at
+    /// the path (another identity) and a rewritten one (another size) are
+    /// refused, the unchanged one is read.
+    #[test]
+    fn open_refuses_a_changed_file() {
+        let d = scratch("open");
+        let p = d.join("a.png");
+        png_file(&p);
+        let item = check_image(&p).unwrap().expect("an image");
+        let mut pics = Pictures {
+            items: vec![item],
+            by_id: HashMap::new(),
+            dirs: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        pics.open(0).unwrap().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, fs::read(&p).unwrap());
+
+        // Same inode, other size.
+        let mut longer = fs::read(&p).unwrap();
+        longer.push(0);
+        fs::write(&p, &longer).unwrap();
+        assert_eq!(
+            pics.open(0).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+
+        // Another file renamed over it, of the original size.
+        let item = check_image(&p).unwrap().expect("an image");
+        pics.items[0] = item;
+        let other = d.join("other.png");
+        fs::write(&other, &longer).unwrap();
+        fs::rename(&other, &p).unwrap();
+        assert_eq!(
+            pics.open(0).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn parsed(path: &str) -> Parsed {
+        let mut left = LIMITS;
+        Parsed {
+            path: PathBuf::from(path),
+            doc: doc::md::read_spending(b"# x\n", &mut left, Dialect::Gfm).unwrap(),
+            len: 4,
+            digest: 0,
+        }
+    }
+
+    /// The keys are the paths below the deepest folder all documents are
+    /// under.
+    #[test]
+    fn keys_are_relative_to_the_common_folder() {
+        let docs = [
+            parsed("/r/x/a/1.md"),
+            parsed("/r/x/b/2.md"),
+            parsed("/r/x/3.md"),
+        ];
+        assert_eq!(keys(&docs), ["a/1.md", "b/2.md", "3.md"]);
+        let docs = [parsed("/r/x/a.md"), parsed("/r/x/b.md")];
+        assert_eq!(keys(&docs), ["a.md", "b.md"]);
+        let docs = [parsed("/r/x/a/1.md"), parsed("/r/y/2.md")];
+        assert_eq!(keys(&docs), ["x/a/1.md", "y/2.md"]);
+        assert_eq!(keys(&[parsed("/r/x/a.md")]), ["a.md"]);
+    }
 }

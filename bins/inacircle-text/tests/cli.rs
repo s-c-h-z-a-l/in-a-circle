@@ -1610,3 +1610,187 @@ fn document_over_the_budget_alone() {
     assert_eq!(lines(&out, "fail").len(), 2, "{out}");
     assert!(lines(&out, "joined").is_empty(), "{out}");
 }
+
+/// Items of a document of exactly the node budget (524,288): the list is
+/// one node, each item three, and a closing thematic break one more.
+const BUDGET_ITEMS: usize = 174_762;
+
+/// After a document that left no node, a document of only blank lines
+/// fails the book (it could be parsed without a node, but fails closed),
+/// while an empty file still joins; a document at the budget alone joins.
+#[test]
+fn spent_budget_admits_only_an_empty_file() {
+    let (root, work) = workdir("join-spent");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, blank, empty) = (dir.join("a.md"), dir.join("b.md"), dir.join("c.md"));
+    fs::write(&a, format!("{}\n***\n", "- a\n".repeat(BUDGET_ITEMS))).unwrap();
+    fs::write(&blank, "\n\n").unwrap();
+    fs::write(&empty, "").unwrap();
+
+    let o = join(&work, &[&a, &blank]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    assert_eq!(lines(&out, "fail").len(), 2, "{out}");
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = join(&work2, &[&a, &empty]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(takes(&o), [a.to_str().unwrap(), empty.to_str().unwrap()]);
+    joined_book(&o, &work2);
+}
+
+/// Progress is the share of inputs passed, exactly: 0, then k/n.
+#[test]
+fn join_progress_counts_the_inputs() {
+    let (root, work) = workdir("join-progress");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    fs::write(&a, "# A\n").unwrap();
+    fs::write(&b, "# B\n").unwrap();
+    let o = join(&work, &[&a, &b]);
+    let out = stdout(&o);
+    let p: Vec<&str> = lines(&out, "progress").iter().map(|f| f[1]).collect();
+    assert_eq!(p, ["0", "0.5", "1"], "{out}");
+}
+
+/// The identifier follows the content of every input, not only its size
+/// or its name.
+#[test]
+fn join_identifier_follows_the_inputs() {
+    let identifier = |text: &str, k: usize| {
+        let (root, work) = workdir(&format!("join-id{k}"));
+        let dir = root.join("d");
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+        fs::write(&a, text).unwrap();
+        fs::write(&b, "# B\n").unwrap();
+        let o = join(&work, &[&a, &b]);
+        let es = entries(&joined_book(&o, &work));
+        let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+        let from = opf.find("<dc:identifier").unwrap();
+        let to = opf.find("</dc:identifier>").unwrap();
+        opf[from..to].to_string()
+    };
+    let (x, y, z) = (
+        identifier("# A1\n", 0),
+        identifier("# A2\n", 1),
+        identifier("# A1\n", 2),
+    );
+    assert_eq!(x, z);
+    assert_ne!(x, y);
+}
+
+/// The book is as old as its newest document.
+#[test]
+fn join_modified_is_the_newest_input() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let (root, work) = workdir("join-mtime");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    for (p, secs) in [(&a, 1_700_000_000u64), (&b, 1_000_000_000)] {
+        fs::write(p, "# T\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+    let o = join(&work, &[&a, &b]);
+    let es = entries(&joined_book(&o, &work));
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(
+        opf.contains(">2023-11-14T22:13:20Z</meta>"),
+        "newest of the two: {opf}"
+    );
+}
+
+/// A document over the input limit and one that cannot be read fail with
+/// their own reasons; a non-text file is a `skip`, and a join that took
+/// nothing and failed nothing exits 3.
+#[test]
+fn join_failure_reasons_and_exit_codes() {
+    let (root, work) = workdir("join-reasons");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, big, gone) = (dir.join("a.md"), dir.join("big.md"), dir.join("gone.md"));
+    fs::write(&a, "# A\n").unwrap();
+    fs::write(&big, vec![b'x'; (8 << 20) + 1]).unwrap();
+    let o = join(&work, &[&a, &big, &gone]);
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 2, "{out}");
+    assert_eq!(fails[0][1], big.to_str().unwrap());
+    assert_eq!(fails[0][2], "This text file is larger than 8 MiB.");
+    assert_eq!(fails[1][1], gone.to_str().unwrap());
+    assert!(fails[1][2].contains("No such file"), "{out}");
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let bin = dir.join("bin.md");
+    fs::write(&bin, [0xffu8, 0xfe, 0, 1, 2]).unwrap();
+    let o = join(&work2, &[&bin]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(3), "{out}");
+    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    assert!(lines(&out, "fail").is_empty(), "{out}");
+    assert!(!work2.join("join").exists());
+}
+
+/// A damaged image says so, and a header past the pixel limit says that.
+#[test]
+fn join_image_failure_reasons() {
+    let (root, work) = workdir("join-imgreasons");
+    let md = root.join("a.md");
+    fs::write(&md, "# A\n").unwrap();
+    let (cut, wide) = (root.join("cut.png"), root.join("wide.png"));
+    let mut bytes = png(1);
+    bytes.truncate(20);
+    fs::write(&cut, bytes).unwrap();
+    fs::write(
+        &wide,
+        testzip::png(20_000, 20_000, 2, None, false, false, &[]),
+    )
+    .unwrap();
+    let o = join(&work, &[&md, &cut, &wide]);
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 2, "{out}");
+    assert_eq!(fails[0][2], "damaged image data", "{out}");
+    assert_eq!(fails[1][2], "image is larger than 180 megapixels", "{out}");
+}
+
+/// A destination that looks like a URL or an absolute path is no local
+/// file, even when a file of that name is an input: `http://x/y.png` is
+/// not the folder `http:` and `%2F…` is not the root.
+#[test]
+fn urls_and_encoded_absolute_paths_are_not_files() {
+    let (root, work) = workdir("join-notlocal");
+    let md = root.join("a.md");
+    let url_dir = root.join("http:/example.com");
+    fs::create_dir_all(&url_dir).unwrap();
+    let (url_img, abs_img) = (url_dir.join("y.png"), root.join("k.png"));
+    fs::write(&url_img, png(1)).unwrap();
+    fs::write(&abs_img, png(2)).unwrap();
+    let abs = format!("%2F{}", abs_img.to_str().unwrap().trim_start_matches('/'));
+    fs::write(
+        &md,
+        format!("![url](http://example.com/y.png)\n\n![abs]({abs})\n"),
+    )
+    .unwrap();
+    let o = join(&work, &[&md, &url_img, &abs_img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let es = entries(&joined_book(&o, &work));
+    let ch = chapters(&es);
+    // The inputs are in the book, but the document shows alt text only.
+    assert_eq!(images(&es).len(), 2);
+    assert_eq!(ch[0].1.matches("<img ").count(), 0, "{}", ch[0].1);
+    assert!(ch[0].1.contains("url") && ch[0].1.contains("abs"));
+}
