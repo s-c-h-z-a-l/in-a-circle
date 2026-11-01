@@ -2,6 +2,8 @@
 //! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
 //! structure). Contract v0 (docs/architecture.md).
 
+mod join;
+
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -154,6 +156,23 @@ fn manifest_text() -> String {
     ] {
         s.push_str(&action(id, input, "text/html", "html", "HTML", "document"));
     }
+    // The join: several Markdown files and the images they use to one book.
+    s.push_str(&manifest::write_line(
+        &manifest::Line::new("action")
+            .bare("text.md-join-epub")
+            .pair("family", "text")
+            .pair("in", "text/markdown")
+            .pair("assets", "image/jpeg,image/png")
+            .pair("out", "application/epub+zip")
+            .pair("ext", "epub")
+            .pair("label", "EPUB")
+            .pair("group", "book")
+            .pair("cost", "10")
+            .pair("lossy", "yes")
+            .pair("batch", "yes")
+            .pair("join", "yes")
+            .pair("min", "1"),
+    ));
     s
 }
 
@@ -538,6 +557,9 @@ fn main() -> ExitCode {
             return ExitCode::from(action::EXIT_USAGE as u8);
         }
     };
+    if inv.action == "text.md-join-epub" {
+        return ExitCode::from(join::run(&inv));
+    }
     let Some(conv) = Conversion::from_id(&inv.action) else {
         eprintln!("inacircle-text: unknown action {}", inv.action);
         return ExitCode::from(action::EXIT_USAGE as u8);

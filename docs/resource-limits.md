@@ -153,6 +153,24 @@ archive) peak at about 3.5 MB `VmHWM` (debug build; the baseline is about
 1.7 MB), not the sum of the images; the test ceiling is 6 MB, far below the
 archive size, so memory that grew with the archive would fail it.
 
+The join action `text.md-join-epub` parses every Markdown file of the
+book and holds them until the book is packed (links across files need all
+of them), so memory follows their sum, not one file: the files together
+may be at most 16 MiB (twice one file's 8 MiB budget; a parsed file takes
+12 to 25 times its input, so about 200 to 400 MB at the limit, under the
+sandbox's `RLIMIT_DATA` net); the file that would pass it fails with `The
+Markdown files together are larger than 16 MiB.` and the rest still join.
+Images are never held by the book: each is header-checked
+(`probe::sniff`, at most 64 MiB, 180 MP, as for the CBZ), digested in 8 KiB
+reads for the book's identifier, and later streamed into the archive from
+the file it was checked from (identity and size must still match). The
+output ceiling is `RLIMIT_FSIZE`, checked by the write itself (the size of
+a book is known only once it is packed): past it every input the book would
+have taken fails with `EPUB would be larger than <N> MiB` and the file is
+removed. The book has at most 1,024 chapters (`book would have more than
+1024 chapters`). The header check does not read the image body: an image
+damaged inside its data passes, as for the CBZ.
+
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
 checking its scan data: the probe reads the markers, not the entropy

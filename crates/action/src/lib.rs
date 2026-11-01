@@ -309,6 +309,53 @@ impl<W: Write> Events<W> {
     }
 }
 
+/// The name of a book join's result when its anchor folder cannot name it
+/// (the root has no name; a hidden folder's would hide the result): the
+/// type's English name. The engine names the file with it and the action
+/// titles the book with it, from [`anchor_of`], so both agree.
+pub const BOOK_FALLBACK_NAME: &str = "book";
+
+/// The anchor folder and name of a join result made of `accepted` (a
+/// join's documents only, in the order the action gets them), the one rule
+/// the engine places the result by and a book join titles itself by. The
+/// anchor is the folder with the most inputs; on a tie, the folder of the
+/// earliest input among the tied. The name is that folder's name for two or
+/// more inputs, and the input's stem for one; `fallback` when that name is
+/// missing, not UTF-8 or starts with a dot. `None` for no input. Pure: no
+/// filesystem access.
+pub fn anchor_of<'a, P: AsRef<Path>>(
+    accepted: &'a [P],
+    fallback: &str,
+) -> Option<(&'a Path, String)> {
+    fn folder(p: &Path) -> &Path {
+        p.parent().unwrap_or(Path::new("/"))
+    }
+    let first = accepted.first()?.as_ref();
+    // Per folder: (inputs, index of its first input). One entry per
+    // distinct folder, so bounded by the invocation's input count.
+    let mut count: std::collections::HashMap<&Path, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (i, p) in accepted.iter().enumerate() {
+        count.entry(folder(p.as_ref())).or_insert((0, i)).0 += 1;
+    }
+    // The most inputs; among equals, the smallest first index.
+    let dir = count
+        .into_iter()
+        .max_by(|(_, (na, ia)), (_, (nb, ib))| na.cmp(nb).then(ib.cmp(ia)))
+        .map_or(folder(first), |(d, _)| d);
+    let usable = |s: &std::ffi::OsStr| -> Option<String> {
+        let s = s.to_str()?;
+        (!s.is_empty() && !s.starts_with('.')).then(|| s.to_owned())
+    };
+    let name = if accepted.len() >= 2 {
+        dir.file_name().and_then(usable)
+    } else {
+        first.file_stem().and_then(usable)
+    }
+    .unwrap_or_else(|| fallback.to_owned());
+    Some((dir, name))
+}
+
 /// The folder under `--work` that holds a join action's one output.
 pub const JOIN_DIR: &str = "join";
 
@@ -337,6 +384,25 @@ pub fn output_path(work: &Path, index: usize, input: &Path, ext: &str) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_of_names_by_folder_or_stem() {
+        let p = |s: &str| PathBuf::from(s);
+        let two = [p("/n/a/x.md"), p("/n/a/y.md"), p("/n/b/z.md")];
+        let (dir, name) = anchor_of(&two, BOOK_FALLBACK_NAME).unwrap();
+        assert_eq!((dir, name.as_str()), (Path::new("/n/a"), "a"));
+        let one = [p("/n/a/x.md")];
+        assert_eq!(anchor_of(&one, "book").unwrap().1, "x");
+        // A tie goes to the earlier input's folder.
+        let tie = [p("/n/b/1.md"), p("/n/a/2.md")];
+        assert_eq!(anchor_of(&tie, "book").unwrap().1, "b");
+        let hidden = [p("/n/.h/1.md"), p("/n/.h/2.md")];
+        assert_eq!(anchor_of(&hidden, "book").unwrap().1, "book");
+        let root = [p("/1.md"), p("/2.md")];
+        assert_eq!(anchor_of(&root, "book").unwrap().1, "book");
+        assert!(anchor_of::<PathBuf>(&[], "book").is_none());
+    }
+
     use manifest::Item;
     use std::os::unix::ffi::OsStringExt;
 

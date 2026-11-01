@@ -16,8 +16,8 @@ use std::io::{self, Read};
 
 use doc::{Dialect, Document, LimitError, Limits, Loss};
 use epub::{
-    BookError, Image, ImageKind, ImageSource, Meta, NoImages, Part, fnv1a_128, uuid_v8, write,
-    write_book,
+    BookError, Image, ImageKind, ImageSource, Meta, NoImages, Part, fnv1a_128, fnv1a_128_read,
+    uuid_v8, write, write_book,
 };
 
 // ---------- memory measurement ----------
@@ -604,6 +604,9 @@ fn fnv_test_vectors() {
     assert_eq!(fnv1a_128(&[b"foobar"]), 0x343e1662793c64bf6f0d3597ba446f18);
     // Chunks hash as their concatenation.
     assert_eq!(fnv1a_128(&[b"foo", b"bar"]), fnv1a_128(&[b"foobar"]));
+    // The streamed hash is the chunked one, across the 8 KiB read size.
+    let big: Vec<u8> = (0..20_000u32).map(|i| (i * 7) as u8).collect();
+    assert_eq!(fnv1a_128_read(&big[..]).unwrap(), fnv1a_128(&[&big[..]]));
     // UUID version 8 (RFC 9562): version nibble 8, variant bits 10.
     assert_eq!(uuid_v8(0), "00000000-0000-8000-8000-000000000000");
     assert_eq!(uuid_v8(u128::MAX), "ffffffff-ffff-8fff-bfff-ffffffffffff");

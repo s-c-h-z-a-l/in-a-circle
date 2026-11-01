@@ -119,6 +119,25 @@ pub fn fnv1a_128(chunks: &[&[u8]]) -> u128 {
     h
 }
 
+/// [`fnv1a_128`] of everything `r` yields, read in 8 KiB pieces (memory
+/// is the buffer, not the stream). The read error, if any, is returned.
+pub fn fnv1a_128_read(mut r: impl Read) -> io::Result<u128> {
+    let mut h = FNV_OFFSET;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return Ok(h),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        for &b in &buf[..n] {
+            h ^= u128::from(b);
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+    }
+}
+
 /// `h` as a version 8 UUID (RFC 9562, custom): the version nibble set to
 /// 8 and the variant bits to `10`, the remaining 122 bits from `h`;
 /// lowercase `8-4-4-4-12` hex.

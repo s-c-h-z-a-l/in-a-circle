@@ -416,7 +416,7 @@ const IMAGES_FALLBACK_NAME: &str = "images";
 
 /// The same for an EPUB join's result: the type's English name, since the
 /// book holds documents, not only images.
-const BOOK_FALLBACK_NAME: &str = "book";
+const BOOK_FALLBACK_NAME: &str = action::BOOK_FALLBACK_NAME;
 
 /// The name [`anchor`] falls back to for a join whose output type is
 /// `output`: [`BOOK_FALLBACK_NAME`] for an EPUB, [`IMAGES_FALLBACK_NAME`]
@@ -450,34 +450,9 @@ pub struct Anchor {
 /// [`writable_target`]'s probe of the anchor folder. `accepted` empty is
 /// `InvalidInput`.
 pub fn anchor<P: AsRef<Path>>(accepted: &[P], fallback: &str) -> io::Result<Anchor> {
-    let Some(first) = accepted.first().map(AsRef::as_ref) else {
+    let Some((dir, name)) = action::anchor_of(accepted, fallback) else {
         return Err(invalid("no input for the result"));
     };
-    fn folder(p: &Path) -> &Path {
-        p.parent().unwrap_or(Path::new("/"))
-    }
-    // Per folder: (inputs, index of its first input). One entry per
-    // distinct folder, so bounded by the invocation's input count.
-    let mut count: std::collections::HashMap<&Path, (usize, usize)> =
-        std::collections::HashMap::new();
-    for (i, p) in accepted.iter().enumerate() {
-        count.entry(folder(p.as_ref())).or_insert((0, i)).0 += 1;
-    }
-    // The most inputs; among equals, the smallest first index.
-    let dir = count
-        .into_iter()
-        .max_by(|(_, (na, ia)), (_, (nb, ib))| na.cmp(nb).then(ib.cmp(ia)))
-        .map_or(folder(first), |(d, _)| d);
-    let usable = |s: &OsStr| -> Option<String> {
-        let s = s.to_str()?;
-        (!s.is_empty() && !s.starts_with('.')).then(|| s.to_owned())
-    };
-    let name = if accepted.len() >= 2 {
-        dir.file_name().and_then(usable)
-    } else {
-        first.file_stem().and_then(usable)
-    }
-    .unwrap_or_else(|| fallback.to_owned());
     let target = writable_target(dir)?;
     Ok(Anchor {
         downloads: target != dir,

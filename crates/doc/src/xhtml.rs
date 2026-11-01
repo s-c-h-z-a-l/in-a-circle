@@ -881,7 +881,7 @@ fn authority_range(s: &str) -> std::ops::Range<usize> {
 
 /// `%XX` sequences decoded; a bad escape stays as written, bytes that are
 /// not UTF-8 become U+FFFD.
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

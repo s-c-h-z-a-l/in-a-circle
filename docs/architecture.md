@@ -293,6 +293,25 @@ are in `CLAUDE.md`.
   input's. The output file is created new (never overwritten) and removed
   when the book fails, so no half book is left; losses of the reader and
   the writer (raw HTML, images, links) are reported once each.
+- `text.md-join-epub` (`group=book`, `lossy=yes`, `join=yes`,
+  `assets=image/jpeg,image/png`) joins Markdown files and the images they
+  use to one book, `join/out.epub`. An input is an image when its header
+  is a JPEG or PNG one (`probe::sniff`: any valid variant, bytes packaged
+  as they are), else a document. Each document is one top-level chapter
+  (split ones have sub-chapters), in the order given; the title is the
+  result's name (`action::anchor_of`, the one rule the engine places the
+  result by: the folder holding most documents) for two or more
+  documents, else the document's own title as above. An image destination
+  is resolved against the document's folder (percent-decoded, `.` and `..`
+  lexically); the file it opens must be one of the given images, matched
+  by device and inode (a symlink, `./a.png` and `a.png` are one image), or
+  the alt text stays and the book reports the loss. A link to another
+  given document goes to its chapter file and heading. A document that
+  fails leaves the rest; a damaged image fails alone (its place keeps the
+  alt text); no document left, no book. The book failing as a whole (the
+  chapter limit, the output ceiling, a write error) fails every input it
+  would have taken and leaves no file. `take` comes per taken input after
+  the book is finished, `joined` once.
 - `text.md-to-html` and `text.txt-to-html` (`group=document`, `lossy=yes`)
   write one self-contained page per input, `<stem>.html`, as a single
   chapter: `<!DOCTYPE html>`, `lang` (as for the book), `<meta charset>`,
@@ -318,6 +337,7 @@ action	text.md-to-epub	family=text	in=text/markdown	out=application/epub+zip	ext
 action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
 action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
