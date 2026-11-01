@@ -1711,6 +1711,34 @@ fn join_modified_is_the_newest_input() {
     );
 }
 
+/// An image is an input too: a newer image makes the book newer than its
+/// documents.
+#[test]
+fn join_modified_counts_the_images() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let (root, work) = workdir("join-mtime-image");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, img) = (dir.join("a.md"), dir.join("pic.png"));
+    fs::write(&a, "# T\n").unwrap();
+    fs::write(&img, png(7)).unwrap();
+    for (p, secs) in [(&a, 1_000_000_000u64), (&img, 1_700_000_000)] {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+    let o = join(&work, &[&a, &img]);
+    let es = entries(&joined_book(&o, &work));
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(
+        opf.contains(">2023-11-14T22:13:20Z</meta>"),
+        "the newer image sets the date: {opf}"
+    );
+}
+
 /// A document over the input limit and one that cannot be read fail with
 /// their own reasons; a non-text file is a `skip`, and a join that took
 /// nothing and failed nothing exits 3.

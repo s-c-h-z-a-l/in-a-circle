@@ -62,6 +62,8 @@ struct Item {
     image: Image,
     /// Digest of its bytes, for the book's identifier.
     digest: u128,
+    /// Its modification time, seconds since the epoch (before it: 0).
+    modified: i64,
 }
 
 /// The images of the book, matched to references by file identity.
@@ -217,6 +219,7 @@ fn check_image(path: &Path) -> Result<Option<Item>, String> {
             alt,
         },
         digest,
+        modified: m.mtime().max(0),
     };
     Ok(Some(item))
 }
@@ -277,16 +280,22 @@ fn keys(docs: &[Parsed]) -> Vec<String> {
         .collect()
 }
 
-/// Seconds since the epoch of the newest document (an unreadable time, or
-/// one before the epoch, counts as the epoch), so the book is reproducible
-/// from its inputs.
-fn modified_unix(docs: &[Parsed]) -> i64 {
-    docs.iter()
+/// Seconds since the epoch of the newest input the book takes, documents
+/// and the images it packages (an unreadable time, or one before the
+/// epoch, counts as the epoch), so the book is reproducible from its
+/// inputs.
+fn modified_unix(docs: &[Parsed], pics: &Pictures) -> i64 {
+    let newest_doc = docs
+        .iter()
         .filter_map(|d| fs::metadata(&d.path).and_then(|m| m.modified()).ok())
         .filter_map(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    pics.items
+        .iter()
+        .map(|i| i.modified)
+        .fold(newest_doc, i64::max)
 }
 
 /// What became of one document.
@@ -482,7 +491,7 @@ pub fn run(inv: &Invocation) -> u8 {
     let meta = epub::Meta {
         title: name.unwrap_or_else(|| parts[0].title.clone()),
         lang: lang(),
-        modified_unix: modified_unix(&docs),
+        modified_unix: modified_unix(&docs, &pics),
         id_seed: id_seed(&docs, &pics),
     };
 
