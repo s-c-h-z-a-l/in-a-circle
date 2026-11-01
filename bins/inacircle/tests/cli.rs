@@ -1180,7 +1180,7 @@ fn sandbox_children_get_a_clean_environment() {
          if [ \"$1\" = --manifest ]; then\n\
          l=clean\n\
          for v in SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY LD_PRELOAD \\\n\
-           INACIRCLE_FAKE_TOKEN HOME XDG_RUNTIME_DIR; do\n\
+           INACIRCLE_FAKE_TOKEN INACIRCLE_LANG HOME XDG_RUNTIME_DIR; do\n\
            eval \"[ -z \\\"\\${$v+x}\\\" ]\" || l=leaked-$v\n\
          done\n\
          [ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C.UTF-8 ] && [ \"$LANG\" = C.UTF-8 ] \\\n\

@@ -677,7 +677,15 @@ pub fn child_lang(env: impl Fn(&str) -> Option<String>) -> String {
 /// [`child_lang`] of this process's own environment, read once.
 pub fn user_lang() -> &'static str {
     static LANG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    LANG.get_or_init(|| child_lang(|k| std::env::var(k).ok()))
+    LANG.get_or_init(|| lang_of_os_env(|k| std::env::var_os(k)))
+}
+
+/// [`child_lang`] over raw environment values. A value that is not UTF-8
+/// still counts as set (the first non-empty variable decides, as in libc);
+/// its invalid bytes become U+FFFD, which is no letter, so the result is
+/// `und` unless a valid 2-3 letter code precedes a `_`/`.`/`@`.
+fn lang_of_os_env(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> String {
+    child_lang(|k| get(k).map(|v| v.to_string_lossy().into_owned()))
 }
 
 /// The manifest's `TMPDIR`: a path that does not exist and is never made.
@@ -3176,6 +3184,28 @@ pub(crate) mod tests {
         assert_eq!(lang(&[("LANG", "x1_US")]), "und");
         assert_eq!(lang(&[("LANG", "abcd_XX")]), "und");
         assert_eq!(lang(&[("LANG", "é_HU")]), "und");
+    }
+
+    #[test]
+    fn non_utf8_locale_counts_as_set() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(b"hu\xff".to_vec());
+        let lang = |vars: Vec<(&'static str, OsString)>| {
+            lang_of_os_env(|k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()))
+        };
+        // The broken LC_ALL decides; LANG does not get a say.
+        assert_eq!(
+            lang(vec![
+                ("LC_ALL", bad.clone()),
+                ("LANG", "hu_HU.UTF-8".into())
+            ]),
+            "und"
+        );
+        // Valid bytes before a separator still give their code.
+        let tail = OsString::from_vec(b"hu_\xff".to_vec());
+        assert_eq!(lang(vec![("LANG", tail)]), "hu");
+        assert_eq!(lang(vec![("LANG", "hu_HU".into())]), "hu");
     }
 
     #[test]

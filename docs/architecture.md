@@ -805,7 +805,10 @@ compositor.
   no one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
-  files fit both inputs the one that takes more of them holds the slot): lit if
+  files fit both inputs, a preset that can run beats a dim one, then the one
+  that takes more of the files holds the slot, then the earlier preset in
+  the table, plain text before Markdown, which is also the flat offer's tie
+  order): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
   takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1. The flat `inacircle offer <files…>` prints the presets of the most common input type, each `slice` line with its `group=`, since a direction repeats across groups.

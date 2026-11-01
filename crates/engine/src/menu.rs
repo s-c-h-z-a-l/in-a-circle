@@ -40,6 +40,12 @@ pub const GROUPS: &[Group] = &[
     },
 ];
 
+/// The order is the tie-break of both wheel levels: when two presets of
+/// one group share a direction (HTML from Markdown and from plain text)
+/// and the dropped files fit both equally, the earlier preset wins; the
+/// flat offer's most common type picks the first preset's input on a tie
+/// the same way. Plain text therefore precedes Markdown for HTML and EPUB,
+/// as `markdown` (which takes plain text) does at the head of the table.
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "markdown",
@@ -60,15 +66,6 @@ pub const PRESETS: &[Preset] = &[
         join: &[],
     },
     Preset {
-        id: "html",
-        input: Some("text/markdown"),
-        output: "text/html",
-        label: "HTML",
-        direction: 2,
-        group: "document",
-        join: &[],
-    },
-    Preset {
         id: "html-txt",
         input: Some("text/plain"),
         output: "text/html",
@@ -78,8 +75,17 @@ pub const PRESETS: &[Preset] = &[
         join: &[],
     },
     Preset {
-        id: "epub",
+        id: "html",
         input: Some("text/markdown"),
+        output: "text/html",
+        label: "HTML",
+        direction: 2,
+        group: "document",
+        join: &[],
+    },
+    Preset {
+        id: "epub-txt",
+        input: Some("text/plain"),
         output: "application/epub+zip",
         label: "EPUB",
         direction: 2,
@@ -87,8 +93,8 @@ pub const PRESETS: &[Preset] = &[
         join: &[],
     },
     Preset {
-        id: "epub-txt",
-        input: Some("text/plain"),
+        id: "epub",
+        input: Some("text/markdown"),
         output: "application/epub+zip",
         label: "EPUB",
         direction: 2,
@@ -421,8 +427,10 @@ fn offer_group_in(
             disabled_reason(cat, p, tally)
         };
         // Presets of different inputs may share a direction (HTML from
-        // Markdown and from plain text): the one that can run for more of
-        // the dropped files holds the slot; a tie keeps the earlier preset.
+        // Markdown and from plain text). A preset that can run beats a dim
+        // one; then the one that takes more of the dropped files holds the
+        // slot; a tie keeps the earlier preset in [`PRESETS`] order (the
+        // flat offer breaks its ties by the same order).
         let score = (disabled.is_none(), applicable);
         let held = slices[usize::from(p.direction)]
             .as_ref()
@@ -467,6 +475,7 @@ pub struct FlatOffer {
 impl FlatOffer {
     /// The first group's wheel; an empty wheel (with the hub) when no group
     /// has a preset for the selection.
+    #[cfg(test)]
     pub fn into_first(self) -> Offer {
         let (hub, total) = (self.hub, self.total);
         match self.groups.into_iter().next() {
@@ -783,6 +792,30 @@ mod tests {
         };
         assert_eq!(slot("a.md", "text/markdown"), "html");
         assert_eq!(slot("a.txt", "text/plain"), "html-txt");
+    }
+
+    /// One Markdown and one plain-text file: the flat offer and both
+    /// two-level wheels pick the same variant (the earlier preset wins).
+    #[test]
+    fn tie_of_md_and_txt_is_the_same_at_both_levels() {
+        let files = [file("a.md", "text/markdown"), file("b.txt", "text/plain")];
+        let f = offer(&two_way(), &files);
+        let mut t = Tally::default();
+        for (n, k) in &files {
+            t.add(n, k);
+        }
+        for g in ["document", "book"] {
+            let flat = f.groups.iter().find(|(id, _)| *id == g).unwrap().1.slices[2]
+                .as_ref()
+                .unwrap()
+                .preset;
+            let wheel = offer_group(&two_way(), &t, g).slices[2]
+                .as_ref()
+                .unwrap()
+                .preset;
+            assert_eq!(flat, wheel, "{g}");
+            assert!(flat.ends_with("-txt"), "{g}: {flat}");
+        }
     }
 
     #[test]
