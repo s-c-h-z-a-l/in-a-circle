@@ -233,7 +233,13 @@ are in `CLAUDE.md`.
   holds the heading. `http(s):` and `mailto:` links stay; any other link,
   or one whose target is missing, keeps its text (reported). Every image
   becomes its alt text (reported), in a chapter and in a standalone page
-  alike, so a page never loads anything from outside. A task list item
+  alike, so a page never loads anything from outside. The one exception
+  is a chapter of a book of several documents: an image the book packages
+  is an `<img>` of the packaged file with its alt text, and a link to
+  another document of the book (`other.md`, `other.md#x`, its path taken
+  relative to the linking document and normalized lexically) goes to that
+  document's first chapter file or to the heading `x` in it, each
+  document's heading ids being the ones it has on its own. A task list item
   is written with a `[x] ` or `[ ] ` text marker and table alignment as a
   `left`, `center` or `right` class, so the output needs no form element and
   no inline style. Every piece counts against the output budget before it

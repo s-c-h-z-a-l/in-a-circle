@@ -2,12 +2,23 @@
 //! The document readers on arbitrary bytes, then every writer on the tree
 //! they built: the two real conversions (`inacircle-text`: txt->md and
 //! md->txt) plus `html::write` and the strict `xhtml::write_chapter` (both
-//! modes), so the tree walks run too.
+//! modes) and `xhtml::write_book_chapter` (every image packaged, links to
+//! another document resolved), so the tree walks run too.
 
 use libfuzzer_sys::fuzz_target;
 
-/// The strict XHTML writer on `d` as one chapter, in both modes, under
-/// `limits`.
+/// Packages every image under its own destination, so the `<img>` path and
+/// its URL escaping see every destination the reader builds.
+struct Every;
+
+impl doc::xhtml::Images for Every {
+    fn src(&self, dest: &str) -> Option<String> {
+        Some(dest.to_string())
+    }
+}
+
+/// The strict XHTML writer on `d` as one chapter, in both modes and as a
+/// book chapter, under `limits`.
 fn xhtml(d: &doc::Document, limits: doc::Limits) {
     let ch = doc::xhtml::Chapter {
         blocks: &d.blocks,
@@ -20,6 +31,27 @@ fn xhtml(d: &doc::Document, limits: doc::Limits) {
     };
     for mode in [doc::xhtml::Mode::Fragment, page] {
         let _ = doc::xhtml::write_chapter(&ch, &anchors, &mode, limits);
+    }
+    let mut n = 0_usize;
+    doc::xhtml::image_dests(&d.blocks, &mut |_| n += 1);
+    // The document twice, as two parts, so a link may name the other.
+    let keys = ["a.md".to_string(), "b/c.md".to_string()];
+    let other = doc::xhtml::Chapter {
+        blocks: &d.blocks,
+        file: "ch0002.xhtml".to_string(),
+    };
+    let anchors = [
+        anchors,
+        doc::xhtml::Anchors::build(std::slice::from_ref(&other)),
+    ];
+    for (part, ch) in [&ch, &other].into_iter().enumerate() {
+        let refs = doc::xhtml::Refs {
+            anchors: &anchors,
+            keys: &keys,
+            part,
+            images: &Every,
+        };
+        let _ = doc::xhtml::write_book_chapter(ch, &refs, limits);
     }
 }
 

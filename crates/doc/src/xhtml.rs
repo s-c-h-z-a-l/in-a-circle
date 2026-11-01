@@ -13,8 +13,12 @@
 //! - `http(s):` and `mailto:` links are kept; every other link keeps its
 //!   text ([`Loss::Links`]).
 //! - Images: every image becomes its alt text ([`Loss::Images`]), in both
-//!   modes. No `<img>` is written, so a page never loads anything from
-//!   outside and the alt text is never lost.
+//!   modes, so a page never loads anything from outside and the alt text is
+//!   never lost. The one exception is a chapter of a book written by
+//!   [`write_book_chapter`]: an image the book packages ([`Images`]) is an
+//!   `<img>` of the packaged file, with its alt text.
+//! - In such a book a link to another of its documents (`other.md`,
+//!   `other.md#x`) is written to that document's chapter file and heading.
 //! - Task list items are written as a text marker (`[x] ` / `[ ] `), table
 //!   alignment as a class (`left`, `center`, `right`): no form element
 //!   (many reading systems do not support them) and no `style` attribute
@@ -268,17 +272,8 @@ pub fn write_chapter(
         anchors.files.iter().filter(|f| **f == ch.file).count() <= 1,
         "chapter file names must be unique"
     );
-    let own = anchors.files.iter().position(|f| *f == ch.file);
-    let mut w = Writer {
-        sink: Sink::new(limits),
-        out: String::new(),
-        losses: BTreeSet::new(),
-        anchors,
-        file: &ch.file,
-        ids: own.map_or(&[][..], |i| &anchors.headings[i]),
-        next_heading: 0,
-        standalone: matches!(mode, Mode::Standalone { .. }),
-    };
+    let mut w = Writer::new(ch, anchors, None, limits);
+    w.standalone = matches!(mode, Mode::Standalone { .. });
     if let Mode::Standalone { lang, title } = mode {
         w.raw("<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"");
         w.esc(lang, true);
@@ -299,16 +294,152 @@ pub fn write_chapter(
     Ok((w.out, w.losses))
 }
 
+/// The images a book packages, as a chapter of one of its documents sees
+/// them.
+pub trait Images {
+    /// The path, relative to the chapter file, of the packaged image that
+    /// `dest` (an image destination as the document writes it) refers to;
+    /// `None` writes the image's alt text instead.
+    fn src(&self, dest: &str) -> Option<String>;
+}
+
+/// What a chapter of a book of several documents may point to beyond its
+/// own document.
+pub struct Refs<'a> {
+    /// Every document's heading ids, each built by [`Anchors::build`] from
+    /// that document's chapters only, so a document's ids are the ones it
+    /// would have on its own (GitHub numbers repeats per file). Chapter file
+    /// names must be unique across the book.
+    pub anchors: &'a [Anchors],
+    /// Every document's key, [`normalize`]d: its path as the other
+    /// documents' links name it, relative to the folder of their own key
+    /// (the same folder for documents side by side, so the file name).
+    pub keys: &'a [String],
+    /// The document the chapter belongs to: an index into `anchors` and
+    /// `keys`.
+    pub part: usize,
+    /// The images the book packages for this document.
+    pub images: &'a dyn Images,
+}
+
+/// Writes one chapter of document `refs.part` of a book, in
+/// [`Mode::Fragment`]. As [`write_chapter`] with that document's anchors,
+/// and besides: an image `refs.images` resolves is an `<img>` of the
+/// packaged file (its alt text in `alt`), and a link to another document
+/// of the book (`other.md`, `other.md#x`, relative to this document's key)
+/// is written to that document's first chapter file or to the heading `x`
+/// in it. A link to a document outside the book, or to a heading the
+/// target document does not have, keeps its text ([`Loss::Links`]).
+pub fn write_book_chapter(
+    ch: &Chapter,
+    refs: &Refs,
+    limits: Limits,
+) -> Result<(String, BTreeSet<Loss>), LimitError> {
+    let mut w = Writer::new(ch, &refs.anchors[refs.part], Some(refs), limits);
+    w.blocks(ch.blocks, false);
+    w.cr();
+    w.sink.result()?;
+    Ok((w.out, w.losses))
+}
+
+/// Calls `f` with the destination of every image [`write_book_chapter`]
+/// meets in `blocks`, in the order it meets them (repeats included): what
+/// a book packer resolves before it writes the package document. An image
+/// inside another image's alt text, in raw HTML, in a table without
+/// columns or in a table cell past the header's width is not written as
+/// an image and is not listed.
+pub fn image_dests(blocks: &[Block], f: &mut dyn FnMut(&str)) {
+    fn inlines(is: &[Inline], f: &mut dyn FnMut(&str)) {
+        for i in is {
+            match i {
+                Inline::Image { dest, .. } => f(dest),
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => inlines(c, f),
+                Inline::Link { content, .. } => inlines(content, f),
+                Inline::Text(_)
+                | Inline::Code(_)
+                | Inline::SoftBreak
+                | Inline::HardBreak
+                | Inline::Html(_) => {}
+            }
+        }
+    }
+    for b in blocks {
+        match b {
+            Block::Paragraph(c) | Block::Heading { content: c, .. } => inlines(c, f),
+            Block::BlockQuote(c) => image_dests(c, f),
+            Block::List { items, .. } => {
+                for item in items {
+                    image_dests(&item.blocks, f);
+                }
+            }
+            Block::Table { align, head, rows } => {
+                for row in std::iter::once(head).chain(rows) {
+                    for cell in row.iter().take(align.len()) {
+                        inlines(cell, f);
+                    }
+                }
+            }
+            Block::CodeBlock { .. } | Block::ThematicBreak | Block::HtmlBlock(_) => {}
+        }
+    }
+}
+
+/// `path` with empty and `.` segments left out and each `..` taking away
+/// the segment before it; a `..` with no segment before it stays, and so
+/// does a leading `/`. Lexical only: nothing is looked up on disk.
+pub fn normalize(path: &str) -> String {
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." if segs.last().is_some_and(|l| *l != "..") => {
+                segs.pop();
+            }
+            _ => segs.push(seg),
+        }
+    }
+    let joined = segs.join("/");
+    if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
 struct Writer<'a> {
     sink: Sink,
     out: String,
     losses: BTreeSet<Loss>,
     anchors: &'a Anchors,
+    /// The book this chapter is part of, for [`write_book_chapter`].
+    refs: Option<&'a Refs<'a>>,
     file: &'a str,
     /// Ids of this chapter's headings, in document order.
     ids: &'a [String],
     next_heading: usize,
     standalone: bool,
+}
+
+impl<'a> Writer<'a> {
+    fn new(
+        ch: &'a Chapter,
+        anchors: &'a Anchors,
+        refs: Option<&'a Refs<'a>>,
+        limits: Limits,
+    ) -> Self {
+        let own = anchors.files.iter().position(|f| *f == ch.file);
+        Writer {
+            sink: Sink::new(limits),
+            out: String::new(),
+            losses: BTreeSet::new(),
+            anchors,
+            refs,
+            file: &ch.file,
+            ids: own.map_or(&[][..], |i| &anchors.headings[i]),
+            next_heading: 0,
+            standalone: false,
+        }
+    }
 }
 
 impl Writer<'_> {
@@ -602,9 +733,26 @@ impl Writer<'_> {
                 content,
                 ..
             } => self.link(dest, title, content),
-            Inline::Image { alt, .. } => {
-                self.losses.insert(Loss::Images);
-                self.plain_text(alt, false);
+            Inline::Image { dest, title, alt } => {
+                match self.refs.and_then(|r| r.images.src(dest)) {
+                    Some(src) => {
+                        self.raw("<img src=\"");
+                        self.url(&src);
+                        self.raw("\" alt=\"");
+                        self.plain_text(alt, true);
+                        self.raw("\"");
+                        if !title.is_empty() {
+                            self.raw(" title=\"");
+                            self.esc(title, true);
+                            self.raw("\"");
+                        }
+                        self.raw("/>");
+                    }
+                    None => {
+                        self.losses.insert(Loss::Images);
+                        self.plain_text(alt, false);
+                    }
+                }
             }
             Inline::SoftBreak => self.raw("\n"),
             Inline::HardBreak => self.raw("<br/>\n"),
@@ -615,7 +763,13 @@ impl Writer<'_> {
     }
 
     fn link(&mut self, dest: &str, title: &str, content: &[Inline]) {
-        let internal = dest.strip_prefix('#').and_then(|f| self.resolve(f));
+        let internal = match dest.strip_prefix('#') {
+            Some(f) => self
+                .resolve(self.anchors, f)
+                .map(|(file, id)| (file, Some(id))),
+            None if is_external(dest) => None,
+            None => self.resolve_document(dest),
+        };
         if internal.is_none() && !is_external(dest) {
             self.losses.insert(Loss::Links);
             self.inlines(content);
@@ -624,17 +778,19 @@ impl Writer<'_> {
         self.raw("<a href=\"");
         match internal {
             Some((file, id)) => {
-                if file != self.file {
+                if file != self.file || id.is_none() {
                     self.url(&file);
                 }
-                self.raw("#");
-                // Percent-encoded: a URI is plain ASCII; the reader decodes
-                // it back to the id.
-                for b in id.bytes() {
-                    if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
-                        self.sink.push(&mut self.out, b as char);
-                    } else {
-                        self.raw(&format!("%{b:02X}"));
+                if let Some(id) = id {
+                    self.raw("#");
+                    // Percent-encoded: a URI is plain ASCII; the reader
+                    // decodes it back to the id.
+                    for b in id.bytes() {
+                        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+                            self.sink.push(&mut self.out, b as char);
+                        } else {
+                            self.raw(&format!("%{b:02X}"));
+                        }
                     }
                 }
             }
@@ -654,10 +810,39 @@ impl Writer<'_> {
     /// The (file, id) a `#fragment` link points to: the fragment is
     /// percent-decoded and sent through [`slug`] (so `#Intro`, `#intro` and
     /// `#2026-terv` find `intro` and `h-2026-terv`), then looked up.
-    fn resolve(&self, fragment: &str) -> Option<(String, String)> {
+    fn resolve(&self, anchors: &Anchors, fragment: &str) -> Option<(String, String)> {
         let id = slug(&percent_decode(fragment));
-        let ci = *self.anchors.owner.get(&id)?;
-        Some((self.anchors.files[ci].clone(), id))
+        let ci = *anchors.owner.get(&id)?;
+        Some((anchors.files[ci].clone(), id))
+    }
+
+    /// The (file, id) a link to another document of the book points to:
+    /// the path before the first `#`, percent-decoded and taken relative
+    /// to the folder of this document's key, must be a document's key; no
+    /// fragment (or an empty one) is that document's first chapter file,
+    /// else the fragment must find a heading of that document. Outside a
+    /// book, an absolute path or no match: `None`.
+    fn resolve_document(&self, dest: &str) -> Option<(String, Option<String>)> {
+        let refs = self.refs?;
+        let (path, fragment) = match dest.split_once('#') {
+            Some((p, f)) => (p, Some(f).filter(|f| !f.is_empty())),
+            None => (dest, None),
+        };
+        let path = percent_decode(path);
+        if path.is_empty() || path.starts_with('/') {
+            return None;
+        }
+        let own = &refs.keys[refs.part];
+        let target = match own.rfind('/') {
+            Some(i) => normalize(&format!("{}/{path}", &own[..i])),
+            None => normalize(&path),
+        };
+        let part = refs.keys.iter().position(|k| *k == target)?;
+        let anchors = &refs.anchors[part];
+        match fragment {
+            None => Some((anchors.files.first()?.clone(), None)),
+            Some(f) => self.resolve(anchors, f).map(|(file, id)| (file, Some(id))),
+        }
     }
 }
 
@@ -1356,5 +1541,247 @@ mod tests {
             "{out}"
         );
         assert!(losses.is_empty());
+    }
+
+    /// Packaged images: destination -> path in the package.
+    struct Packaged(Vec<(&'static str, &'static str)>);
+
+    impl Images for Packaged {
+        fn src(&self, dest: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(d, _)| *d == dest)
+                .map(|(_, s)| s.to_string())
+        }
+    }
+
+    /// A book of `parts` ((key, Markdown) each, one chapter per part,
+    /// `ch0001.xhtml` onwards), every chapter written with `images`.
+    fn render_book(parts: &[(&str, &str)], images: &dyn Images) -> Vec<(String, BTreeSet<Loss>)> {
+        let docs: Vec<Document> = parts.iter().map(|(_, src)| doc(src)).collect();
+        let chapters: Vec<Chapter> = docs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| chapter(&d.blocks, &format!("ch{:04}.xhtml", i + 1)))
+            .collect();
+        let anchors: Vec<Anchors> = chapters
+            .iter()
+            .map(|c| Anchors::build(std::slice::from_ref(c)))
+            .collect();
+        let keys: Vec<String> = parts.iter().map(|(k, _)| normalize(k)).collect();
+        chapters
+            .iter()
+            .enumerate()
+            .map(|(part, ch)| {
+                let refs = Refs {
+                    anchors: &anchors,
+                    keys: &keys,
+                    part,
+                    images,
+                };
+                let (out, losses) = write_book_chapter(ch, &refs, Limits::UNLIMITED).unwrap();
+                well_formed(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+                (out, losses)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn packaged_image_is_an_img() {
+        let images = Packaged(vec![("a b.png", "img/0001.png"), ("x.jpg", "img/0002.jpg")]);
+        let out = render_book(
+            &[(
+                "a.md",
+                "![an *alt* & \"q\"](<a b.png> \"T & 'u'\") ![](x.jpg) ![miss](b.png)\n",
+            )],
+            &images,
+        );
+        let (out, losses) = &out[0];
+        assert!(
+            out.contains("<img src=\"img/0001.png\" alt=\"an alt &amp; &quot;q&quot;\" title=\"T &amp; &#39;u&#39;\"/>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<img src=\"img/0002.jpg\" alt=\"\"/>"),
+            "{out}"
+        );
+        // The one the book does not package is its alt text.
+        assert!(out.ends_with(" miss</p>\n"), "{out}");
+        assert_eq!(*losses, BTreeSet::from([Loss::Images]));
+
+        let (out, losses) = &render_book(&[("a.md", "![p](x.jpg)\n")], &images)[0];
+        assert_eq!(out, "<p><img src=\"img/0002.jpg\" alt=\"p\"/></p>\n");
+        assert!(losses.is_empty(), "{losses:?}");
+        // The plain chapter writer never writes one, in either mode.
+        for mode in [Mode::Fragment, standalone()] {
+            let (out, _) = render("![p](x.jpg)\n", &mode);
+            assert!(!out.contains("<img"), "{out}");
+        }
+    }
+
+    #[test]
+    fn links_between_documents() {
+        let parts = [
+            (
+                "a.md",
+                "# Intro\n\n[1](sub/b.md#Part%20Two) [2](sub/b.md) [3](./sub/../c.md#top) \
+                 [4](missing.md) [5](sub/b.md#nope) [6](/c.md) [7](a.md#intro) [8](#intro) \
+                 [9](sub/b.md#) [10](sub/b.md#intro)\n",
+            ),
+            (
+                "sub/b.md",
+                "# Intro\n\n# Part Two\n\n[back](../a.md#intro) [own](#intro) [c](../c.md)\n",
+            ),
+            ("c.md", "# Top\n"),
+        ];
+        let out = render_book(&parts, &Packaged(vec![]));
+        let (a, la) = &out[0];
+        for want in [
+            "<a href=\"ch0002.xhtml#part-two\">1</a>",
+            "<a href=\"ch0002.xhtml\">2</a>",
+            "<a href=\"ch0003.xhtml#top\">3</a>",
+            " 4 ",
+            " 5 ",
+            " 6 ",
+            "<a href=\"#intro\">7</a>",
+            "<a href=\"#intro\">8</a>",
+            "<a href=\"ch0002.xhtml\">9</a>",
+            // A document's ids are its own: b's first heading is `intro`
+            // too, not `intro-1`.
+            "<a href=\"ch0002.xhtml#intro\">10</a>",
+        ] {
+            assert!(a.contains(want), "{want}\n{a}");
+        }
+        assert_eq!(*la, BTreeSet::from([Loss::Links]));
+        let (b, lb) = &out[1];
+        assert!(b.contains("<h1 id=\"intro\">Intro</h1>"), "{b}");
+        assert!(b.contains("<a href=\"ch0001.xhtml#intro\">back</a>"), "{b}");
+        assert!(b.contains("<a href=\"#intro\">own</a>"), "{b}");
+        assert!(b.contains("<a href=\"ch0003.xhtml\">c</a>"), "{b}");
+        assert!(lb.is_empty(), "{lb:?}");
+
+        // A percent-encoded path finds its document.
+        let out = render_book(
+            &[("a.md", "[n](my%20notes.md#x)\n"), ("my notes.md", "# X\n")],
+            &Packaged(vec![]),
+        );
+        assert!(
+            out[0].0.contains("<a href=\"ch0002.xhtml#x\">n</a>"),
+            "{}",
+            out[0].0
+        );
+        // Outside a book a link to another file keeps its text.
+        let (out, losses) = render("# X\n\n[n](a.md#x)\n", &Mode::Fragment);
+        assert!(!out.contains("<a "), "{out}");
+        assert_eq!(losses, BTreeSet::from([Loss::Links]));
+    }
+
+    /// `image_dests` lists exactly the images the writer asks the book
+    /// for, in its order: every place an image can be written, and the
+    /// places where it is not.
+    #[test]
+    fn image_dests_match_the_writer() {
+        struct Asked(std::cell::RefCell<Vec<String>>);
+        impl Images for Asked {
+            fn src(&self, dest: &str) -> Option<String> {
+                self.0.borrow_mut().push(dest.to_string());
+                Some("img/0001.png".to_string())
+            }
+        }
+        let src = "\
+# ![h](h.png)
+
+p ![1](1.png) *![2](2.png)* **![3](3.png)** ~~![4](4.png)~~ [![5](5.png)](https://x.y/) ![![no](no.png)](6.png)
+
+> ![7](7.png)
+>
+> - ![8](8.png)
+>   1. ![9](9.png)
+
+| ![10](10.png) | b |
+|---|---|
+| ![11](11.png) | ![12](12.png) | ![past](past.png) |
+
+```
+![code](code.png)
+```
+
+<p>![html](html.png)</p>
+
+![13](13.png) <img src=\"inline.png\">
+";
+        let d = doc(src);
+        let mut listed = Vec::new();
+        image_dests(&d.blocks, &mut |s| listed.push(s.to_string()));
+        let asked = Asked(Default::default());
+        let ch = chapter(&d.blocks, "ch0001.xhtml");
+        let anchors = [Anchors::build(std::slice::from_ref(&ch))];
+        let keys = ["a.md".to_string()];
+        let refs = Refs {
+            anchors: &anchors,
+            keys: &keys,
+            part: 0,
+            images: &asked,
+        };
+        let (out, _) = write_book_chapter(&ch, &refs, Limits::UNLIMITED).unwrap();
+        well_formed(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+        let want: Vec<String> = [
+            "h", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
+        ]
+        .iter()
+        .map(|n| format!("{n}.png"))
+        .collect();
+        assert_eq!(listed, want);
+        assert_eq!(*asked.0.borrow(), want);
+
+        // A tree the reader would not build: a row wider than the header,
+        // and a table without columns, are cut as the writer cuts them.
+        let img = |n: &str| {
+            vec![Inline::Image {
+                dest: format!("{n}.png"),
+                title: String::new(),
+                alt: Vec::new(),
+            }]
+        };
+        let blocks = [
+            Block::Table {
+                align: vec![Align::None],
+                head: vec![img("a"), img("wide")],
+                rows: vec![vec![img("b"), img("wider")]],
+            },
+            Block::Table {
+                align: Vec::new(),
+                head: vec![img("none")],
+                rows: Vec::new(),
+            },
+        ];
+        let mut listed = Vec::new();
+        image_dests(&blocks, &mut |s| listed.push(s.to_string()));
+        let asked = Asked(Default::default());
+        let ch = chapter(&blocks, "ch0001.xhtml");
+        let refs = Refs {
+            images: &asked,
+            ..refs
+        };
+        write_book_chapter(&ch, &refs, Limits::UNLIMITED).unwrap();
+        assert_eq!(listed, ["a.png", "b.png"]);
+        assert_eq!(*asked.0.borrow(), listed);
+    }
+
+    #[test]
+    fn normalize_is_lexical() {
+        for (p, want) in [
+            ("a.md", "a.md"),
+            ("./a.md", "a.md"),
+            ("x/../a.md", "a.md"),
+            ("x//y/./a.md", "x/y/a.md"),
+            ("../a.md", "../a.md"),
+            ("../../x/../a.md", "../../a.md"),
+            ("x/../../a.md", "../a.md"),
+            ("/x/../a.md", "/a.md"),
+            ("", ""),
+        ] {
+            assert_eq!(normalize(p), want, "{p}");
+        }
     }
 }
