@@ -1798,12 +1798,18 @@ fn offer_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\nhub\t2 / 3 files\n"
+        "slice\tgroup=document\tdir=2\tpreset=html\tlabel=HTML\tapplicable=2\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\n\
+         slice\tgroup=book\tdir=2\tpreset=epub\tlabel=EPUB\tapplicable=2\tdisabled=no action installed\n\
+         hub\t2 / 3 files\n"
     );
     let o = e.run(&["offer", "a.txt"]);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         hub\ta.txt\n"
     );
 }
 
@@ -1843,7 +1849,10 @@ fn offer_counts_the_same_file_once() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         hub\ta.txt\n"
     );
 }
 
@@ -1860,7 +1869,10 @@ fn offer_pdfs_and_one_txt() {
     let o = e.run(&args);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\t1 / 6 files\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         hub\t1 / 6 files\n"
     );
 }
 
@@ -1912,8 +1924,8 @@ fn offer_images_shows_join_count() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\n\
-         slice\tdir=4\tpreset=cbz\tlabel=CBZ\tapplicable=2\tdisabled=no action installed\n\
+        "slice\tgroup=book\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\n\
+         slice\tgroup=book\tdir=4\tpreset=cbz\tlabel=CBZ\tapplicable=2\tdisabled=no action installed\n\
          hub\t2 / 3 files\n",
         "the CBZ slice is on the wheel, dim: only the PDF join is installed"
     );
@@ -2078,7 +2090,10 @@ fn offer_without_actions_disables_slices() {
     let o = e.run(&["offer", "a.txt"]);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\tdisabled=no action installed\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         hub\ta.txt\n"
     );
     // Running the preset then has no route: the input is unsupported.
     let o = e.run(&["run", "markdown", "a.txt"]);

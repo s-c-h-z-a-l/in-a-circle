@@ -802,10 +802,13 @@ compositor.
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
   north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
-  no one-to-one form, it only joins images into one comic book): lit if
+  no one-to-one form, it only joins images into one comic book; `html`
+  and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
+  a direction is unique per group and input type, and when the dropped
+  files fit both inputs the one that takes more of them holds the slot): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
-  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1.
+  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1. The flat `inacircle offer <files…>` prints the presets of the most common input type, each `slice` line with its `group=`, since a direction repeats across groups.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024

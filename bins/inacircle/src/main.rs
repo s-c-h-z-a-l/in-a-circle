@@ -707,17 +707,22 @@ fn cmd_offer(mut args: Vec<OsString>) -> u8 {
         return EXIT_DONE;
     }
     let offer = menu::offer(&cat, &named);
-    for (dir, s) in offer.slices.iter().enumerate() {
-        let Some(s) = s else { continue };
-        let mut l = Line::new("slice")
-            .pair("dir", &dir.to_string())
-            .pair("preset", s.preset)
-            .pair("label", &s.label)
-            .pair("applicable", &s.applicable.to_string());
-        if let Some(why) = &s.disabled {
-            l = l.pair("disabled", why);
+    // A direction is unique only within a group (Document and Book both
+    // have an east slot), so each slice names its group.
+    for (group, wheel) in &offer.groups {
+        for (dir, s) in wheel.slices.iter().enumerate() {
+            let Some(s) = s else { continue };
+            let mut l = Line::new("slice")
+                .pair("group", group)
+                .pair("dir", &dir.to_string())
+                .pair("preset", s.preset)
+                .pair("label", &s.label)
+                .pair("applicable", &s.applicable.to_string());
+            if let Some(why) = &s.disabled {
+                l = l.pair("disabled", why);
+            }
+            out(&l);
         }
-        out(&l);
     }
     out(&Line::new("hub").bare(&offer.hub));
     EXIT_DONE
