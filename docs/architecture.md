@@ -201,9 +201,11 @@ are in `CLAUDE.md`.
   empty header) with a blank line between rows, and the action reports
   that the table was listed. Widths count characters, so a wide or
   combining character (East Asian Wide and Fullwidth, emoji, combining
-  marks) is reported as possible misalignment. Strikethrough loses its
-  marks (reported); a task list item is written `- [x] ` or `- [ ] `
-  before its text, and that loses nothing. An extended autolink (a bare
+  marks) or a control character such as a TAB is reported as possible
+  misalignment. Strikethrough loses its
+  marks (reported); a task list item is written with `[x] ` or `[ ] `
+  after the list marker, before its text (no trailing space when the item
+  is empty), and that loses nothing. An extended autolink (a bare
   `www.`, `http://`, `https://` or `ftp://` URL, or a bare email address)
   is written as its text, and that loses nothing; a `<...>` autolink is
   reported as a flattened link, as before. Padding and the repeated
