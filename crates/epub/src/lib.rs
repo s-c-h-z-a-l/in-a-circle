@@ -157,7 +157,7 @@ const MAX_LANG: usize = 35;
 /// letters or digits). Anything else, extensions and private use
 /// included, is `und` (undetermined). Fail closed: the value goes into
 /// attributes and readers pick fonts and hyphenation by it.
-fn lang_tag(lang: &str) -> &str {
+pub fn lang_tag(lang: &str) -> &str {
     let alpha = |p: &str| p.bytes().all(|b| b.is_ascii_alphabetic());
     let digit = |p: &str| p.bytes().all(|b| b.is_ascii_digit());
     let alnum = |p: &str| p.bytes().all(|b| b.is_ascii_alphanumeric());

@@ -10,4 +10,5 @@ workspace = true
 [dependencies]
 action = { path = "../../crates/action" }
 doc = { path = "../../crates/doc" }
+epub = { path = "../../crates/epub" }
 manifest = { path = "../../crates/manifest" }

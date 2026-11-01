@@ -248,6 +248,15 @@ are in `CLAUDE.md`.
   gives the same bytes. One chapter's XHTML is in memory at a time; the
   table of contents and the package document are built first from the
   headings. On a failure the packer cuts the file back to empty.
+- `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
+  one book per input into the work directory, `<stem>.epub`. The title is
+  the first non-empty H1 of a Markdown input, else the file's stem (always
+  the stem for plain text); the language is the engine's `INACIRCLE_LANG`,
+  `und` when it is missing or not a well-formed tag; the identifier is
+  made from a digest of the input and the modification time is the
+  input's. The output file is created new (never overwritten) and removed
+  when the book fails, so no half book is left; losses of the reader and
+  the writer (raw HTML, images, links) are reported once each.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -261,6 +270,8 @@ are in `CLAUDE.md`.
 inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
+action	text.md-to-epub	family=text	in=text/markdown	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
+action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
