@@ -374,10 +374,26 @@ impl Writer<'_> {
 
     /// `s` as a URL in an attribute: bytes outside a conservative safe set
     /// are percent-encoded (controls included, so none needs removing).
+    /// Valid per the WHATWG URL rules: a `%` not followed by two hex digits
+    /// is written `%25`, only the first `#` starts the fragment (a later
+    /// one is `%23`), and `[`/`]` stay literal in the authority (an IPv6
+    /// host) and are encoded anywhere else.
     fn url(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let authority = authority_range(s);
+        let mut fragment = false;
         let mut start = 0;
         for (i, c) in s.char_indices() {
-            if c.is_ascii_alphanumeric() || (c.is_ascii() && "-_.+!*(),%#@?=;:/$~".contains(c)) {
+            let keep = match c {
+                '%' => {
+                    bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                        && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+                }
+                '#' => !std::mem::replace(&mut fragment, true),
+                '[' | ']' => authority.contains(&i),
+                c => c.is_ascii_alphanumeric() || (c.is_ascii() && "-_.+!*(),@?=;:/$~".contains(c)),
+            };
+            if keep {
                 continue;
             }
             self.sink.push_str(&mut self.out, &s[start..i]);
@@ -648,6 +664,20 @@ fn is_external(dest: &str) -> bool {
         dest.get(..p.len())
             .is_some_and(|h| h.eq_ignore_ascii_case(p))
     })
+}
+
+/// The byte range of the authority of `s` (`scheme://authority/...`), empty
+/// when `s` has no `://` before its first `/`, `?` or `#`.
+fn authority_range(s: &str) -> std::ops::Range<usize> {
+    let Some(p) = s.find("://") else { return 0..0 };
+    if s[..p].contains(['/', '?', '#']) {
+        return 0..0;
+    }
+    let from = p + 3;
+    let to = s[from..]
+        .find(['/', '?', '#'])
+        .map_or(s.len(), |e| from + e);
+    from..to
 }
 
 /// `%XX` sequences decoded; a bad escape stays as written, bytes that are
@@ -1033,6 +1063,33 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("https://x.y/%F0%9F%98%80"), "{out}");
+    }
+
+    /// Regression: a stray `%` and a second `#` made the href invalid
+    /// (the Nu validator rejects both).
+    #[test]
+    fn url_is_valid_for_a_stray_percent_and_a_second_hash() {
+        let (out, _) = render(
+            "[a](https://a/50%off) [b](https://a/x#y#z) [c](https://a/%41%zz%4)\n",
+            &Mode::Fragment,
+        );
+        assert!(out.contains("href=\"https://a/50%25off\""), "{out}");
+        assert!(out.contains("href=\"https://a/x#y%23z\""), "{out}");
+        assert!(out.contains("href=\"https://a/%41%25zz%254\""), "{out}");
+    }
+
+    /// The brackets of an IPv6 host stay; elsewhere they are encoded.
+    #[test]
+    fn url_keeps_brackets_in_the_authority_only() {
+        let (out, _) = render(
+            "<http://[::1]:8080/> [a](http://[::1]/p[1]?q=[2])\n",
+            &Mode::Fragment,
+        );
+        assert!(out.contains("href=\"http://[::1]:8080/\""), "{out}");
+        assert!(
+            out.contains("href=\"http://[::1]/p%5B1%5D?q=%5B2%5D\""),
+            "{out}"
+        );
     }
 
     #[test]
