@@ -2181,4 +2181,105 @@ mod tests {
         assert!(is_punct('€') && is_punct('¡') && is_punct('—') && is_punct('$'));
         assert!(!is_punct('a') && !is_punct('é') && !is_punct(' '));
     }
+
+    #[test]
+    fn email_charge_is_the_destination_plus_the_address() {
+        // Reading as GFM costs, over CommonMark, exactly the destination
+        // (`mailto:` and the address) per address: 12 for `a@b.c`.
+        for (input, addresses, bytes) in
+            [("a@b.c", 1, 5), ("x a@b.cc y", 1, 6), ("a@b.c a@b.c", 2, 5)]
+        {
+            let need = |dialect| {
+                (0..)
+                    .find(|&text_bytes| {
+                        let limits = crate::Limits {
+                            text_bytes,
+                            ..crate::Limits::DEFAULT
+                        };
+                        md::read_limited_with(input.as_bytes(), limits, dialect).is_ok()
+                    })
+                    .unwrap()
+            };
+            assert_eq!(
+                need(Dialect::Gfm) - need(Dialect::CommonMark),
+                addresses * ("mailto:".len() + bytes),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn autolink_steps_count_what_is_scanned() {
+        // The bound in `extended_autolinks_stay_linear` is only worth
+        // something if the counter counts: pin it on small inputs, each
+        // reaching one of the places that add to it.
+        // The domain run (7 bytes) and one look at the empty path.
+        assert_eq!(autolink_steps("www.a.b"), 8);
+        // The run and the stop byte, then an entity look-alike (`&`, its
+        // three letters) in the path scan.
+        assert_eq!(autolink_steps("www.a.b&amp;"), 13);
+        // A path that stays: scanned once, then trimmed from the end,
+        // an entity look-alike counting its letters.
+        assert_eq!(autolink_steps("www.a.b/x),."), 18);
+        assert_eq!(autolink_steps("www.a.b/x&amp;"), 21);
+        assert_eq!(autolink_steps("http://a.b/p?q=1)."), 16);
+        // Addresses: the bytes up to each `@`, its local part going back,
+        // the domain going forward.
+        assert_eq!(autolink_steps("a@b.c"), 7);
+        assert_eq!(autolink_steps("x a.b@c.de y"), 14);
+        assert_eq!(autolink_steps("a@b@c"), 10);
+        // One opener candidate per closer in emphasis.
+        assert_eq!(emphasis_steps("*a* **b**"), 2);
+    }
+
+    #[test]
+    fn extended_autolink_domain_edges() {
+        let link = |t: &str| format!("<a href=\"http://{t}\">{t}</a>");
+        // A `www.` with no segment after its period is no domain, even
+        // when an earlier period in the same run has one.
+        assert_eq!(gfm("x.y_www."), "<p>x.y_www.</p>\n");
+        assert_eq!(gfm("www.x_www."), "<p>www.x_www.</p>\n");
+        // A second candidate inside a run: its own segment `www` holds no
+        // underscore, whatever the segments before it hold.
+        assert_eq!(
+            gfm("www.x_www.c"),
+            format!("<p>www.x_{}</p>\n", link("www.c"))
+        );
+        assert_eq!(gfm("x.y_www.c"), format!("<p>x.y_{}</p>\n", link("www.c")));
+        // `www.` must be the whole start of a candidate, and `://` must
+        // follow a scheme: neither a bare `w` nor a bare `:` is one.
+        assert_eq!(gfm("w.a.b"), "<p>w.a.b</p>\n");
+        assert_eq!(gfm("http:abc.d.e"), "<p>http:abc.d.e</p>\n");
+        assert_eq!(gfm("ww.a.b.c"), "<p>ww.a.b.c</p>\n");
+        // A trailing entity look-alike of any length goes, the link ending
+        // where its `&` begins.
+        for (entity, tail) in [
+            ("&a;", "&amp;a;"),
+            ("&ab;", "&amp;ab;"),
+            ("&amp;", "&amp;"),
+            ("&abcdefgh;", "&amp;abcdefgh;"),
+        ] {
+            assert_eq!(
+                gfm(&format!("www.a.b/x{entity}")),
+                format!("<p>{}{tail}</p>\n", link("www.a.b/x")),
+                "{entity}"
+            );
+        }
+        // An entity look-alike longer than half of what precedes it still
+        // goes from the end of the link.
+        assert_eq!(
+            gfm("www.a.b&aaaaaaaaaaaa;"),
+            format!("<p>{}&amp;aaaaaaaaaaaa;</p>\n", link("www.a.b"))
+        );
+    }
+
+    #[test]
+    fn closers_of_different_length_mod_3_keep_their_own_search_floor() {
+        // `**` is both-flanking and its run length is 2 mod 3, the closing
+        // `*` is 1 mod 3: the search floors kept per class must not be
+        // shared, or the `*` would give up before it reaches the opener.
+        let want = "<p><em>a**a</em>a</p>\n";
+        assert_eq!(html("*a**a*a"), want);
+        assert_eq!(gfm("*a**a*a"), want);
+    }
 }
