@@ -825,3 +825,77 @@ fn over_the_output_ceiling_fails_one_input_and_the_batch_goes_on() {
         assert_eq!(left.len(), 1, "{id}: {left:?}");
     }
 }
+
+/// The book's modification time is the input's, in UTC, also before 1970.
+#[test]
+fn epub_modified_time_is_the_inputs() {
+    use std::time::{Duration, UNIX_EPOCH};
+    for (k, (mtime, want)) in [
+        (
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            "2023-11-14T22:13:20Z",
+        ),
+        (
+            UNIX_EPOCH - Duration::from_secs(90_000),
+            "1969-12-30T23:00:00Z",
+        ),
+        (UNIX_EPOCH, "1970-01-01T00:00:00Z"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (root, work) = workdir(&format!("mtime{k}"));
+        let a = root.join("a.md");
+        fs::write(&a, "# T\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let (o, book) = convert("text.md-to-epub", &a, &work, None);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        let bytes = fs::read(&book).unwrap();
+        assert!(
+            contains(&bytes, &format!(">{want}</meta>")),
+            "{want}: not in the book"
+        );
+    }
+}
+
+/// A page of exactly the size ceiling is written; one byte more is not.
+#[test]
+fn html_page_of_exactly_the_ceiling_is_written() {
+    const CEILING: usize = 1 << 20; // `run_with_fsize`'s RLIMIT_FSIZE
+    let page_size = |k: usize| {
+        let (root, work) = workdir(&format!("exact{k}"));
+        let a = root.join("big.md");
+        fs::write(&a, format!("{}\n", "a".repeat(k))).unwrap();
+        let (o, page) = convert("text.md-to-html", &a, &work, None);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        fs::metadata(&page).unwrap().len() as usize
+    };
+    // The page is the same around a paragraph of k letters.
+    let k = CEILING - page_size(1) + 1;
+    assert_eq!(page_size(k), CEILING);
+    for (extra, fits) in [(0, true), (1, false)] {
+        let (root, work) = workdir(&format!("ceiling-exact{extra}"));
+        let a = root.join("big.md");
+        fs::write(&a, format!("{}\n", "a".repeat(k + extra))).unwrap();
+        let o = run_with_fsize("text.md-to-html", &work, &[&a]);
+        let out = stdout(&o);
+        if fits {
+            assert_eq!(lines(&out, "done").len(), 1, "{out}");
+            let done = lines(&out, "done");
+            assert_eq!(
+                fs::metadata(work.join(done[0][2])).unwrap().len() as usize,
+                CEILING
+            );
+        } else {
+            let fails = lines(&out, "fail");
+            assert_eq!(fails.len(), 1, "{out}");
+            assert_eq!(fails[0][2], "HTML would be larger than 1 MiB");
+            assert!(snapshot(&work).is_empty());
+        }
+    }
+}
