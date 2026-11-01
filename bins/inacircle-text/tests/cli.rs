@@ -765,3 +765,63 @@ fn losses_reported() {
         assert_eq!(warns, expected, "{id}");
     }
 }
+
+/// `inacircle-text` run with its own `RLIMIT_FSIZE` at 1 MiB (soft and
+/// hard), as the engine's sandbox bounds an action's output, but small
+/// enough to reach with little data. SIGXFSZ is not ignored here: the
+/// action must stay under the ceiling or fail the input itself.
+fn run_with_fsize(id: &str, work: &Path, inputs: &[&Path]) -> Output {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_inacircle-text"));
+    c.args(["run", id, "--work"])
+        .arg(work)
+        .arg("--")
+        .args(inputs);
+    // SAFETY: the closure runs between fork and exec and only calls
+    // `setrlimit`, which is async-signal-safe, on a local struct; it
+    // touches no memory of the parent and takes no lock.
+    unsafe {
+        c.pre_exec(|| {
+            let rl = libc::rlimit {
+                rlim_cur: 1 << 20,
+                rlim_max: 1 << 20,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.output().unwrap()
+}
+
+/// An output past the ceiling fails that input with the size copy and the
+/// next input of the batch still converts. 2 MiB of paragraphs make an
+/// EPUB (stored) or a page of more than 2 MiB; "x" makes a few KB.
+#[test]
+fn over_the_output_ceiling_fails_one_input_and_the_batch_goes_on() {
+    for (id, what, ext) in [
+        ("text.md-to-epub", "EPUB", "epub"),
+        ("text.md-to-html", "HTML", "html"),
+    ] {
+        let (root, work) = workdir(&format!("ceiling-{ext}"));
+        let big = root.join("big.md");
+        fs::write(&big, "abcdefghi jklmnop\n\n".repeat(110_000)).unwrap();
+        let small = root.join("small.md");
+        fs::write(&small, "x\n").unwrap();
+        let o = run_with_fsize(id, &work, &[&big, &small]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(0), "{id}: {out}");
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 1, "{id}: {out}");
+        assert_eq!(fails[0][1], big.to_str().unwrap());
+        assert_eq!(fails[0][2], format!("{what} would be larger than 1 MiB"));
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{id}: {out}");
+        assert_eq!(done[0][1], small.to_str().unwrap());
+        assert!(work.join(done[0][2]).is_file());
+        // Nothing of the big input is left behind.
+        let left: Vec<_> = snapshot(&work).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(left.len(), 1, "{id}: {left:?}");
+    }
+}

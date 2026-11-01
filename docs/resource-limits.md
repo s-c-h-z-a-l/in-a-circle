@@ -181,6 +181,7 @@ contents and package document together, not each file alone.
 | entries | 65,534 | the ZIP writer's format guard; 1,024 chapters plus five fixed entries is far below it |
 | archive | 4 GiB - 1 | every offset and size is 32 bits (no ZIP64); unreachable under the XHTML budget |
 | language tag | 35 B | RFC 5646 asks for at least 35 characters; a longer or malformed tag is written as `und` |
+| output ceiling | `RLIMIT_FSIZE` | an HTML page is whole in memory, so its exact size is checked against the action's own `RLIMIT_FSIZE` before the file is created; a book is packed straight to the file, so `SIGXFSZ` is ignored and the first write past the ceiling fails (`EFBIG`) and the file is cut back to empty. Either way only that input fails, with `EPUB would be larger than <N> MiB` or `HTML would be larger than <N> MiB` (N rounded down), and the rest of the batch still converts. A ceiling that cannot be read fails the input |
 
 Memory is one chapter's XHTML at a time (its string may hold twice its
 length while it grows), the ZIP writer's 64 KiB copy buffer, and the

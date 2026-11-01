@@ -248,6 +248,38 @@ fn title(conv: Conversion, d: &Document, input: &Path) -> String {
     if t.is_empty() { "Untitled" } else { t }.to_string()
 }
 
+/// The soft `RLIMIT_FSIZE` of this process, the largest file it may write
+/// (the engine sets it to 16 x the input, 256 MiB to 16 GiB). `None` is
+/// unlimited. A failing `getrlimit` is an error, so the input fails closed
+/// instead of writing without a known ceiling. `getrlimit` on itself is
+/// allowed by the sandbox's seccomp policy.
+fn output_cap() -> Result<Option<u64>, ConvertError> {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `rl` is a valid, writable `rlimit` for the whole call, and
+    // RLIMIT_FSIZE is a valid resource; the call only writes into `rl`.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut rl) };
+    if rc != 0 {
+        return Err(ConvertError::Other(format!(
+            "cannot read the output size limit: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok((rl.rlim_cur != libc::RLIM_INFINITY).then_some(rl.rlim_cur))
+}
+
+/// The copy for an output past the ceiling (N rounded down, so it never
+/// overstates the limit). If the ceiling cannot be read now, the generic
+/// copy.
+fn too_large(what: &str) -> ConvertError {
+    match output_cap() {
+        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20)),
+        _ => ConvertError::Other(format!("{what} would be too large")),
+    }
+}
+
 /// Writes the EPUB or the HTML page of `bytes` to `out`; what it lost.
 /// Whatever is left at `out` after an error is the caller's to remove.
 fn publish(
@@ -282,7 +314,23 @@ fn publish(
                 // The 16 bytes of the input's digest, not a copy of it.
                 id_seed: epub::fnv1a_128(&[bytes]).to_be_bytes().to_vec(),
             };
-            epub::write(&d, &meta, file, LIMITS)?
+            // SIGXFSZ would kill the process (and the batch) at the first
+            // byte past `RLIMIT_FSIZE`; ignored, that write fails with
+            // EFBIG instead and only this input fails. The size of a book
+            // is known only once it is packed, so this is the ceiling's
+            // one check; the file is cut back to empty by `epub::write`.
+            // SAFETY: `signal` with SIG_IGN installs no handler code and
+            // touches no Rust state; SIGXFSZ is a valid signal number.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            }
+            epub::write(&d, &meta, file, LIMITS).map_err(|e| {
+                if e.write_error().and_then(io::Error::raw_os_error) == Some(libc::EFBIG) {
+                    too_large("EPUB")
+                } else {
+                    e.into()
+                }
+            })?
         }
         Conversion::MdToHtml | Conversion::TxtToHtml => {
             let ch = Chapter {
@@ -296,6 +344,11 @@ fn publish(
                 &Mode::Standalone { lang, title },
                 LIMITS,
             )?;
+            // The page is whole in memory, so its exact size is checked
+            // before the file exists on disk.
+            if output_cap()?.is_some_and(|c| page.len() as u64 > c) {
+                return Err(too_large("HTML"));
+            }
             fs::write(out, page)
                 .map_err(|e| ConvertError::Other(format!("cannot write output: {e}")))?;
             more

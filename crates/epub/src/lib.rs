@@ -52,6 +52,17 @@ pub enum BookError {
     Io(io::Error),
 }
 
+impl BookError {
+    /// The operating-system error behind a failed write, if that is what
+    /// stopped the book (a caller maps `EFBIG` to its own copy).
+    pub fn write_error(&self) -> Option<&io::Error> {
+        match self {
+            Self::Io(e) | Self::Zip(WriteError::Io(e)) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for BookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
