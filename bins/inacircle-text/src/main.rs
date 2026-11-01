@@ -280,15 +280,16 @@ fn too_large(what: &str) -> ConvertError {
     }
 }
 
-/// Writes the EPUB or the HTML page of `bytes` to `out`; what it lost.
+/// Writes the EPUB or the HTML page of `d`, which `conv.read` made of
+/// `bytes` (and lost `losses` doing so), to `out`; what was lost in all.
 /// Whatever is left at `out` after an error is the caller's to remove.
 fn publish(
     conv: Conversion,
     input: &Path,
     bytes: &[u8],
+    (d, mut losses): (Document, BTreeSet<Loss>),
     out: &Path,
 ) -> Result<BTreeSet<Loss>, ConvertError> {
-    let (d, mut losses) = conv.read(bytes)?;
     let title = title(conv, &d, input);
     let lang = lang();
     let more = match conv {
@@ -442,18 +443,21 @@ fn document(
     bytes: &[u8],
     ev: &mut Events<impl Write>,
 ) -> Outcome {
-    // Parse before the output exists: an input nobody reads leaves nothing.
-    if let Err(e) = conv.read(bytes) {
-        match e {
-            ConvertError::NotText => {
-                ev.skip(input, "unsupported");
-                return Outcome::Unsupported;
+    // Parse (once) before the output exists: an input nobody reads leaves nothing.
+    let read = match conv.read(bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            match e {
+                ConvertError::NotText => {
+                    ev.skip(input, "unsupported");
+                    return Outcome::Unsupported;
+                }
+                ConvertError::Limit(l) => ev.fail(input, &limit_reason(l)),
+                ConvertError::Other(r) => ev.fail(input, &r),
             }
-            ConvertError::Limit(l) => ev.fail(input, &limit_reason(l)),
-            ConvertError::Other(r) => ev.fail(input, &r),
+            return Outcome::Failed;
         }
-        return Outcome::Failed;
-    }
+    };
     let out = match action::output_path(&inv.work, i, input, conv.ext()) {
         Ok(p) => p,
         Err(e) => {
@@ -461,7 +465,7 @@ fn document(
             return Outcome::Failed;
         }
     };
-    match publish(conv, input, bytes, &out) {
+    match publish(conv, input, bytes, read, &out) {
         Ok(losses) => {
             ev.done(input, out.strip_prefix(&inv.work).unwrap_or(&out));
             for loss in losses {
