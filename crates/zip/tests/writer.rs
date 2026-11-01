@@ -279,15 +279,8 @@ fn folder_names_are_accepted() {
         ("META-INF/container.xml", b"<container/>"),
         ("OEBPS/img/0001.png", b"\x89PNG"),
     ];
-    let (s, bytes) = build(&entries);
+    let (s, _) = build(&entries);
     let names: Vec<&str> = entries.iter().map(|(n, _)| *n).collect();
-    for n in &names {
-        let at = bytes
-            .windows(n.len())
-            .position(|w| w == n.as_bytes())
-            .unwrap_or_else(|| panic!("{n} missing"));
-        assert!(at > 0);
-    }
     independent_check(&s.0, &entries);
     // Our reader sees the exact names.
     let f = File::open(&s.0).unwrap();
@@ -328,6 +321,10 @@ fn bad_folder_names_rejected() {
     // Each segment may be 255 bytes; the whole path stays within 512.
     let ok = format!("{}/{}", "a".repeat(255), "b".repeat(255));
     w.add(&ok, &mut &b"x"[..], 10).unwrap();
+    // Exactly 512 bytes (MAX_PATH) is accepted: 255 + 1 + 254 + 1 + 1.
+    let exact = format!("{}/{}/f", "d".repeat(255), "e".repeat(254));
+    assert_eq!(exact.len(), 512);
+    w.add(&exact, &mut &b"x"[..], 10).unwrap();
     let too_long = format!("{}/{}/c", "a".repeat(255), "b".repeat(255));
     assert!(matches!(
         w.add(&too_long, &mut &b"x"[..], 10),
