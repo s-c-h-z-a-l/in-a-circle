@@ -221,8 +221,9 @@ are in `CLAUDE.md`.
   XML name gets the prefix `h-`, repeats are numbered `-1`, `-2`), and a
   `#id` link resolves across the chapters of a document to the file that
   holds the heading. `http(s):` and `mailto:` links stay; any other link,
-  or one whose target is missing, keeps its text (reported). A local image
-  becomes its alt text (reported); `alt` is always written. A task list item
+  or one whose target is missing, keeps its text (reported). Every image
+  becomes its alt text (reported), in a chapter and in a standalone page
+  alike, so a page never loads anything from outside. A task list item
   is written with a `[x] ` or `[ ] ` text marker and table alignment as a
   `left`, `center` or `right` class, so the output needs no form element and
   no inline style. Every piece counts against the output budget before it

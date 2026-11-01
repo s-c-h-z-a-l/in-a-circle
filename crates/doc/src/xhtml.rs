@@ -12,8 +12,9 @@
 //!   target chapter file; an unresolved one keeps its text ([`Loss::Links`]).
 //! - `http(s):` and `mailto:` links are kept; every other link keeps its
 //!   text ([`Loss::Links`]).
-//! - Images: `alt` is always written. A local image (nothing but the
-//!   input is readable) becomes its alt text ([`Loss::Images`]).
+//! - Images: every image becomes its alt text ([`Loss::Images`]), in both
+//!   modes. No `<img>` is written, so a page never loads anything from
+//!   outside and the alt text is never lost.
 //! - Task list items are written as a text marker (`[x] ` / `[ ] `), table
 //!   alignment as a class (`left`, `center`, `right`): no form element
 //!   (many reading systems do not support them) and no `style` attribute
@@ -31,10 +32,8 @@ pub enum Mode {
     /// an EPUB chapter file; the packager writes the surrounding shell).
     Fragment,
     /// A whole self-contained page: doctype, `lang`, title, the embedded
-    /// [`STYLE_STANDALONE`] stylesheet, no script. The only mode that keeps
-    /// a remote (`http(s):`) image as an `<img>`: an EPUB would have to
-    /// declare remote resources, and an offline book should not need the
-    /// network.
+    /// [`STYLE_STANDALONE`] stylesheet, no script, no `<img>`, nothing
+    /// loaded from outside.
     Standalone { lang: String, title: String },
 }
 
@@ -61,7 +60,11 @@ impl Anchors {
     /// Gives every heading of `chapters` its id. Collisions are numbered
     /// over the whole document in document order, as GitHub does: the
     /// second `intro` is `intro-1`, the third `intro-2`. Memory is bounded
-    /// by the headings' text, which the reader's budgets already bound.
+    /// by the headings' text, which the reader's budgets already bound; a
+    /// heading's text is held about four times here (plain text, base slug,
+    /// owner key, used key), so the factor is 4 over the headings' bytes.
+    /// Chapter file names must be unique ([`write_chapter`] finds its
+    /// headings by file name).
     pub fn build(chapters: &[Chapter]) -> Anchors {
         let mut a = Anchors::default();
         let mut used: HashSet<String> = HashSet::new();
@@ -203,15 +206,20 @@ th,td{border:1px solid;padding:.2em .5em}
 img{max-width:100%}
 ";
 
-/// Whether XML 1.0 allows `c` in a document.
+/// Whether `c` may be written: XML 1.0 allows it and HTML5 does not call it
+/// a noncharacter. The noncharacters are U+FDD0..=U+FDEF and the last two
+/// code points of every plane (U+FFFE, U+FFFF, U+1FFFE, ...); XML allows
+/// those of planes 1-16, but the standalone page must also be valid HTML.
 fn xml_char(c: char) -> bool {
-    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
+    let noncharacter = ('\u{FDD0}'..='\u{FDEF}').contains(&c) || (c as u32) & 0xFFFE == 0xFFFE;
+    !noncharacter
+        && matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 /// Writes one chapter. `anchors` must have been built from the chapters of
-/// the whole document, this one included (found by its file name; a chapter
-/// it does not know gets headings without ids, and its links to other
-/// chapters still resolve). Every piece is charged to `limits.output_bytes`
+/// the whole document, this one included (found by its file name, so the
+/// chapter file names must be unique; a chapter it does not know gets
+/// headings without ids, and its links to other chapters still resolve). Every piece is charged to `limits.output_bytes`
 /// before it is appended.
 pub fn write_chapter(
     ch: &Chapter,
@@ -219,6 +227,10 @@ pub fn write_chapter(
     mode: &Mode,
     limits: Limits,
 ) -> Result<(String, BTreeSet<Loss>), LimitError> {
+    debug_assert!(
+        anchors.files.iter().filter(|f| **f == ch.file).count() <= 1,
+        "chapter file names must be unique"
+    );
     let own = anchors.files.iter().position(|f| *f == ch.file);
     let mut w = Writer {
         sink: Sink::new(limits),
@@ -424,6 +436,8 @@ impl Writer<'_> {
                 self.cr();
                 self.raw(&format!("</{tag}>\n"));
             }
+            // A table with no column has no cell to write; `<tr>` needs one.
+            Block::Table { align, .. } if align.is_empty() => {}
             Block::Table { align, head, rows } => {
                 self.cr();
                 self.raw("<table>\n<thead>\n");
@@ -533,23 +547,9 @@ impl Writer<'_> {
                 content,
                 ..
             } => self.link(dest, title, content),
-            Inline::Image { dest, title, alt } => {
-                if self.standalone && is_remote(dest) {
-                    self.raw("<img src=\"");
-                    self.url(dest);
-                    self.raw("\" alt=\"");
-                    self.plain_text(alt, true);
-                    self.raw("\"");
-                    if !title.is_empty() {
-                        self.raw(" title=\"");
-                        self.esc(title, true);
-                        self.raw("\"");
-                    }
-                    self.raw("/>");
-                } else {
-                    self.losses.insert(Loss::Images);
-                    self.plain_text(alt, false);
-                }
+            Inline::Image { alt, .. } => {
+                self.losses.insert(Loss::Images);
+                self.plain_text(alt, false);
             }
             Inline::SoftBreak => self.raw("\n"),
             Inline::HardBreak => self.raw("<br/>\n"),
@@ -608,13 +608,6 @@ impl Writer<'_> {
 
 fn is_external(dest: &str) -> bool {
     ["http://", "https://", "mailto:"].iter().any(|p| {
-        dest.get(..p.len())
-            .is_some_and(|h| h.eq_ignore_ascii_case(p))
-    })
-}
-
-fn is_remote(dest: &str) -> bool {
-    ["http://", "https://"].iter().any(|p| {
         dest.get(..p.len())
             .is_some_and(|h| h.eq_ignore_ascii_case(p))
     })
@@ -867,7 +860,7 @@ mod tests {
                     content: vec![Inline::Text("h\u{1}i".into())],
                 },
                 Block::Paragraph(vec![
-                    Inline::Text("a\u{1}b\u{FFFE}c\u{FFFF}d\u{b}e\tf".into()),
+                    Inline::Text("a\u{1}b\u{FFFE}c\u{FFFF}d\u{b}e\tf\u{FDD0}\u{FDEF}\u{1FFFE}\u{10FFFF}\u{FDCF}\u{FDF0}\u{1FFFD}g".into()),
                     Inline::Code("x\u{0}y".into()),
                     Inline::Link {
                         dest: "https://x.y/\u{1}".into(),
@@ -886,7 +879,7 @@ mod tests {
         let a = Anchors::build(std::slice::from_ref(&ch));
         let (out, losses) = write_chapter(&ch, &a, &Mode::Fragment, Limits::UNLIMITED).unwrap();
         assert_eq!(losses, BTreeSet::from([Loss::ControlCharacters]));
-        assert!(out.contains("abcde\tf"), "{out}");
+        assert!(out.contains("abcde\tf\u{FDCF}\u{FDF0}\u{1FFFD}g"), "{out}");
         assert!(
             out.contains("<code>xy</code>") && out.contains("title=\"tt\""),
             "{out}"
@@ -898,6 +891,22 @@ mod tests {
         assert!(out.contains("href=\"https://x.y/%01\""), "{out}");
         assert!(out.contains("id=\"hi\""), "{out}");
         well_formed(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+    }
+
+    #[test]
+    fn table_without_columns_is_skipped() {
+        let blocks = vec![
+            Block::Table {
+                align: vec![],
+                head: vec![],
+                rows: vec![vec![]],
+            },
+            Block::Paragraph(vec![Inline::Text("x".into())]),
+        ];
+        let ch = chapter(&blocks, "c.xhtml");
+        let a = Anchors::build(std::slice::from_ref(&ch));
+        let (out, _) = write_chapter(&ch, &a, &Mode::Fragment, Limits::UNLIMITED).unwrap();
+        assert_eq!(out, "<p>x</p>\n");
     }
 
     #[test]
@@ -975,29 +984,28 @@ mod tests {
             assert!(out.contains("an alt &amp; more "), "{out}");
             assert_eq!(losses, BTreeSet::from([Loss::Images]));
         }
-        // A remote image is alt text in a chapter too: the book is offline.
-        let (out, losses) = render("![r](https://x.y/a.png)\n", &Mode::Fragment);
-        assert!(!out.contains("<img") && out.contains("<p>r</p>"), "{out}");
-        assert_eq!(losses, BTreeSet::from([Loss::Images]));
+        // A remote image is alt text too: nothing is loaded from outside.
+        for mode in [Mode::Fragment, standalone()] {
+            let (out, losses) = render("![r](https://x.y/a.png)\n", &mode);
+            assert!(!out.contains("<img") && out.contains("<p>r</p>"), "{out}");
+            assert_eq!(losses, BTreeSet::from([Loss::Images]));
+        }
     }
 
     #[test]
     fn alt_always_written() {
-        let (out, losses) = render(
-            "![](https://x.y/a.png) ![p \"q\"](https://x.y/b.png \"ti'tle\")\n",
-            &standalone(),
-        );
-        assert!(
-            out.contains("<img src=\"https://x.y/a.png\" alt=\"\"/>"),
-            "{out}"
-        );
-        assert!(
-            out.contains(
-                "<img src=\"https://x.y/b.png\" alt=\"p &quot;q&quot;\" title=\"ti&#39;tle\"/>"
-            ),
-            "{out}"
-        );
-        assert!(losses.is_empty());
+        for mode in [Mode::Fragment, standalone()] {
+            let (out, losses) = render(
+                "![p \"q\" & r](https://x.y/b.png \"ti'tle\") ![](https://x.y/a.png)\n",
+                &mode,
+            );
+            assert!(
+                !out.contains("<img") && !out.contains("src=") && !out.contains("title="),
+                "{out}"
+            );
+            assert!(out.contains("<p>p \"q\" &amp; r </p>"), "{out}");
+            assert_eq!(losses, BTreeSet::from([Loss::Images]));
+        }
     }
 
     #[test]
@@ -1040,11 +1048,27 @@ mod tests {
             !out.contains("<script") && !out.contains("<link") && !out.contains("src="),
             "{out}"
         );
+        // A remote image does not put anything outside into the page.
+        let (out, _) = render("![x](https://t.example/p.png)\n", &standalone());
+        assert!(!out.contains("src=") && !out.contains("t.example"), "{out}");
         assert!(out.ends_with("</body>\n</html>\n"), "{out}");
         assert!(losses.is_empty());
         // A fragment is the body content only.
         let (frag, _) = render("# T\n\ntext\n", &Mode::Fragment);
         assert_eq!(frag, "<h1 id=\"t\">T</h1>\n<p>text</p>\n");
+    }
+
+    #[test]
+    fn standalone_loads_nothing_from_outside() {
+        let (out, losses) = render(
+            "![r](https://t.example/p.png) ![l](pic.png) ![](http://t.example/q.png \"t\")\n\n# H\n",
+            &standalone(),
+        );
+        for bad in ["<img", "<link", "<script", "@import", "url("] {
+            assert!(!out.contains(bad), "{bad}: {out}");
+        }
+        assert!(!out.contains("t.example"), "{out}");
+        assert_eq!(losses, BTreeSet::from([Loss::Images]));
     }
 
     #[test]
