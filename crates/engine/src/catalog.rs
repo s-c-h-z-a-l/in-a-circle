@@ -1274,6 +1274,19 @@ pub fn fuzz_read_cache(bytes: &[u8]) {
     if check_cache(text.as_bytes()).is_ok() {
         assert!(parse_cache(text.as_bytes()).as_deref() == Some(&entries[..]));
     }
+    // The engine's load path: every cached line is re-validated into an
+    // action. Each line `parse_action` accepts, and each action of the
+    // resulting catalog, obeys the action rules.
+    for l in entries.iter().flat_map(|e| &e.lines) {
+        if let Some(a) = parse_action(l) {
+            fuzz_check_action(&a, Some(l));
+        }
+    }
+    let catalog = Catalog::of(&entries);
+    for (i, a) in catalog.actions.iter().enumerate() {
+        fuzz_check_action(a, None);
+        assert!(!catalog.actions[..i].iter().any(|x| x.id == a.id));
+    }
     for b in entries.iter().filter_map(|e| e.backoff) {
         assert!((1..=BACKOFF_FAILS_MAX).contains(&b.fails));
         let top = u64::MAX - BACKOFF_MAX;
@@ -1284,6 +1297,52 @@ pub fn fuzz_read_cache(bytes: &[u8]) {
             // A fresh backoff is never due at once, nor further than a day.
             if now <= top {
                 assert!(n.retry > now && n.retry - now <= BACKOFF_MAX && !n.due(now));
+            }
+        }
+    }
+}
+
+/// Fuzz entry point: `parse_action` on every line of arbitrary manifest
+/// text (a plugin's `--manifest` output); what it accepts obeys the action
+/// rules.
+#[cfg(fuzzing)]
+pub fn fuzz_parse_actions(text: &str) {
+    for line in text.lines() {
+        if let Ok(l) = manifest::parse_line(line)
+            && let Some(a) = parse_action(&l)
+        {
+            fuzz_check_action(&a, Some(&l));
+        }
+    }
+}
+
+/// The rules every accepted action obeys. A join: its document set is
+/// 1 to `JOIN_TYPES_MAX` distinct non-empty types, `input` is the first;
+/// its asset set is at most `JOIN_TYPES_MAX` distinct non-empty types,
+/// disjoint from the documents; `min` is 1 to the input limit. Not a join:
+/// one type, and the line (when known) carries no `min=` or `assets=`.
+#[cfg(fuzzing)]
+fn fuzz_check_action(a: &Action, line: Option<&Line>) {
+    let distinct = |s: &[String]| (1..s.len()).all(|i| !s[..i].contains(&s[i]));
+    assert!(!a.id.is_empty() && !a.input.is_empty());
+    match &a.join {
+        Some(j) => {
+            assert!(!j.types.is_empty() && j.types.len() <= JOIN_TYPES_MAX);
+            assert!(j.types.iter().all(|t| !t.is_empty()) && distinct(&j.types));
+            assert_eq!(a.input, j.types[0]);
+            assert!(j.assets.len() <= JOIN_TYPES_MAX);
+            assert!(j.assets.iter().all(|t| !t.is_empty()) && distinct(&j.assets));
+            assert!(!j.assets.iter().any(|t| j.types.contains(t)));
+            assert!(j.min >= 1 && j.min as usize <= action::INPUT_COUNT);
+            if let Some(l) = line {
+                assert_eq!(l.get("join"), Some("yes"));
+                assert_eq!(j.assets.is_empty(), l.get("assets").is_none());
+            }
+        }
+        None => {
+            assert!(!a.input.contains(','));
+            if let Some(l) = line {
+                assert!(l.get("min").is_none() && l.get("assets").is_none());
             }
         }
     }
@@ -3327,10 +3386,14 @@ pub(crate) mod tests {
 
     #[test]
     fn join_without_assets_unchanged() {
-        let j = parsed(PDF_LINE).unwrap().join.unwrap();
-        assert_eq!(j.assets, Vec::<String>::new());
-        assert_eq!(j.types, ["image/jpeg", "image/png"]);
-        assert_eq!(j.min, 1);
+        // Both shipped join lines without `assets=` (docs/architecture.md).
+        let cbz = "action\tpages.images-to-cbz\tfamily=pages\tin=image/jpeg,image/png\tout=application/vnd.comicbook+zip\text=cbz\tlabel=CBZ\tgroup=book\tcost=10\tlossy=no\tbatch=yes\tjoin=yes\tmin=1";
+        for line in [PDF_LINE, cbz] {
+            let j = parsed(line).unwrap().join.unwrap();
+            assert_eq!(j.assets, Vec::<String>::new(), "{line}");
+            assert_eq!(j.types, ["image/jpeg", "image/png"], "{line}");
+            assert_eq!(j.min, 1, "{line}");
+        }
     }
 
     #[test]
@@ -3374,6 +3437,10 @@ pub(crate) mod tests {
         let sixteen = parsed(&with(&set(JOIN_TYPES_MAX), "\tjoin=yes")).unwrap();
         assert_eq!(sixteen.join.unwrap().assets.len(), JOIN_TYPES_MAX);
         assert!(parsed(&with("image/png", "\tjoin=yes")).is_some());
+        // A repeated `assets=` key: the first pair wins, as for every
+        // manifest field; the second is not read, malformed or not.
+        let dup = with("image/png", "\tjoin=yes\tassets=text/markdown,,");
+        assert_eq!(parsed(&dup).unwrap().join.unwrap().assets, ["image/png"]);
     }
 
     /// The cache stores manifest lines verbatim and `parse_action` checks
