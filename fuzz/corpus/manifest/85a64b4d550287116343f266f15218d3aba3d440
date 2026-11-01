@@ -1,0 +1,11 @@
+inacircle-manifest 0
+action	text.md-join-epub	family=text	in=,ext/markdown,text/x-markdinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdowtext/markdown,text/x-markdown	assets=xt/x-markdown	asse=ssit=image/jpeg,image/png	outǞpplication/epub+zip	s=image/jpeg,image/pinacircle-manifest 0
+action	te~t.md-join-epub	family=text	in=,ext/markdown,text/x-markdinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdowtext/markdown,text/x-markdown	assets=iown1asse=ssit=image/jpeg,imiown1asse=ssit=image/jpeg,imextsets=iown1asse=ssit=image/jpeg,imexplication/epub+zip	s=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	familyEimage	in=image/jpeg,image/png	out=es	joiin=yes	mn=2
+in=2

@@ -1,0 +1,15 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	s	join=yes	min=1024
+action	j.b	family=f	in=teath=/b/text	mtime=5	size=7ath=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=102	builtin=yes
+action	j.a	family=f	in=text/markdown,tn=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	be=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	asselication/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yath=/b/text	mtime=5	size=7	buitch=yes
+action	j.a	family=f	in=text/L	group=g	cost=ch=1	lossy=no	batch=yath=/b/text	m=+5ctime=5	size=7	builtostly=f	in=text/markdown,tn=1024yes	join=no
+
+action	j.b	family=f	in=teataess=imagen	out=application/pdf	ext=pdf	label=ataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=Lion/pdf	ext=pdf	label=ataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	loss=g	cost=es	join=no

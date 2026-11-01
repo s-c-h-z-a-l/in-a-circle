@@ -1,0 +1,4 @@
+inacrcle-manifest 0
+action	text.ub	family=text	in=text/m	join=yeesrery 10s	min=1024
+action	ge	in=image	cost=10ssy=/o	ba0ch=yes	join=utps	min=2
+

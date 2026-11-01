@@ -1,0 +1,8 @@
+-epub	family0
+action	text.md-join-epub	family=text	in=text/markdown	assets=imanifest 0
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=applIcation/epub+zip	ext=epub	label=EPUB	grou)
+b
+)
+ifest 0
+action	text.md-join-epub	family=text	in=text/markdownnacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	e1

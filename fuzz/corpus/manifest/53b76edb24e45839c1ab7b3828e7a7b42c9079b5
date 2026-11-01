@@ -1,0 +1,3 @@
+ncle-manifest 0
+action	text.mdfamily=text	in=text/x-maatc~=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imas	join=yes	mia	n=2

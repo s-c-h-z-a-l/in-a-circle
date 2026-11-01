@@ -1,0 +1,2 @@
+in`circlet 0
+action	text.mde.join-pdf	family=im=image	in=png	out=appaoliticn/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batin=3

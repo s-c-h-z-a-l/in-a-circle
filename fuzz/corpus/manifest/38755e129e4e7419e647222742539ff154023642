@@ -1,0 +1,2 @@
+c	=\#e-manifest 0
+action	text.md-jmage	in=image/kdgwn,text/x-markdown	assets=i=10&	join=yes	min=2

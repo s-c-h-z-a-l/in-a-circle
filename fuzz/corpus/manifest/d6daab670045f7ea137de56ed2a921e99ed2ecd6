@@ -1,0 +1,55 @@
+inacircle-manifest 0
+actioxt	in=text/markdown,text/x-markdown	assets=image/jimage/ircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=aprkdown	assets=image/jimage/ircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/png	out=epplication/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=aprkdown	assets=image/jimage/ircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=ige/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=application/epub+ziinacircp	ext=epub	label=EPUBage/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/png	out=a	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/png	out=epplication/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=aprkdown	assets=image/jimage/ircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=ige/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=application/epub+ziinacircp	ext=epub	label=EPUBage/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/pn*g	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=applicsresreation/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,imagroup=doc	cost=10	lossy/jpeg,image/age/pn*g	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	in=2plication/epub+ziinacircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/age/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy/jpeg,image/age/pn*g	out=application/pdf	dxt=pdf	label=PDF	group=doc	cost=10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+min=2

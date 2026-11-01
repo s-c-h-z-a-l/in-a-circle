@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	text.md-join-epub	family=text	in=tpeg~,ima/pegng	out=applicatiepub+zip	ext=epub	label=EPUB	group=book	cost=10(el=EPUB	s	join=yes	min=1

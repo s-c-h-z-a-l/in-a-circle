@@ -1,0 +1,3 @@
+inacircle-catalog \##inacirroup=b
+action	im##age.join-pdf	family=imagec	cost=10	lossy=non-epub	family=text	in=text/markdown,text/x-markdown	assets=					ctnimage/jpeg,image/	mossy=yes	batch=yes	join=yes	min=1023
+action	imdf	family=image	in=imagrkdown	assets=					ctnimage/jpeg,image/pn	batch=yes	join=yes	min=2

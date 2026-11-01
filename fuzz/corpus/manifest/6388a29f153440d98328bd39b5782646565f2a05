@@ -1,0 +1,3 @@
+idotch=yes	joi.=yes	min=1024
+action	imfamily=image	in=emage,up5age/=1024
+action	image.join-pdf	family=image	in=im,age/jpeg,

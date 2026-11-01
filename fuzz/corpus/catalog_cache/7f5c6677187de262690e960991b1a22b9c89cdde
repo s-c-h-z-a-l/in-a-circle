@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=textmarkdown	assets=image/png	out=application/epub+zip	ext=minb	label=L	group=g	cost=0	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/ecost=1	lossy=no	batch=yes	join=yes	minn=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	costf	ext=pdf	label=L	group=g	cost=0	lossy=no	batch=yes	join=no

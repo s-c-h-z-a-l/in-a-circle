@@ -1,0 +1,8 @@
+iv#	\min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg,imag
+	mossy=yes	battsyes	min=0511
+action	im##age.join-pdmage	in=image/jpeg,imag
+
+
+v	\
+n		\

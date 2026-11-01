@@ -1,0 +1,3 @@
+inac	bats	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg				mage/pss	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/xt/x-markdown	assets=					ctenia/mgjpeg,image/pn	batch=yes	join=yes	min=3

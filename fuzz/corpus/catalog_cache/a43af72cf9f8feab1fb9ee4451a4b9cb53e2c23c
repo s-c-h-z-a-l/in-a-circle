@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown	out=application/epub+zip	ext=epub	label=Lg	cost=1	lossy=no	ba=L	group=g	cost=1	lossy=no	batch='es	assetsxt	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown	out=application/epub+zip	ext=epub	label=ost=1	lossy=no	ba=L	group=g	cost=1	lossy=no	batch='es	aown	jion=yes

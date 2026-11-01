@@ -1,0 +1,3 @@
+r%cle-manifest 0
+action	teacction-pdf	family=image	in=image/ng	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=so	b0
+action	

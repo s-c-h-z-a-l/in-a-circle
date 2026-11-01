@@ -1,0 +1,4 @@
+ist 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpegdown,text/.join-pds	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,i	batch=yes	join=yes	min=2

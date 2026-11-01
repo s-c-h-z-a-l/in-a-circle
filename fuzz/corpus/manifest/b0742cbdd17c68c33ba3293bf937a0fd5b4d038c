@@ -1,0 +1,4 @@
+i!-manifest 0
+action	j.a	family=f	in=~ext/markdown	out=etxp	i=epub	 0
+action	j.a	family=f	in=~ext/mb	 0
+action	j.a	family=f	in=/markdown	out=etxp	i=imageǏng,=yes

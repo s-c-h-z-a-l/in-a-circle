@@ -1,0 +1,5 @@
+inacircle-manifest 0
+action	text.md-jmin-epeb	family=text	in=text/rkdown,text/x-maatch=yes	join=yes	min=1024
+action	image.age/png	out=application/pdf	int=pdf	label=PDF	group=doc	coson	text.md-join-epeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-ext/markdown,tein=image/jpeg,image/png	out=applicatiopeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=immage	in=image/jpeg,image/png	out=application/pdf	ext=group=doc	cost=t=10	lossy=no	batch=yes	join=yes	min=2

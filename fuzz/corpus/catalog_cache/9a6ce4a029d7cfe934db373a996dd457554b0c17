@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	text.md-jy=text	in=tet=10	l=yes	batch=yes	join=yes	min=1

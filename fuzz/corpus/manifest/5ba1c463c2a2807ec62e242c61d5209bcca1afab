@@ -1,0 +1,11 @@
+inainacircle-manifest 0
+action	tout.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=ily=image	in=image/jpemagefest 0
+action	text.md-join-text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+actioge	in=imeag/jpemagly=image	i 0
+action	text.md-join-epeb	family=text	in=t	join=yes	st 0
+-mi 0
+action	text.md-join-epeb	family=t`xt	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+action	imag	in=image/jn=image/jpeg,image/DF	group=d

@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family-text	in=text/markdown	assets=imast=paths02y=ysteb	ach=yes	join=yes	min=1333333333	mes
+action	text.md-join-epub	family=text	in=text/markdown	asset33333333

@@ -1,0 +1,7 @@
+inac`rc=================inacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/is=image/jpeg,image/png	out=apn/epub+zip	ext=epub	label=EPUB	group=book	cost=10let 	lossy=yes	batch=yes	join=yes	min=1024
+actiifest is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	outa=pplicaon	imin-pdf	famage/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10let 	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=iatch=yee/png	outa=;plicaon	imin-pdf	famage/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10sy=yes	batch=yes	join=yes	min=1024
+actiifestlabel=PDF	group=doc	cost=10\	lossy=batch=yes	join=yes	min=2

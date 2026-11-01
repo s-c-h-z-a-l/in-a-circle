@@ -1,0 +1,9 @@
+inacircle-manifest 0
+action	text.md-join-epub	family=text	in=,ext/markdown,text/x-markdinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=applicatieopn/ub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	fam&ly=text	in=text/markdown,in-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10*************************************************************************************************	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdowtext/markdown,text/x-markdown	assets=iown1asse=ssit=image/jpeg,imextsets=iown1asse=ssit=image/jpeg,imext/x-ye,kdown	asse=ssit=image/jpeg,image/png	out=application/epub+zip	s=image/jpeg,image/png	out=application/epub+plication/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imext/x-markdowtext/markdown,text/x-markdown	assets=iown1asse=ssit=image/jpeg,imext/x-markdown	asse=ssit=image/jpeg,image/png	out=application/epub+zip	s=image/jpeg,image/png	out=application/epub+plication/epub+zip	ext=epub	label=EPUB	group=book	cost=10	in=image/jpeg,image/png	out=applicaon	image.join-pdf	family=image	in=image/jpeg,imaext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	m/png	gout=appli	cost=10	lossy=batch=yes	join=yes	me/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=batch=yes	joiin=yes	mn=2
+in=2

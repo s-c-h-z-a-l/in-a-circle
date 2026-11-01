@@ -1,0 +1,13 @@
+inainacircle-m5555555555555555	image.join-pdf	fes	st 0
+-min=1024
+action	image.join-pdf	fam	k=	k=ily=image	in=image/jpemage.join-pdf	family=image	i 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+action	image.join-pdf	fam	k=	k=ily=image	in=image/jpemage.join-pdf	family.join-text.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-m24
+action	image.join-pdf	fam	k=	k=ily=image	in=image/jpemage.join-pdf	family=image	e 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+action	image.join-pdf	fam	k=	k=ily=image	in=image/jpemage.join-pdf	family.join-pdf	family=image	i 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+action	image.join-pdf	fam	k=	k=ily=image	in=image/jpemage.join-pdf	family=image	in=image/jn=image/jpeg,image/DF	group=d

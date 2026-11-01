@@ -1,0 +1,2 @@
+inacjoin-24
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=apation/pdf	ext=pdf	label=PDF	group=doc	cost=10t=10	lossy=batch=yes	join=yes	min=2

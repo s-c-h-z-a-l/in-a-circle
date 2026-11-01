@@ -1,0 +1,9 @@
+=================inac-manifest 0
+20n1=i5
+actiifest 0
+action	text.md-join-epub	family=text	in=tex.t/markdown,text/x-markdown	assets=iatch=yes	join=yes	min=0512
+actiifest 0
+action	text.md-joinmage/jpeg,image/png	out=applicaonf	family=image	in=image/jpelabel=EPin-pdf	family=image	in=imagest=10	lossy=yes	bat#h=yes	join=yes	min=0421
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=applicaon	image.join-pdf	familyn	text.md-join-epub	family=text	in=textch=yes	join=yes	min=0512
+actiifest 0
+action	text.md-join-epub	fam.join-pdf	family=image	in==2

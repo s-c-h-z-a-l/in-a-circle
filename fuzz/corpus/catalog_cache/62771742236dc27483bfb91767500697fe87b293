@@ -1,0 +1,8 @@
+inacircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image?/png	out=applicatzon/epub+zip	ext=epub	label=Elication/epub+zip	ext=epub	label=EPUB	group=book	cost=ols	s01y=ysteb	ach=yes	join=yes	min=1333333333333333333333PUB	group=book	cost=ols	s01y=book	cost=ols	s01y=ysteb	ach=yes	join=yes	min=133333333333334ircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image?/png	out=application/epub+zip	ext=epub	label=Elication/epub+zip	ext=st=ols	s01y=ysteb	ach=yes	join=yes	min=1333333333333333333333PUBtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image?/png	out=applicatysteb	ach=yes	join=yes	min=000001364248317ircle-catalog1 
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image?/png	out=application/epub+zip	ext=epub	label=Elication/epub+zip	ext=epub	label=EPUB	group=book	cost=ols	s01y=ysteb	ach=yes	join=yes	min=1333333333333333333333PUB	group=book	cost=ols	s01y=ysteb	epub	label=EPUB	group=book	cost=ols	s01y=ysteb	ach=yes	join=yes	min=1333333333333333333333PUB3333333333333333333333333ach=yes	join=yes	m(in=133333333333333333333333333333333333333333333333333
