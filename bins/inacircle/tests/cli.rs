@@ -1513,6 +1513,10 @@ fn cancel_end_to_end() {
     assert_eq!(mine[0].get("action"), Some("test.script"));
     assert_eq!(mine[0].get("pid"), Some(child.id().to_string().as_str()));
     assert!(mine[0].get("progress").is_some());
+    // The registry file records how many inputs the run has (`jobs`
+    // does not print it).
+    let entry = fs::read_to_string(e.root.join("runtime/inacircle/jobs").join(&id)).unwrap();
+    assert!(entry.split('\t').any(|f| f == "inputs=2"), "{entry}");
 
     // A running job cannot be undone.
     let u = e.run(&["undo", &id]);
