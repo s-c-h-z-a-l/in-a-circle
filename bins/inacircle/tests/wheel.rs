@@ -765,6 +765,50 @@ fn wheel_offers_and_runs_md_to_html() {
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.html");
 }
 
+/// The same with a dropped `.txt`: Book (east), its east slice is the
+/// plain-text EPUB (`epub-txt`); the book is made of the text, titled by
+/// the file's stem.
+#[test]
+fn wheel_offers_and_runs_txt_to_epub() {
+    let root = Root::new("txt2epub");
+    root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "epub-txt");
+    let src = root.0.join("f/jegyzet.txt");
+    fs::write(&src, "Első sor.\n\nMásodik.\n").unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (1110, 540));
+    assert_eq!(code, Some(0));
+    let epub = fs::read(root.0.join("f/jegyzet/jegyzet.epub")).expect("no EPUB written");
+    assert!(epub.starts_with(b"PK\x03\x04"));
+    assert!(
+        epub.windows(8).any(|w| w == b"mimetype"),
+        "the first entry is mimetype"
+    );
+    assert_eq!(
+        fs::read_to_string(&src).unwrap(),
+        "Első sor.\n\nMásodik.\n",
+        "the source changed"
+    );
+    assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
+}
+
+/// The same with a dropped `.txt`: Document (north), its east slice is
+/// the plain-text HTML (`html-txt`).
+#[test]
+fn wheel_offers_and_runs_txt_to_html() {
+    let root = Root::new("txt2html");
+    root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "html-txt");
+    let src = root.0.join("f/jegyzet.txt");
+    fs::write(&src, "Üdv\n\nSzöveg.\n").unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let code = choose_on_the_wheel(&root, &list, (960, 390), (1110, 540));
+    assert_eq!(code, Some(0));
+    let html = fs::read_to_string(root.0.join("f/jegyzet/jegyzet.html")).expect("no HTML written");
+    assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+    assert!(html.contains("<title>jegyzet</title>"), "{html}");
+    assert!(html.contains("Szöveg."), "{html}");
+    assert_one_group_and_undo(&root, "jegyzet", "jegyzet.html");
+}
+
 /// Stage 2 comes from the catalog cache: an action binary the cache does
 /// not know, whose `--manifest` hangs, is not run while the overlay is up.
 /// Once the wheel closed, the catalog is refreshed in the same process
