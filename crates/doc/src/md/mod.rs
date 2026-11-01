@@ -1406,4 +1406,91 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn task_item_marker_and_body() {
+        let item = |checked, blocks| crate::ListItem { checked, blocks };
+        let l = Block::List {
+            start: None,
+            tight: true,
+            items: vec![
+                item(Some(true), vec![para("a")]),
+                item(Some(false), vec![]),
+                item(Some(true), vec![]),
+            ],
+        };
+        assert_eq!(write(&doc(vec![l])).0, "- [x] a\n- [ ]\n- [x]\n");
+    }
+
+    #[test]
+    fn table_cells_are_joined_by_a_space() {
+        let table = Block::Table {
+            align: vec![crate::Align::None; 2],
+            head: vec![vec![t("a")], vec![t("b")]],
+            rows: vec![vec![vec![t("c")], vec![t("d")]]],
+        };
+        assert_eq!(write(&doc(vec![table])).0, "a b\nc d\n");
+    }
+
+    /// Only the last cell of the last row ends a rendered line: a space
+    /// there is an entity, a space at the end of any other cell is not.
+    #[test]
+    fn table_trailing_space_only_in_the_last_cell_is_encoded() {
+        let table = Block::Table {
+            align: vec![crate::Align::None; 2],
+            head: vec![vec![t("h")], vec![t("i")]],
+            rows: vec![vec![vec![t("a ")], vec![t("b ")]]],
+        };
+        assert_eq!(write(&doc(vec![table])).0, "h i\na  b&#32;\n");
+    }
+
+    /// An inner emphasis takes `_` only at the edge of the outer one, next
+    /// to something that is not a word character; elsewhere, and in front
+    /// of or behind a word, it keeps `*` (the shape that cannot be
+    /// written either way is left as it was).
+    #[test]
+    fn inner_emphasis_delimiter_by_neighbour() {
+        let e = |v: Vec<Inline>| Inline::Emph(v);
+        for (inner, want) in [
+            (vec![e(vec![t("x")])], "*_x_*\n"),
+            (vec![t("a "), e(vec![t("x")])], "*a _x_*\n"),
+            (vec![e(vec![t("x")]), t(" b")], "*_x_ b*\n"),
+            (vec![t("a "), e(vec![t("x")]), t(" b")], "*a *x* b*\n"),
+            (vec![e(vec![t("x")]), t("b")], "**x*b*\n"),
+            (vec![t("b"), e(vec![t("x")])], "*b*x**\n"),
+        ] {
+            let d = doc(vec![Block::Paragraph(vec![e(inner)])]);
+            assert_eq!(write(&d).0, want);
+        }
+    }
+
+    #[test]
+    fn strikethrough_ends_a_line_only_at_the_end_of_it() {
+        let d = doc(vec![Block::Paragraph(vec![
+            Inline::Strikethrough(vec![t("a ")]),
+            t("b"),
+        ])]);
+        let (out, losses) = write(&d);
+        assert_eq!(out, "a b\n");
+        assert_eq!(losses, BTreeSet::from([Loss::Strikethrough]));
+        let d = doc(vec![Block::Paragraph(vec![
+            t("b"),
+            Inline::Strikethrough(vec![t("a ")]),
+        ])]);
+        assert_eq!(write(&d).0, "ba&#32;\n");
+    }
+
+    /// Only an email address gets its `_` escaped; the text of a web
+    /// autolink is written as it came.
+    #[test]
+    fn web_autolink_underscores_are_not_escaped() {
+        let input = "www.a.b/x_.y";
+        let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+        let Block::Paragraph(p) = &d.blocks[0] else {
+            panic!("{d:?}")
+        };
+        assert!(matches!(p[0], Inline::Link { auto: true, .. }), "{p:?}");
+        assert_eq!(write(&d).0, format!("{input}\n"));
+        assert_eq!(read_with(input.as_bytes(), Dialect::Gfm).unwrap(), d);
+    }
 }
