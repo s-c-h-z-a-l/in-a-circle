@@ -121,7 +121,7 @@ fn headings(bs: &[Block], out: &mut Vec<String>) {
 }
 
 /// The text of `is` without any markup: what a heading id is made from.
-fn plain(is: &[Inline], out: &mut String) {
+pub(crate) fn plain(is: &[Inline], out: &mut String) {
     for i in is {
         match i {
             Inline::Text(t) | Inline::Code(t) => out.push_str(t),
