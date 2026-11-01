@@ -175,6 +175,9 @@ nodes joined alone (185,112 KiB); two dense files of 261,000 nodes each
 join at 161,420 KiB; two prose files of 8 MiB join at 88,276 KiB; three of
 7 MiB pass the shared owned-text budget and fail at 74,500 KiB. All are
 under a fifth of the sandbox's `RLIMIT_DATA` net (>= 1 GiB).
+The largest input count (1,024: 24 Markdown files and 1,000 PNG images of
+130,808 B, a 131 MB book) peaks at 15,640 KiB in the same method. Images
+are copied in chunks, so their count does not grow the peak.
 Images are never held by the book: each is header-checked
 (`probe::sniff`, at most 64 MiB, 180 MP, as for the CBZ), digested in 8 KiB
 reads for the book's identifier, and later streamed into the archive from
