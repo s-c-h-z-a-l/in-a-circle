@@ -1571,6 +1571,109 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The drawn Book wheel for Markdown plus images and for images alone
+    /// (what `wheel::stage2` paints): with documents the east slice is a lit
+    /// EPUB and the hub counts documents plus images (the text file and the
+    /// comic book stay out); with images alone there is no EPUB slice at
+    /// all, while PDF (north) and CBZ (south) stay live.
+    #[test]
+    fn markdown_and_images_join_epub_east() {
+        let act =
+            |id: &str, out: &str, ext: &str, label: &str, join: engine::catalog::Join| Action {
+                id: id.into(),
+                input: join.types[0].clone(),
+                output: out.into(),
+                ext: ext.into(),
+                label: label.into(),
+                group: "book".into(),
+                lossy: true,
+                join: Some(join),
+                ..md_catalog().actions.remove(0)
+            };
+        let images = |min| engine::catalog::Join {
+            types: vec!["image/jpeg".into(), "image/png".into()],
+            min,
+            assets: Vec::new(),
+        };
+        let cat = Catalog {
+            actions: vec![
+                act(
+                    "text.md-join-epub",
+                    "application/epub+zip",
+                    "epub",
+                    "EPUB",
+                    engine::catalog::Join {
+                        types: vec!["text/markdown".into()],
+                        min: 1,
+                        assets: vec!["image/jpeg".into(), "image/png".into()],
+                    },
+                ),
+                act(
+                    "pages.images-to-pdf",
+                    "application/pdf",
+                    "pdf",
+                    "PDF",
+                    images(1),
+                ),
+                act(
+                    "pages.images-to-cbz",
+                    "application/vnd.comicbook+zip",
+                    "cbz",
+                    "CBZ",
+                    images(1),
+                ),
+            ],
+        };
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-mdimg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, data: &[u8]| {
+            let f = dir.join(name);
+            std::fs::write(&f, data).unwrap();
+            f
+        };
+        let md = [write("a.md", b"# A\n"), write("b.md", b"# B\n")];
+        let img = [
+            write("1.jpg", b"\xff\xd8\xff\xe0 j"),
+            write("2.png", b"\x89PNG\r\n\x1a\n"),
+            write("3.png", b"\x89PNG\r\n\x1a\n"),
+        ];
+        let txt = write("n.txt", b"words\n");
+        let cbz = write("c.cbz", b"PK\x03\x04 comic");
+        let slice = |m: &wheel::Menu, k: usize| {
+            m.slices[k]
+                .as_ref()
+                .map(|c| (c.label.clone(), c.preset.clone(), c.applicable))
+        };
+
+        let mut all: Vec<PathBuf> = md.to_vec();
+        all.extend(img.iter().cloned());
+        all.extend([txt, cbz]);
+        let g = group_menu_for(all, Some(cat.clone()));
+        assert!(g.slices[2].as_ref().is_some_and(|b| b.lit), "Book lights");
+        let m = target_menu(&g, "book");
+        assert_eq!(slice(&m, 2), Some(("EPUB".into(), "epub".into(), true)));
+        assert_eq!(slice(&m, 0), Some(("PDF".into(), "pdf".into(), true)));
+        assert_eq!(m.hub, "5 / 7 files");
+
+        let g = group_menu_for(img.to_vec(), Some(cat));
+        assert!(g.slices[2].as_ref().is_some_and(|b| b.lit), "Book lights");
+        let m = target_menu(&g, "book");
+        assert!(
+            m.slices
+                .iter()
+                .flatten()
+                .all(|c| c.preset != "epub" || !c.applicable),
+            "images alone offer no EPUB"
+        );
+        assert!(
+            slice(&m, 2).is_none_or(|(_, _, applicable)| !applicable),
+            "the east slice is dim or absent"
+        );
+        assert_eq!(slice(&m, 0), Some(("PDF".into(), "pdf".into(), true)));
+        assert_eq!(slice(&m, 4), Some(("CBZ".into(), "cbz".into(), true)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A selection nothing applies to says so on the hub, with the first
     /// file's type; one lit category keeps the usual hub.
     #[test]

@@ -2392,6 +2392,11 @@ fn cli_md_and_images_to_epub() {
     assert!(zip_names(&book, "OEBPS/img/0001.png"), "referenced image");
     assert!(zip_names(&book, "OEBPS/img/0002.jpg"), "unreferenced image");
     assert!(!zip_names(&book, "OEBPS/img/0003"), "no third image");
+    // The one document is the first chapter, the unreferenced image the
+    // "Images" chapter after it; nothing else.
+    assert!(zip_names(&book, "OEBPS/ch0001.xhtml"), "the document");
+    assert!(zip_names(&book, "OEBPS/ch0002.xhtml"), "the Images chapter");
+    assert!(!zip_names(&book, "OEBPS/ch0003"), "no third chapter");
     for (p, bytes) in [
         (&md, &b"# Notes\n\n![pic](a.png)\n"[..]),
         (&a, &png),
@@ -2403,9 +2408,11 @@ fn cli_md_and_images_to_epub() {
 
     // Two documents and an image, in their own folder.
     let e = Env::new("md-img-epub2");
-    e.file("kotet/a.md", b"# A\n\n![](k.png)\n");
-    e.file("kotet/b.md", b"# B\n");
-    e.file("kotet/k.png", &png);
+    let docs = [
+        e.file("kotet/a.md", b"# A\n\n![](k.png)\n"),
+        e.file("kotet/b.md", b"# B\n"),
+        e.file("kotet/k.png", &png),
+    ];
     let o = e.run(&["run", "epub", "kotet/a.md", "kotet/b.md", "kotet/k.png"]);
     assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
     assert_eq!(o.summary(), (3, 0, 0));
@@ -2416,5 +2423,15 @@ fn cli_md_and_images_to_epub() {
     assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
     let book = fs::read(&out).unwrap();
     assert!(zip_names(&book, "OEBPS/img/0001.png"));
+    // One chapter per document; the image is referenced, so no Images chapter.
+    assert!(zip_names(&book, "OEBPS/ch0001.xhtml"), "first document");
+    assert!(zip_names(&book, "OEBPS/ch0002.xhtml"), "second document");
+    assert!(!zip_names(&book, "OEBPS/ch0003"), "no third chapter");
+    for (p, bytes) in docs
+        .iter()
+        .zip([&b"# A\n\n![](k.png)\n"[..], b"# B\n", &png])
+    {
+        assert_eq!(fs::read(p).unwrap(), bytes, "an input changed");
+    }
     one_group_and_undo(&e, &o, &wrapper, "kotet.epub");
 }

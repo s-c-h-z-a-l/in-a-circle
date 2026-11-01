@@ -877,9 +877,19 @@ fn wheel_images_alone_have_no_epub() {
         child.try_wait().unwrap().is_none(),
         "the click on an empty east slice closed the wheel"
     );
-    let _ = child.kill();
-    let _ = child.wait();
-    assert!(!dir.join("Utazás").exists(), "an output appeared");
+    // Liveness: the wheel really is in stage 2. A click on the lit PDF
+    // slice (north) runs and closes it, and no book appears anywhere.
+    c.pointer_motion(960, 390);
+    c.pump(Duration::from_millis(50));
+    c.pointer_button(0x110);
+    assert!(
+        c.hangs_up(Duration::from_secs(20)).is_ok(),
+        "the click on PDF never closed the wheel"
+    );
+    let st = wait_exit(&mut child, Duration::from_secs(20));
+    assert_eq!(st.code(), Some(0));
+    assert!(dir.join("Utazás/Utazás.pdf").is_file(), "no PDF written");
+    assert!(!dir.join("Utazás/Utazás.epub").exists(), "an EPUB appeared");
 }
 
 /// The same with HTML: Document (north), its east slice HTML.
