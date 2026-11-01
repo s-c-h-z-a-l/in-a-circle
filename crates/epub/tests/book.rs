@@ -951,6 +951,47 @@ fn link_to_a_file_outside_the_book_is_text() {
     epubcheck(&s.0);
 }
 
+/// Keys are paths relative to the documents' deepest common folder; a
+/// link resolves against its own document's folder in that key space.
+#[test]
+fn links_across_sibling_folders() {
+    let (s, r) = book_of(
+        &[
+            (
+                "a/one.md",
+                "# One
+
+[two](../b/two.md#h) [lost](../../x.md)
+",
+            ),
+            (
+                "b/two.md",
+                "# H
+
+[one](../a/one.md) [out](../../b/two.md#h)
+",
+            ),
+        ],
+        &mut NoImages,
+        "T",
+    );
+    // `../../x.md` and `../../b/two.md` climb out of the common folder:
+    // text, never a document of the book (not even one of the same name).
+    assert_eq!(r.unwrap(), BTreeSet::from([Loss::Links]));
+    let es = entries(&s.0);
+    let c1 = text(&es, "OEBPS/ch0001.xhtml");
+    assert!(
+        c1.contains("<a href=\"ch0002.xhtml#h\">two</a> lost</p>"),
+        "{c1}"
+    );
+    let c2 = text(&es, "OEBPS/ch0002.xhtml");
+    assert!(
+        c2.contains("<a href=\"ch0001.xhtml\">one</a> out</p>"),
+        "{c2}"
+    );
+    epubcheck(&s.0);
+}
+
 #[test]
 fn nav_parts_with_sub_chapters() {
     let (s, r) = book_of(
@@ -1048,6 +1089,53 @@ fn image_bytes_identical() {
     assert!(
         matches!(e, BookError::Zip(zip::WriteError::EntryTooSmall)),
         "{e:?}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+
+    // So does one that gives more: the image is never cut to fit.
+    let mut long = Pics::new(&["a.md"], &[("a.png", ImageKind::Png, PNG)]);
+    long.images[0].len -= 1;
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut long, "T");
+    let e = r.unwrap_err();
+    assert!(
+        matches!(e, BookError::Zip(zip::WriteError::EntryTooLarge)),
+        "{e:?}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+
+    // A read that fails mid-copy is an image error, like an open failure.
+    struct Failing(Image);
+    impl ImageSource for Failing {
+        fn resolve(&mut self, _: usize, _: &str) -> Option<usize> {
+            Some(0)
+        }
+        fn count(&self) -> usize {
+            1
+        }
+        fn image(&self, _: usize) -> &Image {
+            &self.0
+        }
+        fn open(&mut self, _: usize) -> io::Result<Box<dyn Read + '_>> {
+            struct Eio;
+            impl Read for Eio {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    Err(io::Error::other("device error"))
+                }
+            }
+            Ok(Box::new(PNG.chain(Eio)))
+        }
+    }
+    let mut failing = Failing(Image {
+        kind: ImageKind::Png,
+        len: PNG.len() as u64 + 1,
+        alt: "a.png".into(),
+    });
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut failing, "T");
+    let e = r.unwrap_err();
+    assert!(matches!(e, BookError::Image(_)), "{e:?}");
+    assert!(
+        e.to_string().starts_with("reading an image failed: "),
+        "{e}"
     );
     assert_eq!(s.bytes().len(), 0);
 

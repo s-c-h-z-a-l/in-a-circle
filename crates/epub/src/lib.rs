@@ -14,9 +14,10 @@
 //! from the chapters' titles and heading ids and the images' destinations
 //! (bounded by the documents' text); then one chapter's XHTML at a time is
 //! written and streamed into the archive, and the images are copied from
-//! the caller's [`ImageSource`] through a fixed buffer. Nothing depends on the clock or chance: the identifier is
-//! a hash of [`Meta::id_seed`], the modification time is the caller's, so
-//! the same input gives the same bytes.
+//! the caller's [`ImageSource`] through a fixed buffer. Nothing depends on
+//! the clock or chance: the identifier is a hash of [`Meta::id_seed`], the
+//! modification time is the caller's, so the same input gives the same
+//! bytes.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -51,7 +52,7 @@ pub enum BookError {
     NoDocuments,
     /// The split gives more than [`MAX_CHAPTERS`]; nothing was written.
     TooManyChapters,
-    /// An image could not be opened for copying.
+    /// An image could not be opened or read for copying.
     Image(io::Error),
     Zip(WriteError),
     /// The output budget ran out (or memory for the next piece).
@@ -476,9 +477,13 @@ pub struct Part<'a> {
     /// A book of one document lists its chapters at the top level and uses
     /// [`Meta::title`] instead.
     pub title: String,
-    /// The document's path as the other documents' links name it, relative
-    /// to the folder of their own key: the file name for documents side by
-    /// side (see [`xhtml::Refs::keys`]). An empty key is never a target.
+    /// The document's path relative to one folder that contains every
+    /// document of the book (their deepest common folder): `a/one.md` and
+    /// `b/two.md` for documents in sibling folders, the file name for
+    /// documents side by side. Keys are unique. A link resolves against the
+    /// folder of its own document's key within that key space (see
+    /// [`xhtml::Refs::keys`]); one that climbs out of the common folder
+    /// names no document. An empty key is never a target.
     pub file_key: String,
 }
 
@@ -519,6 +524,10 @@ pub struct Image {
 
 /// The images of a book, held by the caller: the packer opens no file and
 /// never holds an image whole.
+///
+/// Indices are in the inputs' natural order (the order the caller sorts
+/// its inputs in): the `Images` chapter lists the unreferenced images in
+/// index order, and the packer has no other order to go by.
 pub trait ImageSource {
     /// The image (an index below [`count`](Self::count)) that the image
     /// destination `dest` of document `part` refers to, as the document
@@ -526,13 +535,20 @@ pub trait ImageSource {
     /// document and destination, before anything is written; an index out
     /// of range counts as `None`.
     fn resolve(&mut self, part: usize, dest: &str) -> Option<usize>;
-    /// How many images there are. The ones no document refers to go to the
-    /// `Images` chapter at the end, in index order.
+    /// How many images there are, each one the caller already checked
+    /// (format, size): every index is packaged. The ones no document refers
+    /// to go to the `Images` chapter at the end, in index (natural) order.
     fn count(&self) -> usize;
     fn image(&self, i: usize) -> &Image;
     /// The bytes of image `i` from the first, exactly [`Image::len`] of
-    /// them (fewer or more fails the book). Called once per packaged image,
-    /// after the chapters.
+    /// them. Called once per packaged image, after the chapters.
+    ///
+    /// It must read the very file the caller checked, not reopen a path
+    /// (e.g. the descriptor kept from the check, matched by its device and
+    /// inode, from offset 0): the packer stores the bytes under the checked
+    /// [`Image::kind`] without looking. If the file changed since, all it
+    /// can catch is the length: fewer or more bytes than `len` fails the
+    /// book, which is then cut back to empty, never stored short.
     fn open(&mut self, i: usize) -> io::Result<Box<dyn Read + '_>>;
 }
 
@@ -855,7 +871,13 @@ fn pack(
     for (n, &i) in packing.order.iter().enumerate() {
         let len = images.image(i).len;
         let mut r = images.open(i).map_err(BookError::Image)?;
-        zip.add_exact(&format!("OEBPS/{}", packing.names[n].0), &mut r, len)?;
+        zip.add_exact(&format!("OEBPS/{}", packing.names[n].0), &mut r, len)
+            .map_err(|e| match e {
+                // A read of the image, not of a chapter: say so, as an
+                // open failure does.
+                WriteError::Read(e) => BookError::Image(e),
+                e => BookError::Zip(e),
+            })?;
     }
     zip.finish()?;
     Ok(losses)

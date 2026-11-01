@@ -311,9 +311,14 @@ pub struct Refs<'a> {
     /// would have on its own (GitHub numbers repeats per file). Chapter file
     /// names must be unique across the book.
     pub anchors: &'a [Anchors],
-    /// Every document's key, [`normalize`]d: its path as the other
-    /// documents' links name it, relative to the folder of their own key
-    /// (the same folder for documents side by side, so the file name).
+    /// Every document's key, [`normalize`]d and unique: its path relative
+    /// to one folder that contains every document of the book (their
+    /// deepest common folder), so `a/one.md` and `b/two.md` for documents
+    /// in sibling folders and the file name for documents side by side. A
+    /// link is resolved against the folder of its own document's key within
+    /// that key space, so `../b/two.md` from `a/one.md` is `b/two.md`; a
+    /// path that climbs out of the common folder (`../../x.md`) keeps a
+    /// leading `..` and matches no key. An empty key is never a target.
     pub keys: &'a [String],
     /// The document the chapter belongs to: an index into `anchors` and
     /// `keys`.
@@ -817,8 +822,10 @@ impl Writer<'_> {
     }
 
     /// The (file, id) a link to another document of the book points to:
-    /// the path before the first `#`, percent-decoded and taken relative
-    /// to the folder of this document's key, must be a document's key; no
+    /// the path before the first `#`, percent-decoded, joined to the folder
+    /// of this document's key and normalized, must be a document's key
+    /// (every key is relative to the same common folder, see
+    /// [`Refs::keys`]); no
     /// fragment (or an empty one) is that document's first chapter file,
     /// else the fragment must find a heading of that document. Outside a
     /// book, an absolute path or no match: `None`.

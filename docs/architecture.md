@@ -239,7 +239,10 @@ are in `CLAUDE.md`.
   another document of the book (`other.md`, `other.md#x`, its path taken
   relative to the linking document and normalized lexically) goes to that
   document's first chapter file or to the heading `x` in it, each
-  document's heading ids being the ones it has on its own. A task list item
+  document's heading ids being the ones it has on its own. Every document
+  is named by its path relative to one folder that holds them all (their
+  deepest common folder), so `../b/two.md` from `a/one.md` finds
+  `b/two.md`, and a link that climbs out of that folder finds none. A task list item
   is written with a `[x] ` or `[ ] ` text marker and table alignment as a
   `left`, `center` or `right` class, so the output needs no form element and
   no inline style. Every piece counts against the output budget before it
@@ -272,9 +275,9 @@ are in `CLAUDE.md`.
   document lists its chapters at the top, as above. Images come from the
   caller (the packer opens no file): it resolves each image destination
   of each document once, before anything is written, to one of the
-  JPEG or PNG images it was given, and copies each packaged image's bytes
-  exactly, streamed, never held whole; a short or long copy fails the
-  book. An image is packaged once however many destinations refer to it,
+  JPEG or PNG images it was given, already checked and in natural order,
+  and copies each packaged image's bytes exactly, streamed, never held
+  whole, from the file it checked; a short or long copy fails the book. An image is packaged once however many destinations refer to it,
   as `OEBPS/img/0001.<jpg|png>` onwards in the order the documents first
   refer to it, and written as an `<img>`; an image no document refers to
   goes, in the caller's order, to a last chapter `Images`, one figure per
