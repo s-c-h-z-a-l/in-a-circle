@@ -1264,4 +1264,87 @@ mod tests {
         );
         assert_eq!(l, BTreeSet::from([Loss::Emphasis, Loss::Links]));
     }
+
+    #[test]
+    fn column_widths_edges() {
+        // The minimums plus the gaps fill the line exactly: it fits.
+        assert_eq!(column_widths(&[30; 6], 70), Some(vec![10; 6]));
+        assert_eq!(column_widths(&[30; 6], 69), None);
+        // The cap is 15 (45 of the 46 characters left); the spare one goes
+        // to a column still above the cap, not to the one exactly at it.
+        assert_eq!(column_widths(&[20, 20, 15], 50), Some(vec![15, 16, 15]));
+    }
+
+    #[test]
+    fn wrap_counts_the_rest_of_a_cut_word() {
+        let long = format!("{} {}", "x".repeat(150), "y".repeat(20));
+        assert_eq!(
+            wrap(&long, 80),
+            vec![&long[..80], &long[80..150], &long[151..]]
+        );
+        // The 70 left over still share a line with a short word.
+        let short = format!("{} yy", "x".repeat(150));
+        assert_eq!(wrap(&short, 80), vec![&short[..80], &short[80..]]);
+    }
+
+    #[test]
+    fn line_breaks_in_a_cell_become_spaces() {
+        let d = Document {
+            blocks: vec![Block::Table {
+                align: vec![Align::None; 2],
+                head: vec![vec![t("h")], vec![t("i")]],
+                rows: vec![vec![
+                    vec![t("a"), Inline::HardBreak, t("b")],
+                    vec![t("c"), Inline::SoftBreak, t("d")],
+                ]],
+            }],
+        };
+        assert_eq!(write(&d).0, "h    i\n---  ---\na b  c d\n");
+    }
+
+    #[test]
+    fn centered_column_pads_both_sides() {
+        let (s, l) = gfm_txt("| h | x |\n|:-:|--|\n| ab | y |\n| abcdef | z |\n");
+        assert_eq!(
+            s,
+            "  h     x\n\
+             ------  ---\n\
+             \x20 ab    y\n\
+             abcdef  z\n"
+        );
+        assert!(l.is_empty(), "{l:?}");
+    }
+
+    #[test]
+    fn header_only_table_in_the_fallback_layout() {
+        let c = |c: char| c.to_string().repeat(30);
+        let cells: Vec<String> = "abcdefg".chars().map(c).collect();
+        let input = format!("| {} |\n|{}\n", cells.join(" | "), "-|".repeat(7));
+        let (s, l) = gfm_txt(&input);
+        assert_eq!(s, format!("{}\n", cells.join("\n")));
+        assert_eq!(l, BTreeSet::from([Loss::TableLayout]));
+    }
+
+    /// The cell grid is charged before it is built: a limit equal to its
+    /// size passes the charge, and the output itself is smaller.
+    #[test]
+    fn grid_charge_fits_a_limit_equal_to_the_grid() {
+        let d = Document {
+            blocks: vec![Block::Table {
+                align: vec![Align::None; 4],
+                head: vec![vec![]; 4],
+                rows: vec![],
+            }],
+        };
+        let grid = 4 * std::mem::size_of::<String>();
+        let lim = |n| Limits {
+            output_bytes: n,
+            ..Limits::UNLIMITED
+        };
+        assert!(write_limited(&d, lim(grid)).is_ok());
+        assert_eq!(
+            write_limited(&d, lim(grid - 1)).unwrap_err(),
+            LimitError::Exceeded("output")
+        );
+    }
 }
