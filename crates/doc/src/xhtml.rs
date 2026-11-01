@@ -377,7 +377,9 @@ impl Writer<'_> {
     /// Valid per the WHATWG URL rules: a `%` not followed by two hex digits
     /// is written `%25`, only the first `#` starts the fragment (a later
     /// one is `%23`), and `[`/`]` stay literal in the authority (an IPv6
-    /// host) and are encoded anywhere else.
+    /// host) and are encoded anywhere else. Known limit: a non-ASCII host
+    /// is percent-encoded as UTF-8, which parsers decode to punycode but
+    /// which is not a strictly valid host string.
     fn url(&mut self, s: &str) {
         let bytes = s.as_bytes();
         let authority = authority_range(s);
@@ -1088,6 +1090,17 @@ mod tests {
         assert!(out.contains("href=\"http://[::1]:8080/\""), "{out}");
         assert!(
             out.contains("href=\"http://[::1]/p%5B1%5D?q=%5B2%5D\""),
+            "{out}"
+        );
+    }
+
+    /// A later `://` (here in a query) does not make the text before it an
+    /// authority: the brackets after the `?` are encoded.
+    #[test]
+    fn url_authority_needs_the_scheme_before_any_separator() {
+        let (out, _) = render("[a](mailto:a@b?u=http://[::1])\n", &Mode::Fragment);
+        assert!(
+            out.contains("href=\"mailto:a@b?u=http://%5B::1%5D\""),
             "{out}"
         );
     }
