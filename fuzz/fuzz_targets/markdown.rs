@@ -1,14 +1,33 @@
 #![no_main]
 //! The document readers on arbitrary bytes, then every writer on the tree
 //! they built: the two real conversions (`inacircle-text`: txt->md and
-//! md->txt) plus `html::write`, so the tree walks run too.
+//! md->txt) plus `html::write` and the strict `xhtml::write_chapter` (both
+//! modes), so the tree walks run too.
 
 use libfuzzer_sys::fuzz_target;
+
+/// The strict XHTML writer on `d` as one chapter, in both modes, under
+/// `limits`.
+fn xhtml(d: &doc::Document, limits: doc::Limits) {
+    let ch = doc::xhtml::Chapter {
+        blocks: &d.blocks,
+        file: "ch0001.xhtml".to_string(),
+    };
+    let anchors = doc::xhtml::Anchors::build(std::slice::from_ref(&ch));
+    let page = doc::xhtml::Mode::Standalone {
+        lang: "und".to_string(),
+        title: "t".to_string(),
+    };
+    for mode in [doc::xhtml::Mode::Fragment, page] {
+        let _ = doc::xhtml::write_chapter(&ch, &anchors, &mode, limits);
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
         if let Ok(d) = doc::md::read_with(data, dialect) {
             let _ = doc::html::write(&d);
+            xhtml(&d, doc::Limits::UNLIMITED);
             let _ = doc::html::write_with(&d, doc::html::Options { tagfilter: true });
             let _ = doc::txt::write(&d);
             let _ = doc::md::write(&d);
@@ -16,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok((d, _losses)) = doc::txt::read(data) {
         let _ = doc::html::write(&d);
+        xhtml(&d, doc::Limits::UNLIMITED);
         let _ = doc::md::write(&d);
     }
     // The shipped, budgeted path under budgets small enough to be hit by
@@ -31,6 +51,7 @@ fuzz_target!(|data: &[u8]| {
     for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
         if let Ok(d) = doc::md::read_limited_with(data, tight, dialect) {
             let _ = doc::txt::write_limited(&d, tight);
+            xhtml(&d, tight);
             let _ = doc::md::write_limited(&d, tight);
         }
     }
@@ -43,6 +64,7 @@ fuzz_target!(|data: &[u8]| {
     for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
         if let Ok(d) = doc::md::read_limited_with(data, official, dialect) {
             let _ = doc::txt::write_limited(&d, official);
+            xhtml(&d, official);
             let _ = doc::md::write_limited(&d, official);
         }
     }

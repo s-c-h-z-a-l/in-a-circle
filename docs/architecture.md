@@ -211,6 +211,22 @@ are in `CLAUDE.md`.
   reported as a flattened link, as before. Padding and the repeated
   headers of the listed form count against the output budget like any
   other byte.
+- The user-facing XHTML and HTML output goes through its own strict
+  writer, `doc::xhtml`; the test writer `doc::html`, which reproduces the
+  CommonMark and GFM reference renderers for the spec tests, is not that
+  path and stays unchanged. The strict writer's output is well-formed XML:
+  characters XML 1.0 forbids are left out (reported), raw HTML is dropped
+  (reported), only the five XML entities are written, headings get
+  GitHub-style ids (Unicode letters and digits kept, an id that is not an
+  XML name gets the prefix `h-`, repeats are numbered `-1`, `-2`), and a
+  `#id` link resolves across the chapters of a document to the file that
+  holds the heading. `http(s):` and `mailto:` links stay; any other link,
+  or one whose target is missing, keeps its text (reported). A local image
+  becomes its alt text (reported); `alt` is always written. A task list item
+  is written with a `[x] ` or `[ ] ` text marker and table alignment as a
+  `left`, `center` or `right` class, so the output needs no form element and
+  no inline style. Every piece counts against the output budget before it
+  is appended.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
