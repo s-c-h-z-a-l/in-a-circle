@@ -1213,6 +1213,8 @@ fn sandbox_children_get_a_clean_environment() {
             .env("LD_PRELOAD", "libc.so.6")
             .env("INACIRCLE_FAKE_TOKEN", "token-canary-4711")
             .env("TMPDIR", "/tmp/parent-canary")
+            // The engine's own language reaches the action as INACIRCLE_LANG.
+            .env("LC_ALL", "hu_HU.UTF-8")
             .output()
             .unwrap(),
     );
@@ -1237,14 +1239,25 @@ fn sandbox_children_get_a_clean_environment() {
         "parent-canary",
         "HOME=",
         "XDG_",
-        "INACIRCLE_",
+        "hu_HU",
     ] {
         assert!(!env.contains(canary), "{canary} leaked: {env}");
     }
     let vars: Vec<&str> = env.lines().collect();
-    for want in ["PATH=/usr/bin:/bin", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"] {
+    for want in [
+        "PATH=/usr/bin:/bin",
+        "LC_ALL=C.UTF-8",
+        "LANG=C.UTF-8",
+        "INACIRCLE_LANG=hu",
+    ] {
         assert!(vars.contains(&want), "{want} missing: {env}");
     }
+    // Nothing else of ours is passed.
+    let ours: Vec<&&str> = vars
+        .iter()
+        .filter(|v| v.starts_with("INACIRCLE_"))
+        .collect();
+    assert_eq!(ours, [&"INACIRCLE_LANG=hu"], "{env}");
     let tmpdir = vars
         .iter()
         .find_map(|v| v.strip_prefix("TMPDIR="))

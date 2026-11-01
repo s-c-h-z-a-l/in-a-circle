@@ -1489,7 +1489,7 @@ fn run_step(
     let fd = ruleset.as_raw_fd();
     let mut cmd = Command::new(&action.bin);
     // Inside the work dir, the one place the ruleset lets it write.
-    sandbox::configure_child_env(&mut cmd, Some(&tmp));
+    sandbox::configure_child_env(&mut cmd, Some(&tmp), Some(sandbox::user_lang()));
     cmd.arg("run")
         .arg(&action.id)
         .arg("--work")

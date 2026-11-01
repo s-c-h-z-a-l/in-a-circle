@@ -419,8 +419,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   cap again.
 - **Clean environment**: the parent's is cleared; the child gets only
   `PATH=/usr/bin:/bin`, `LC_ALL` and `LANG` `C.UTF-8`, and `TMPDIR` (an
-  action's private `<work>/tmp`, mode 0700). No session socket, bus,
-  display, token or loader variable is passed through.
+  action's private `<work>/tmp`, mode 0700). An action also gets
+  `INACIRCLE_LANG`, the user's language code computed by the engine: the
+  first non-empty of its own `LC_ALL`, `LC_MESSAGES`, `LANG`, cut at the
+  first `_`, `.` or `@`, lowercased, if that is 2 or 3 ASCII letters; else
+  `und` (so `hu_HU.UTF-8` gives `hu`, `LC_ALL=C` gives `und`). A manifest
+  probe does not get it. It adds no path or syscall, so the ruleset and
+  the filter are unchanged. No session socket, bus, display, token or
+  loader variable is passed through.
 - **Mandatory**: nothing runs without the whole sandbox, built-in actions
   and manifests included, and an action the catalog knows from its cache
   meets the same gate when it runs. The gate needs Landlock ABI >= 6 (the
