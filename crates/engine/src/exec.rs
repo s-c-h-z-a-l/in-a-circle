@@ -582,7 +582,7 @@ pub fn run_join(
         .take_while(|&&i| i < documents)
         .map(|&i| uniq[i].as_path())
         .collect();
-    let placed = output::anchor(&accepted);
+    let placed = output::anchor(&accepted, output::join_fallback_name(&action.output));
     drop(accepted);
     let anchor = match placed {
         Ok(a) => a,

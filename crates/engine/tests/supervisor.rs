@@ -2339,6 +2339,67 @@ fn min_counts_documents() {
     assert_eq!(done_pairs(&r).len(), 7);
 }
 
+/// A book of documents in a hidden folder (which would hide a result
+/// named after it) is named `book`, not `images`; an image join there
+/// keeps `images`.
+#[test]
+fn hidden_folder_book_is_named_book() {
+    let t = Tmp::new("join-book-name");
+    let hidden = t.0.join(".notes");
+    let docs = files_in(&hidden, &["a.md", "b.md"]);
+    let bin = t.script("join", JOIN_ALL);
+    let mut epub = book_join(&bin, 1);
+    epub.output = "application/epub+zip".into();
+    epub.ext = "epub".into();
+    let (r, _) = common::run_join_assets(&epub, &docs, &[], None);
+    let d = done_pairs(&r);
+    assert_eq!(d.len(), 2, "{:?}", r.outcomes);
+    let want = hidden.join("book/book.epub");
+    assert!(d.iter().all(|(_, o)| *o == want), "{d:?}");
+    let imgs = files_in(&hidden, &["p1.jpg", "p2.jpg"]);
+    let (r, _) = run_join(&join_action(&bin, 1), &imgs, None);
+    let d = done_pairs(&r);
+    assert_eq!(d.len(), 2, "{:?}", r.outcomes);
+    let want = hidden.join("images/images.pdf");
+    assert!(d.iter().all(|(_, o)| *o == want), "{d:?}");
+}
+
+/// An action that skips its only document and takes the assets alone
+/// reports `joined` below its `min=1` of documents: nothing is published,
+/// the document keeps its own skip and every asset fails.
+#[test]
+fn assets_taken_alone_publish_nothing() {
+    let t = Tmp::new("join-assets-only-taken");
+    let docs = files_in(&t.0.join("docs"), &["a.md"]);
+    let imgs = files_in(&t.0.join("docs"), &["1.png", "2.jpg"]);
+    let bin = t.script(
+        "join",
+        "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.pdf\"\n\
+         while IFS= read -r in; do case $in in\n\
+         *.md) printf 'skip\\t%s\\tno text\\n' \"$in\" ;;\n\
+         *) cat \"$in\" >> \"$work/join/out.pdf\"; printf 'take\\t%s\\n' \"$in\" ;;\n\
+         esac; done < \"$6\"\n\
+         printf 'joined\\tjoin/out.pdf\\n'",
+    );
+    let (r, rep) = common::run_join_assets(&book_join(&bin, 1), &docs, &imgs, None);
+    let all = [docs.clone(), imgs.clone()].concat();
+    assert_nothing_published(
+        &t,
+        &all,
+        &r,
+        &rep,
+        "action reported fewer inputs than its minimum",
+    );
+    assert!(
+        r.outcomes.iter().any(
+            |o| matches!(o, Outcome::Skipped { input, reason } if *input == docs[0] && reason == "no text")
+        ),
+        "{:?}",
+        r.outcomes
+    );
+    assert_eq!(failed(&r).len(), 2, "{:?}", r.outcomes);
+}
+
 /// Assets without an admitted document never run: each is skipped, and
 /// the action is not started (it would leave a mark).
 #[test]

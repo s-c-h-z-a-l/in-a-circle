@@ -406,10 +406,28 @@ pub fn writable_target(source_dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// The name of a join result whose anchor folder's own name cannot name
-/// it (the root has none; a hidden one would hide the result). The join
-/// actions take images, so the word says what the result holds.
-const JOIN_FALLBACK_NAME: &str = "images";
+/// The type of an EPUB book, the one join output that is not made of images.
+const EPUB_MIME: &str = "application/epub+zip";
+
+/// The name of an image join's result (a PDF or CBZ of images) whose anchor
+/// folder's own name cannot name it (the root has none; a hidden one would
+/// hide the result): the word says what the result holds.
+const IMAGES_FALLBACK_NAME: &str = "images";
+
+/// The same for an EPUB join's result: the type's English name, since the
+/// book holds documents, not only images.
+const BOOK_FALLBACK_NAME: &str = "book";
+
+/// The name [`anchor`] falls back to for a join whose output type is
+/// `output`: [`BOOK_FALLBACK_NAME`] for an EPUB, [`IMAGES_FALLBACK_NAME`]
+/// for every other join (they all take images).
+pub fn join_fallback_name(output: &str) -> &'static str {
+    if output == EPUB_MIME {
+        BOOK_FALLBACK_NAME
+    } else {
+        IMAGES_FALLBACK_NAME
+    }
+}
 
 /// Where a join action's one result goes, and its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,13 +442,14 @@ pub struct Anchor {
 
 /// The place and name of a join result made of `accepted` (in the order
 /// the action gets them): a join's documents only, never its assets (the
-/// result is built around its documents). The anchor is the folder with the most of them;
-/// on a tie, the folder of the earliest input among the tied. The name is
-/// that folder's name for two or more inputs ([`JOIN_FALLBACK_NAME`] when
-/// it has none, or one starting with a dot), and the input's stem for one.
-/// The only filesystem access is [`writable_target`]'s probe of the
-/// anchor folder. `accepted` empty is `InvalidInput`.
-pub fn anchor<P: AsRef<Path>>(accepted: &[P]) -> io::Result<Anchor> {
+/// result is built around its documents). The anchor is the folder with
+/// the most of them; on a tie, the folder of the earliest input among the
+/// tied. The name is that folder's name for two or more inputs, and the
+/// input's stem for one; `fallback` ([`join_fallback_name`]) when that
+/// name is missing or starts with a dot. The only filesystem access is
+/// [`writable_target`]'s probe of the anchor folder. `accepted` empty is
+/// `InvalidInput`.
+pub fn anchor<P: AsRef<Path>>(accepted: &[P], fallback: &str) -> io::Result<Anchor> {
     let Some(first) = accepted.first().map(AsRef::as_ref) else {
         return Err(invalid("no input for the result"));
     };
@@ -458,7 +477,7 @@ pub fn anchor<P: AsRef<Path>>(accepted: &[P]) -> io::Result<Anchor> {
     } else {
         first.file_stem().and_then(usable)
     }
-    .unwrap_or_else(|| JOIN_FALLBACK_NAME.to_owned());
+    .unwrap_or_else(|| fallback.to_owned());
     let target = writable_target(dir)?;
     Ok(Anchor {
         downloads: target != dir,
@@ -3514,7 +3533,7 @@ pub(crate) mod tests {
         // The lone image sorts first: the count wins, not the order.
         let mut ins = vec![work.join("ábra01.jpg")];
         ins.extend(images_in(&trip, "kép", 25));
-        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        let a = anchor_env(&t, || anchor(&ins, IMAGES_FALLBACK_NAME)).unwrap();
         assert_eq!(a.target, trip);
         assert_eq!(a.name, "Nyaralás");
         assert!(!a.downloads);
@@ -3533,7 +3552,7 @@ pub(crate) mod tests {
             y.join("c.jpg"),
             x.join("d.jpg"),
         ];
-        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        let a = anchor_env(&t, || anchor(&ins, IMAGES_FALLBACK_NAME)).unwrap();
         assert_eq!((a.target.as_path(), a.name.as_str()), (y.as_path(), "y"));
         // The other way round, the other folder.
         let ins = vec![
@@ -3542,7 +3561,7 @@ pub(crate) mod tests {
             x.join("c.jpg"),
             y.join("d.jpg"),
         ];
-        let a = anchor_env(&t, || anchor(&ins)).unwrap();
+        let a = anchor_env(&t, || anchor(&ins, IMAGES_FALLBACK_NAME)).unwrap();
         assert_eq!((a.target.as_path(), a.name.as_str()), (x.as_path(), "x"));
     }
 
@@ -3551,7 +3570,10 @@ pub(crate) mod tests {
         let t = Tmp::new("anchor-one");
         let d = t.0.join("Nyaralás");
         fs::create_dir(&d).unwrap();
-        let a = anchor_env(&t, || anchor(&[d.join("IMG_1234.jpg")])).unwrap();
+        let a = anchor_env(&t, || {
+            anchor(&[d.join("IMG_1234.jpg")], IMAGES_FALLBACK_NAME)
+        })
+        .unwrap();
         assert_eq!(a.name, "IMG_1234");
         assert_eq!(a.target, d);
         assert!(!a.downloads);
@@ -3563,14 +3585,20 @@ pub(crate) mod tests {
         // A hidden folder would hide the result.
         let hidden = t.0.join(".photos");
         fs::create_dir(&hidden).unwrap();
-        let a = anchor_env(&t, || anchor(&images_in(&hidden, "p", 2))).unwrap();
+        let a = anchor_env(&t, || {
+            anchor(&images_in(&hidden, "p", 2), IMAGES_FALLBACK_NAME)
+        })
+        .unwrap();
         assert_eq!(
             (a.target.as_path(), a.name.as_str()),
             (hidden.as_path(), "images")
         );
         // The root has no name at all. Unless the tests run as root, it is
         // not writable either: the result goes to the download folder.
-        let a = anchor_env(&t, || anchor(&images_in(Path::new("/"), "p", 2))).unwrap();
+        let a = anchor_env(&t, || {
+            anchor(&images_in(Path::new("/"), "p", 2), IMAGES_FALLBACK_NAME)
+        })
+        .unwrap();
         assert_eq!(a.name, "images");
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
@@ -3578,8 +3606,32 @@ pub(crate) mod tests {
             assert_eq!(a.target, t.0.join("home/Downloads"));
         }
         // One input keeps its stem even there.
-        let a = anchor_env(&t, || anchor(&[PathBuf::from("/x.jpg")])).unwrap();
+        let a = anchor_env(&t, || {
+            anchor(&[PathBuf::from("/x.jpg")], IMAGES_FALLBACK_NAME)
+        })
+        .unwrap();
         assert_eq!(a.name, "x");
+    }
+
+    #[test]
+    fn join_fallback_name_follows_the_output_type() {
+        assert_eq!(join_fallback_name("application/epub+zip"), "book");
+        for image_join in ["application/pdf", "application/vnd.comicbook+zip"] {
+            assert_eq!(join_fallback_name(image_join), "images");
+        }
+        let t = Tmp::new("anchor-book");
+        let hidden = t.0.join(".notes");
+        fs::create_dir(&hidden).unwrap();
+        let book = join_fallback_name(EPUB_MIME);
+        let docs = [hidden.join("a.md"), hidden.join("b.md")];
+        let a = anchor_env(&t, || anchor(&docs, book)).unwrap();
+        assert_eq!(
+            (a.target.as_path(), a.name.as_str()),
+            (hidden.as_path(), "book")
+        );
+        // One document whose stem is hidden.
+        let a = anchor_env(&t, || anchor(&[t.0.join(".todo.md")], book)).unwrap();
+        assert_eq!(a.name, "book");
     }
 
     #[test]
@@ -3593,7 +3645,9 @@ pub(crate) mod tests {
         let ro = t.0.join("Nyaralás");
         fs::create_dir(&ro).unwrap();
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
-        let a = anchor_env(&t, || anchor(&images_in(&ro, "kép", 3)));
+        let a = anchor_env(&t, || {
+            anchor(&images_in(&ro, "kép", 3), IMAGES_FALLBACK_NAME)
+        });
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
         let a = a.unwrap();
         assert!(a.downloads);
@@ -3606,7 +3660,7 @@ pub(crate) mod tests {
     #[test]
     fn anchor_of_nothing_is_an_error() {
         let t = Tmp::new("anchor-none");
-        let e = anchor_env(&t, || anchor::<PathBuf>(&[])).unwrap_err();
+        let e = anchor_env(&t, || anchor::<PathBuf>(&[], IMAGES_FALLBACK_NAME)).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }

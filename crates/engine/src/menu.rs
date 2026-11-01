@@ -264,7 +264,9 @@ fn join_count(a: &Action, tally: &Tally) -> usize {
 }
 
 /// The most files any join action of `p` could take, if it were runnable:
-/// the preset's join set, or a candidate's documents and assets. Type
+/// the preset's join set, or a candidate's documents and assets. A
+/// candidate counts its whole type set, beyond the preset's set too, so a
+/// disabled join shows what [`choose`] would give it once runnable. Type
 /// checks only.
 fn raw_join(cat: &Catalog, p: &Preset, tally: &Tally) -> usize {
     join_candidates(cat, p)

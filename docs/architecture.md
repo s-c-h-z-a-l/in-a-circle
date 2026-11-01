@@ -364,8 +364,8 @@ action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/
   reported `joined`; 3 if it took nothing and skipped every input;
   otherwise 1.
 - A join action's result is published only if it reported `joined`, took
-  at least `min` documents (assets never count), broke no rule of the contract, exited 0, and no
-  cancel came before the commit. Otherwise nothing reaches the user's
+  at least `min` documents (assets never count), broke no rule of the
+  contract, exited 0, and no cancel came before the commit. Otherwise nothing reaches the user's
   folder: every input it did not settle with its own `skip` or `fail`
   fails (with the violation, the exit status, "action reported fewer
   inputs than its minimum", or "cancelled"). An input it said nothing of
@@ -546,8 +546,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   document and an asset (unless the 1:1 route takes more files): two
   Markdown files, or one with its images, make one book; one Markdown file
   alone keeps its 1:1 form, and images alone offer no EPUB. The count is
-  the slice's `applicable` and the hub's N. The wheel's levels, the flat offer and the
-  run all ask `choose`, so they cannot disagree. A join action is never a
+  the slice's `applicable` and the hub's N. The wheel's levels, the flat
+  offer and the run all ask `choose`, so they cannot disagree. A join action is never a
   step of a chain: the planner skips it.
 
 ## Executor and supervisor
@@ -714,8 +714,10 @@ In the engine, in one place:
    the folder of the document that comes first in its order. Its name is
    that folder's name for two or more documents
    (`Nyaralás/Nyaralás/Nyaralás.pdf`), the document's stem for one, however
-   many assets come with it; a folder without a usable name (the root, or a hidden one, which
-   would hide the result) gives `images`. The wrapper and a taken name
+   many assets come with it. A name that is missing or hidden (the root,
+   a folder or stem starting with a dot, which would hide the result)
+   gives the type's English name: `book` for an EPUB join, `images` for
+   the image joins (PDF, CBZ). The wrapper and a taken name
    (`Nyaralás (1)/`) follow rule 3; inputs from other folders change
    nothing. It goes to the download folder only when the anchor folder is
    not writable.
