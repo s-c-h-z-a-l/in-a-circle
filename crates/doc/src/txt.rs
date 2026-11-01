@@ -193,12 +193,14 @@ fn column_widths(natural: &[usize], available: usize) -> Option<Vec<usize>> {
 /// Whether `c` is shown in a monospaced terminal with a width other than
 /// one cell: a combining mark (zero) or an East Asian Wide or Fullwidth
 /// character, emoji included (two), or a joiner or variation selector that
-/// changes how a neighbour is drawn. A small fixed table of the main blocks
+/// changes how a neighbour is drawn, or a control character (a TAB shows as
+/// up to eight cells, others as nothing or as a symbol). A small fixed table of the main blocks
 /// (Unicode 15.0: EastAsianWidth.txt, emoji-data.txt and the
 /// combining-mark blocks), no dependency; it only decides whether to warn,
 /// the layout counts characters.
 fn is_wide_or_combining(c: char) -> bool {
-    matches!(u32::from(c),
+    c.is_control()
+        || matches!(u32::from(c),
         // Combining Diacritical Marks, Extended, Supplement; for Symbols;
         // Half Marks.
         0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
@@ -1176,6 +1178,15 @@ mod tests {
         let (_, l) = gfm_txt("| a |\n|--|\n| plain |\n");
         assert!(l.is_empty());
         assert!(!is_wide_or_combining('a') && !is_wide_or_combining('\u{e9}'));
+    }
+
+    #[test]
+    fn control_characters_in_a_cell_warn() {
+        let (_, l) = gfm_txt("| a | b |\n|--|--|\n| x\ty | z |\n");
+        assert_eq!(l, BTreeSet::from([Loss::TableWidth]));
+        let (_, l) = gfm_txt("| a |\n|--|\n| x\u{1}y |\n");
+        assert_eq!(l, BTreeSet::from([Loss::TableWidth]));
+        assert!(is_wide_or_combining('\t') && is_wide_or_combining('\u{7f}'));
     }
 
     #[test]
