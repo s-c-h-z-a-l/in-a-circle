@@ -88,16 +88,16 @@ are in `CLAUDE.md`.
   (64 MiB, 180 MP) is left out and reported as `fail`; the rest is joined.
   If the archive as a whole would pass the output size limit or 4 GiB, or a
   write fails, nothing is written and every taken input fails.
-  `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
-  PNG without transparency, JPEG passed through untouched) becomes one
-  PDF with one page per image, in natural order of the entry names; one
-  CBZ, one PDF, all or nothing. It sits in the **Book** category. It is
-  `lossy=yes`: it leaves out entries that are not images (such as
-  `ComicInfo.xml`), ignores the Exif orientation and does not embed ICC
-  profiles, and reports each as a warning, which the notification shows.
-  A PNG is checked down to its scanlines; a JPEG is passed through
-  without checking its scan data, so a JPEG truncated inside its entropy
-  data is not detected and shows as a grey or partial page in the reader.
+  `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages,
+  8-bit PNG without transparency, JPEG passed through untouched) becomes one PDF
+  with one page per image, in natural order of the entry names; one CBZ, one
+  PDF, all or nothing. It sits in the **Book** category. It is `lossy=yes`: it
+  leaves out entries that are not images (such as `ComicInfo.xml`), ignores the
+  Exif orientation and does not embed ICC profiles, and reports each as a
+  warning, which the notification shows. A PNG is checked down to its scanlines;
+  a JPEG is passed through without checking its scan data, so a JPEG truncated
+  inside its entropy data is not detected and shows as a grey or partial page in
+  the reader.
 
 ## Manifest
 
@@ -121,17 +121,17 @@ are in `CLAUDE.md`.
   the binary backs off (the negative cache): its `bin` line keeps its
   current identity plus `fails=<n>` and `retry=<unix seconds>`, and its old
   actions, if any, stay on the wheel. Its manifest is not rerun before
-  `retry`: 60 s after the first failure in a row, doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
-  stops at 64. A success clears both fields; a changed binary (mtime or
-  size) is tried at once and counts from zero. `retry` is wall-clock time
-  (`CLOCK_REALTIME`, which survives a reboot); one more than 24 h ahead
-  (the clock went back) is tried at once. Not its fault, so not
-  penalized ("will retry" at the next start, as before): the refresh
-  budget ran out, even when it cut a manifest short of its own 2 s; the
-  sandbox or the supervision did not start; the spawn failed; no stdout;
-  a `poll`, `wait`, `read` or child-list error. A broken manifest (not
-  UTF-8, too large, malformed) stays cached without actions and without a
-  backoff until the binary changes.
+  `retry`: 60 s after the first failure in a row, doubling (60 s x 2^(n-1)) up
+  to 24 h, reached at the 12th; the count stops at 64. A success clears both
+  fields; a changed binary (mtime or size) is tried at once and counts from
+  zero. `retry` is wall-clock time (`CLOCK_REALTIME`, which survives a reboot);
+  one more than 24 h ahead (the clock went back) is tried at once. Not its
+  fault, so not penalized ("will retry" at the next start, as before): the
+  refresh budget ran out, even when it cut a manifest short of its own 2 s; the
+  sandbox or the supervision did not start; the spawn failed; no stdout; a
+  `poll`, `wait`, `read` or child-list error. A broken manifest (not UTF-8, too
+  large, malformed) stays cached without actions and without a backoff until the
+  binary changes.
 - A whole catalog refresh shares one 10 s budget: each manifest gets
   min(2 s, the rest of the budget), so a run of hanging binaries cannot
   hold a start for N x 2 s. A binary cut by it keeps its old cache entry
@@ -203,24 +203,22 @@ are in `CLAUDE.md`.
   autolinks). The action writes GFM tables as aligned columns in a full
   line of 80 characters (the prefix of an enclosing list or quote
   counts): two spaces between columns, a row of dashes under the header,
-  the column alignment kept as padding. When the table is wider, the widest columns
-  give up width one character at a time, none below 10 (a column that is
-  narrower stays as it is) and a cell wraps inside its column, at spaces,
-  a longer word at a character boundary. If the minimums and gaps do not
-  fit the line, each row becomes `header: cell` lines (`Column <n>` for an
-  empty header) with a blank line between rows, and the action reports
-  that the table was listed. Widths count characters, so a wide or
-  combining character (East Asian Wide and Fullwidth, emoji, combining
-  marks) or a control character such as a TAB is reported as possible
-  misalignment. Strikethrough loses its
-  marks (reported); a task list item is written with `[x] ` or `[ ] `
-  after the list marker, before its text (no trailing space when the item
-  is empty), and that loses nothing. An extended autolink (a bare
-  `www.`, `http://`, `https://` or `ftp://` URL, or a bare email address)
-  is written as its text, and that loses nothing; a `<...>` autolink is
-  reported as a flattened link, as before. Padding and the repeated
-  headers of the listed form count against the output budget like any
-  other byte.
+  the column alignment kept as padding. When the table is wider, the widest
+  columns give up width one character at a time, none below 10 (a column that is
+  narrower stays as it is) and a cell wraps inside its column, at spaces, a
+  longer word at a character boundary. If the minimums and gaps do not fit the
+  line, each row becomes `header: cell` lines (`Column <n>` for an empty header)
+  with a blank line between rows, and the action reports that the table was
+  listed. Widths count characters, so a wide or combining character (East Asian
+  Wide and Fullwidth, emoji, combining marks) or a control character such as a
+  TAB is reported as possible misalignment. Strikethrough loses its marks
+  (reported); a task list item is written with `[x] ` or `[ ] ` after the list
+  marker, before its text (no trailing space when the item is empty), and that
+  loses nothing. An extended autolink (a bare `www.`, `http://`, `https://` or
+  `ftp://` URL, or a bare email address) is written as its text, and that loses
+  nothing; a `<...>` autolink is reported as a flattened link, as before.
+  Padding and the repeated headers of the listed form count against the output
+  budget like any other byte.
 - The user-facing XHTML and HTML output goes through its own strict
   writer, `doc::xhtml`; the test writer `doc::html`, which reproduces the
   CommonMark and GFM reference renderers for the spec tests, is not that
@@ -242,11 +240,11 @@ are in `CLAUDE.md`.
   document's heading ids being the ones it has on its own. Every document
   is named by its path relative to one folder that holds them all (their
   deepest common folder), so `../b/two.md` from `a/one.md` finds
-  `b/two.md`, and a link that climbs out of that folder finds none. A task list item
-  is written with a `[x] ` or `[ ] ` text marker and table alignment as a
-  `left`, `center` or `right` class, so the output needs no form element and
-  no inline style. Every piece counts against the output budget before it
-  is appended.
+  `b/two.md`, and a link that climbs out of that folder finds none. A task list
+  item is written with a `[x] ` or `[ ] ` text marker and table alignment as a
+  `left`, `center` or `right` class, so the output needs no form element and no
+  inline style. Every piece counts against the output budget before it is
+  appended.
 - The book packer, `crates/epub` (doc and zip, no XML parser), writes a
   document as an EPUB 3 book through the stored ZIP writer: `mimetype`
   first and stored, `META-INF/container.xml`, `OEBPS/content.opf`,
@@ -277,13 +275,14 @@ are in `CLAUDE.md`.
   of each document once, before anything is written, to one of the
   JPEG or PNG images it was given, already checked and in natural order,
   and copies each packaged image's bytes exactly, streamed, never held
-  whole, from the file it checked; a short or long copy fails the book. An image is packaged once however many destinations refer to it,
-  as `OEBPS/img/0001.<jpg|png>` onwards in the order the documents first
-  refer to it, and written as an `<img>`; an image no document refers to
-  goes, in the caller's order, to a last chapter `Images`, one figure per
-  page with the file name as its alt text, and counts toward the chapter
-  limit. Image bytes are not charged to the output budget (the caller
-  bounds each image and the archive is bounded by the ZIP writer).
+  whole, from the file the caller checked; a short or long copy fails the book.
+  An image is packaged once however many destinations refer to it, as
+  `OEBPS/img/0001.<jpg|png>` onwards in the order the documents first refer to
+  it, and written as an `<img>`; an image no document refers to goes, in the
+  caller's order, to a last chapter `Images`, one figure per page with the file
+  name as its alt text, and counts toward the chapter limit. Image bytes are not
+  charged to the output budget (the caller bounds each image and the archive is
+  bounded by the ZIP writer).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
@@ -411,12 +410,12 @@ action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/
   otherwise 1.
 - A join action's result is published only if it reported `joined`, took
   at least `min` documents (assets never count), broke no rule of the
-  contract, exited 0, and no cancel came before the commit. Otherwise nothing reaches the user's
-  folder: every input it did not settle with its own `skip` or `fail`
-  fails (with the violation, the exit status, "action reported fewer
-  inputs than its minimum", or "cancelled"). An input it said nothing of
-  fails ("no result reported") even when the result is published. Once
-  published, every input it took is done, with the same one output.
+  contract, exited 0, and no cancel came before the commit. Otherwise nothing
+  reaches the user's folder: every input it did not settle with its own `skip`
+  or `fail` fails (with the violation, the exit status, "action reported fewer
+  inputs than its minimum", or "cancelled"). An input it said nothing of fails
+  ("no result reported") even when the result is published. Once published,
+  every input it took is done, with the same one output.
 - Cancel with `SIGTERM` to the action's process group, `SIGKILL` 5 s
   later; the engine removes the temp dir either way.
 - If the supervisor itself dies abnormally (`SIGKILL`, an abort), nobody
@@ -424,8 +423,8 @@ action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/
   before the sandbox, which then denies changing it), but the leader's
   own children live on under the next subreaper (e.g. `systemd --user`),
   still sandboxed, writing only into the work dir (a later run in that
-  folder removes it after a day); nothing of them is published, and `jobs` and `cancel`
-  no longer see them. A cgroup would bound that; it is not used (no
+  folder removes it after a day); nothing of them is published, and `jobs` and
+  `cancel` no longer see them. A cgroup would bound that; it is not used (no
   systemd dependency).
 - Limits, set in the child: `RLIMIT_FSIZE` caps **each file** an action
   writes at 16 × the total input size (all the inputs of that one
@@ -593,8 +592,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   Markdown files, or one with its images, make one book; one Markdown file
   alone keeps its 1:1 form, and images alone offer no EPUB. The count is
   the slice's `applicable` and the hub's N. The wheel's levels, the flat
-  offer and the run all ask `choose`, so they cannot disagree. A join action is never a
-  step of a chain: the planner skips it.
+  offer and the run all ask `choose`, so they cannot disagree. A join action is
+  never a step of a chain: the planner skips it.
 
 ## Executor and supervisor
 
@@ -906,7 +905,10 @@ compositor.
   order): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
-  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1. The flat `inacircle offer <files…>` prints the presets of the most common input type, each `slice` line with its `group=`, since a direction repeats across groups.
+  takes (`n`, the count the run would take) is below the number dropped.
+  `inacircle offer --groups <files…>` prints level 1. The flat
+  `inacircle offer <files…>` prints the presets of the most common input type,
+  each `slice` line with its `group=`, since a direction repeats across groups.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
