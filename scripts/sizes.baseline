@@ -37,7 +37,8 @@
 # (tree clean): inacircle-text grew 61456 B (file, 53136 B of .text), from the
 # table parser and the column-width and wrapping logic. That is under the
 # 100 KB explanation threshold and the .text stays under the 1 MiB family
-# limit; inacircle and inacircle-pages are unchanged.
+# limit; inacircle and inacircle-pages are unchanged. +416 B of .text (+416 B
+# file) from the closing fixes (wrap at runs of spaces, control characters warn).
 inacircle 1160024 891880
-inacircle-text 756456 450450
+inacircle-text 756872 450866
 inacircle-pages 503712 403267
