@@ -25,6 +25,11 @@ impl Meter {
         self.err.is_some()
     }
 
+    /// What was charged so far: nodes and owned text bytes.
+    pub(crate) fn spent(&self) -> (usize, usize) {
+        (self.nodes, self.text)
+    }
+
     pub(crate) fn result(&self) -> Result<(), LimitError> {
         self.err.map_or(Ok(()), Err)
     }

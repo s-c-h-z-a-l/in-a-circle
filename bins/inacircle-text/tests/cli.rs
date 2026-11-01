@@ -1409,3 +1409,174 @@ fn sibling_folders_link_across() {
     assert!(opf.contains("<dc:title>a</dc:title>"), "{opf}");
     epubcheck(&book);
 }
+
+/// Watches files for being opened (inotify `IN_OPEN`), so a test can prove
+/// that the action never opened a file it must not touch.
+struct OpenWatch(std::os::fd::OwnedFd);
+
+impl OpenWatch {
+    fn new(paths: &[&Path]) -> OpenWatch {
+        use std::os::fd::FromRawFd;
+        // SAFETY: no pointer is passed; a negative result is checked.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `fd` is a new descriptor owned by nothing else.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        for p in paths {
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+            // SAFETY: `c` is NUL-terminated and outlives the call.
+            let wd = unsafe { libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_OPEN) };
+            assert!(
+                wd >= 0,
+                "{}: {}",
+                p.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+        OpenWatch(owned)
+    }
+
+    /// Whether any watched file was opened since the watch began.
+    fn opened(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is writable for its whole length; the descriptor is
+        // non-blocking, so an empty queue returns -1 (EAGAIN) at once.
+        let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        n > 0
+    }
+}
+
+/// A referenced file that is not an input is never opened, only its
+/// identity is looked at: neither a regular image nor a FIFO (whose open
+/// could block or have effects) sees an open; both keep their alt text.
+#[test]
+fn referenced_non_input_is_never_opened() {
+    let (root, work) = workdir("join-noopen");
+    let md = root.join("a.md");
+    fs::write(
+        &md,
+        "![plain](other.png)\n\n![pipe](pipe.png)\n\n![in](in.png)\n",
+    )
+    .unwrap();
+    let (other, pipe, input) = (
+        root.join("other.png"),
+        root.join("pipe.png"),
+        root.join("in.png"),
+    );
+    fs::write(&other, png(3)).unwrap();
+    fs::write(&input, png(4)).unwrap();
+    let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: c is NUL-terminated.
+    assert_eq!(unsafe { libc_mkfifo(c.as_ptr(), 0o600) }, 0);
+    let watch = OpenWatch::new(&[&other, &pipe]);
+    let o = join(&work, &[&md, &input]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(!watch.opened(), "a non-input file was opened");
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    assert_eq!(images(&es).len(), 1);
+    let ch = chapters(&es);
+    assert!(ch[0].1.contains("plain") && ch[0].1.contains("pipe"));
+    assert_eq!(ch[0].1.matches("<img ").count(), 1, "{}", ch[0].1);
+    assert_eq!(lines(&out, "warn").len(), 1, "{out}");
+}
+
+/// An input with a non-UTF-8 path is skipped before anything opens it,
+/// image or document, as in every other action.
+#[test]
+fn join_non_utf8_path_is_skipped_unread() {
+    let (root, work) = workdir("join-badpath");
+    let md = root.join("a.md");
+    fs::write(&md, "# A\n").unwrap();
+    let bad = root.join(OsStr::from_bytes(b"bad\xff.png"));
+    fs::write(&bad, png(5)).unwrap();
+    let watch = OpenWatch::new(&[&bad]);
+    let o = join(&work, &[&md, &bad]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(!watch.opened(), "the non-UTF-8 input was opened");
+    let skip = lines(&out, "skip");
+    assert_eq!(skip.len(), 1, "{out}");
+    assert_eq!(skip[0][2], "non-UTF-8 path");
+    assert_eq!(takes(&o), [md.to_str().unwrap()]);
+}
+
+/// A colon in a file name is not a URL scheme: `a:b.png` (one letter
+/// before the colon) is a sibling image like any other.
+#[test]
+fn colon_in_file_name_is_a_local_image() {
+    let (root, work) = workdir("join-colon");
+    let md = root.join("a.md");
+    fs::write(&md, "![colon](a:b.png)\n").unwrap();
+    let img = root.join("a:b.png");
+    fs::write(&img, png(6)).unwrap();
+    let o = join(&work, &[&md, &img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let book = joined_book(&o, &work);
+    let ch = chapters(&entries(&book));
+    assert_eq!(ch.len(), 1, "referenced, so no Images chapter");
+    assert!(ch[0].1.contains("src=\"img/0001.png\""), "{}", ch[0].1);
+}
+
+/// `lines` lines of `- a`, three nodes each (list item, paragraph, text):
+/// a node-dense document of `4 * lines` bytes.
+fn dense(path: &Path, lines: usize) {
+    fs::write(path, "- a\n".repeat(lines)).unwrap();
+}
+
+/// The documents of one book share one document budget: two documents
+/// that each fit it but together pass its 524,288 nodes fail the whole
+/// book loudly (no file, every input it would take fails, the image too);
+/// together under it they join.
+#[test]
+fn documents_share_one_budget() {
+    let (root, work) = workdir("join-budget");
+    let dir = root.join("dense");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b, img) = (dir.join("a.md"), dir.join("b.md"), dir.join("p.png"));
+    // 100,000 items: ~300,000 nodes each, 600,000 together.
+    dense(&a, 100_000);
+    dense(&b, 100_000);
+    fs::write(&img, png(7)).unwrap();
+    let o = join(&work, &[&a, &b, &img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty() && lines(&out, "take").is_empty());
+    let fails = lines(&out, "fail");
+    let failed: Vec<&str> = fails.iter().map(|f| f[1]).collect();
+    assert_eq!(
+        failed,
+        [
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            img.to_str().unwrap()
+        ],
+        "{out}"
+    );
+    assert!(
+        fails
+            .iter()
+            .all(|f| f[2] == "book is too large (documents exceed the document budget together)"),
+        "{out}"
+    );
+    assert!(!work.join("join/out.epub").exists());
+
+    // Each alone fits: the same document is a book of its own.
+    let work1 = root.join("work1");
+    fs::create_dir_all(&work1).unwrap();
+    let o = join(&work1, &[&b]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+
+    // 80,000 items each: ~480,000 nodes together, under the budget.
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    dense(&a, 80_000);
+    dense(&b, 80_000);
+    let o = join(&work2, &[&a, &b, &img]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(takes(&o).len(), 3);
+    joined_book(&o, &work2);
+}

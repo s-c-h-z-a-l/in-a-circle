@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use action::{Events, Invocation};
-use doc::{Dialect, Document, ReadError};
+use doc::{Dialect, Document, LimitError, ReadError};
 use epub::{Image, ImageKind, ImageSource, Part};
 use probe::{Format, ProbeError};
 
@@ -32,15 +32,15 @@ const IMAGE_BYTES: u64 = 64 << 20;
 /// check refuses more before anything else is read.
 const MAX_PIXELS: u64 = 180_000_000;
 
-/// Most Markdown bytes held at once, summed over the documents: 16 MiB.
-/// Every document of the book is parsed and held until the book is packed
-/// (the packer needs them all to resolve links), and a parsed document
-/// takes 12 to 25 times its input (`Limits::DEFAULT`), so the sum is what
-/// the memory follows: 16 MiB is twice one document's budget, about 200 to
-/// 400 MB parsed at the worst, under the sandbox's `RLIMIT_DATA` (>= 1 GiB)
-/// and 25 times the largest real text measured. The document that would
-/// pass it fails (`fail`) and the rest still join.
-const DOCUMENTS_BYTES: usize = 16 << 20;
+/// The `fail` reason of a book whose documents together pass the one
+/// document budget they share. Every document of the book is parsed and
+/// held until the book is packed (the packer needs them all to resolve
+/// links), and the memory a parsed document holds follows its nodes and
+/// owned text, not its input bytes (a dense list holds ~180 times its
+/// input). So the documents of one book share one document's node and
+/// owned text budget (`Limits::DEFAULT`): the largest book holds what the
+/// largest accepted single document holds (`docs/resource-limits.md`).
+const BOOK_TOO_LARGE: &str = "book is too large (documents exceed the document budget together)";
 
 /// What an input turned out to be.
 enum Class {
@@ -81,13 +81,28 @@ fn open_nonblocking(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Whether `first`, the destination's first path segment, starts with a
+/// URL scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"` (RFC 3986,
+/// section 3.1), at least two characters before the colon so a Windows
+/// drive letter (`C:`) is not one. Any other colon is part of a file name
+/// (`a:b.png`).
+fn has_scheme(first: &str) -> bool {
+    let Some((scheme, _)) = first.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    scheme.len() >= 2
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// The absolute path an image destination names from the folder `dir` of
 /// its document: percent-decoded, normalized lexically (`.` and `..` only,
 /// no symlink is looked at). An absolute path or a URL (a scheme before
 /// the first `/`) is not a local image: `None`.
 fn reference_path(dir: &Path, dest: &str) -> Option<PathBuf> {
     let first = dest.split('/').next().unwrap_or_default();
-    if dest.is_empty() || first.is_empty() || first.contains(':') {
+    if dest.is_empty() || first.is_empty() || has_scheme(first) {
         return None;
     }
     let decoded = doc::xhtml::percent_decode(dest);
@@ -110,10 +125,13 @@ fn reference_path(dir: &Path, dest: &str) -> Option<PathBuf> {
 impl ImageSource for Pictures {
     fn resolve(&mut self, part: usize, dest: &str) -> Option<usize> {
         let path = reference_path(self.dirs.get(part)?, dest)?;
-        // The opened file's identity decides, never its name: another
-        // path to an input (a symlink, `./a.png`) is that input; a file
-        // that is not an input is not read.
-        let m = open_nonblocking(&path).ok()?.metadata().ok()?;
+        // The file's identity decides, never its name: another path to an
+        // input (a symlink, `./a.png`) is that input. Only `stat` (symlinks
+        // followed): a file that is not an input is never opened, so a
+        // device or FIFO named by a reference sees nothing. A failing stat
+        // is not an input. `open` re-checks the identity on the descriptor
+        // of the checked input itself.
+        let m = fs::metadata(&path).ok()?;
         if !m.is_file() {
             return None;
         }
@@ -278,10 +296,24 @@ enum Doc {
     Skipped,
     /// Its own `fail` was reported.
     Failed,
+    /// It does not fit what the documents before it left of the budget
+    /// they share: the book fails (nothing reported yet).
+    BookTooLarge,
 }
 
-/// Reads and parses one document, reporting its own `skip` or `fail`.
-fn read_document(path: &Path, held: &mut usize, ev: &mut Events<impl Write>) -> Doc {
+/// Reads and parses one document under `left`, what the documents before
+/// it left of the shared budget, reporting its own `skip` or `fail`.
+fn read_document(path: &Path, left: &mut doc::Limits, ev: &mut Events<impl Write>) -> Doc {
+    // Nothing spent yet: the document has the whole budget, and passing it
+    // is its own failure. After another one, passing what is left is the
+    // book's.
+    let first = *left == LIMITS;
+    // Checked before the read: with no node left a document with content
+    // cannot fit (an empty file still can; one of only blank lines fails
+    // closed).
+    if !first && left.nodes == 0 && fs::metadata(path).is_ok_and(|m| m.len() > 0) {
+        return Doc::BookTooLarge;
+    }
     let bytes = match action::read_file_bounded(path, LIMITS.input_bytes) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
@@ -293,24 +325,14 @@ fn read_document(path: &Path, held: &mut usize, ev: &mut Events<impl Write>) -> 
             return Doc::Failed;
         }
     };
-    if held.saturating_add(bytes.len()) > DOCUMENTS_BYTES {
-        ev.fail(
-            path,
-            &format!(
-                "The Markdown files together are larger than {} MiB.",
-                DOCUMENTS_BYTES >> 20
-            ),
-        );
-        return Doc::Failed;
-    }
-    match doc::md::read_limited_with(&bytes, LIMITS, Dialect::Gfm) {
-        Ok(d) => {
-            *held += bytes.len();
-            Doc::Parsed(d, bytes.len(), epub::fnv1a_128(&[&bytes]))
-        }
+    match doc::md::read_spending(&bytes, left, Dialect::Gfm) {
+        Ok(d) => Doc::Parsed(d, bytes.len(), epub::fnv1a_128(&[&bytes])),
         Err(ReadError::NotText) => {
             ev.skip(path, "unsupported");
             Doc::Skipped
+        }
+        Err(ReadError::Limit(LimitError::Exceeded("nodes" | "owned text"))) if !first => {
+            Doc::BookTooLarge
         }
         Err(ReadError::Limit(l)) => {
             ev.fail(path, &limit_reason(l));
@@ -358,15 +380,17 @@ pub fn run(inv: &Invocation) -> u8 {
     };
     let mut classes: Vec<Class> = Vec::with_capacity(n);
     for input in &inv.inputs {
+        if input.to_str().is_none() {
+            // Settled unread, as in every other action.
+            ev.skip(input, "non-UTF-8 path");
+            classes.push(Class::Settled);
+            continue;
+        }
         let class = match check_image(input) {
             Ok(None) => Class::Document,
             Err(reason) => {
                 ev.fail(input, &reason);
                 any_fail = true;
-                Class::Settled
-            }
-            Ok(Some(_)) if input.to_str().is_none() => {
-                ev.skip(input, "non-UTF-8 path");
                 Class::Settled
             }
             Ok(Some(item)) => match pics.by_id.get(&(item.dev, item.ino)) {
@@ -388,23 +412,35 @@ pub fn run(inv: &Invocation) -> u8 {
         .map(|(p, _)| p.as_path())
         .collect();
 
-    // Pass 2: the documents, in order.
+    // Pass 2: the documents, in order, under one shared budget.
     let mut docs: Vec<Parsed> = Vec::new();
-    let mut held = 0;
+    let mut left = LIMITS;
     for (i, (input, class)) in inv.inputs.iter().zip(&classes).enumerate() {
         if matches!(class, Class::Document) {
-            if input.to_str().is_none() {
-                ev.skip(input, "non-UTF-8 path");
-            } else {
-                match read_document(input, &mut held, &mut ev) {
-                    Doc::Parsed(doc, len, digest) => docs.push(Parsed {
-                        path: input.clone(),
-                        doc,
-                        len,
-                        digest,
-                    }),
-                    Doc::Skipped => {}
-                    Doc::Failed => any_fail = true,
+            match read_document(input, &mut left, &mut ev) {
+                Doc::Parsed(doc, len, digest) => docs.push(Parsed {
+                    path: input.clone(),
+                    doc,
+                    len,
+                    digest,
+                }),
+                Doc::Skipped => {}
+                Doc::Failed => any_fail = true,
+                Doc::BookTooLarge => {
+                    // The whole book fails: every input it would have
+                    // taken (the documents read, this one, the ones not
+                    // yet read, the images); no file was made.
+                    for (j, (input, class)) in inv.inputs.iter().zip(&classes).enumerate() {
+                        let would_take = match class {
+                            Class::Image => true,
+                            Class::Document => j >= i || docs.iter().any(|d| d.path == *input),
+                            Class::Settled => false,
+                        };
+                        if would_take {
+                            ev.fail(input, BOOK_TOO_LARGE);
+                        }
+                    }
+                    return action::EXIT_FAILED as u8;
                 }
             }
         }
@@ -538,4 +574,27 @@ fn pack(
     })?;
     partial.armed = false;
     Ok(losses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheme_is_rfc_3986_and_two_characters() {
+        for s in ["http:", "https://x", "mailto:a@b", "a+b-c.d:x", "ab:c.png"] {
+            assert!(has_scheme(s), "{s}");
+        }
+        for s in [
+            "a:b.png",
+            "C:",
+            "1http:x",
+            "ht_tp:x",
+            ":x",
+            "plain.png",
+            "-ab:x",
+        ] {
+            assert!(!has_scheme(s), "{s}");
+        }
+    }
 }

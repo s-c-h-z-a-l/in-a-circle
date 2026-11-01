@@ -155,11 +155,26 @@ archive size, so memory that grew with the archive would fail it.
 
 The join action `text.md-join-epub` parses every Markdown file of the
 book and holds them until the book is packed (links across files need all
-of them), so memory follows their sum, not one file: the files together
-may be at most 16 MiB (twice one file's 8 MiB budget; a parsed file takes
-12 to 25 times its input, so about 200 to 400 MB at the limit, under the
-sandbox's `RLIMIT_DATA` net); the file that would pass it fails with `The
-Markdown files together are larger than 16 MiB.` and the rest still join.
+of them), so memory follows their sum, not one file. What a parsed file
+holds follows its nodes and owned text, not its input bytes (24 files of
+660 KB of `- a` lines, 15.8 MiB, each under the node budget, peaked at
+2.9 GB held side by side). So the files of one book share ONE document
+budget: the 524,288 nodes and 32 MiB of owned text of `Limits::DEFAULT`
+are charged across all of them, each file read under what the files
+before it left (each file still has its own 8 MiB input limit). The
+largest book holds what the largest accepted single file holds. Past the
+shared budget no book is made: every input the book would have taken
+(the files read, the one that passed it, those not yet read, the images)
+fails with `book is too large (documents exceed the document budget
+together)`. A file that passes the budget on its own fails alone when it
+is the first that spends any of it; after others it fails the book.
+Measured peak RSS (release `inacircle-text`, no sandbox, `getrusage`
+of the child, `ru_maxrss` in KiB): the 24 dense files above stop at the
+second file, 185,140 KiB (190 MB), the same as one dense file of 495,000
+nodes joined alone (185,112 KiB); two dense files of 261,000 nodes each
+join at 161,420 KiB; two prose files of 8 MiB join at 88,276 KiB; three of
+7 MiB pass the shared owned-text budget and fail at 74,500 KiB. All are
+under a fifth of the sandbox's `RLIMIT_DATA` net (>= 1 GiB).
 Images are never held by the book: each is header-checked
 (`probe::sniff`, at most 64 MiB, 180 MP, as for the CBZ), digested in 8 KiB
 reads for the book's identifier, and later streamed into the archive from
