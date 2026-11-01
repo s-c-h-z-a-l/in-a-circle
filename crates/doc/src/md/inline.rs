@@ -2282,4 +2282,15 @@ mod tests {
         assert_eq!(html("*a**a*a"), want);
         assert_eq!(gfm("*a**a*a"), want);
     }
+
+    #[test]
+    fn email_autolink_needs_a_clean_domain() {
+        // A character that is neither a letter, digit, hyphen, period nor
+        // the closing bracket ends the scan: no address.
+        assert_eq!(html("<a@b$c>"), "<p>&lt;a@b$c&gt;</p>\n");
+        assert_eq!(
+            html("<a@b.c>"),
+            "<p><a href=\"mailto:a@b.c\">a@b.c</a></p>\n"
+        );
+    }
 }
