@@ -256,17 +256,7 @@ fn rejects_bad_names() {
     w.add("ok.jpg", &mut &b"1"[..], 10).unwrap();
     let before = s.bytes();
     let long = "a".repeat(256);
-    for bad in [
-        "",
-        "a/b",
-        "a\\b",
-        "..",
-        ".",
-        "é.jpg",
-        "a b",
-        "a\n",
-        long.as_str(),
-    ] {
+    for bad in ["", "a\\b", "..", ".", "é.jpg", "a b", "a\n", long.as_str()] {
         assert!(
             matches!(w.add(bad, &mut &b"x"[..], 10), Err(WriteError::BadName)),
             "{bad:?}"
@@ -280,6 +270,84 @@ fn rejects_bad_names() {
     assert_eq!(w.len(), 1);
     // 255 bytes is the longest allowed.
     w.add(&"a".repeat(255), &mut &b"x"[..], 10).unwrap();
+}
+
+#[test]
+fn folder_names_are_accepted() {
+    let entries: [(&str, &[u8]); 3] = [
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", b"<container/>"),
+        ("OEBPS/img/0001.png", b"\x89PNG"),
+    ];
+    let (s, bytes) = build(&entries);
+    let names: Vec<&str> = entries.iter().map(|(n, _)| *n).collect();
+    for n in &names {
+        let at = bytes
+            .windows(n.len())
+            .position(|w| w == n.as_bytes())
+            .unwrap_or_else(|| panic!("{n} missing"));
+        assert!(at > 0);
+    }
+    independent_check(&s.0, &entries);
+    // Our reader sees the exact names.
+    let f = File::open(&s.0).unwrap();
+    let a = open(&f, LIMITS).unwrap();
+    let got: Vec<&[u8]> = a.entries().iter().map(|e| e.name.as_slice()).collect();
+    let want: Vec<&[u8]> = names.iter().map(|n| n.as_bytes()).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn bad_folder_names_rejected() {
+    let s = Scratch::new();
+    let mut w = StoreWriter::new(s.create());
+    let long_segment = format!("a/{}", "b".repeat(256));
+    let long_path = vec!["abcdefghij"; 52].join("/"); // 52*10 + 51 = 571 B
+    for bad in [
+        "/a",
+        "a/",
+        "/",
+        "a//b",
+        "a/./b",
+        "a/../b",
+        "./a",
+        "../a",
+        "a/.",
+        "a/..",
+        "a\\b",
+        "a/b\\c",
+        long_segment.as_str(),
+        long_path.as_str(),
+    ] {
+        assert!(
+            matches!(w.add(bad, &mut &b"x"[..], 10), Err(WriteError::BadName)),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(w.len(), 0);
+    // Each segment may be 255 bytes; the whole path stays within 512.
+    let ok = format!("{}/{}", "a".repeat(255), "b".repeat(255));
+    w.add(&ok, &mut &b"x"[..], 10).unwrap();
+    let too_long = format!("{}/{}/c", "a".repeat(255), "b".repeat(255));
+    assert!(matches!(
+        w.add(&too_long, &mut &b"x"[..], 10),
+        Err(WriteError::BadName)
+    ));
+}
+
+#[test]
+fn duplicate_full_path_rejected() {
+    let s = Scratch::new();
+    let mut w = StoreWriter::new(s.create());
+    w.add("a/x.txt", &mut &b"1"[..], 10).unwrap();
+    // The same file name under another folder, and the bare name, differ.
+    w.add("b/x.txt", &mut &b"2"[..], 10).unwrap();
+    w.add("x.txt", &mut &b"3"[..], 10).unwrap();
+    assert!(matches!(
+        w.add("a/x.txt", &mut &b"4"[..], 10),
+        Err(WriteError::DuplicateName)
+    ));
+    assert_eq!(w.len(), 3);
 }
 
 /// Gives `n` bytes, then an error.
