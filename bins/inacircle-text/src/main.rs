@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::time::UNIX_EPOCH;
 
 use action::{Command, Events, Invocation, parse_args};
+use doc::xhtml::{Anchors, Chapter, Mode};
 use doc::{Dialect, Document, LimitError, Limits, Loss, ReadError};
 
 /// The structure budgets of one conversion (`document_*` budgets, see
@@ -147,6 +148,12 @@ fn manifest_text() -> String {
             "book",
         ));
     }
+    for (id, input) in [
+        ("text.md-to-html", "text/markdown"),
+        ("text.txt-to-html", "text/plain"),
+    ] {
+        s.push_str(&action(id, input, "text/html", "html", "HTML", "document"));
+    }
     s
 }
 
@@ -156,6 +163,8 @@ enum Conversion {
     MdToTxt,
     MdToEpub,
     TxtToEpub,
+    MdToHtml,
+    TxtToHtml,
 }
 
 impl Conversion {
@@ -165,6 +174,8 @@ impl Conversion {
             "text.md-to-txt" => Some(Conversion::MdToTxt),
             "text.md-to-epub" => Some(Conversion::MdToEpub),
             "text.txt-to-epub" => Some(Conversion::TxtToEpub),
+            "text.md-to-html" => Some(Conversion::MdToHtml),
+            "text.txt-to-html" => Some(Conversion::TxtToHtml),
             _ => None,
         }
     }
@@ -174,12 +185,13 @@ impl Conversion {
             Conversion::TxtToMd => "md",
             Conversion::MdToTxt => "txt",
             Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
+            Conversion::MdToHtml | Conversion::TxtToHtml => "html",
         }
     }
 
-    /// Whether the input is Markdown (else plain text) for a book.
+    /// Whether the input is Markdown (else plain text) for a book or a page.
     fn reads_markdown(self) -> bool {
-        matches!(self, Conversion::MdToEpub)
+        matches!(self, Conversion::MdToEpub | Conversion::MdToHtml)
     }
 
     /// Converted text plus every loss from the reader and the writer.
@@ -194,13 +206,14 @@ impl Conversion {
                 let d = doc::md::read_limited_with(bytes, LIMITS, doc::Dialect::Gfm)?;
                 Ok(doc::txt::write_limited(&d, LIMITS)?)
             }
-            Conversion::MdToEpub | Conversion::TxtToEpub => {
-                unreachable!("books go through `publish`")
-            }
+            Conversion::MdToEpub
+            | Conversion::TxtToEpub
+            | Conversion::MdToHtml
+            | Conversion::TxtToHtml => unreachable!("books and pages go through `publish`"),
         }
     }
 
-    /// The parsed input of a book, with the reader's losses.
+    /// The parsed input of a book or a page, with the reader's losses.
     fn read(self, bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ConvertError> {
         if self.reads_markdown() {
             let d = doc::md::read_limited_with(bytes, LIMITS, Dialect::Gfm)?;
@@ -211,7 +224,7 @@ impl Conversion {
     }
 }
 
-/// The language of the book: the engine's `INACIRCLE_LANG`, kept
+/// The language of the book or page: the engine's `INACIRCLE_LANG`, kept
 /// only when it is a well-formed tag, else `und` (undetermined). Fail
 /// closed: the value lands in attributes, and readers choose fonts and
 /// hyphenation by it.
@@ -220,7 +233,7 @@ fn lang() -> String {
     epub::lang_tag(&v).to_string()
 }
 
-/// The title of a book: Markdown's first H1, else (and always for
+/// The title of a book or page: Markdown's first H1, else (and always for
 /// plain text) the file's stem. Never empty, so `<title>` has text.
 fn title(conv: Conversion, d: &Document, input: &Path) -> String {
     let h1 = conv.reads_markdown().then(|| doc::book::title(d)).flatten();
@@ -235,7 +248,7 @@ fn title(conv: Conversion, d: &Document, input: &Path) -> String {
     if t.is_empty() { "Untitled" } else { t }.to_string()
 }
 
-/// Writes the EPUB of `bytes` to `out`; what it lost.
+/// Writes the EPUB or the HTML page of `bytes` to `out`; what it lost.
 /// Whatever is left at `out` after an error is the caller's to remove.
 fn publish(
     conv: Conversion,
@@ -270,6 +283,22 @@ fn publish(
                 id_seed: epub::fnv1a_128(&[bytes]).to_be_bytes().to_vec(),
             };
             epub::write(&d, &meta, file, LIMITS)?
+        }
+        Conversion::MdToHtml | Conversion::TxtToHtml => {
+            let ch = Chapter {
+                blocks: &d.blocks,
+                file: "index.html".to_string(),
+            };
+            let anchors = Anchors::build(std::slice::from_ref(&ch));
+            let (page, more) = doc::xhtml::write_chapter(
+                &ch,
+                &anchors,
+                &Mode::Standalone { lang, title },
+                LIMITS,
+            )?;
+            fs::write(out, page)
+                .map_err(|e| ConvertError::Other(format!("cannot write output: {e}")))?;
+            more
         }
         Conversion::TxtToMd | Conversion::MdToTxt => {
             unreachable!("text goes through `convert`")
@@ -350,7 +379,7 @@ fn process(
     Outcome::Done
 }
 
-/// One input to an EPUB. The output is removed on any
+/// One input to an EPUB or an HTML page. The output is removed on any
 /// error, so a half book never stays for the engine to publish.
 fn document(
     conv: Conversion,

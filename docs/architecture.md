@@ -257,6 +257,13 @@ are in `CLAUDE.md`.
   input's. The output file is created new (never overwritten) and removed
   when the book fails, so no half book is left; losses of the reader and
   the writer (raw HTML, images, links) are reported once each.
+- `text.md-to-html` and `text.txt-to-html` (`group=document`, `lossy=yes`)
+  write one self-contained page per input, `<stem>.html`, as a single
+  chapter: `<!DOCTYPE html>`, `lang` (as for the book), `<meta charset>`,
+  `<title>` (the same rule as the book's title), an embedded stylesheet
+  of at most 1.5 KiB with a dark mode through `prefers-color-scheme`, no
+  script and nothing loaded from outside. The losses are those of the
+  book.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -272,6 +279,8 @@ action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=M
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-epub	family=text	in=text/markdown	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
 action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
+action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
+action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1

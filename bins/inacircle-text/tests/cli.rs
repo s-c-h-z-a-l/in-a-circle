@@ -8,7 +8,9 @@ const MANIFEST: &str = "inacircle-manifest 0\n\
 action\ttext.txt-to-md\tfamily=text\tin=text/plain\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-to-epub\tfamily=text\tin=text/markdown\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
-action\ttext.txt-to-epub\tfamily=text\tin=text/plain\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n";
+action\ttext.txt-to-epub\tfamily=text\tin=text/plain\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
+action\ttext.md-to-html\tfamily=text\tin=text/markdown\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
+action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -70,7 +72,7 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn manifest_lists_four_actions() {
+fn manifest_lists_six_actions() {
     let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
         .arg("--manifest")
         .output()
@@ -560,6 +562,20 @@ fn epubcheck(path: &Path) {
     );
 }
 
+/// The Nu validator finds no error in the page (when installed).
+fn vnu(path: &Path) {
+    if !have("vnu") {
+        return;
+    }
+    let out = Command::new("vnu").arg(path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "vnu: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn contains(hay: &[u8], needle: &str) -> bool {
     hay.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
@@ -633,6 +649,39 @@ fn txt_to_epub_title_is_stem() {
 }
 
 #[test]
+fn md_to_html_end_to_end() {
+    let (root, work) = workdir("md2html");
+    let a = root.join("oldal.md");
+    fs::write(
+        &a,
+        "# Üdv\n\nSzöveg [link](https://example.com/) és `kód`.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+    )
+    .unwrap();
+    let (o, page) = convert("text.md-to-html", &a, &work, Some("hu"));
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(page.strip_prefix(&work).unwrap(), Path::new("0/oldal.html"));
+    let html = fs::read_to_string(&page).unwrap();
+    assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+    assert!(html.contains("lang=\"hu\""), "{html}");
+    assert!(html.contains("<title>Üdv</title>"), "{html}");
+    assert!(!html.contains("<script"), "{html}");
+    vnu(&page);
+}
+
+#[test]
+fn txt_to_html_title_is_stem() {
+    let (root, work) = workdir("txt2html");
+    let a = root.join("lista.txt");
+    fs::write(&a, "egy\n\nkettő\n").unwrap();
+    let (o, page) = convert("text.txt-to-html", &a, &work, Some("de-CH"));
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let html = fs::read_to_string(&page).unwrap();
+    assert!(html.contains("<title>lista</title>"), "{html}");
+    assert!(html.contains("lang=\"de-CH\""), "{html}");
+    vnu(&page);
+}
+
+#[test]
 fn invalid_lang_is_und() {
     let (root, _) = workdir("badlang");
     let a = root.join("a.md");
@@ -644,6 +693,10 @@ fn invalid_lang_is_und() {
         w
     };
     for (k, bad) in ["xx_YY", "hu_HU", "", "hu\"x", "a"].into_iter().enumerate() {
+        let (o, page) = convert("text.md-to-html", &a, &fresh(&format!("h{k}")), Some(bad));
+        assert_eq!(o.status.code(), Some(0), "{bad}: {}", stdout(&o));
+        let html = fs::read_to_string(&page).unwrap();
+        assert!(html.contains("lang=\"und\""), "{bad}: {html}");
         let (o, book) = convert("text.md-to-epub", &a, &fresh(&format!("e{k}")), Some(bad));
         assert_eq!(o.status.code(), Some(0), "{bad}: {}", stdout(&o));
         let bytes = fs::read(&book).unwrap();
@@ -700,13 +753,15 @@ fn losses_reported() {
     let (root, work) = workdir("losses");
     let a = root.join("a.md");
     fs::write(&a, "# T\n\n<div>raw</div>\n\n![pic](local.png)\n").unwrap();
-    let (o, _) = convert("text.md-to-epub", &a, &work, None);
-    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
-    let out = stdout(&o);
-    let warns: Vec<Vec<&str>> = lines(&out, "warn");
-    let expected: Vec<Vec<&str>> = ["images replaced by their alt text", "HTML dropped"]
-        .iter()
-        .map(|m| vec!["warn", a.to_str().unwrap(), m])
-        .collect();
-    assert_eq!(warns, expected);
+    for id in ["text.md-to-epub", "text.md-to-html"] {
+        let (o, _) = convert(id, &a, &work, None);
+        assert_eq!(o.status.code(), Some(0), "{id}: {}", stdout(&o));
+        let out = stdout(&o);
+        let warns: Vec<Vec<&str>> = lines(&out, "warn");
+        let expected: Vec<Vec<&str>> = ["images replaced by their alt text", "HTML dropped"]
+            .iter()
+            .map(|m| vec!["warn", a.to_str().unwrap(), m])
+            .collect();
+        assert_eq!(warns, expected, "{id}");
+    }
 }
