@@ -441,6 +441,12 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
         }
         Block::Table { head, rows, .. } => {
             // Flattened to one line per row, cells separated by a space.
+            // The loss copy ("table too wide; rows listed one by one") speaks
+            // of width, which does not apply here: this writer flattens every
+            // table whatever its width. Accepted for now: trees from text
+            // hold no tables, so no shipped path reaches this arm; the GFM
+            // Markdown writer that replaces it will write tables and drop
+            // this loss.
             losses.insert(Loss::TableLayout);
             let mut w = InlineWriter::new(true, false, losses, sink);
             // A row with no content would be a blank line and split the
