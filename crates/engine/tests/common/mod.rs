@@ -111,6 +111,7 @@ pub fn join_action(bin: &Path, min: u32) -> Action {
         join: Some(Join {
             types: vec!["image/jpeg".into(), "image/png".into()],
             min,
+            assets: Vec::new(),
         }),
         ..action(bin, "pdf")
     }

@@ -3240,6 +3240,7 @@ pub(crate) mod tests {
         action.join = Some(crate::catalog::Join {
             types: vec!["text/plain".into()],
             min: 1,
+            assets: Vec::new(),
         });
         let tok = CancelToken::install().unwrap();
         AFTER_PUBLISH.set(Some(Box::new(|_p: &Publication| {

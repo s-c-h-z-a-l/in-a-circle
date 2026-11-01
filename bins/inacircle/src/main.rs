@@ -1454,6 +1454,7 @@ mod tests {
             join: Some(engine::catalog::Join {
                 types: vec!["image/jpeg".into(), "image/png".into()],
                 min: 1,
+                assets: Vec::new(),
             }),
             ..md_catalog().actions.remove(0)
         };

@@ -1080,6 +1080,7 @@ mod tests {
             j.join = Some(crate::catalog::Join {
                 types: vec!["image/jpeg".into(), "image/png".into()],
                 min: 1,
+                assets: Vec::new(),
             });
             actions.push(j);
         }
@@ -1117,6 +1118,7 @@ mod tests {
         j.join = Some(crate::catalog::Join {
             types: vec!["image/jpeg".into(), "image/png".into()],
             min: 1,
+            assets: Vec::new(),
         });
         cat.actions.push(j);
         cat

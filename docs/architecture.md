@@ -180,6 +180,16 @@ are in `CLAUDE.md`.
   ("invalid action line ignored"). For display the engine takes the set's
   first member as the action's input type. The catalog cache stores the
   manifest lines verbatim, so its format does not change.
+- A join action may also take assets beside its documents
+  (`assets=<MIME set>`, e.g. the images a set of Markdown files shows).
+  `in=` is then the set of document types and `min=` counts documents
+  only; assets alone never make a run. `assets=` has the shape of the
+  `in=` set (1 to 16 members, none empty, none repeated) and shares no
+  member with `in=`, so every input has one role. It is valid only with
+  `join=yes`; absent means no assets. Any other value or combination
+  rejects the line. A line without `assets=` means what it did before,
+  and the catalog cache (stored lines, checked again on load) keeps its
+  format and version.
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
   the action reports it (blank lines at the start or end of the text and

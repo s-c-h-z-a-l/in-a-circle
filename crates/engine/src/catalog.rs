@@ -248,12 +248,16 @@ pub struct Action {
     pub builtin: bool,
 }
 
-/// A many-inputs-to-one-output action: the MIME types it takes and the
-/// fewest accepted inputs a run needs.
+/// A many-inputs-to-one-output action: the MIME types of the documents it
+/// joins, the fewest accepted documents a run needs, and the MIME types of
+/// the assets (e.g. images) it may take beside the documents. An asset is
+/// never a document: the two sets are disjoint, and assets alone never make
+/// a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Join {
     pub types: Vec<String>,
     pub min: u32,
+    pub assets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -677,9 +681,21 @@ fn parse_action(l: &Line) -> Option<Action> {
         if min == 0 || min as usize > action::INPUT_COUNT {
             return None;
         }
-        Some(Join { types, min })
-    } else if l.get("min").is_some() || input.contains(',') {
-        // `min` and a MIME set are meaningful only for a join action.
+        // `assets` is a MIME set of the same shape as `in`, taken beside
+        // the documents; absent means none. An asset type that is also a
+        // document type would make an input's role ambiguous, so the sets
+        // must be disjoint.
+        let assets = match l.get("assets") {
+            None => Vec::new(),
+            Some(v) => mime_set(v)?,
+        };
+        if assets.iter().any(|a| types.contains(a)) {
+            return None;
+        }
+        Some(Join { types, min, assets })
+    } else if l.get("min").is_some() || l.get("assets").is_some() || input.contains(',') {
+        // `min`, `assets` and a MIME set are meaningful only for a join
+        // action.
         return None;
     } else {
         None
@@ -715,10 +731,11 @@ fn parse_action(l: &Line) -> Option<Action> {
     })
 }
 
-/// The most members an `in=` set may have. Derived from the formats the
-/// roadmap names for a joined document (JPEG, PNG, GIF, TIFF, HEIC, WebP)
-/// plus a document-and-assets role, both far below 16; the menu matches an
-/// input against the set member by member, so the cost is linear in it.
+/// The most members an `in=` set, and alike an `assets=` set, may have.
+/// Derived from the formats the roadmap names for a joined document (JPEG,
+/// PNG, GIF, TIFF, HEIC, WebP) plus a document-and-assets role, both far
+/// below 16; the menu matches an input against a set member by member, so
+/// the cost is linear in it.
 /// Past it the line is rejected whole (a set that wide is a malformed line,
 /// not an action we know).
 const JOIN_TYPES_MAX: usize = 16;
@@ -3191,7 +3208,8 @@ pub(crate) mod tests {
             a.join,
             Some(Join {
                 types: vec!["image/jpeg".into(), "image/png".into()],
-                min: 1
+                min: 1,
+                assets: Vec::new(),
             })
         );
         assert_eq!(a.input, "image/jpeg");
@@ -3280,6 +3298,115 @@ pub(crate) mod tests {
         let text = manifest::write_line(&l);
         let back = manifest::parse_line(text.trim_end_matches('\n')).unwrap();
         assert_eq!(parse_action(&back), parse_action(&l));
+    }
+
+    // ---- join actions with assets ----
+
+    const EPUB_LINE: &str = "action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1";
+
+    #[test]
+    fn assets_join_parses() {
+        let a = parsed(EPUB_LINE).unwrap();
+        assert_eq!(
+            a.join,
+            Some(Join {
+                types: vec!["text/markdown".into()],
+                min: 1,
+                assets: vec!["image/jpeg".into(), "image/png".into()],
+            })
+        );
+        // The display input is the first document type, never an asset.
+        assert_eq!(a.input, "text/markdown");
+        // A set of documents beside the assets is taken too.
+        let two = EPUB_LINE.replace("in=text/markdown", "in=text/markdown,text/plain");
+        assert_eq!(
+            parsed(&two).unwrap().join.unwrap().types,
+            ["text/markdown", "text/plain"]
+        );
+    }
+
+    #[test]
+    fn join_without_assets_unchanged() {
+        let j = parsed(PDF_LINE).unwrap().join.unwrap();
+        assert_eq!(j.assets, Vec::<String>::new());
+        assert_eq!(j.types, ["image/jpeg", "image/png"]);
+        assert_eq!(j.min, 1);
+    }
+
+    #[test]
+    fn rejects_bad_assets() {
+        let with = |assets: &str, join: &str| {
+            format!(
+                "action\tj.a\tfamily=f\tin=text/markdown\tassets={assets}\tout=application/epub+zip\text=epub\tlabel=L\tgroup=g\tcost=10\tlossy=no\tbatch=yes{join}"
+            )
+        };
+        let set = |n: usize| {
+            (0..n)
+                .map(|i| format!("image/x{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let bad = [
+            // Only a join action has assets.
+            with("image/png", ""),
+            with("image/png", "\tjoin=no"),
+            // Empty set, empty member, repeated member.
+            with("", "\tjoin=yes"),
+            with("image/png,", "\tjoin=yes"),
+            with(",image/png", "\tjoin=yes"),
+            with("image/jpeg,,image/png", "\tjoin=yes"),
+            with("image/png,image/png", "\tjoin=yes"),
+            // An asset type that is also a document type.
+            with("text/markdown", "\tjoin=yes"),
+            with("image/png,text/markdown", "\tjoin=yes"),
+            // Past the set limit.
+            with(&set(JOIN_TYPES_MAX + 1), "\tjoin=yes"),
+        ];
+        for l in &bad {
+            assert!(parsed(l).is_none(), "{l}");
+        }
+        // The overlap rule holds against every document type, not only the
+        // first.
+        let two_docs = with("text/plain", "\tjoin=yes")
+            .replace("in=text/markdown", "in=text/markdown,text/plain");
+        assert!(parsed(&two_docs).is_none(), "{two_docs}");
+        // The limit itself is taken, and so is a plain one-member set.
+        let sixteen = parsed(&with(&set(JOIN_TYPES_MAX), "\tjoin=yes")).unwrap();
+        assert_eq!(sixteen.join.unwrap().assets.len(), JOIN_TYPES_MAX);
+        assert!(parsed(&with("image/png", "\tjoin=yes")).is_some());
+    }
+
+    /// The cache stores manifest lines verbatim and `parse_action` checks
+    /// them again on load: a line with assets survives a cache round trip,
+    /// and a cache written before assets existed (version 1, no `assets=`)
+    /// is still read as it was.
+    #[test]
+    fn assets_line_survives_the_cache_and_old_caches_still_load() {
+        let text = format!("{CACHE_OK}{EPUB_LINE}\n{PDF_LINE}\n");
+        let entries = parse_cache(text.as_bytes()).unwrap();
+        assert_eq!(cache_text(&entries), text);
+        let c = Catalog::of(&entries);
+        let epub = c.get("text.md-join-epub").unwrap();
+        assert_eq!(
+            epub.join.as_ref().unwrap().assets,
+            ["image/jpeg", "image/png"]
+        );
+        assert_eq!(epub.bin, Path::new("/a/one"));
+
+        // A version-1 cache from before assets: the same header, the
+        // images-to-PDF join line without `assets=`.
+        let old = format!("{CACHE_OK}{PDF_LINE}\n");
+        let c = Catalog::of(&parse_cache(old.as_bytes()).unwrap());
+        let pdf = c.get("pages.images-to-pdf").unwrap();
+        assert_eq!(pdf.join.as_ref().unwrap().assets, Vec::<String>::new());
+        assert_eq!(
+            *pdf,
+            Action {
+                bin: "/a/one".into(),
+                builtin: true,
+                ..parsed(PDF_LINE).unwrap()
+            }
+        );
     }
 
     // ---- bounded cache and manifest ----
