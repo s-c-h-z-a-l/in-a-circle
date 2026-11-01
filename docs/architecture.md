@@ -302,9 +302,10 @@ are in `CLAUDE.md`.
   result by: the folder holding most documents) for two or more
   documents, else the document's own title as above. An image destination
   is resolved against the document's folder (percent-decoded, `.` and `..`
-  lexically); the file it opens must be one of the given images, matched
-  by device and inode (a symlink, `./a.png` and `a.png` are one image), or
-  the alt text stays and the book reports the loss. A link to another
+  lexically); the resolver only `stat`s the path it names (it never opens
+  a file that is not an input) and compares device and inode with the
+  given images (a symlink, `./a.png` and `a.png` are one image), or the
+  alt text stays and the book reports the loss. A link to another
   given document goes to its chapter file and heading. A document that
   fails leaves the rest; a damaged image fails alone (its place keeps the
   alt text); no document left, no book. The book failing as a whole (the
