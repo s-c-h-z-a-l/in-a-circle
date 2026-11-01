@@ -183,3 +183,25 @@ impl Sink {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A charge equal to the limit fits; one byte more does not, and the
+    /// failure is sticky.
+    #[test]
+    fn charge_fits_up_to_the_limit() {
+        let limits = Limits {
+            output_bytes: 10,
+            ..Limits::UNLIMITED
+        };
+        let mut sink = Sink::new(limits);
+        assert!(sink.charge(10));
+        assert!(!sink.failed());
+        assert!(sink.charge(0));
+        assert!(!sink.charge(11));
+        assert_eq!(sink.result(), Err(LimitError::Exceeded("output")));
+        assert!(!sink.charge(0));
+    }
+}

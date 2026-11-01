@@ -677,4 +677,19 @@ mod tests {
 <li>\n<p><input checked=\"\" disabled=\"\" type=\"checkbox\"> b</p>\n</li>\n</ul>\n"
         );
     }
+
+    /// A tag name at the very end of the raw HTML still counts as a tag
+    /// name; a name followed by any other punctuation is a longer name.
+    #[test]
+    fn tagfilter_name_at_the_end_and_before_punctuation() {
+        let on = Options { tagfilter: true };
+        let d = Document {
+            blocks: vec![Block::Paragraph(vec![
+                Inline::Html("<script".into()),
+                Inline::Html("<script-x>".into()),
+                Inline::Html("<style_y>".into()),
+            ])],
+        };
+        assert_eq!(write_with(&d, on), "<p>&lt;script<script-x><style_y></p>\n");
+    }
 }
