@@ -1580,3 +1580,33 @@ fn documents_share_one_budget() {
     assert_eq!(takes(&o).len(), 3);
     joined_book(&o, &work2);
 }
+
+/// A document past the node budget on its own fails alone when nothing was
+/// spent before it, and the rest still join; after a document that spent
+/// some of the shared budget, it fails the book.
+#[test]
+fn document_over_the_budget_alone() {
+    let (root, work) = workdir("join-alone");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (big, small) = (dir.join("a.md"), dir.join("b.md"));
+    // 180,000 items: ~540,000 nodes, past 524,288 on its own.
+    dense(&big, 180_000);
+    fs::write(&small, "# Small\n").unwrap();
+    let o = join(&work, &[&big, &small]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(fails[0][1], big.to_str().unwrap());
+    assert!(fails[0][2].contains("too many text elements"), "{out}");
+    assert_eq!(takes(&o), [small.to_str().unwrap()]);
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = join(&work2, &[&small, &big]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert_eq!(lines(&out, "fail").len(), 2, "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+}
