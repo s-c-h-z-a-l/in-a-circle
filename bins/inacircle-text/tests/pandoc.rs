@@ -273,9 +273,14 @@ impl Drop for Tmp {
     }
 }
 
+/// Every call gets its own directory: the tests of this file run in
+/// parallel in one process, and a name shared by two of them (the same
+/// book) let one test's `remove_dir_all` delete the other's work dir.
 fn tmp(name: &str) -> Tmp {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "inacircle-pandoc-test-{}-{name}",
+        "inacircle-pandoc-test-{}-{n}-{name}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&d);
