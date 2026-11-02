@@ -845,3 +845,47 @@ fn doubled_byte_order_mark_is_not_well_formed() {
     // One mark is fine.
     assert!(read_bytes(b"\xEF\xBB\xBF<a/>").is_ok());
 }
+
+#[test]
+fn namespace_tables_hold_only_bindings_in_scope() {
+    // Distinct prefixes and names on sibling elements: each leaves both
+    // tables when its element ends, so they never hold more than the
+    // bindings in scope (here the root's one and one sibling's).
+    let siblings: String = (0..1000)
+        .map(|i| format!("<e xmlns:p{i}='urn:{i}'/>"))
+        .collect();
+    let s = format!("<r xmlns:q='urn:r'>{siblings}</r>");
+    let mut r = Reader::new(&s, opts());
+    let (mut prefixes, mut names) = (0, 0);
+    while r.next().unwrap().is_some() {
+        prefixes = prefixes.max(r.ns.len());
+        names = names.max(r.uris.len());
+    }
+    assert_eq!((prefixes, names), (2, 2));
+    assert_eq!((r.ns.len(), r.uris.len()), (0, 0));
+}
+
+#[test]
+fn declared_encoding_matching_the_bytes_reads() {
+    let doc = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><a>é</a>";
+    let mut utf8 = b"\xEF\xBB\xBF".to_vec();
+    utf8.extend(doc.as_bytes());
+    assert_eq!(text(&decode(&utf8).unwrap(), opts()), "é");
+    for (bom, enc, unit) in [
+        (
+            [0xFF, 0xFE],
+            "UTF-16LE",
+            u16::to_le_bytes as fn(u16) -> [u8; 2],
+        ),
+        ([0xFE, 0xFF], "UTF-16BE", u16::to_be_bytes),
+        ([0xFF, 0xFE], "UTF-16", u16::to_le_bytes),
+        ([0xFE, 0xFF], "UTF-16", u16::to_be_bytes),
+    ] {
+        let doc = format!("<?xml version=\"1.0\" encoding=\"{enc}\"?><a>é</a>");
+        let b: Vec<u8> = bom
+            .into_iter()
+            .chain(doc.encode_utf16().flat_map(unit))
+            .collect();
+        assert_eq!(text(&decode(&b).unwrap(), opts()), "é", "{enc}");
+    }
+}

@@ -34,6 +34,7 @@ mod tests;
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -501,9 +502,11 @@ pub struct Reader<'a> {
     close_empty: bool,
     /// Prefix (`""` = default namespace) -> the URIs bound to it, innermost
     /// last, each with its id; `""` as a default namespace URI means "no
-    /// namespace".
+    /// namespace". A prefix leaves when its last binding goes out of
+    /// scope.
     ns: HashMap<&'a str, Vec<(&'a str, usize)>>,
-    /// The namespace names bound in scope, each hashed once per binding:
+    /// The namespace names bound in scope, looked up once when a binding
+    /// comes into scope and once when it leaves:
     /// equal names (even bound to different prefixes) share one id, so
     /// the duplicate check compares ids. A name leaves when its last
     /// binding goes out of scope, so this holds no more than the bindings
@@ -1310,15 +1313,24 @@ impl<'a> Reader<'a> {
     fn unbind(&mut self, n: usize) {
         for _ in 0..n {
             let Some(p) = self.undo.pop() else { return };
+            // One lookup per table (one hash, one comparison); an entry
+            // left with no binding is removed, so neither table outgrows
+            // the bindings in scope.
             self.steps += (p.len() + 1) as u64;
-            let Some((uri, _)) = self.ns.get_mut(p).and_then(Vec::pop) else {
+            let Entry::Occupied(mut e) = self.ns.entry(p) else {
                 continue;
             };
+            let Some((uri, _)) = e.get_mut().pop() else {
+                continue;
+            };
+            if e.get().is_empty() {
+                e.remove();
+            }
             self.steps += 2 * uri.len() as u64 + 1;
-            if let Some(u) = self.uris.get_mut(uri) {
-                u.bindings -= 1;
-                if u.bindings == 0 {
-                    self.uris.remove(uri);
+            if let Entry::Occupied(mut u) = self.uris.entry(uri) {
+                u.get_mut().bindings -= 1;
+                if u.get().bindings == 0 {
+                    u.remove();
                 }
             }
         }
