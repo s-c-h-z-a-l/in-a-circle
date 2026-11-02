@@ -112,20 +112,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends qpdf poppler-utils libjpeg-turbo-progs libxml2-utils
 
       # The book tests check whole EPUBs with W3C EPUBCheck and pages with
-      # the W3C Nu HTML validator (vnu), both Java. Pinned versions,
+      # the W3C Nu HTML validator (vnu), both Java, and compare the text
+      # read from public-domain books with pandoc's (a static binary,
+      # used only by that test). Pinned versions,
       # verified by SHA-256 and run through wrappers on PATH: EPUBCheck's
       # GitHub release zip (the hash matches the digest GitHub publishes
       # for the asset) and vnu's npm package `vnu-jar` (a fixed version;
       # the hash is of the registry tarball, whose sha512 matches the
       # registry's integrity field; GitHub's `latest` vnu is rebuilt in
-      # place and cannot be pinned). INACIRCLE_REQUIRE_BOOK_TOOLS=1 makes
-      # a missing one a failure instead of a skip.
+      # place and cannot be pinned; pandoc's GitHub release tarball, whose
+      # hash matches the digest GitHub publishes for the asset).
+      # INACIRCLE_REQUIRE_BOOK_TOOLS=1 makes a missing one a failure
+      # instead of a skip.
       - name: Install book test tools
         env:
           EPUBCHECK_VERSION: 5.4.0
           EPUBCHECK_SHA256: 33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c
           VNU_VERSION: 26.10.12
           VNU_SHA256: 3925f07364f5e5a111cef54a7baefa575b22d05c70f8ced048f0616d4579b7ab
+          PANDOC_VERSION: 3.11
+          PANDOC_SHA256: 37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6
         run: |
           sudo apt-get install -y --no-install-recommends default-jre-headless
           cd "$RUNNER_TEMP"
@@ -133,7 +139,11 @@ jobs:
           echo "$EPUBCHECK_SHA256  epubcheck.zip" | sha256sum -c -
           curl -fsSLo vnu.tgz "https://registry.npmjs.org/vnu-jar/-/vnu-jar-$VNU_VERSION.tgz"
           echo "$VNU_SHA256  vnu.tgz" | sha256sum -c -
+          curl -fsSLo pandoc.tgz "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-amd64.tar.gz"
+          echo "$PANDOC_SHA256  pandoc.tgz" | sha256sum -c -
           sudo mkdir -p /opt/book-tools
+          sudo tar -xzf pandoc.tgz -C /opt/book-tools "pandoc-$PANDOC_VERSION/bin/pandoc"
+          sudo ln -s "/opt/book-tools/pandoc-$PANDOC_VERSION/bin/pandoc" /usr/local/bin/pandoc
           sudo unzip -q epubcheck.zip -d /opt/book-tools
           sudo tar -xzf vnu.tgz -C /opt/book-tools package/build/dist/vnu.jar
           printf '#!/bin/sh\nexec java -jar /opt/book-tools/epubcheck-%s/epubcheck.jar "$@"\n' "$EPUBCHECK_VERSION" | sudo tee /usr/local/bin/epubcheck >/dev/null
@@ -141,6 +151,7 @@ jobs:
           sudo chmod 755 /usr/local/bin/epubcheck /usr/local/bin/vnu
           epubcheck --version
           vnu --version
+          pandoc --version | head -1
 
       - name: Test
         if: ${{ !cancelled() }}
