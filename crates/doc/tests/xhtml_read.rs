@@ -530,6 +530,19 @@ fn mathml_annotations_and_epub_cases_dropped_without_a_loss() {
         r#"<p><annotation xmlns="http://example.com/">kept</annotation> <case>kept2</case></p>"#,
     );
     assert_eq!(out, "kept kept2\n");
+    // Outside a `math` an XHTML or un-namespaced `annotation` is an
+    // unknown element: its text stays, also after a `math` has closed.
+    let (out, losses) = read_txt(
+        "<p>a<annotation>b</annotation><math><annotation>T</annotation></math><annotation-xml>c</annotation-xml></p>",
+    );
+    assert_eq!(out, "abc\n");
+    assert_eq!(losses, BTreeSet::from([Loss::Styles]));
+    let (d, _) = read_limited(
+        "<html><body><p>x<annotation>y</annotation>z</p></body></html>",
+        Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(txt::write(&d).0, "xyz\n");
 }
 
 #[test]

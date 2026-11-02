@@ -22,10 +22,11 @@
 //!   `epub:` elements included, which do not.
 //! - Dropped with their content: `head`, `script`, `style`, `template`;
 //!   inline SVG ([`Loss::Images`]); without a loss, MathML `annotation`
-//!   and `annotation-xml` (another encoding of the same formula) and
-//!   `epub:case` (an alternative to its `epub:switch`'s `epub:default`,
-//!   which is read). Stylesheets and `style`
-//!   attributes are never read: [`Loss::Styles`] is always reported.
+//!   and `annotation-xml` (another encoding of the same formula; in XHTML
+//!   or no namespace only inside a `math`) and `epub:case` (an
+//!   alternative to its `epub:switch`'s `epub:default`, which is read).
+//!   Stylesheets and `style` attributes are never read: [`Loss::Styles`]
+//!   is always reported.
 //! - Elements in no namespace are read as XHTML (EPUB 2 chapters written
 //!   without the namespace), names compared ASCII case-insensitively;
 //!   elements of any other namespace are transparent.
@@ -267,18 +268,21 @@ enum Tag {
     Inline,
 }
 
-fn classify(name: QName<'_>) -> Tag {
+/// Classifies an element; `in_math`: a `math` element is open.
+fn classify(name: QName<'_>, in_math: bool) -> Tag {
     // A MathML annotation is another encoding of the formula beside it
     // (TeX, content MathML), and an `epub:case` an alternative to the
     // `epub:default` the book gives as its own fallback: dropped without
     // a loss, the formula's or the fallback's text stays. HTML has no
-    // element of that name, so in XHTML or no namespace (MathML written
-    // without its namespace) it is the MathML one too.
+    // element of that name, so in XHTML or no namespace inside a `math`
+    // (MathML written without its namespace) it is the MathML one too;
+    // outside one it is an unknown element and keeps its text.
     let annotation = |local: &str| {
         local.eq_ignore_ascii_case("annotation") || local.eq_ignore_ascii_case("annotation-xml")
     };
     match name.ns {
-        None | Some(XHTML_NS | MATHML_NS) if annotation(name.local) => return Tag::Skip,
+        Some(MATHML_NS) if annotation(name.local) => return Tag::Skip,
+        None | Some(XHTML_NS) if in_math && annotation(name.local) => return Tag::Skip,
         None | Some(XHTML_NS) => {}
         Some(SVG_NS) => return Tag::Svg,
         Some(OPS_NS) if name.local == "case" => return Tag::Skip,
@@ -485,6 +489,11 @@ struct Builder {
     skip: u32,
     /// Links open (a link inside one is its text).
     links: u32,
+    /// Elements open outside dropped ones (the root is 1).
+    depth: u32,
+    /// [`Builder::depth`] of the outermost open `math` element, any
+    /// namespace (0: none is open).
+    math_at: u32,
     /// The last thing written to the current block's inline content was
     /// white space, a line break, or nothing: white space now writes
     /// nothing.
@@ -510,6 +519,8 @@ impl Builder {
             open: Vec::new(),
             skip: 0,
             links: 0,
+            depth: 0,
+            math_at: 0,
             last_space: true,
             flow: false,
             pending_break: false,
@@ -552,7 +563,7 @@ impl Builder {
             self.skip += 1;
             return;
         }
-        let tag = classify(e.name);
+        let tag = classify(e.name, self.math_at > 0);
         match tag {
             Tag::Skip => {
                 self.skip = 1;
@@ -564,6 +575,10 @@ impl Builder {
                 return;
             }
             _ => {}
+        }
+        self.depth += 1;
+        if self.math_at == 0 && e.name.local.eq_ignore_ascii_case("math") {
+            self.math_at = self.depth;
         }
         if let Some(Frame::Flat { raw, .. }) = self.stack.last() {
             let raw = *raw;
@@ -591,6 +606,10 @@ impl Builder {
             self.skip -= 1;
             return;
         }
+        if self.depth == self.math_at {
+            self.math_at = 0;
+        }
+        self.depth = self.depth.saturating_sub(1);
         let Some(o) = self.open.pop() else {
             return;
         };

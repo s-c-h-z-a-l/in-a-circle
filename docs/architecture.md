@@ -369,28 +369,28 @@ are in `CLAUDE.md`.
   go without ending one; their content stays. `head`, `script`, `style`,
   `template` and their content are dropped, inline SVG too (reported as
   images), and without a loss MathML `annotation`/`annotation-xml`
-  (another encoding of the same formula) and `epub:case` (an `epub:switch`
-  alternative; its `epub:default` is read). Elements in no namespace are
-  read as XHTML (EPUB 2 chapters written without it), names ASCII
-  case-insensitive; any other namespace is transparent. White space collapses as in HTML except in `pre`
-  (whose leading line feed is dropped); a no-break space is text. Inline
-  content at block level becomes a paragraph; a block where only inline
-  content fits (a paragraph in a cell or in emphasis) keeps its text on
-  lines of its own. A table's header is its `thead` row or a first row of
-  `th` cells, else empty; `tfoot` rows come last; a cell spanning columns
-  or rows (clamped as HTML does, 1000 and 65534) is kept once and the
-  cells it covered are empty (`merged table cells split`); a caption is a
-  paragraph before the table. Stylesheets and `style` attributes are never
-  read: every chapter reports `book styles (fonts, colours, layout) not
-  carried over`. Budgets: every element is a node, charged when it
-  starts, and so is every node it builds besides its own (a text run, an
-  implicit paragraph, row or cell, an empty cell a span adds); text is
-  charged by its collapsed bytes; both before the allocation, so a chapter
-  stops at `Exceeded("nodes")` or `Exceeded("owned text")`. The work is
-  linear in the chapter plus the nodes charged (a step count the tests
-  and the fuzz target bound), with the builder's own stacks, no
-  recursion. `has_text` tells whether a document holds any text that is
-  not white space (an image's alt text is not).
+  (another encoding of the same formula; in XHTML or no namespace only
+  inside a `math`) and `epub:case` (an `epub:switch` alternative; its
+  `epub:default` is read). Elements in no namespace are read as XHTML
+  (EPUB 2 chapters written without it), names ASCII case-insensitive; any
+  other namespace is transparent. White space collapses as in HTML except
+  in `pre` (whose leading line feed is dropped); a no-break space is text.
+  Inline content at block level becomes a paragraph; a block where only
+  inline content fits (a paragraph in a cell or in emphasis) keeps its text
+  on lines of its own. A table's header is its `thead` row or a first row of
+  `th` cells, else empty; `tfoot` rows come last; a cell spanning columns or
+  rows (clamped as HTML does, 1000 and 65534) is kept once and the cells it
+  covered are empty (`merged table cells split`); a caption is a paragraph
+  before the table. Stylesheets and `style` attributes are never read: every
+  chapter reports `book styles (fonts, colours, layout) not carried over`.
+  Budgets: every element is a node, charged when it starts, and so is every
+  node it builds besides its own (a text run, an implicit paragraph, row or
+  cell, an empty cell a span adds); text is charged by its collapsed bytes;
+  both before the allocation, so a chapter stops at `Exceeded("nodes")` or
+  `Exceeded("owned text")`. The work is linear in the chapter plus the nodes
+  charged (a step count the tests and the fuzz target bound), with the
+  builder's own stacks, no recursion. `has_text` tells whether a document
+  holds any text that is not white space (an image's alt text is not).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
