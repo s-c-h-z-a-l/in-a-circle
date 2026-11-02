@@ -325,8 +325,8 @@ are in `CLAUDE.md`.
   every non-empty `dc:creator` in order (whitespace collapsed), the
   manifest and the spine, and `META-INF/encryption.xml` if there is one.
   The `mimetype` entry is not required. All three files are plain XML (no
-  HTML entity names), at most 8 MiB and 2^19 XML events each. Every
-  `itemref` is kept in spine order, `linear="no"` included, a repeated
+  HTML entity names), at most 8 MiB and 2^19 XML nodes (elements,
+  attributes and text runs) each. Every `itemref` is kept in spine order, `linear="no"` included, a repeated
   one as often as it appears, numbered from 1 (the `N` of `Chapter N`);
   the manifest item it names is resolved and kept once, however often the
   spine names it, its path at most 512 bytes (the longest entry name: a

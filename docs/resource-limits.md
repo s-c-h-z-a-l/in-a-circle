@@ -236,7 +236,7 @@ never lets the data exceed) and named when it is hit.
 | entries | 12,000 | the CBZ reader's value, so both archive readers accept the same archives; about 200 B per record, 2.4 MB at the limit; `damaged EPUB: too many entries` |
 | ratio | 1032 | the most a deflate stream can reach, the CBZ reader's value; a header claiming more is refused before anything is inflated; `damaged EPUB: an entry's compression ratio is too high` |
 | name | 512 B | the CBZ reader's value; `damaged EPUB: an entry name is too long` |
-| skeleton file | 8 MiB, 524,288 XML events | `container.xml`, the package document and `encryption.xml` each, at most the text family's input and node budgets; a real package is tens of KiB; `not an EPUB (package document too large)` |
+| skeleton file | 8 MiB, 524,288 XML nodes | `container.xml`, the package document and `encryption.xml` each, at most the text family's input and node budgets (an element, each attribute and each text run is a node); a real package is tens of KiB; `not an EPUB (package document too large)` |
 | XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
 | chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); a few dozen bytes each, and each manifest item they name is resolved and kept once, at most about 1 KB (the two caps below), however often the spine names it; `book has more than 10000 chapters` |
 | item path | 512 B | the ZIP reader's name limit: a longer resolved path names no entry, the item is `missing`, and only its first 512 B are kept |

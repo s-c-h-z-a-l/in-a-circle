@@ -549,6 +549,40 @@ fn package_document_too_large() {
     assert!(open(&f).is_ok());
 }
 
+#[test]
+fn package_attributes_count_against_the_node_budget() {
+    // Attributes are structure too: one element with 2^19 of them (5.8 MB,
+    // within 8 MiB) is past the 2^19 node budget with the element itself.
+    let cont = container("content.opf");
+    let c1 = xhtml("1");
+    let attrs: String = (0..1usize << 19).map(|i| format!(" a{i}=\"\"")).collect();
+    let opf = package(
+        &format!("<x{attrs}/>"),
+        &item("c1", "c1.xhtml"),
+        &itemref("c1"),
+    );
+    assert!(opf.len() < 8 * MIB);
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Deflated),
+        ("c1.xhtml", &c1, Stored),
+    ]);
+    assert!(matches!(err(open(&f)), BookError::PackageTooLarge));
+    // Half as many open.
+    let attrs: String = (0..1usize << 18).map(|i| format!(" a{i}=\"\"")).collect();
+    let opf = package(
+        &format!("<x{attrs}/>"),
+        &item("c1", "c1.xhtml"),
+        &itemref("c1"),
+    );
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Deflated),
+        ("c1.xhtml", &c1, Stored),
+    ]);
+    assert!(open(&f).is_ok());
+}
+
 /// A chapter body of exactly `len` bytes.
 fn body_of(len: usize) -> Vec<u8> {
     let head = b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>";

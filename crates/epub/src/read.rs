@@ -120,7 +120,8 @@ pub struct Limits {
     /// Largest `container.xml`, package document or `encryption.xml`,
     /// uncompressed.
     pub package_bytes: u64,
-    /// Most XML events (elements and text runs) one package file may have.
+    /// Most XML nodes (elements, attributes and text runs) one skeleton
+    /// file may have.
     pub package_nodes: usize,
 }
 
@@ -524,8 +525,8 @@ fn read_package(
     }
 }
 
-/// The XML reader over a skeleton file, every event counted against
-/// `Limits::package_nodes`. `each` gets the open element's local names
+/// The XML reader over a skeleton file, every element, attribute and text
+/// run counted against `Limits::package_nodes`. `each` gets the open element's local names
 /// (the event's own last for a start tag) and the event.
 fn walk<'a>(
     text: &'a str,
@@ -549,11 +550,16 @@ fn walk<'a>(
     let mut open: Vec<&'a str> = Vec::new();
     let mut nodes = 0usize;
     while let Some(ev) = r.next().map_err(xml_err)? {
-        if !matches!(ev, Event::End(_)) {
-            nodes += 1;
-            if nodes > limits.package_nodes {
-                return Err(BookError::PackageTooLarge);
-            }
+        // An element, each of its attributes and a text run are a node
+        // each: an attribute is structure the reader holds as much as an
+        // element is.
+        nodes += match &ev {
+            Event::Start(e) => 1 + e.attrs().count(),
+            Event::Text(_) => 1,
+            Event::End(_) => 0,
+        };
+        if nodes > limits.package_nodes {
+            return Err(BookError::PackageTooLarge);
         }
         match &ev {
             Event::Start(e) => {
