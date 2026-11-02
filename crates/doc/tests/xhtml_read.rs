@@ -103,6 +103,20 @@ fn ordered_list_start() {
     assert_eq!(start(r#"<ol start="junk"><li>x</li></ol>"#), Some(1));
     assert_eq!(start(r#"<ol start="-2"><li>x</li></ol>"#), Some(1));
     assert_eq!(start("<ul><li>x</li></ul>"), None);
+    // Clamped to the highest number a Markdown list marker holds (nine
+    // digits), so the items still count up.
+    assert_eq!(
+        start(r#"<ol start="18446744073709551615"><li>x</li></ol>"#),
+        Some(999_999_999)
+    );
+    assert_eq!(
+        start(r#"<ol start="1000000000"><li>x</li></ol>"#),
+        Some(999_999_999)
+    );
+    assert_eq!(
+        start(r#"<ol start="999999999"><li>x</li></ol>"#),
+        Some(999_999_999)
+    );
 }
 
 #[test]

@@ -3,9 +3,10 @@
 //!
 //! The subset (anything else keeps its text; text disappears only with a
 //! reported [`Loss`]):
-//! - Blocks: `p`, `h1`-`h6`, `ul`/`ol` (`start`; `menu`, `dir` as `ul`),
-//!   `li`, `blockquote`, `pre` (a line feed right after its start tag is
-//!   dropped; markup inside keeps its text, `br` is a line feed), `hr`,
+//! - Blocks: `p`, `h1`-`h6`, `ul`/`ol` (`start`, at most 999,999,999;
+//!   `menu`, `dir` as `ul`), `li`, `blockquote`, `pre` (a line feed
+//!   right after its start tag is dropped; markup inside keeps its text,
+//!   `br` is a line feed), `hr`,
 //!   `table` with `thead`/`tbody`/`tfoot`/`tr`/`th`/`td`/`caption`.
 //! - Inlines: `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/
 //!   `samp` (flat text), `a href` (a link inside a link is its text),
@@ -48,6 +49,7 @@ use std::collections::BTreeSet;
 use xml::{Element, Event, QName, Reader};
 
 use crate::budget::Meter;
+use crate::md::MAX_LIST_NUMBER;
 use crate::{Align, Block, Document, Inline, LimitError, Limits, ListItem, Loss};
 
 const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
@@ -301,11 +303,14 @@ fn classify(name: QName<'_>) -> Tag {
     }
 }
 
-/// `ol start`: a non-negative decimal integer, else HTML's default 1.
+/// `ol start`: a non-negative decimal integer, else HTML's default 1;
+/// clamped to the Markdown writer's highest list number, so a hostile
+/// start does not number every item the same (the writers saturate).
 fn list_start(e: &Element<'_>) -> u64 {
     e.attr(None, "start")
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(1)
+        .min(MAX_LIST_NUMBER)
 }
 
 /// `colspan` and `rowspan` as HTML clamps them; not a number is 1.

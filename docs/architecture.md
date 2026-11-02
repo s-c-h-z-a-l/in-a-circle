@@ -357,11 +357,11 @@ are in `CLAUDE.md`.
 - The XHTML chapter reader, `doc::xhtml_read`, maps one chapter (decoded by
   `xml::decode`, then read with the HTML named characters and the XML
   depth limit) to the document tree; text disappears only with a reported
-  loss. Kept: `p`, `h1`-`h6`, `ul`/`ol` (`start`), `li`, `blockquote`,
-  `pre` (markup inside keeps its text, `br` is a line feed), `hr`, `br`,
-  tables, `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/`samp`,
-  `a href` (a link inside a link is its text), `img` (`src`, `alt`) and
-  `ruby` (base text, each `rt` in parentheses, `rp` dropped). The HTML
+  loss. Kept: `p`, `h1`-`h6`, `ul`/`ol` (`start`, at most 999,999,999),
+  `li`, `blockquote`, `pre` (markup inside keeps its text, `br` is a line
+  feed), `hr`, `br`, tables, `em`/`i`, `strong`/`b`, `del`/`s`/`strike`,
+  `code`/`kbd`/`samp`, `a href` (a link inside a link is its text), `img`
+  (`src`, `alt`) and `ruby` (base text, each `rt` in parentheses, `rp` dropped). The HTML
   block containers (`div`, `section`, `aside`, `figure`, `dl`, …) go and
   end a paragraph, `span` and unknown elements (MathML, `epub:` elements)
   go without ending one; their content stays. `head`, `script`, `style`,

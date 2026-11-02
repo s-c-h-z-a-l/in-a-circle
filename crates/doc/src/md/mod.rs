@@ -216,6 +216,12 @@ fn decoded_len(s: &str, backslashes: bool) -> usize {
     total
 }
 
+/// Highest ordered-list number written: CommonMark reads at most nine
+/// digits as a list marker, so a larger number would not read back as a
+/// list. Readers of other formats clamp to it too; no real book counts
+/// that far.
+pub(crate) const MAX_LIST_NUMBER: u64 = 999_999_999;
+
 /// Longest HTML5 entity name is 31 characters; this bounds the scan.
 const MAX_ENTITY_NAME: usize = 32;
 
@@ -419,7 +425,7 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                     None => "- ".to_string(),
                     Some(n) => format!(
                         "{}{} ",
-                        n.saturating_add(i as u64).min(999_999_999),
+                        n.saturating_add(i as u64).min(MAX_LIST_NUMBER),
                         if alt { ')' } else { '.' }
                     ),
                 };
