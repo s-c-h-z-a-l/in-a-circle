@@ -501,6 +501,38 @@ fn inline_svg_is_images_loss_mathml_text_kept() {
 }
 
 #[test]
+fn mathml_annotations_and_epub_cases_dropped_without_a_loss() {
+    let read_txt = |body: &str| {
+        let (d, losses) = read(&page(body));
+        (txt::write(&d).0, losses)
+    };
+    let (out, losses) = read_txt(
+        r#"<p>f <math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>x</mi><annotation encoding="application/x-tex">\alpha</annotation><annotation-xml encoding="MathML-Content"><ci>y</ci></annotation-xml></semantics></math> g</p>"#,
+    );
+    assert_eq!(out, "f x g\n");
+    assert_eq!(losses, BTreeSet::from([Loss::Styles]));
+    // MathML written without its namespace the same.
+    let (out, _) = read_txt("<p><math><mi>x</mi><annotation>TEX</annotation></math></p>");
+    assert_eq!(out, "x\n");
+    let (d, _) = read_limited(
+        "<html><body><p><math><mi>x</mi><annotation>TEX</annotation></math></p></body></html>",
+        Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(txt::write(&d).0, "x\n");
+    let (out, losses) = read_txt(
+        r#"<div xmlns:epub="http://www.idpf.org/2007/ops"><epub:switch><epub:case required-namespace="http://www.w3.org/1998/Math/MathML"><p>case</p></epub:case><epub:default><p>fallback</p></epub:default></epub:switch></div>"#,
+    );
+    assert_eq!(out, "fallback\n");
+    assert_eq!(losses, BTreeSet::from([Loss::Styles]));
+    // Only those names, only in those namespaces.
+    let (out, _) = read_txt(
+        r#"<p><annotation xmlns="http://example.com/">kept</annotation> <case>kept2</case></p>"#,
+    );
+    assert_eq!(out, "kept kept2\n");
+}
+
+#[test]
 fn epub2_doctype_and_html_entities() {
     let bytes = br#"<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"

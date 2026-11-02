@@ -368,9 +368,11 @@ are in `CLAUDE.md`.
   end a paragraph, `span` and unknown elements (MathML, `epub:` elements)
   go without ending one; their content stays. `head`, `script`, `style`,
   `template` and their content are dropped, inline SVG too (reported as
-  images). Elements in no namespace are read as XHTML (EPUB 2 chapters
-  written without it), names ASCII case-insensitive; any other namespace
-  is transparent. White space collapses as in HTML except in `pre`
+  images), and without a loss MathML `annotation`/`annotation-xml`
+  (another encoding of the same formula) and `epub:case` (an `epub:switch`
+  alternative; its `epub:default` is read). Elements in no namespace are
+  read as XHTML (EPUB 2 chapters written without it), names ASCII
+  case-insensitive; any other namespace is transparent. White space collapses as in HTML except in `pre`
   (whose leading line feed is dropped); a no-break space is text. Inline
   content at block level becomes a paragraph; a block where only inline
   content fits (a paragraph in a cell or in emphasis) keeps its text on
