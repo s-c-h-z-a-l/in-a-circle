@@ -484,11 +484,19 @@ impl Writer {
     /// The table as aligned columns: the header, a row of dashes, the rows.
     /// A header whose cells are all empty (a table that has none, as a
     /// book's often has not) is left out with its dashes: it would be an
-    /// empty line over a rule that heads nothing.
+    /// empty line over a rule that heads nothing. The empty rows right
+    /// after such a header go with it.
     fn aligned_table(&mut self, align: &[Align], widths: &[usize], grid: &[Vec<String>]) -> String {
         let mut out = String::new();
         let mut first = true;
-        let headless = grid[0].iter().all(String::is_empty);
+        let empty = |row: &Vec<String>| row.iter().all(String::is_empty);
+        // Without a header, the empty rows before the first written line
+        // are left out too: each would open the table with a blank line.
+        let skip = if empty(&grid[0]) {
+            grid.iter().take_while(|row| empty(row)).count()
+        } else {
+            0
+        };
         let line = |w: &mut Self, out: &mut String, pieces: &[(&str, usize, Align)]| {
             // Trailing empty columns are left out, and the last column
             // written has no right padding: no padding at the end of a line (a cell's
@@ -514,7 +522,7 @@ impl Writer {
             }
         };
         for (r, row) in grid.iter().enumerate() {
-            if r == 0 && headless {
+            if r < skip {
                 continue;
             }
             let wrapped: Vec<Vec<&str>> = row
@@ -1386,6 +1394,11 @@ mod tests {
         // An all-empty header with no rows writes nothing.
         let (s, _) = gfm_txt("|  |  |\n|--|--|\n");
         assert_eq!(s, "");
+        // Without a header, leading empty rows are left out as well (no
+        // blank line opens the table); a later empty row stays.
+        let (s, _) =
+            gfm_txt("a\n\n|  |  |\n|--|--|\n|  |  |\n| x | y |\n|  |  |\n| z | w |\n\nb\n");
+        assert_eq!(s, "a\n\nx    y\n\nz    w\n\nb\n");
     }
 
     #[test]

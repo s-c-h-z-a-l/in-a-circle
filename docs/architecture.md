@@ -203,8 +203,8 @@ are in `CLAUDE.md`.
   autolinks). The action writes GFM tables as aligned columns in a full
   line of 80 characters (the prefix of an enclosing list or quote
   counts): two spaces between columns, a row of dashes under the header
-  (a header whose cells are all empty is left out with its dashes), the
-  column alignment kept as padding. When the table is wider, the widest
+  (a header whose cells are all empty is left out with its dashes and
+  the empty rows right after it), the column alignment kept as padding. When the table is wider, the widest
   columns give up width one character at a time, none below 10 (a column that is
   narrower stays as it is) and a cell wraps inside its column, at spaces, a
   longer word at a character boundary. If the minimums and gaps do not fit the
