@@ -6,7 +6,9 @@
 //! and media type within their caps, the work to resolve them within the
 //! package's length; no chapter over its limit, all chapters read (each as
 //! often as the spine has it) within the book limit; an empty buffer on
-//! every error.
+//! every error. Each chapter read is decoded and mapped to the document
+//! tree (`doc::xhtml_read`, fresh default budgets per chapter, as the
+//! action reads it) and written as text.
 //!
 //! Before the bytes are written, the CRC-32 of every stored entry the
 //! directory locates is recomputed into both its headers (`fix_crcs`):
@@ -147,6 +149,13 @@ fuzz_target!(|data: &[u8]| {
                 Ok(()) => {
                     assert!(out.len() as u64 <= LIMITS.chapter_bytes);
                     produced += out.len() as u64;
+                    if let Ok(text) = xml::decode(&out)
+                        && let Ok((d, _)) =
+                            doc::xhtml_read::read_limited(&text, doc::Limits::DEFAULT)
+                    {
+                        let _ = doc::xhtml_read::has_text(&d);
+                        let _ = doc::txt::write_limited(&d, doc::Limits::DEFAULT);
+                    }
                 }
                 Err(_) => assert!(out.is_empty()),
             }

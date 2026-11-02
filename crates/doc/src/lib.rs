@@ -7,6 +7,7 @@ pub mod html;
 pub mod md;
 pub mod txt;
 pub mod xhtml;
+pub mod xhtml_read;
 
 /// The Markdown syntax a reader accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -127,6 +128,11 @@ pub enum Loss {
     TableLayout,
     TableWidth,
     ControlCharacters,
+    /// A book's stylesheets and style attributes are never read.
+    Styles,
+    /// A table cell spanning several columns or rows became one cell and
+    /// empty ones.
+    MergedCells,
 }
 
 impl Loss {
@@ -145,6 +151,8 @@ impl Loss {
             Loss::TableLayout => "table too wide; rows listed one by one",
             Loss::TableWidth => "table columns may be misaligned by wide or combining characters",
             Loss::ControlCharacters => "characters not allowed in XHTML removed",
+            Loss::Styles => "book styles (fonts, colours, layout) not carried over",
+            Loss::MergedCells => "merged table cells split",
         }
     }
 }

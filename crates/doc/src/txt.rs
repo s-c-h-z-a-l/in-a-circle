@@ -927,6 +927,12 @@ mod tests {
             HeadingLevels,
             BlankLines,
             Whitespace,
+            Strikethrough,
+            TableLayout,
+            TableWidth,
+            ControlCharacters,
+            Styles,
+            MergedCells,
         ] {
             assert!(!l.message().is_empty());
         }
