@@ -283,6 +283,35 @@ are in `CLAUDE.md`.
   name as its alt text, and counts toward the chapter limit. Image bytes are not
   charged to the output budget (the caller bounds each image and the archive is
   bounded by the ZIP writer).
+- The XML reader, `crates/xml` (no dependencies, no `unsafe`, independent of
+  `doc` so other readers can use it), is a non-validating pull parser for
+  XML 1.0 (fifth edition) with Namespaces in XML 1.0, for foreign input.
+  `xml::decode` takes UTF-8 (with or without a byte order mark, borrowed)
+  or UTF-16 with a byte order mark (copied); any other declared encoding
+  is `unsupported encoding <name>`, a declaration that contradicts the
+  bytes or invalid UTF-8/16 is not well-formed. `Reader::next` returns
+  start tags (namespace URIs resolved, declarations applied, not listed),
+  end tags and text (CDATA, references and line-end normalization
+  included); an empty element is a start and an end. It never loads
+  anything: a DOCTYPE's external identifier is only checked for syntax,
+  and the internal subset is skipped lexically (a `]>` in a literal,
+  comment or PI does not end it). No entity is expanded from a DTD: a
+  reference to one the internal subset declares, or that an external
+  subset or parameter entity may declare (unless `standalone="yes"`),
+  is `entity declarations are not supported`, so entity bombs and
+  external entities cannot occur. Known references are the five XML
+  entities, character references to characters XML allows, and, only
+  with `Options::html_entities` (XHTML), the HTML5 named characters
+  (`xml::entity`, the WHATWG table the Markdown reader also uses).
+  Anything not well-formed or not namespace-well-formed is an error with
+  its line; there is no recovery, and attribute defaults from the
+  internal subset are not applied. A namespace name holding a reference
+  or a line break is refused, so names and values borrow from the input
+  and only text or a value that a reference or normalization changes is
+  copied. Elements nest at most `Options::max_depth` (`MAX_DEPTH`, 256)
+  deep, past it `TooDeep`; the open elements are the reader's own stack,
+  not recursion, and the work is linear in the input (a step count the
+  tests and the fuzz target bound per byte).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
@@ -1208,14 +1237,15 @@ inacircle cancel <job-id>
 
 ```
 crates/   wire, dbus, ui, engine, manifest, action, doc, epub, flate,
-          zip, probe, pdf (planned: toml)
+          zip, probe, pdf, xml (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
           `inacircle-pages`, zip also writes archives with stored
-          entries only; epub: the EPUB packer of `inacircle-text`; the
-          shipped `inacircle` links wire, dbus, ui, engine, manifest and
-          action, never `doc`, `epub`, `flate`, `zip`, `probe` or `pdf`;
+          entries only; epub: the EPUB packer of `inacircle-text`; xml:
+          the non-validating XML reader; the shipped `inacircle` links
+          wire, dbus, ui, engine, manifest and action, never `doc`,
+          `epub`, `flate`, `zip`, `probe`, `pdf` or `xml`;
           `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,
           inacircle-testaction (test-only)

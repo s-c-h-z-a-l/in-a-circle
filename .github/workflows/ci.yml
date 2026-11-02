@@ -103,12 +103,13 @@ jobs:
       # to the default home.
       # The PDF and pages tests check their output with independent tools
       # (qpdf, pdftoppm and pdfimages from poppler-utils, djpeg from
-      # libjpeg-turbo-progs); INACIRCLE_REQUIRE_PDF_TOOLS=1
+      # libjpeg-turbo-progs), the XML reader's against xmllint
+      # (libxml2-utils); INACIRCLE_REQUIRE_PDF_TOOLS=1
       # makes a missing one a failure instead of a skip.
       - name: Install PDF test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qpdf poppler-utils libjpeg-turbo-progs
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils libjpeg-turbo-progs libxml2-utils
 
       # The book tests check whole EPUBs with W3C EPUBCheck and pages with
       # the W3C Nu HTML validator (vnu), both Java. Pinned versions,

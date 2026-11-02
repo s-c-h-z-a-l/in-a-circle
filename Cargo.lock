@@ -323,6 +323,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xml"
+version = "0.0.0"
+
+[[package]]
 name = "zip"
 version = "0.0.0"
 dependencies = [
