@@ -847,6 +847,57 @@ fn media_types_ignore_case_and_parameters() {
 }
 
 #[test]
+fn missing_media_type_reads_none() {
+    // No `media-type`, an empty one, or only parameters: the reason names
+    // `(none)`, not a blank after `type`.
+    let manifest = [
+        r#"<item id="a" href="c.xhtml"/>"#,
+        r#"<item id="b" href="c.xhtml" media-type=""/>"#,
+        r#"<item id="c" href="c.xhtml" media-type=" ;x=1"/>"#,
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("c")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let c = xhtml("c");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("c.xhtml", &c, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    for r in read_all(&book) {
+        let e = r.unwrap_err();
+        assert_eq!(e, ChapterError::UnsupportedType(String::new()));
+        assert_eq!(e.reason(), "unsupported type (none)");
+    }
+}
+
+#[test]
+fn long_media_type_is_cut_at_a_character_boundary() {
+    // `x/` and 200 two-byte `é`: byte 255 is inside a character, so the
+    // cut ends at 254 bytes (126 of them), then `...`.
+    let t = format!("x/{}", "é".repeat(200));
+    let manifest = format!(r#"<item id="a" href="c.xhtml" media-type="{t}"/>"#);
+    let opf = package("", &manifest, &itemref("a"));
+    let cont = container("content.opf");
+    let c = xhtml("c");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("c.xhtml", &c, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let shown = format!("x/{}...", "é".repeat(126));
+    assert_eq!(shown.len(), 254 + 3);
+    assert_eq!(book.items[0].media_type, shown);
+    assert_eq!(
+        book.chapter(1, &mut Vec::new()),
+        Err(ChapterError::UnsupportedType(shown))
+    );
+}
+
+#[test]
 fn href_query_is_cut_like_a_fragment() {
     // A URL's query is no part of its path: `c1.xhtml?q=1` names
     // `c1.xhtml`. A `?` that is percent-encoded is a name byte.

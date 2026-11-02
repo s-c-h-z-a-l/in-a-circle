@@ -8,9 +8,10 @@
 //! the spine is the same in both; the `mimetype` entry is not required,
 //! many real books do not store it first). Every spine item is resolved
 //! to its ZIP entry then, each manifest item once however often the spine
-//! names it; [`Book::chapter`] reads one when asked and keeps nothing. A broken skeleton fails the whole book ([`BookError`]); a
-//! spine item that cannot be read fails only itself ([`ChapterError`]),
-//! and the caller reports it in its place.
+//! names it; [`Book::chapter`] reads one when asked and keeps nothing. A
+//! broken skeleton fails the whole book ([`BookError`]); a spine item that
+//! cannot be read fails only itself ([`ChapterError`]), and the caller
+//! reports it in its place.
 //!
 //! Paths: an `href` is relative to the package document's folder, its
 //! `?query` and `#fragment` cut, `%XX` decoded and normalized lexically;
@@ -24,10 +25,10 @@
 //! (`EncryptedData`, its `EncryptionMethod` and `CipherReference URI`,
 //! relative to the container root). Font obfuscation (the IDPF and Adobe
 //! algorithms) is not encryption and is ignored; any other method (also
-//! next to an obfuscation one), or none stated, is. A ZIP entry with an encryption flag is encrypted too. When
-//! every XHTML spine item that is in the book is encrypted, the book is
-//! DRM-protected; when only some are, those items fail alone. `rights.xml`
-//! decides nothing.
+//! next to an obfuscation one), or none stated, is. A ZIP entry with an
+//! encryption flag is encrypted too. When every XHTML spine item that is
+//! in the book is encrypted, the book is DRM-protected; when only some
+//! are, those items fail alone. `rights.xml` decides nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -201,7 +202,8 @@ pub enum ChapterError {
     Encrypted,
     OutsideTheBook,
     Missing,
-    /// Neither XHTML nor SVG: the item's media type.
+    /// Neither XHTML nor SVG: the item's media type (empty when it states
+    /// none; the reason then says `(none)`).
     UnsupportedType(String),
     /// The ZIP reader's reason (CRC, method, deflate stream).
     Damaged(String),
@@ -216,6 +218,8 @@ impl ChapterError {
             Self::Encrypted => "encrypted".into(),
             Self::OutsideTheBook => "outside the book".into(),
             Self::Missing => "missing".into(),
+            // An item that states no media type: `(none)`, not a blank.
+            Self::UnsupportedType(t) if t.is_empty() => "unsupported type (none)".into(),
             Self::UnsupportedType(t) => format!("unsupported type {t}"),
             Self::Damaged(why) => format!("damaged ({why})"),
         }
@@ -238,8 +242,8 @@ pub struct ChapterRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     /// The entry it resolves to; or, when it is outside the book, its
-    /// `href` as written. At most [`MAX_PATH`] bytes (cut at a character
-    /// boundary).
+    /// `href` as written. At most [`MAX_PATH`] bytes and `...` (a longer
+    /// one is cut at a character boundary): 515 bytes.
     pub path: String,
     /// The essence of the manifest's `media-type` (`type/subtype` as
     /// written, parameters and blanks cut); at most
@@ -547,8 +551,9 @@ fn read_package(
 }
 
 /// The XML reader over a skeleton file, every element, attribute and text
-/// run counted against `Limits::package_nodes`. `each` gets the open element's local names
-/// (the event's own last for a start tag) and the event.
+/// run counted against `Limits::package_nodes`. `each` gets the open
+/// element's local names (the event's own last for a start tag) and the
+/// event.
 fn walk<'a>(
     text: &'a str,
     path: &str,

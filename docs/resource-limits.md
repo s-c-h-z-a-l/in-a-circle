@@ -255,7 +255,7 @@ These fail the whole book (nothing is written for it), each with its text:
 - no `META-INF/container.xml`: `not an EPUB (no META-INF/container.xml)`;
 - no package rootfile, or no package at its path: `not an EPUB (no
   package document)`;
-- a skeleton file over its size or event limit: `not an EPUB (package
+- a skeleton file over its size or node limit: `not an EPUB (package
   document too large)`;
 - a skeleton file that is not well-formed (or nested too deeply): `not an
   EPUB (<XML error> in <path>)`;

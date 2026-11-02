@@ -348,8 +348,9 @@ are in `CLAUDE.md`.
   and keeps nothing (media types are compared by `type/subtype`, ASCII
   case ignored, parameters cut): an XHTML item (`application/xhtml+xml`)
   up to 8 MiB, an SVG page as nothing (it has no text), anything else is
-  `unsupported type <mime>`. A broken skeleton fails the whole book
-  (`BookError`, the texts in `docs/resource-limits.md`); a spine item that
+  `unsupported type <mime>` (`unsupported type (none)` when the item
+  states none). A broken skeleton fails the whole book (`BookError`, the
+  texts in `docs/resource-limits.md`); a spine item that
   is missing, outside the book, encrypted, too large, of another type or
   whose data is damaged fails only itself (`ChapterError`) and the rest of
   the book reads.
