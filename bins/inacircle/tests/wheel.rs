@@ -746,6 +746,40 @@ fn wheel_offers_and_runs_md_to_epub() {
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
 }
 
+/// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document
+/// (north); its south slice is Plain text; clicking it writes the book's
+/// text next to the source in its wrapper folder, as one history group
+/// that Undo trashes. The drawn wheel's slices (south lit, north and east
+/// dim) are pinned by `epub_menus_offer_plain_text_south` in the binary's
+/// unit tests.
+#[test]
+fn wheel_offers_and_runs_epub_to_txt() {
+    use testzip::Store::Stored;
+    let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+    let opf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Kis könyv</dc:title></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+    let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body><p>Első fejezet.</p></body></html>";
+    let book = testzip::zip(&[
+        (b"mimetype", b"application/epub+zip", Stored),
+        (b"META-INF/container.xml", container.as_bytes(), Stored),
+        (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+        (b"OEBPS/c1.xhtml", page.as_bytes(), Stored),
+    ]);
+    let root = Root::new("epub2txt");
+    root.real_action_cached("inacircle-text", ("primer.epub", &book), "plain-text-epub");
+    let src = root.0.join("f/könyv.epub");
+    fs::write(&src, &book).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Document is north of the center, Plain text is its south slice.
+    let code = choose_on_the_wheel(&root, &list, (960, 390), (960, 690));
+    assert_eq!(code, Some(0));
+    let txt = fs::read_to_string(root.0.join("f/könyv/könyv.txt")).expect("no txt written");
+    assert_eq!(txt, "Kis könyv\n\nElső fejezet.\n");
+    assert_eq!(fs::read(&src).unwrap(), book, "the book changed");
+    assert_one_group_and_undo(&root, "könyv", "könyv.txt");
+}
+
 /// Fixture of the Markdown-and-images wheel tests: the real text and pages
 /// actions (both primed into the catalog cache), and in `f/Utazás` two
 /// Markdown files (the first referencing `1.png`), three images, a text

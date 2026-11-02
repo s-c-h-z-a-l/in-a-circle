@@ -2439,3 +2439,51 @@ fn cli_md_and_images_to_epub() {
     }
     one_group_and_undo(&e, &o, &wrapper, "kotet.epub");
 }
+
+/// A minimal EPUB 3 book (title, one author, one chapter), built with
+/// `testzip` so the ZIP is not made by the code under test.
+fn tiny_epub(chapter: &str) -> Vec<u8> {
+    use testzip::Store::Stored;
+    let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+    let opf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Kis könyv</dc:title><dc:creator>Szerző</dc:creator></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+    let page = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body>{chapter}</body></html>"
+    );
+    testzip::zip(&[
+        (b"mimetype", b"application/epub+zip", Stored),
+        (b"META-INF/container.xml", container.as_bytes(), Stored),
+        (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+        (b"OEBPS/c1.xhtml", page.as_bytes(), Stored),
+    ])
+}
+
+/// `run plain-text-epub` turns an EPUB into `<stem>/<stem>.txt`: the title
+/// and author, then the chapter; the book is untouched, the run is one
+/// history group, and Undo moves the wrapper to the Trash.
+#[test]
+fn cli_epub_to_txt() {
+    let e = Env::new("epub-txt");
+    let book = tiny_epub("<h1>Első</h1><p>Szöveg.</p>");
+    let src = e.file("a.epub", &book);
+    let o = e.run(&["run", "plain-text-epub", "a.epub"]);
+    if skip_no_sandbox("cli_epub_to_txt", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let wrapper = e.files().join("a");
+    let out = wrapper.join("a.txt");
+    assert_eq!(
+        o.pairs("done"),
+        [(src.clone(), out.display().to_string())],
+        "{}",
+        o.stdout
+    );
+    let txt = fs::read_to_string(&out).unwrap();
+    assert!(txt.starts_with("Kis könyv\nSzerző\n\n"), "{txt}");
+    assert!(txt.contains("Első") && txt.contains("Szöveg."), "{txt}");
+    assert_eq!(fs::read(&src).unwrap(), book, "the book changed");
+    one_group_and_undo(&e, &o, &wrapper, "a.txt");
+}
