@@ -44,6 +44,9 @@ dependencies = [
 [[package]]
 name = "doc"
 version = "0.0.0"
+dependencies = [
+ "xml",
+]
 
 [[package]]
 name = "engine"
@@ -87,6 +90,7 @@ dependencies = [
  "manifest",
  "probe",
  "wire",
+ "xml",
  "zip",
 ]
 
@@ -145,6 +149,10 @@ version = "0.0.0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "xml"
+version = "0.0.0"
 
 [[package]]
 name = "zip"

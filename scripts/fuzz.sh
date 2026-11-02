@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -147,6 +147,18 @@ limits() {
         # ranges (1 MiB) and the inflate a 32 KiB window and a 16 KiB
         # buffer; any larger allocation is a bug; 1024 MB RSS ceiling.
         image_probe) echo "1048576 2 16 1024" ;;
+        # 64 KiB: reaches the nesting limit (MAX_DEPTH 256 elements is
+        # under 1 KiB of tags), attribute lists past the pairwise
+        # duplicate-check threshold (8) and every reference form; the real
+        # limit (an 8 MiB chapter) would only slow the run, and linearity
+        # at scale is pinned by the step-count tests in
+        # crates/xml/src/tests.rs, which the target also asserts on every
+        # input. 2 s: a linear scan of 64 KiB, twice (both modes), takes
+        # ms under ASan. 16 MB malloc limit: the reader's allocations are
+        # at most about 1.5x the input (UTF-16 decoding, owned text and
+        # values, the attribute list), so anything near 250x the input is
+        # a bug; 1024 MB RSS ceiling.
+        xml) echo "65536 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
