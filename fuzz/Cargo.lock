@@ -58,6 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "epub"
+version = "0.0.0"
+dependencies = [
+ "doc",
+ "xml",
+ "zip",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,6 +94,7 @@ dependencies = [
  "dbus",
  "doc",
  "engine",
+ "epub",
  "flate",
  "libfuzzer-sys",
  "manifest",

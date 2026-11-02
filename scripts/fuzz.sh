@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -159,6 +159,20 @@ limits() {
         # values, the attribute list), so anything near 250x the input is
         # a bug; 1024 MB RSS ceiling.
         xml) echo "65536 2 16 1024" ;;
+        # 64 KiB: a container, a package, an encryption.xml and a few
+        # small chapters, stored or deflated, fit with room; a deflated
+        # entry reaches the target's 256 KiB chapter limit and four spine
+        # items its 1 MiB book limit. The shipped limits (8 MiB chapter,
+        # 64 MiB book) would only slow the run; their boundaries are pinned
+        # by crates/epub/tests/read.rs. 2 s: the worst input inflates at
+        # most 1 MiB of chapters plus three 256 KiB skeleton files and
+        # parses them linearly, ms under ASan. 16 MB malloc limit (one
+        # allocation): the largest legitimate ones are a chapter's 256 KiB
+        # reservation, a decoded skeleton file (at most 1.5x its 256 KiB,
+        # from UTF-16) and the ZIP entry list (a 64 KiB input holds at most
+        # ~1,400 records), so anything near 16 MB is a bug; 1024 MB RSS
+        # ceiling.
+        epub_reader) echo "65536 2 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
