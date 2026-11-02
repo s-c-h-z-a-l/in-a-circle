@@ -55,6 +55,14 @@ const TABLE_WARNS: &[&str] = &[
 ];
 
 const BOOKS: &[Book] = &[
+    // The Prince has footnotes; its divergences from pandoc (where each
+    // writer puts a note) are triaged from the CI run, so none is listed yet.
+    Book {
+        file: "the-prince-epub3.epub",
+        head: "The Prince\nNiccolò Machiavelli",
+        warns: BASE_WARNS,
+        diverges: &[],
+    },
     Book {
         file: "alice-epub2.epub",
         head: "Alice's Adventures in Wonderland\nLewis Carroll",
