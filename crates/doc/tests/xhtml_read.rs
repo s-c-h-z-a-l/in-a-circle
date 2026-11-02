@@ -459,6 +459,34 @@ fn ruby_base_then_rt_in_parens() {
 }
 
 #[test]
+fn rp_dropped_only_when_it_holds_brackets() {
+    let txt = |body: &str| txt::write(&read(&page(body)).0).0;
+    // Brackets, ASCII or CJK, and white space: dropped, its white space
+    // too (a hidden rp shows nothing).
+    assert_eq!(
+        txt("<p><ruby>漢<rp>（</rp><rt>kan</rt><rp> ） </rp></ruby>字</p>"),
+        "漢(kan)字\n"
+    );
+    assert_eq!(txt("<p>a<rp> [ </rp>b <rp>{</rp> c</p>"), "ab c\n");
+    // Any other text is kept, in its place, markup inside as its text.
+    assert_eq!(
+        txt("<p><ruby>b<rp>KEPT</rp><rt>r</rt></ruby> x</p>"),
+        "bKEPT(r) x\n"
+    );
+    assert_eq!(txt("<p>a <rp>(<em>note</em>)</rp> b</p>"), "a (note) b\n");
+    // At block level and inside pre.
+    assert_eq!(txt("<div><rp>alone</rp></div>"), "alone\n");
+    let b = blocks("<pre><ruby>a<rp>(</rp><rt>b</rt><rp>)</rp><rp>c</rp></ruby></pre>");
+    assert_eq!(
+        b,
+        vec![Block::CodeBlock {
+            info: String::new(),
+            text: "a(b)c\n".into()
+        }]
+    );
+}
+
+#[test]
 fn inline_svg_is_images_loss_mathml_text_kept() {
     let s = page(
         r#"<p>a <svg xmlns="http://www.w3.org/2000/svg" width="10"><text>drawn</text></svg> b <math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi><mo>+</mo><mn>1</mn></math></p>"#,
@@ -896,8 +924,11 @@ impl Gen {
             }
             15 => {
                 let (b, r) = (self.word(false), self.word(false));
-                self.out
-                    .push_str(&format!("<ruby>{b}<rp>(</rp><rt>{r}</rt><rp>)</rp></ruby>"));
+                // An rp that holds more than a bracket keeps its text.
+                let p = self.word(false);
+                self.out.push_str(&format!(
+                    "<ruby>{b}<rp>(</rp><rt>{r}</rt><rp>) {p}</rp></ruby>"
+                ));
             }
             16 => {
                 self.out.push_str(r#"<a href="http://x/">"#);

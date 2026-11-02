@@ -362,7 +362,8 @@ are in `CLAUDE.md`.
   feed, a block inside is a line of its own, a cell a space), `hr`, `br`,
   tables, `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/`samp`,
   `a href` (a link inside a link is its text), `img` (`src`, `alt`) and
-  `ruby` (base text, each `rt` in parentheses, `rp` dropped). The HTML
+  `ruby` (base text, each `rt` in parentheses; an `rp` holding only
+  brackets and white space is dropped, any other `rp` text kept). The HTML
   block containers (`div`, `section`, `aside`, `figure`, `dl`, …) go and
   end a paragraph, `span` and unknown elements (MathML, `epub:` elements)
   go without ending one; their content stays. `head`, `script`, `style`,

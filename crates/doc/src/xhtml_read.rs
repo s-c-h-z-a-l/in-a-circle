@@ -12,14 +12,16 @@
 //! - Inlines: `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/
 //!   `samp` (flat text), `a href` (a link inside a link is its text),
 //!   `img` (`src`, `alt`, `title`), `br`, `ruby` (base text, then each `rt`
-//!   in parentheses; `rp`, which only holds those parentheses, is dropped).
+//!   in parentheses; an `rp` holding only brackets and white space, the
+//!   parentheses the reader writes itself, is dropped, any other `rp`
+//!   keeps its text).
 //! - Transparent (the element goes, its content stays): `div`, `section`,
 //!   `article`, `aside`, `figure`, `figcaption`, `header`, `footer`, `nav`,
 //!   `dl`/`dt`/`dd` and the other HTML block containers, which also end a
 //!   paragraph; `span` and every unknown element, MathML and the EPUB
 //!   `epub:` elements included, which do not.
-//! - Dropped with their content: `head`, `script`, `style`, `template`,
-//!   `rp`; inline SVG ([`Loss::Images`]). Stylesheets and `style`
+//! - Dropped with their content: `head`, `script`, `style`, `template`;
+//!   inline SVG ([`Loss::Images`]). Stylesheets and `style`
 //!   attributes are never read: [`Loss::Styles`] is always reported.
 //! - Elements in no namespace are read as XHTML (EPUB 2 chapters written
 //!   without the namespace), names compared ASCII case-insensitively;
@@ -55,6 +57,13 @@ use crate::{Align, Block, Document, Inline, LimitError, Limits, ListItem, Loss};
 
 const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// What a ruby parenthesis (`rp`) holds when it only shows the brackets
+/// around `rt` to a reader without ruby support: the ASCII ones and the
+/// CJK and fullwidth ones books use. The reader writes its own
+/// parentheses around `rt`, so such an `rp` is dropped; any other text in
+/// it is kept.
+const RP_BRACKETS: &str = "()[]{}<>（）［］｛｝〈〉《》「」『』【】〔〕〖〗〘〙〚〛｟｠⦅⦆";
 
 /// HTML clamps `colspan` to 1..=1000 and `rowspan` to 0..=65534 (WHATWG,
 /// "processing model" of tables), 0 meaning "to the end of the row
@@ -245,6 +254,9 @@ enum Tag {
     Img,
     Br,
     Rt,
+    /// Ruby parenthesis: its text is kept unless it is only the brackets
+    /// (and white space) the reader writes around `rt` itself.
+    Rp,
     /// Inline and not kept (`span`, unknown elements).
     Inline,
 }
@@ -264,7 +276,7 @@ fn classify(name: QName<'_>) -> Tag {
     low.copy_from_slice(l);
     low.make_ascii_lowercase();
     match &*low {
-        b"head" | b"script" | b"style" | b"template" | b"rp" => Tag::Skip,
+        b"head" | b"script" | b"style" | b"template" => Tag::Skip,
         b"svg" => Tag::Svg,
         b"p" => Tag::Para,
         b"h1" => Tag::Heading(1),
@@ -296,6 +308,7 @@ fn classify(name: QName<'_>) -> Tag {
         b"img" => Tag::Img,
         b"br" => Tag::Br,
         b"rt" => Tag::Rt,
+        b"rp" => Tag::Rp,
         b"html" | b"body" | b"div" | b"section" | b"article" | b"aside" | b"nav" | b"header"
         | b"footer" | b"main" | b"figure" | b"figcaption" | b"address" | b"center" | b"dl"
         | b"dt" | b"dd" | b"hgroup" | b"details" | b"summary" | b"fieldset" | b"legend"
@@ -404,11 +417,14 @@ enum Frame {
         inlines: Vec<Inline>,
         implicit: bool,
     },
-    /// `pre` (`raw`: white space kept) or inline code (collapsed).
+    /// `pre` (`raw`: white space kept) or inline code (collapsed); with
+    /// `rp`, a ruby parenthesis (collapsed), `Some` holding the white
+    /// space state before it.
     Flat {
         raw: bool,
         text: String,
         fresh: bool,
+        rp: Option<bool>,
     },
 }
 
@@ -546,6 +562,7 @@ impl Builder {
             | Tag::Img
             | Tag::Br
             | Tag::Rt
+            | Tag::Rp
             | Tag::Inline => self.inline_start(tag, e),
             Tag::Quiet => self.push_open(End::Nothing),
             _ => self.block_start(tag, e),
@@ -620,6 +637,10 @@ impl Builder {
             Tag::Rt => {
                 self.text("(");
                 End::Text(")")
+            }
+            Tag::Rp => {
+                self.rp_start();
+                return;
             }
             Tag::Para
             | Tag::Heading(_)
@@ -711,6 +732,7 @@ impl Builder {
                     raw: false,
                     text: String::new(),
                     fresh: false,
+                    rp: None,
                 });
             }
             Tag::Img => {
@@ -728,8 +750,23 @@ impl Builder {
                 self.push_open(End::Text(")"));
                 self.text("(");
             }
+            Tag::Rp => self.rp_start(),
             _ => self.push_open(End::Nothing),
         }
+    }
+
+    /// `rp` collects its text flat (an element inside is its text, as in
+    /// inline code); [`Builder::close_top`] then drops it when it holds
+    /// only brackets and white space, else writes it where it stands.
+    fn rp_start(&mut self) {
+        let space = self.last_space;
+        self.push_open(End::Nothing);
+        self.push_frame(Frame::Flat {
+            raw: false,
+            text: String::new(),
+            fresh: false,
+            rp: Some(space),
+        });
     }
 
     fn block_start(&mut self, tag: Tag, e: &Element<'_>) {
@@ -861,6 +898,7 @@ impl Builder {
                         raw: true,
                         text: String::new(),
                         fresh: true,
+                        rp: None,
                     });
                 }
                 (Ctx::Block, Tag::Hr) => {
@@ -1108,6 +1146,22 @@ impl Builder {
                     });
                 }
             }
+            Frame::Flat {
+                rp: Some(space),
+                text,
+                ..
+            } => {
+                // A hidden `rp` shows nothing, its white space included;
+                // kept, its text is written again where the `rp` started
+                // (charged a second time: the budget only errs early).
+                self.last_space = space;
+                if !text
+                    .chars()
+                    .all(|c| c.is_whitespace() || RP_BRACKETS.contains(c))
+                {
+                    self.text(&text);
+                }
+            }
             Frame::Flat { text, .. } => {
                 if !text.is_empty() {
                     self.add_inline(Inline::Code(text));
@@ -1246,6 +1300,7 @@ impl Builder {
                 raw: true,
                 text,
                 fresh,
+                ..
             }) => {
                 self.steps += len;
                 let s = if std::mem::take(fresh) {
