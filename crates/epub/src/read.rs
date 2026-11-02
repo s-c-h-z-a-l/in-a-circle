@@ -21,8 +21,8 @@
 //! DRM: `META-INF/encryption.xml` lists the encrypted resources
 //! (`EncryptedData`, its `EncryptionMethod` and `CipherReference URI`,
 //! relative to the container root). Font obfuscation (the IDPF and Adobe
-//! algorithms) is not encryption and is ignored; any other method, or none
-//! stated, is. A ZIP entry with an encryption flag is encrypted too. When
+//! algorithms) is not encryption and is ignored; any other method (also
+//! next to an obfuscation one), or none stated, is. A ZIP entry with an encryption flag is encrypted too. When
 //! every XHTML spine item that is in the book is encrypted, the book is
 //! DRM-protected; when only some are, those items fail alone. `rights.xml`
 //! decides nothing.
@@ -759,12 +759,14 @@ fn has_scheme(href: &str) -> bool {
 /// an `EncryptionMethod` and a `CipherData` that are direct children of an
 /// `EncryptedData` count (an `EncryptedKey` inside its `KeyInfo` has its
 /// own). An `EncryptedData` that states no method is encrypted (fail
-/// closed); a URI outside the book names nothing in it.
+/// closed), and so is one that states a cipher among other methods, in
+/// any order; a URI outside the book names nothing in it.
 fn parse_encryption(bytes: &[u8], limits: &Limits) -> Result<HashSet<String>, BookError> {
     let text = decode(bytes, ENCRYPTION)?;
     let mut out = HashSet::new();
-    // Per open EncryptedData: its depth, its method, its URIs.
-    let mut data: Vec<(usize, Option<String>, Vec<String>)> = Vec::new();
+    // Per open EncryptedData: its depth, whether it names a cipher (`None`
+    // until a method is seen), its URIs.
+    let mut data: Vec<(usize, Option<bool>, Vec<String>)> = Vec::new();
     walk(&text, ENCRYPTION, limits, |open, ev| match ev {
         Event::Start(e) => {
             let depth = open.len();
@@ -774,7 +776,10 @@ fn parse_encryption(bytes: &[u8], limits: &Limits) -> Result<HashSet<String>, Bo
                     if let Some(d) = data.last_mut()
                         && d.0 + 1 == depth
                     {
-                        d.1 = Some(e.attr(None, "Algorithm").unwrap_or("").trim().to_string());
+                        let alg = e.attr(None, "Algorithm").unwrap_or("").trim();
+                        // Once a cipher, always: a later obfuscation method
+                        // does not make the data plain.
+                        d.1 = Some(d.1 == Some(true) || !OBFUSCATION.contains(&alg));
                     }
                 }
                 "CipherReference" => {
@@ -793,8 +798,8 @@ fn parse_encryption(bytes: &[u8], limits: &Limits) -> Result<HashSet<String>, Bo
         Event::End(name) => {
             if name.local == "EncryptedData"
                 && data.last().is_some_and(|d| d.0 == open.len())
-                && let Some((_, method, uris)) = data.pop()
-                && !method.is_some_and(|m| OBFUSCATION.contains(&m.as_str()))
+                && let Some((_, cipher, uris)) = data.pop()
+                && cipher != Some(false)
             {
                 out.extend(uris);
             }

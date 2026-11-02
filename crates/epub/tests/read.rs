@@ -997,6 +997,37 @@ fn all_chapters_encrypted_is_drm() {
         err(open(&file_of(&encrypted_book(Some(&enc))))),
         BookError::DrmProtected
     ));
+    // Two methods in one EncryptedData: a cipher and an obfuscation, in
+    // either order. The cipher wins (fail closed): the data is ciphertext
+    // whatever else is stated, so the book is DRM-protected, not a set of
+    // chapters that are not well-formed.
+    for (first, second) in [(AES, IDPF), (IDPF, AES), (ADOBE, AES), (AES, ADOBE)] {
+        let enc = encryption(&[(first, "OEBPS/a.xhtml"), (first, "OEBPS/b.xhtml")]).replace(
+            &format!(r#"<enc:EncryptionMethod Algorithm="{first}"/>"#),
+            &format!(
+                r#"<enc:EncryptionMethod Algorithm="{first}"/><enc:EncryptionMethod Algorithm="{second}"/>"#
+            ),
+        );
+        assert!(
+            matches!(
+                err(open(&file_of(&encrypted_book(Some(&enc))))),
+                BookError::DrmProtected
+            ),
+            "{first} then {second}"
+        );
+    }
+    // Two obfuscation methods: still not encrypted.
+    let enc = encryption(&[(IDPF, "OEBPS/a.xhtml")]).replace(
+        &format!(r#"<enc:EncryptionMethod Algorithm="{IDPF}"/>"#),
+        &format!(
+            r#"<enc:EncryptionMethod Algorithm="{IDPF}"/><enc:EncryptionMethod Algorithm="{ADOBE}"/>"#
+        ),
+    );
+    assert!(
+        read_all(&open(&file_of(&encrypted_book(Some(&enc)))).unwrap())
+            .iter()
+            .all(Result::is_ok)
+    );
     // A `rights.xml` alone decides nothing.
     let rights: &[(&str, &[u8], Store)] = &[("META-INF/rights.xml", b"<rights/>", Stored)];
     let f = file_of(&encrypted_book_with(None, rights));
