@@ -120,8 +120,9 @@ jobs:
       # for the asset) and vnu's npm package `vnu-jar` (a fixed version;
       # the hash is of the registry tarball, whose sha512 matches the
       # registry's integrity field; GitHub's `latest` vnu is rebuilt in
-      # place and cannot be pinned; pandoc's GitHub release tarball, whose
-      # hash matches the digest GitHub publishes for the asset).
+      # place and cannot be pinned; pandoc's GitHub release tarball, one per
+      # runner architecture (x86_64: linux-amd64, aarch64: linux-arm64),
+      # each hash matching the digest GitHub publishes for its asset).
       # INACIRCLE_REQUIRE_BOOK_TOOLS=1 makes a missing one a failure
       # instead of a skip.
       - name: Install book test tools
@@ -131,7 +132,8 @@ jobs:
           VNU_VERSION: 26.10.12
           VNU_SHA256: 3925f07364f5e5a111cef54a7baefa575b22d05c70f8ced048f0616d4579b7ab
           PANDOC_VERSION: 3.11
-          PANDOC_SHA256: 37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6
+          PANDOC_SHA256_AMD64: 37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6
+          PANDOC_SHA256_ARM64: 56ed5566ec41d22ec9ee0704e6ac0b98ba102e92384efd5306173a22d314c79a
         run: |
           sudo apt-get install -y --no-install-recommends default-jre-headless
           cd "$RUNNER_TEMP"
@@ -139,7 +141,12 @@ jobs:
           echo "$EPUBCHECK_SHA256  epubcheck.zip" | sha256sum -c -
           curl -fsSLo vnu.tgz "https://registry.npmjs.org/vnu-jar/-/vnu-jar-$VNU_VERSION.tgz"
           echo "$VNU_SHA256  vnu.tgz" | sha256sum -c -
-          curl -fsSLo pandoc.tgz "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-amd64.tar.gz"
+          case "$(uname -m)" in
+            x86_64) PANDOC_ARCH=amd64; PANDOC_SHA256=$PANDOC_SHA256_AMD64 ;;
+            aarch64) PANDOC_ARCH=arm64; PANDOC_SHA256=$PANDOC_SHA256_ARM64 ;;
+            *) echo "no pandoc asset for $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSLo pandoc.tgz "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-$PANDOC_ARCH.tar.gz"
           echo "$PANDOC_SHA256  pandoc.tgz" | sha256sum -c -
           sudo mkdir -p /opt/book-tools
           sudo tar -xzf pandoc.tgz -C /opt/book-tools "pandoc-$PANDOC_VERSION/bin/pandoc"
