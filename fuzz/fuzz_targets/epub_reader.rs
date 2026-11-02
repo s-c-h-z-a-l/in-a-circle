@@ -2,7 +2,11 @@
 //! `epub::read::open_with` and `Book::chapter` of every spine item, on
 //! arbitrary bytes as a file: whatever an EPUB on the user's disk holds.
 //! Asserts what the reader promises: at most `MAX_SPINE` items numbered
-//! from 1, no chapter over its limit, an empty buffer on every error.
+//! from 1, each naming a kept item; each manifest item kept once, its path
+//! and media type within their caps, the work to resolve them within the
+//! package's length; no chapter over its limit, all chapters read (each as
+//! often as the spine has it) within the book limit; an empty buffer on
+//! every error.
 //!
 //! Before the bytes are written, the CRC-32 of every stored entry the
 //! directory locates is recomputed into both its headers (`fix_crcs`):
@@ -15,7 +19,7 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
-use epub::read::{Limits, MAX_SPINE, open_with};
+use epub::read::{Limits, MAX_MEDIA_TYPE, MAX_PATH, MAX_SPINE, open_with};
 
 /// Small limits so the fuzzer reaches each of them at speed, as the
 /// `zip_reader` target does: chapters and skeleton files up to 256 KiB
@@ -103,13 +107,34 @@ fuzz_target!(|data: &[u8]| {
             return;
         };
         assert!(!book.chapters.is_empty() && book.chapters.len() <= MAX_SPINE);
+        // Held: one item per manifest item the spine names, each capped
+        // (`...` is appended to a cut string).
+        assert!(book.items.len() <= book.chapters.len());
+        for it in &book.items {
+            assert!(it.path.len() <= MAX_PATH + 3, "{} B path", it.path.len());
+            assert!(it.media_type.len() <= MAX_MEDIA_TYPE + 3);
+        }
+        // Work: each item's href and media type once. They are parts of the
+        // package document, at most `package_bytes`, 1.5 x that once a
+        // UTF-16 document is decoded to UTF-8.
+        assert!(
+            book.steps() <= LIMITS.package_bytes * 3 / 2,
+            "{} steps",
+            book.steps()
+        );
         let mut out = Vec::new();
+        let mut produced = 0u64;
         for (k, c) in book.chapters.iter().enumerate() {
             assert_eq!(c.index, k + 1);
+            assert!(c.item.is_none_or(|i| i < book.items.len()));
             match book.chapter(c.index, &mut out) {
-                Ok(()) => assert!(out.len() as u64 <= LIMITS.chapter_bytes),
+                Ok(()) => {
+                    assert!(out.len() as u64 <= LIMITS.chapter_bytes);
+                    produced += out.len() as u64;
+                }
                 Err(_) => assert!(out.is_empty()),
             }
         }
+        assert!(produced <= LIMITS.book_bytes, "{produced} B produced");
     });
 });
