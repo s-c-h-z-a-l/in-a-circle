@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use epub::read::{BookError, ChapterError, open};
+use epub::read::{BookError, ChapterError, MAX_MEDIA_TYPE, MAX_PATH, open};
 use testzip::Store::{self, Deflated, Stored};
 
 const MIB: usize = 1024 * 1024;
@@ -119,6 +119,17 @@ fn read_all(book: &epub::read::Book<'_>) -> Vec<Result<Vec<u8>, ChapterError>> {
         .collect()
 }
 
+/// The path of every spine item, in spine order (empty for none).
+fn paths_of<'b>(book: &'b epub::read::Book<'_>) -> Vec<&'b str> {
+    book.chapters.iter().map(|c| path(book, c.index)).collect()
+}
+
+/// The path of spine item `n` (1-based; empty when it names no item).
+fn path<'b>(book: &'b epub::read::Book<'_>, n: usize) -> &'b str {
+    book.item(&book.chapters[n - 1])
+        .map_or("", |i| i.path.as_str())
+}
+
 fn err(r: Result<epub::read::Book<'_>, BookError>) -> BookError {
     match r {
         Ok(_) => panic!("the book opened"),
@@ -131,7 +142,7 @@ fn reads_epub3_and_epub2_spines() {
     // EPUB 3.
     let f = simple(3, &[]);
     let book = open(&f).unwrap();
-    let paths: Vec<_> = book.chapters.iter().map(|c| c.path.as_str()).collect();
+    let paths = paths_of(&book);
     assert_eq!(
         paths,
         ["OEBPS/c1.xhtml", "OEBPS/c2.xhtml", "OEBPS/c3.xhtml"]
@@ -142,7 +153,7 @@ fn reads_epub3_and_epub2_spines() {
     assert!(
         book.chapters
             .iter()
-            .all(|c| c.media_type == "application/xhtml+xml")
+            .all(|c| book.item(c).unwrap().media_type == "application/xhtml+xml")
     );
     let got = read_all(&book);
     assert_eq!(got[1].as_ref().unwrap(), &xhtml("chapter 2"));
@@ -174,7 +185,7 @@ fn reads_epub3_and_epub2_spines() {
         ("b.html", &b, Stored),
     ]);
     let book = open(&f).unwrap();
-    let paths: Vec<_> = book.chapters.iter().map(|c| c.path.as_str()).collect();
+    let paths = paths_of(&book);
     assert_eq!(paths, ["a.html", "b.html"]);
     assert_eq!(book.title.as_deref(), Some("Old Book"));
     assert_eq!(book.authors, ["A. Author"]);
@@ -256,7 +267,7 @@ fn linear_no_kept_in_place() {
     let got: Vec<_> = book
         .chapters
         .iter()
-        .map(|c| (c.index, c.path.as_str(), c.linear))
+        .map(|c| (c.index, path(&book, c.index), c.linear))
         .collect();
     // Every itemref in spine order; the repeated one is there twice.
     assert_eq!(
@@ -299,7 +310,7 @@ fn hrefs_relative_to_opf_dir() {
         ("OEBPS/Styles/style.css", b"p{}", Stored),
     ]);
     let book = open(&f).unwrap();
-    let paths: Vec<_> = book.chapters.iter().map(|c| c.path.as_str()).collect();
+    let paths = paths_of(&book);
     assert_eq!(
         paths,
         ["OEBPS/Text/Chapter 1.xhtml", "OEBPS/Text/Chapter2.xhtml"]
@@ -310,7 +321,7 @@ fn hrefs_relative_to_opf_dir() {
 
     // The package at the root: hrefs are relative to the root.
     let f = simple(1, &[]);
-    assert_eq!(open(&f).unwrap().chapters[0].path, "OEBPS/c1.xhtml");
+    assert_eq!(path(&open(&f).unwrap(), 1), "OEBPS/c1.xhtml");
 }
 
 #[test]
@@ -727,7 +738,7 @@ fn svg_spine_item_and_unsupported_type() {
         ("b.xml", b"<dtbook/>", Stored),
     ]);
     let book = open(&f).unwrap();
-    assert_eq!(book.chapters[0].media_type, "image/svg+xml");
+    assert_eq!(book.items[0].media_type, "image/svg+xml");
     let all = read_all(&book);
     // An SVG page carries no text: it reads as nothing, the caller reports
     // it by its media type.
@@ -831,10 +842,10 @@ fn href_escaping_the_container_is_outside() {
     for (i, h) in hrefs.iter().enumerate().take(7) {
         assert_eq!(all[i], Err(ChapterError::OutsideTheBook), "{h}");
         // The path is the href as written: there is no entry to name.
-        assert_eq!(book.chapters[i].path, *h);
+        assert_eq!(path(&book, i + 1), *h);
     }
     // `..` from OEBPS/ to the root stays inside the container.
-    assert_eq!(book.chapters[7].path, "in-root.xhtml");
+    assert_eq!(path(&book, 8), "in-root.xhtml");
     assert_eq!(all[7].as_ref().unwrap(), &inside);
     assert_eq!(ChapterError::OutsideTheBook.reason(), "outside the book");
 
@@ -1011,4 +1022,96 @@ fn zip_encrypted_entry_counts_as_encrypted() {
         err(open(&file_of(&z))).to_string(),
         "damaged EPUB: the entry is encrypted"
     );
+}
+
+#[test]
+fn open_resolves_each_item_once() {
+    // 10,000 itemrefs naming one manifest item whose href or media type
+    // is most of the package: the item is resolved once and kept once, at
+    // most `MAX_PATH` + `MAX_MEDIA_TYPE` bytes. Resolving it per itemref
+    // copied the href and the type 10,000 times (10 GB for the 1 MiB href)
+    // and normalized the `x/../` climb 10,000 times (4 * 10^9 steps).
+    let n = 10_000;
+    let spine: String = (0..n).map(|_| itemref("c")).collect();
+    let long_href = "a".repeat(MIB);
+    let long_type = "x".repeat(100 << 10);
+    let climb = format!("{}c.xhtml", "x/../".repeat(80_000));
+    let cont = container("content.opf");
+    let body = xhtml("c");
+    let cases = [
+        item("c", &long_href),
+        format!(r#"<item id="c" href="c.xhtml" media-type="{long_type}"/>"#),
+        item("c", &climb),
+    ];
+    let mut got = Vec::new();
+    for manifest in &cases {
+        let opf = package("", manifest, &spine);
+        let f = zip_file(&[
+            ("META-INF/container.xml", cont.as_bytes(), Stored),
+            ("content.opf", opf.as_bytes(), Stored),
+            ("c.xhtml", &body, Stored),
+        ]);
+        let book = open(&f).unwrap();
+        assert_eq!(book.chapters.len(), n);
+        // Work: each item's href and type once, within the package's size.
+        assert!(book.steps() <= opf.len() as u64, "{} steps", book.steps());
+        assert!(book.chapters.iter().all(|c| c.item == Some(0)));
+        // Memory: one item, its strings capped.
+        assert_eq!(book.items.len(), 1);
+        let it = &book.items[0];
+        assert!(it.path.len() <= MAX_PATH + 3 && it.media_type.len() <= MAX_MEDIA_TYPE + 3);
+        let first = book.chapter(1, &mut Vec::new());
+        assert_eq!(book.chapter(n, &mut Vec::new()), first);
+        got.push((first, it.clone()));
+    }
+    // A 1 MiB path names no entry: missing, its first 512 bytes kept.
+    assert_eq!(got[0].0, Err(ChapterError::Missing));
+    assert_eq!(got[0].1.path, format!("{}...", "a".repeat(MAX_PATH)));
+    // A 100 KiB media type is no type: its first 255 bytes are shown.
+    let shown = format!("{}...", "x".repeat(MAX_MEDIA_TYPE));
+    assert_eq!(got[1].0, Err(ChapterError::UnsupportedType(shown.clone())));
+    assert_eq!(
+        got[1].0.as_ref().unwrap_err().reason(),
+        format!("unsupported type {shown}")
+    );
+    assert_eq!(got[1].1.media_type, shown);
+    // The climb resolves (once) to the chapter.
+    assert_eq!(got[2].0, Ok(()));
+    assert_eq!(got[2].1.path, "c.xhtml");
+}
+
+#[test]
+fn path_and_media_type_at_their_caps() {
+    // A resolved path of exactly 512 bytes is looked up and read; one byte
+    // more names no entry. A media type of 255 bytes is a type (here not
+    // a supported one, shown whole); 256 bytes is cut.
+    let at = format!("{}.xhtml", "p".repeat(MAX_PATH - 6));
+    let over = format!("{}.xhtml", "q".repeat(MAX_PATH - 5));
+    assert_eq!((at.len(), over.len()), (MAX_PATH, MAX_PATH + 1));
+    let t255 = format!("x/{}", "y".repeat(MAX_MEDIA_TYPE - 2));
+    let t256 = format!("x/{}", "y".repeat(MAX_MEDIA_TYPE - 1));
+    let manifest = [
+        item("a", &at),
+        item("b", &over),
+        format!(r#"<item id="c" href="{at}" media-type="{t255}"/>"#),
+        format!(r#"<item id="d" href="{at}" media-type="{t256}"/>"#),
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("c"), itemref("d")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let body = xhtml("a");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        (&at, &body, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[0].as_ref().unwrap(), &body);
+    assert_eq!(all[1], Err(ChapterError::Missing));
+    assert_eq!(path(&book, 2), format!("{}...", &over[..MAX_PATH]));
+    assert_eq!(all[2], Err(ChapterError::UnsupportedType(t255.clone())));
+    let cut = format!("{}...", &t256[..MAX_MEDIA_TYPE]);
+    assert_eq!(all[3], Err(ChapterError::UnsupportedType(cut)));
 }

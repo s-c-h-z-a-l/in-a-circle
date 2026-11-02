@@ -238,21 +238,34 @@ never lets the data exceed) and named when it is hit.
 | name | 512 B | the CBZ reader's value; `damaged EPUB: an entry name is too long` |
 | skeleton file | 8 MiB, 524,288 XML events | `container.xml`, the package document and `encryption.xml` each, at most the text family's input and node budgets; a real package is tens of KiB; `not an EPUB (package document too large)` |
 | XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
-| chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); about 500 B each; `book has more than 10000 chapters` |
+| chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); a few dozen bytes each, and each manifest item they name is resolved and kept once, at most about 1 KB (the two caps below), however often the spine names it; `book has more than 10000 chapters` |
+| item path | 512 B | the ZIP reader's name limit: a longer resolved path names no entry, the item is `missing`, and only its first 512 B are kept |
+| media type | 255 B | RFC 6838: type and subtype names at most 127 characters each, and the `/`; a longer one is `unsupported type <its first 255 B>...` |
 | chapter | 8 MiB | uncompressed, the text family's input limit; only that chapter fails, `too large`, the rest of the book reads |
 | book | 64 MiB | the sum of the chapters to read, each as often as the spine has it (a chapter too large alone does not count): twice the 32 MiB text output, since XHTML markup is at least as large as its text; `book is too large`, nothing is read |
 
-These fail the whole book (nothing is written for it): an archive the
-ZIP reader refuses at `open` (`damaged EPUB: <reason>`: not a ZIP,
-truncated, ZIP64, an entry outside the file, overlapping entries, two
-entries of the same name, the limits above), no `META-INF/container.xml`
-(`not an EPUB (no META-INF/container.xml)`), no package rootfile or no
-package at its path (`not an EPUB (no package document)`), a skeleton file
-over its limit or not well-formed (`not an EPUB (<XML error> in <path>)`)
-or unreadable (`damaged EPUB: <reason>`), no spine or an empty one (`book
-has no spine`), too many chapters, a book over 64 MiB, and a book whose
-every XHTML chapter is encrypted (`book is DRM-protected`). Everything
-else fails only the chapter it concerns.
+These fail the whole book (nothing is written for it), each with its text:
+
+- an archive the ZIP reader refuses at `open`: `damaged EPUB: <reason>`
+  (not a ZIP, truncated, ZIP64, an entry outside the file, overlapping
+  entries, two entries of the same name, the limits above). The whole
+  directory is checked, so any entry fails the book, a font or an image
+  as much as a chapter (a font whose compression ratio is past 1032:
+  `damaged EPUB: an entry's compression ratio is too high`);
+- no `META-INF/container.xml`: `not an EPUB (no META-INF/container.xml)`;
+- no package rootfile, or no package at its path: `not an EPUB (no
+  package document)`;
+- a skeleton file over its size or event limit: `not an EPUB (package
+  document too large)`;
+- a skeleton file that is not well-formed (or nested too deeply): `not an
+  EPUB (<XML error> in <path>)`;
+- a skeleton file the ZIP reader cannot read: `damaged EPUB: <reason>`;
+- no spine, or an empty one: `book has no spine`;
+- more than 10,000 spine items: `book has more than 10000 chapters`;
+- chapters over 64 MiB in all: `book is too large`;
+- every XHTML chapter encrypted: `book is DRM-protected`.
+
+Everything else fails only the chapter it concerns.
 
 ### The machine side
 

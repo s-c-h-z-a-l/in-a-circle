@@ -7,8 +7,8 @@
 //! package's `dc:title`, `dc:creator`, manifest and spine (EPUB 2 and 3:
 //! the spine is the same in both; the `mimetype` entry is not required,
 //! many real books do not store it first). Every spine item is resolved
-//! to its ZIP entry then; [`Book::chapter`] reads one when asked and keeps
-//! nothing. A broken skeleton fails the whole book ([`BookError`]); a
+//! to its ZIP entry then, each manifest item once however often the spine
+//! names it; [`Book::chapter`] reads one when asked and keeps nothing. A broken skeleton fails the whole book ([`BookError`]); a
 //! spine item that cannot be read fails only itself ([`ChapterError`]),
 //! and the caller reports it in its place.
 //!
@@ -71,10 +71,24 @@ const ZIP_LIMITS: zip::Limits = zip::Limits {
 
 /// Most spine items: 10,000, the CBZ reader's page limit (below the
 /// 12,000 entries, so the message is reachable). The longest real books
-/// split into a few hundred files; one item costs about 500 B here (the
-/// resolved path, its media type, the slot). Past it:
-/// `book has more than 10000 chapters`.
+/// split into a few hundred files. A spine item costs a few dozen bytes
+/// here (its idref, until `open` returns, and a [`ChapterRef`]); the
+/// manifest item it names at most about 1 KB, once ([`MAX_PATH`],
+/// [`MAX_MEDIA_TYPE`]). Past it: `book has more than 10000 chapters`.
 pub const MAX_SPINE: usize = 10_000;
+
+/// Longest path an [`Item`] keeps: 512 bytes, the ZIP reader's name limit
+/// (`ZIP_NAME_BYTES`). A resolved path longer than that can name no entry,
+/// so the item is `missing`, and only its first 512 bytes are kept (an
+/// href outside the book likewise), so a spine of 10,000 items naming one
+/// href of megabytes holds 512 bytes, not 10,000 copies.
+pub const MAX_PATH: usize = ZIP_NAME_BYTES;
+
+/// Longest media type: 255 bytes, RFC 6838 section 4.2 (type and subtype
+/// names at most 127 characters each, and the `/`). A longer one is no
+/// media type: the item is `unsupported type <first 255 bytes>...` (cut at
+/// a character boundary, `...` appended), and only that is kept.
+pub const MAX_MEDIA_TYPE: usize = 255;
 
 /// The package media type `container.xml` must name.
 const PACKAGE_TYPE: &str = "application/oebps-package+xml";
@@ -209,16 +223,26 @@ impl ChapterError {
 pub struct ChapterRef {
     /// Its spine position, from 1: the `N` of `Chapter N`.
     pub index: usize,
-    /// The entry it resolves to (or, if it does not, its `href` as
-    /// written; empty when the manifest has no such item).
-    pub path: String,
-    /// The manifest's `media-type` (empty when there is no such item).
-    pub media_type: String,
+    /// The manifest item it names, an index into [`Book::items`]; `None`
+    /// when the manifest has no such id.
+    pub item: Option<usize>,
     /// False for `linear="no"`; such an item is still read in its place.
     pub linear: bool,
 }
 
-/// How a spine item was resolved at `open`.
+/// A manifest item the spine names, resolved once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    /// The entry it resolves to; or, when it is outside the book, its
+    /// `href` as written. At most [`MAX_PATH`] bytes (cut at a character
+    /// boundary).
+    pub path: String,
+    /// The manifest's `media-type`, trimmed; at most [`MAX_MEDIA_TYPE`]
+    /// bytes and `...` (a longer one is cut).
+    pub media_type: String,
+}
+
+/// How a manifest item was resolved at `open`.
 #[derive(Debug)]
 enum Slot {
     /// An XHTML chapter in this entry, within the chapter limit.
@@ -237,9 +261,14 @@ pub struct Book<'f> {
     pub authors: Vec<String>,
     /// Every spine item in spine order, `linear="no"` included.
     pub chapters: Vec<ChapterRef>,
+    /// The manifest items the spine names, each once, in the order the
+    /// spine first names them.
+    pub items: Vec<Item>,
     archive: zip::Archive<'f>,
+    /// One per item.
     slots: Vec<Slot>,
     limits: Limits,
+    steps: u64,
 }
 
 /// Open the book in `file` with [`Limits::DEFAULT`].
@@ -279,55 +308,47 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
     };
 
     let base = opf_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    // Manifest item -> its index in `items`, set when the spine first
+    // names it: each item is resolved once, however often it is named.
+    let mut seen: Vec<Option<usize>> = vec![None; pkg.items.len()];
+    let mut items = Vec::new();
+    let mut slots = Vec::new();
+    // Per item: `Some(encrypted)` for an XHTML item in the book.
+    let mut xhtml_locked: Vec<Option<bool>> = Vec::new();
+    let mut steps: u64 = 0;
     let mut chapters = Vec::with_capacity(pkg.spine.len());
-    let mut slots = Vec::with_capacity(pkg.spine.len());
     let mut total: u64 = 0;
-    // XHTML items in the book: encrypted ones, and ones that are not.
+    // XHTML spine items in the book: encrypted ones, and ones that are not.
     let (mut locked, mut unlocked) = (0usize, 0usize);
     for (k, (idref, linear)) in pkg.spine.iter().enumerate() {
-        let Some((href, media_type)) = pkg.manifest.get(idref.as_str()) else {
-            chapters.push(ChapterRef {
-                index: k + 1,
-                path: String::new(),
-                media_type: String::new(),
-                linear: *linear,
-            });
-            slots.push(Slot::Fail(ChapterError::Missing));
-            continue;
-        };
-        let (path, slot) = match resolve(base, href) {
-            None => (href.clone(), Slot::Fail(ChapterError::OutsideTheBook)),
-            Some(path) => match names.get(path.as_bytes()) {
-                None => (path, Slot::Fail(ChapterError::Missing)),
-                Some(&i) => {
-                    let entry = &archive.entries()[i];
-                    let is_locked = entry.encrypted || encrypted.contains(&path);
-                    if media_type == XHTML_TYPE {
-                        *(if is_locked {
-                            &mut locked
-                        } else {
-                            &mut unlocked
-                        }) += 1;
-                    }
-                    let slot = if is_locked {
-                        Slot::Fail(ChapterError::Encrypted)
-                    } else {
-                        classify(entry, i, media_type, &limits)
-                    };
-                    (path, slot)
-                }
-            },
-        };
-        if let Slot::Chapter(i) = slot {
-            total = total.saturating_add(archive.entries()[i].size);
+        let item = pkg.manifest.get(idref.as_str()).map(|&m| {
+            *seen[m].get_or_insert_with(|| {
+                let (href, media_type) = &pkg.items[m];
+                steps += (href.len() + media_type.len()) as u64;
+                let (item, slot, xhtml) = resolve_item(
+                    base, href, media_type, &names, &archive, &encrypted, &limits,
+                );
+                items.push(item);
+                slots.push(slot);
+                xhtml_locked.push(xhtml);
+                items.len() - 1
+            })
+        });
+        if let Some(at) = item {
+            match xhtml_locked[at] {
+                Some(true) => locked += 1,
+                Some(false) => unlocked += 1,
+                None => {}
+            }
+            if let Slot::Chapter(i) = slots[at] {
+                total = total.saturating_add(archive.entries()[i].size);
+            }
         }
         chapters.push(ChapterRef {
             index: k + 1,
-            path,
-            media_type: media_type.clone(),
+            item,
             linear: *linear,
         });
-        slots.push(slot);
     }
     // Every XHTML item in the book is encrypted (at least one is).
     if locked > 0 && unlocked == 0 {
@@ -340,10 +361,65 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
         title: pkg.title,
         authors: pkg.authors,
         chapters,
+        items,
         archive,
         slots,
         limits,
+        steps,
     })
+}
+
+/// One manifest item: what the book keeps of it, how it reads, and, for
+/// an XHTML item in the book, whether it is encrypted. Linear in the
+/// lengths of `href` and `media_type`.
+fn resolve_item(
+    base: &str,
+    href: &str,
+    media_type: &str,
+    names: &HashMap<&[u8], usize>,
+    archive: &zip::Archive<'_>,
+    encrypted: &HashSet<String>,
+    limits: &Limits,
+) -> (Item, Slot, Option<bool>) {
+    let shown_type = cut(media_type, MAX_MEDIA_TYPE);
+    let item = |path: &str| Item {
+        path: cut(path, MAX_PATH),
+        media_type: shown_type.clone(),
+    };
+    let Some(path) = resolve(base, href) else {
+        return (item(href), Slot::Fail(ChapterError::OutsideTheBook), None);
+    };
+    // A path longer than any entry name is looked up nowhere.
+    let at = (path.len() <= MAX_PATH)
+        .then(|| names.get(path.as_bytes()))
+        .flatten();
+    let Some(&i) = at else {
+        return (item(&path), Slot::Fail(ChapterError::Missing), None);
+    };
+    let entry = &archive.entries()[i];
+    let is_locked = entry.encrypted || encrypted.contains(&path);
+    let xhtml = (media_type == XHTML_TYPE).then_some(is_locked);
+    let slot = if is_locked {
+        Slot::Fail(ChapterError::Encrypted)
+    } else if media_type.len() > MAX_MEDIA_TYPE {
+        Slot::Fail(ChapterError::UnsupportedType(shown_type.clone()))
+    } else {
+        classify(entry, i, media_type, limits)
+    };
+    (item(&path), slot, xhtml)
+}
+
+/// `s` if it is at most `max` bytes; else its longest prefix of at most
+/// `max` bytes that ends at a character boundary, and `...`.
+fn cut(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 /// What a resolved spine item in entry `i` is.
@@ -357,6 +433,19 @@ fn classify(entry: &zip::Entry, i: usize, media_type: &str, limits: &Limits) -> 
 }
 
 impl Book<'_> {
+    /// The manifest item spine item `c` names (`None` when there is none).
+    pub fn item(&self, c: &ChapterRef) -> Option<&Item> {
+        c.item.and_then(|k| self.items.get(k))
+    }
+
+    /// Bytes of hrefs and media types `open` examined to resolve the spine:
+    /// each manifest item the spine names once, so at most the package
+    /// document's length (plus the UTF-16 to UTF-8 growth). For the
+    /// linearity tests.
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
     /// The raw bytes of spine item `i` (1-based, as [`ChapterRef::index`])
     /// in `out`, which is cleared first and left empty on an error. An SVG
     /// page reads as nothing (`Ok` with `out` empty); an index that is no
@@ -366,6 +455,8 @@ impl Book<'_> {
         out.clear();
         let slot = i
             .checked_sub(1)
+            .and_then(|k| self.chapters.get(k))
+            .and_then(|c| c.item)
             .and_then(|k| self.slots.get(k))
             .ok_or(ChapterError::Missing)?;
         let at = match slot {
@@ -510,8 +601,10 @@ fn parse_container(bytes: &[u8], limits: &Limits) -> Result<Option<String>, Book
 struct Package {
     title: Option<String>,
     authors: Vec<String>,
-    /// id -> (href, media type); the first item of an id counts.
-    manifest: HashMap<String, (String, String)>,
+    /// id -> index into `items`; the first item of an id counts.
+    manifest: HashMap<String, usize>,
+    /// (href, media type) of each manifest item that counts.
+    items: Vec<(String, String)>,
     /// (idref, linear) in spine order.
     spine: Vec<(String, bool)>,
 }
@@ -531,6 +624,7 @@ fn parse_package(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, B
         title: None,
         authors: Vec::new(),
         manifest: HashMap::new(),
+        items: Vec::new(),
         spine: Vec::new(),
     };
     let mut collect = Collect::No;
@@ -562,9 +656,10 @@ fn parse_package(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, B
                     ("item", Some("manifest")) => {
                         if let (Some(id), Some(href)) = (e.attr(None, "id"), e.attr(None, "href")) {
                             let mt = e.attr(None, "media-type").unwrap_or("").trim();
-                            pkg.manifest
-                                .entry(id.to_string())
-                                .or_insert_with(|| (href.to_string(), mt.to_string()));
+                            if !pkg.manifest.contains_key(id) {
+                                pkg.manifest.insert(id.to_string(), pkg.items.len());
+                                pkg.items.push((href.to_string(), mt.to_string()));
+                            }
                         }
                     }
                     ("spine", _) if spine_state == 0 => {
