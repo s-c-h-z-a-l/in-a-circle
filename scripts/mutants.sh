@@ -108,8 +108,9 @@ export INACIRCLE_REQUIRE_LANDLOCK=1
 # job. fuzz/ (a live corpus, rewritten while a campaign runs, so the copy even
 # fails) and spikes/ (1.4 GB) are outside the workspace (`exclude`), so every
 # run works on a staged copy of the tracked and untracked-not-ignored files
-# without them. The copy is of the working tree, so uncommitted changes are
-# mutation-tested too; stage 2 must see the tree stage 1 saw.
+# without them, except fuzz/corpus/xml: the xmllint comparison test reads it
+# as its seed set (a read-only input, not a live-rewritten one). The copy is of the
+# working tree, so uncommitted changes are mutation-tested too; stage 2 must see the tree stage 1 saw.
 TREE=$PWD/$OUT_ROOT/tree
 stage_tree() {
   # rsync --delete with --files-from only deletes within the listed files'
@@ -121,7 +122,7 @@ stage_tree() {
   mkdir -p "$TREE"
   find "$TREE" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
   git ls-files -z --cached --others --exclude-standard |
-    grep -zvE '^(fuzz|spikes|notes|\.superpowers|\.obsidian)/' |
+    grep -zvP '^(fuzz/(?!corpus/xml/)|(spikes|notes|\.superpowers|\.obsidian)/)' |
     rsync -a --delete --from0 --files-from=- --delete-excluded ./ "$TREE/"
 }
 
