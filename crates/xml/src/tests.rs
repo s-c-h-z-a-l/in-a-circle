@@ -954,3 +954,73 @@ fn step_counts_per_construct() {
         assert_eq!(steps(s, o), want, "{s:?}");
     }
 }
+
+#[test]
+fn declaration_and_decoding_edges() {
+    let nwf = |what| ErrorKind::NotWellFormed(what);
+    // UTF-16 without a byte order mark, in either byte order (both are
+    // valid UTF-8, so only this check refuses them).
+    for b in [&b"<\0a\0/\0>\0"[..], b"\0<\0a\0/\0>"] {
+        let e = decode(b).unwrap_err();
+        assert_eq!(e.kind, nwf("UTF-16 without a byte order mark"), "{b:?}");
+    }
+    // \r\n is one line end in decode's lines, too.
+    assert_eq!(decode(b"a\r\nb\xFF").unwrap_err().line, 2);
+    // A processing instruction whose target starts with `xml` is not the
+    // declaration.
+    assert!(read_bytes(b"<?xml-stylesheet href='s'?><a/>").is_ok());
+    // `<?xml` followed by neither space, `?` nor a name character.
+    assert_eq!(
+        decode(b"<?xml><a/>").unwrap_err().kind,
+        nwf("a malformed XML declaration")
+    );
+    // The version needs at least one digit after `1.`.
+    assert_eq!(
+        decode(b"<?xml version='1.'?><a/>").unwrap_err().kind,
+        nwf("an XML version other than 1.x")
+    );
+    assert!(read_bytes(b"<?xml version='1.1'?><a/>").is_ok());
+    // A declaration error behind a byte order mark the reader removed is
+    // reported on its own line, not shifted by the mark.
+    assert_eq!(
+        not_wf("\u{FEFF}<?xml version='1.0'\n\n\nstandalone='maybe'?>\n\n<a/>"),
+        4
+    );
+}
+
+#[test]
+fn line_after_an_error_is_the_failed_events() {
+    // The error's line is past the event's start; asking for the event's
+    // line afterwards counts back from the start, not from the error.
+    let mut r = Reader::new("<r><a\nx='1'\nx='2'/></r>", opts());
+    r.next().unwrap();
+    assert_eq!(r.line(), 1);
+    assert_eq!(r.next().unwrap_err().line, 3);
+    assert_eq!(r.line(), 1);
+}
+
+#[test]
+fn one_unchanged_slice_of_text_is_borrowed() {
+    let ev = events("<a>hi<b/>x&amp;</a>", opts()).unwrap();
+    assert!(matches!(&ev[1], Event::Text(Cow::Borrowed("hi"))), "{ev:?}");
+    assert!(
+        matches!(&ev[4], Event::Text(Cow::Owned(t)) if t == "x&"),
+        "{ev:?}"
+    );
+}
+
+#[test]
+fn local_part_must_start_a_name() {
+    // `1a` and `-b` are names' tails, not names: not qualified names.
+    not_wf("<p:1a xmlns:p='urn:p'/>");
+    not_wf("<a xmlns:p='urn:p' p:-b=''/>");
+    assert!(events("<p:a xmlns:p='urn:p' p:b=''/>", opts()).is_ok());
+}
+
+#[test]
+fn each_attribute_whitespace_character_is_one_space() {
+    // Only \r\n together is one line end; \t\n and \n\n are two spaces.
+    let ev = events("<a v=\"a\t\nb\n\nc\r\nd\"/>", opts()).unwrap();
+    let Event::Start(a) = &ev[0] else { panic!() };
+    assert_eq!(a.attr(None, "v"), Some("a  b  c d"));
+}
