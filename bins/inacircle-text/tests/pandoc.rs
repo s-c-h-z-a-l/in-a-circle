@@ -14,6 +14,9 @@ use std::process::Command;
 struct Book {
     /// File name in `tests/data/books/`.
     file: &'static str,
+    /// The head `text.epub-to-txt` writes: the title line, then the author
+    /// line (what the book's package document names).
+    head: &'static str,
     /// The `warn` messages of the conversion, in order (pinned: a change
     /// is a change of what the conversion reports and must be looked at).
     warns: &'static [&'static str],
@@ -54,21 +57,25 @@ const TABLE_WARNS: &[&str] = &[
 const BOOKS: &[Book] = &[
     Book {
         file: "alice-epub2.epub",
+        head: "Alice's Adventures in Wonderland\nLewis Carroll",
         warns: BASE_WARNS,
         diverges: &[],
     },
     Book {
         file: "alice-epub3.epub",
+        head: "Alice's Adventures in Wonderland\nLewis Carroll",
         warns: BASE_WARNS,
         diverges: &[],
     },
     Book {
         file: "frankenstein-epub3.epub",
+        head: "Frankenstein; or, The modern Prometheus\nMary Wollstonecraft Shelley",
         warns: BASE_WARNS,
         diverges: &[],
     },
     Book {
         file: "pride-and-prejudice-epub2.epub",
+        head: "Pride and Prejudice\nJane Austen",
         warns: TABLE_WARNS,
         diverges: &[Divergence {
             ours: &["house", "156", "charing"],
@@ -92,6 +99,14 @@ fn strip_header(text: &str) -> &str {
         Some(i) if !text.starts_with('\n') => &text[i + 2..],
         _ => text,
     }
+}
+
+/// The head that `strip_header` drops (empty when there is none); each
+/// book's must equal its pinned `head`, so a garbled or extra head line
+/// fails instead of vanishing from the comparison.
+fn head(text: &str) -> &str {
+    let body = strip_header(text);
+    text[..text.len() - body.len()].trim_end_matches('\n')
 }
 
 /// Our text without the lines that stand for a chapter that could not be
@@ -150,9 +165,11 @@ struct Hunk {
 /// after a divergence (a single equal word is chance: "the").
 const RUN: usize = 8;
 
-/// How far either side may be ahead when looking for the next agreement.
-/// A divergence longer than this (a whole page of words only one side has)
-/// is `unresolved` and fails the book with the position, instead of the
+/// The most words, on both sides together, that a divergence may span
+/// when looking for the next agreement (a one-sided gap of up to this many
+/// words resolves; so do two gaps adding up to it). A divergence past it
+/// (a whole page of words that only one side has, or both sides replaced)
+/// is `unresolved`: it fails the book with the position instead of the
 /// search growing quadratic in the book's length.
 const WINDOW: usize = 2048;
 
@@ -357,6 +374,7 @@ fn books_convert_cleanly() {
             book.file
         );
         assert_eq!(warns, book.warns, "{}", book.file);
+        assert_eq!(head(&text), book.head, "{}", book.file);
         assert!(!our_words(&text).is_empty(), "{}", book.file);
     }
 }
@@ -397,6 +415,7 @@ fn books_match_pandoc_word_sequence() {
     for book in BOOKS {
         let work = tmp(book.file);
         let (text, _) = convert(book, &work.0);
+        assert_eq!(head(&text), book.head, "{}", book.file);
         // `--sandbox`: pandoc reads the book and nothing else.
         let o = Command::new("pandoc")
             .args(["--sandbox", "-f", "epub", "-t", "plain", "--wrap=none"])
@@ -454,6 +473,13 @@ mod cmp {
 
     fn w(s: &str) -> Vec<String> {
         words(s, false)
+    }
+
+    #[test]
+    fn head_is_what_strip_header_drops() {
+        assert_eq!(head("Title\nA, B\n\nbody\n"), "Title\nA, B");
+        assert_eq!(head("\nbody\n"), "");
+        assert_eq!(head("only one line"), "");
     }
 
     #[test]

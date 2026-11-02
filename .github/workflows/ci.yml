@@ -114,8 +114,9 @@ jobs:
       # The book tests check whole EPUBs with W3C EPUBCheck and pages with
       # the W3C Nu HTML validator (vnu), both Java, and compare the text
       # read from public-domain books with pandoc's (a static binary,
-      # used only by that test). Pinned versions,
-      # verified by SHA-256 and run through wrappers on PATH: EPUBCheck's
+      # used only by that test). Pinned versions, verified by SHA-256 and
+      # put on PATH (wrapper scripts for the Java tools, a symlink for
+      # pandoc): EPUBCheck's
       # GitHub release zip (the hash matches the digest GitHub publishes
       # for the asset) and vnu's npm package `vnu-jar` (a fixed version;
       # the hash is of the registry tarball, whose sha512 matches the
@@ -158,7 +159,8 @@ jobs:
           sudo chmod 755 /usr/local/bin/epubcheck /usr/local/bin/vnu
           epubcheck --version
           vnu --version
-          pandoc --version | head -1
+          pandoc --version >/dev/null
+          echo "pandoc $PANDOC_VERSION installed"
 
       - name: Test
         if: ${{ !cancelled() }}
