@@ -25,9 +25,6 @@
 //! `decode` turns the bytes into text (UTF-8, or UTF-16 with a byte order
 //! mark) and checks the declared encoding; `Reader` reads the text.
 
-// The HTML5 table still lives with the Markdown reader; it moves here
-// once that reader looks names up through `entity`.
-#[path = "../../doc/src/md/entities.rs"]
 mod entities;
 #[cfg(test)]
 mod tests;

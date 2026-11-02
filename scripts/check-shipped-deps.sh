@@ -14,12 +14,14 @@ for pkg in $SHIPPED; do
     for name in $names; do
         case "$pkg:$name" in
             # The engine binary must stay free of the document model.
-            inacircle:doc|inacircle:epub|inacircle:zip|inacircle:flate|inacircle:probe|inacircle:pdf) echo "$pkg: disallowed dependency: $name"; bad=1 ;;
+            inacircle:doc|inacircle:epub|inacircle:zip|inacircle:flate|inacircle:probe|inacircle:pdf|inacircle:xml) echo "$pkg: disallowed dependency: $name"; bad=1 ;;
             *:inacircle|*:inacircle-*|*:manifest|*:doc|*:action|*:engine|*:libc) ;;
             # The pages family's own libc-only readers and writer.
             *:zip|*:flate|*:probe|*:pdf) ;;
             # The text family's EPUB packer (doc and zip only).
             *:epub) ;;
+            # The XML reader (no dependencies), which doc uses.
+            *:xml) ;;
             # Notifications: our own libc-only D-Bus client.
             inacircle:dbus) ;;
             # Our own libc-only Wayland client.
