@@ -95,6 +95,19 @@ fn fix_crcs(b: &mut [u8]) -> Option<()> {
     Some(())
 }
 
+/// The largest uncompressed size (APPNOTE 4.3.12, +24) any central
+/// directory record in `b` declares, at every `PK\x01\x02` signature
+/// whatever end record locates it: every record the ZIP reader accepts is
+/// among them, the package document's too. One pass over the input.
+fn max_declared(b: &[u8]) -> u64 {
+    b.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"PK\x01\x02")
+        .filter_map(|(at, _)| le32(b, at + 24))
+        .max()
+        .unwrap_or(0) as u64
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut data = data.to_vec();
     let _ = fix_crcs(&mut data);
@@ -115,11 +128,14 @@ fuzz_target!(|data: &[u8]| {
             assert!(it.media_type.len() <= MAX_MEDIA_TYPE + 3);
         }
         // Work: each item's href and media type once. They are parts of the
-        // package document, at most `package_bytes`, 1.5 x that once a
-        // UTF-16 document is decoded to UTF-8.
+        // package document as it was read: at most its declared size (and
+        // `package_bytes`), 1.5 x that once a UTF-16 document is decoded to
+        // UTF-8. Resolving per itemref instead exceeds it as soon as a
+        // long href is named a few times.
+        let package = max_declared(&data).min(LIMITS.package_bytes);
         assert!(
-            book.steps() <= LIMITS.package_bytes * 3 / 2,
-            "{} steps",
+            book.steps() <= package * 3 / 2,
+            "{} steps, package at most {package} B",
             book.steps()
         );
         let mut out = Vec::new();
