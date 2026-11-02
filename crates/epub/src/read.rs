@@ -14,9 +14,20 @@
 //!
 //! Paths: an `href` is relative to the package document's folder, its
 //! `#fragment` cut, `%XX` decoded and normalized lexically; entry names
-//! are matched exactly (case-sensitive), as the ZIP holds them.
+//! are matched exactly (case-sensitive), as the ZIP holds them. An href
+//! with a URL scheme, an absolute one, or one that climbs above the
+//! container root is outside the book and never looked up.
+//!
+//! DRM: `META-INF/encryption.xml` lists the encrypted resources
+//! (`EncryptedData`, its `EncryptionMethod` and `CipherReference URI`,
+//! relative to the container root). Font obfuscation (the IDPF and Adobe
+//! algorithms) is not encryption and is ignored; any other method, or none
+//! stated, is. A ZIP entry with an encryption flag is encrypted too. When
+//! every XHTML spine item that is in the book is encrypted, the book is
+//! DRM-protected; when only some are, those items fail alone. `rights.xml`
+//! decides nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io;
@@ -74,6 +85,14 @@ const SVG_TYPE: &str = "image/svg+xml";
 /// Dublin Core elements, the namespace of `dc:title` and `dc:creator`.
 const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
 const CONTAINER: &str = "META-INF/container.xml";
+const ENCRYPTION: &str = "META-INF/encryption.xml";
+/// Font obfuscation algorithms (OCF's IDPF obfuscation and Adobe's): a
+/// font scrambled with the book's identifier, not a cipher; a resource
+/// they name is read as it is.
+const OBFUSCATION: [&str; 2] = [
+    "http://www.idpf.org/2008/embedding",
+    "http://ns.adobe.com/pdf/enc#RC",
+];
 
 /// The reader's own budgets. [`Limits::DEFAULT`] is what [`open`] uses;
 /// smaller ones are for the fuzz target, which reaches them at speed.
@@ -84,7 +103,8 @@ pub struct Limits {
     pub chapter_bytes: u64,
     /// Largest sum of the chapters read, each time it is in the spine.
     pub book_bytes: u64,
-    /// Largest `container.xml` or package document, uncompressed.
+    /// Largest `container.xml`, package document or `encryption.xml`,
+    /// uncompressed.
     pub package_bytes: u64,
     /// Most XML events (elements and text runs) one package file may have.
     pub package_nodes: usize,
@@ -253,26 +273,50 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
     let bytes = read_package(&archive, at, &limits)?;
     let pkg = parse_package(&bytes, &opf_path, &limits)?;
     drop(bytes);
+    let encrypted = match names.get(ENCRYPTION.as_bytes()) {
+        None => HashSet::new(),
+        Some(&at) => parse_encryption(&read_package(&archive, at, &limits)?, &limits)?,
+    };
 
     let base = opf_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut chapters = Vec::with_capacity(pkg.spine.len());
     let mut slots = Vec::with_capacity(pkg.spine.len());
     let mut total: u64 = 0;
+    // XHTML items in the book: encrypted ones, and ones that are not.
+    let (mut locked, mut unlocked) = (0usize, 0usize);
     for (k, (idref, linear)) in pkg.spine.iter().enumerate() {
-        let (path, media_type, slot) = match pkg.manifest.get(idref.as_str()) {
-            None => (
-                String::new(),
-                String::new(),
-                Slot::Fail(ChapterError::Missing),
-            ),
-            Some((href, media_type)) => {
-                let path = resolve(base, href);
-                let slot = match names.get(path.as_bytes()) {
-                    None => Slot::Fail(ChapterError::Missing),
-                    Some(&i) => classify(&archive.entries()[i], i, media_type, &limits),
-                };
-                (path, media_type.clone(), slot)
-            }
+        let Some((href, media_type)) = pkg.manifest.get(idref.as_str()) else {
+            chapters.push(ChapterRef {
+                index: k + 1,
+                path: String::new(),
+                media_type: String::new(),
+                linear: *linear,
+            });
+            slots.push(Slot::Fail(ChapterError::Missing));
+            continue;
+        };
+        let (path, slot) = match resolve(base, href) {
+            None => (href.clone(), Slot::Fail(ChapterError::OutsideTheBook)),
+            Some(path) => match names.get(path.as_bytes()) {
+                None => (path, Slot::Fail(ChapterError::Missing)),
+                Some(&i) => {
+                    let entry = &archive.entries()[i];
+                    let is_locked = entry.encrypted || encrypted.contains(&path);
+                    if media_type == XHTML_TYPE {
+                        *(if is_locked {
+                            &mut locked
+                        } else {
+                            &mut unlocked
+                        }) += 1;
+                    }
+                    let slot = if is_locked {
+                        Slot::Fail(ChapterError::Encrypted)
+                    } else {
+                        classify(entry, i, media_type, &limits)
+                    };
+                    (path, slot)
+                }
+            },
         };
         if let Slot::Chapter(i) = slot {
             total = total.saturating_add(archive.entries()[i].size);
@@ -280,10 +324,14 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
         chapters.push(ChapterRef {
             index: k + 1,
             path,
-            media_type,
+            media_type: media_type.clone(),
             linear: *linear,
         });
         slots.push(slot);
+    }
+    // Every XHTML item in the book is encrypted (at least one is).
+    if locked > 0 && unlocked == 0 {
+        return Err(BookError::DrmProtected);
     }
     if total > limits.book_bytes {
         return Err(BookError::TooLarge);
@@ -578,13 +626,79 @@ fn escapes(path: &str) -> bool {
 }
 
 /// The entry name `href` (relative to the folder `base`) names: fragment
-/// cut, `%XX` decoded, normalized.
-fn resolve(base: &str, href: &str) -> String {
+/// cut, `%XX` decoded, normalized; `None` when it is outside the book (a
+/// URL scheme, an absolute path, or above the container root, also when
+/// that is only seen once decoded).
+fn resolve(base: &str, href: &str) -> Option<String> {
     let href = href.split_once('#').map_or(href, |(p, _)| p);
+    if has_scheme(href) || href.starts_with('/') {
+        return None;
+    }
     let decoded = percent_decode(href);
-    if base.is_empty() {
+    let path = if base.is_empty() {
         normalize(&decoded)
     } else {
         normalize(&format!("{base}/{decoded}"))
-    }
+    };
+    (!escapes(&path)).then_some(path)
+}
+
+/// `href` starts with a URL scheme (RFC 3986: a letter, then letters,
+/// digits, `+`, `-` or `.`, then `:`).
+fn has_scheme(href: &str) -> bool {
+    let Some((scheme, _)) = href.split_once(':') else {
+        return false;
+    };
+    let mut c = scheme.bytes();
+    c.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && c.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// The entries `encryption.xml` marks encrypted with a real cipher. Only
+/// an `EncryptionMethod` and a `CipherData` that are direct children of an
+/// `EncryptedData` count (an `EncryptedKey` inside its `KeyInfo` has its
+/// own). An `EncryptedData` that states no method is encrypted (fail
+/// closed); a URI outside the book names nothing in it.
+fn parse_encryption(bytes: &[u8], limits: &Limits) -> Result<HashSet<String>, BookError> {
+    let text = decode(bytes, ENCRYPTION)?;
+    let mut out = HashSet::new();
+    // Per open EncryptedData: its depth, its method, its URIs.
+    let mut data: Vec<(usize, Option<String>, Vec<String>)> = Vec::new();
+    walk(&text, ENCRYPTION, limits, |open, ev| match ev {
+        Event::Start(e) => {
+            let depth = open.len();
+            match e.name.local {
+                "EncryptedData" => data.push((depth, None, Vec::new())),
+                "EncryptionMethod" => {
+                    if let Some(d) = data.last_mut()
+                        && d.0 + 1 == depth
+                    {
+                        d.1 = Some(e.attr(None, "Algorithm").unwrap_or("").trim().to_string());
+                    }
+                }
+                "CipherReference" => {
+                    if let Some(d) = data.last_mut()
+                        && d.0 + 2 == depth
+                        && open[depth - 2] == "CipherData"
+                        && let Some(uri) = e.attr(None, "URI")
+                        && let Some(path) = resolve("", uri.trim())
+                    {
+                        d.2.push(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Event::End(name) => {
+            if name.local == "EncryptedData"
+                && data.last().is_some_and(|d| d.0 == open.len())
+                && let Some((_, method, uris)) = data.pop()
+                && !method.is_some_and(|m| OBFUSCATION.contains(&m.as_str()))
+            {
+                out.extend(uris);
+            }
+        }
+        Event::Text(_) => {}
+    })?;
+    Ok(out)
 }

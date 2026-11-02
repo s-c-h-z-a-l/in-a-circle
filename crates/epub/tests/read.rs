@@ -793,3 +793,222 @@ fn open_is_linear_in_the_spine() {
     assert_eq!(book.chapters.len(), n);
     assert!(t.elapsed().as_secs_f64() < 2.0, "{:?}", t.elapsed());
 }
+
+#[test]
+fn href_escaping_the_container_is_outside() {
+    let hrefs = [
+        "../../x.xhtml",
+        "../%2E%2E/x.xhtml",
+        "/abs.xhtml",
+        "%2F..%2F..%2Fx.xhtml",
+        "http://example.com/c.xhtml",
+        "file:///etc/passwd",
+        "mailto:a@b",
+        "../in-root.xhtml",
+    ];
+    let manifest: String = hrefs
+        .iter()
+        .enumerate()
+        .map(|(i, h)| item(&format!("i{i}"), h))
+        .collect();
+    let spine: String = (0..hrefs.len())
+        .map(|i| itemref(&format!("i{i}")))
+        .collect();
+    let opf = package("", &manifest, &spine);
+    let cont = container("OEBPS/content.opf");
+    let inside = xhtml("root");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("OEBPS/content.opf", opf.as_bytes(), Stored),
+        ("in-root.xhtml", &inside, Stored),
+        // Entries with the names an escaping path would normalize to must
+        // not be found through it.
+        ("x.xhtml", &inside, Stored),
+        ("abs.xhtml", &inside, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    for (i, h) in hrefs.iter().enumerate().take(7) {
+        assert_eq!(all[i], Err(ChapterError::OutsideTheBook), "{h}");
+        // The path is the href as written: there is no entry to name.
+        assert_eq!(book.chapters[i].path, *h);
+    }
+    // `..` from OEBPS/ to the root stays inside the container.
+    assert_eq!(book.chapters[7].path, "in-root.xhtml");
+    assert_eq!(all[7].as_ref().unwrap(), &inside);
+    assert_eq!(ChapterError::OutsideTheBook.reason(), "outside the book");
+
+    // A package path that leaves the container is no package.
+    let cont = container("../content.opf");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+    ]);
+    assert!(matches!(err(open(&f)), BookError::NoPackage));
+}
+
+const AES: &str = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
+const IDPF: &str = "http://www.idpf.org/2008/embedding";
+const ADOBE: &str = "http://ns.adobe.com/pdf/enc#RC";
+
+/// `META-INF/encryption.xml` listing `(algorithm, uri)` pairs, each in an
+/// `EncryptedData` with a key whose own `EncryptionMethod` is RSA (it must
+/// not be taken for the data's).
+fn encryption(list: &[(&str, &str)]) -> String {
+    let data: String = list
+        .iter()
+        .map(|(alg, uri)| {
+            format!(
+                r#"<enc:EncryptedData>
+  <enc:EncryptionMethod Algorithm="{alg}"/>
+  <ds:KeyInfo><enc:EncryptedKey>
+    <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#rsa-1_5"/>
+    <enc:CipherData><enc:CipherValue>AAAA</enc:CipherValue></enc:CipherData>
+  </enc:EncryptedKey></ds:KeyInfo>
+  <enc:CipherData><enc:CipherReference URI="{uri}"/></enc:CipherData>
+</enc:EncryptedData>"#
+            )
+        })
+        .collect();
+    format!(
+        r#"<?xml version="1.0"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
+  xmlns:enc="http://www.w3.org/2001/04/xmlenc#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">{data}</encryption>"#
+    )
+}
+
+/// A book of two chapters (`OEBPS/a.xhtml`, `OEBPS/b.xhtml`), an SVG page
+/// and a font, with this `encryption.xml` (if any).
+fn encrypted_book(enc: Option<&str>) -> Vec<u8> {
+    encrypted_book_with(enc, &[])
+}
+
+fn encrypted_book_with(enc: Option<&str>, extra: &[(&str, &[u8], Store)]) -> Vec<u8> {
+    let manifest = [
+        item("a", "a.xhtml"),
+        item("b", "b.xhtml"),
+        r#"<item id="s" href="s.svg" media-type="image/svg+xml"/>"#.to_string(),
+        r#"<item id="f" href="f.otf" media-type="font/otf"/>"#.to_string(),
+    ]
+    .concat();
+    let spine = [itemref("s"), itemref("a"), itemref("b")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("OEBPS/content.opf");
+    let (a, b) = (xhtml("a"), xhtml("b"));
+    let mut entries: Vec<(&str, &[u8], Store)> = vec![
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("OEBPS/content.opf", opf.as_bytes(), Stored),
+        ("OEBPS/a.xhtml", &a, Stored),
+        ("OEBPS/b.xhtml", &b, Stored),
+        (
+            "OEBPS/s.svg",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            Stored,
+        ),
+        ("OEBPS/f.otf", b"OTTO", Stored),
+    ];
+    if let Some(enc) = enc {
+        entries.push(("META-INF/encryption.xml", enc.as_bytes(), Stored));
+    }
+    entries.extend_from_slice(extra);
+    zip_bytes(&entries)
+}
+
+#[test]
+fn font_obfuscation_is_not_drm() {
+    for alg in [IDPF, ADOBE] {
+        // The font obfuscated, and (oddly) a chapter: obfuscation is not
+        // encryption, the chapter is read as it is.
+        let enc = encryption(&[(alg, "OEBPS/f.otf"), (alg, "OEBPS/a.xhtml")]);
+        let f = file_of(&encrypted_book(Some(&enc)));
+        let book = open(&f).unwrap();
+        let all = read_all(&book);
+        assert_eq!(all[1].as_ref().unwrap(), &xhtml("a"), "{alg}");
+        assert_eq!(all[2].as_ref().unwrap(), &xhtml("b"), "{alg}");
+    }
+    // A real cipher on a resource that is not a chapter: no chapter fails.
+    let enc = encryption(&[(AES, "OEBPS/f.otf")]);
+    let f = file_of(&encrypted_book(Some(&enc)));
+    let book = open(&f).unwrap();
+    assert!(read_all(&book).iter().all(Result::is_ok));
+}
+
+#[test]
+fn all_chapters_encrypted_is_drm() {
+    // Both XHTML chapters encrypted; the SVG page is not, but it is no
+    // readable chapter. The URIs are relative to the container root, one
+    // percent-encoded.
+    let enc = encryption(&[(AES, "OEBPS/a.xhtml"), (AES, "OEBPS/%62.xhtml")]);
+    let e = err(open(&file_of(&encrypted_book(Some(&enc)))));
+    assert!(matches!(e, BookError::DrmProtected));
+    assert_eq!(e.to_string(), "book is DRM-protected");
+    // An EncryptedData with no method at all is encrypted (fail closed).
+    let enc = encryption(&[(AES, "OEBPS/a.xhtml"), (AES, "OEBPS/b.xhtml")]).replacen(
+        &format!(r#"<enc:EncryptionMethod Algorithm="{AES}"/>"#),
+        "",
+        1,
+    );
+    assert!(matches!(
+        err(open(&file_of(&encrypted_book(Some(&enc))))),
+        BookError::DrmProtected
+    ));
+    // A `rights.xml` alone decides nothing.
+    let rights: &[(&str, &[u8], Store)] = &[("META-INF/rights.xml", b"<rights/>", Stored)];
+    let f = file_of(&encrypted_book_with(None, rights));
+    assert!(read_all(&open(&f).unwrap()).iter().all(Result::is_ok));
+}
+
+#[test]
+fn some_chapters_encrypted() {
+    let enc = encryption(&[(AES, "OEBPS/b.xhtml")]);
+    let f = file_of(&encrypted_book(Some(&enc)));
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[0], Ok(Vec::new()));
+    assert_eq!(all[1].as_ref().unwrap(), &xhtml("a"));
+    assert_eq!(all[2], Err(ChapterError::Encrypted));
+    assert_eq!(ChapterError::Encrypted.reason(), "encrypted");
+}
+
+#[test]
+fn encryption_file_is_part_of_the_skeleton() {
+    // Not well-formed: the book fails, naming the file.
+    let f = file_of(&encrypted_book(Some("<encryption>")));
+    let e = err(open(&f));
+    assert!(
+        e.to_string().ends_with(" in META-INF/encryption.xml)"),
+        "{e}"
+    );
+    // Over 8 MiB.
+    let big = format!("{}<!--{}-->", encryption(&[]), "x".repeat(8 * 1024 * 1024));
+    let f = file_of(&encrypted_book(Some(&big)));
+    assert!(matches!(err(open(&f)), BookError::PackageTooLarge));
+}
+
+/// Sets the traditional-encryption flag of entry `name` in both headers.
+fn zip_encrypt(z: &mut [u8], name: &str) {
+    let (local, central) = headers(z, name);
+    z[local + 6] |= 1;
+    z[central + 8] |= 1;
+}
+
+#[test]
+fn zip_encrypted_entry_counts_as_encrypted() {
+    let mut z = encrypted_book(None);
+    zip_encrypt(&mut z, "OEBPS/a.xhtml");
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[1], Err(ChapterError::Encrypted));
+    assert_eq!(all[2].as_ref().unwrap(), &xhtml("b"));
+    // Both: the book is DRM-protected.
+    zip_encrypt(&mut z, "OEBPS/b.xhtml");
+    assert!(matches!(err(open(&file_of(&z))), BookError::DrmProtected));
+    // An encrypted skeleton file is damage, not DRM.
+    let mut z = encrypted_book(None);
+    zip_encrypt(&mut z, "OEBPS/content.opf");
+    assert_eq!(
+        err(open(&file_of(&z))).to_string(),
+        "damaged EPUB: the entry is encrypted"
+    );
+}

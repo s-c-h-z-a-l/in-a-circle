@@ -236,7 +236,7 @@ never lets the data exceed) and named when it is hit.
 | entries | 12,000 | the CBZ reader's value, so both archive readers accept the same archives; about 200 B per record, 2.4 MB at the limit; `damaged EPUB: too many entries` |
 | ratio | 1032 | the most a deflate stream can reach, the CBZ reader's value; a header claiming more is refused before anything is inflated; `damaged EPUB: an entry's compression ratio is too high` |
 | name | 512 B | the CBZ reader's value; `damaged EPUB: an entry name is too long` |
-| skeleton file | 8 MiB, 524,288 XML events | `container.xml` and the package document each, at most the text family's input and node budgets; a real package is tens of KiB; `not an EPUB (package document too large)` |
+| skeleton file | 8 MiB, 524,288 XML events | `container.xml`, the package document and `encryption.xml` each, at most the text family's input and node budgets; a real package is tens of KiB; `not an EPUB (package document too large)` |
 | XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
 | chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); about 500 B each; `book has more than 10000 chapters` |
 | chapter | 8 MiB | uncompressed, the text family's input limit; only that chapter fails, `too large`, the rest of the book reads |
@@ -250,7 +250,8 @@ entries of the same name, the limits above), no `META-INF/container.xml`
 package at its path (`not an EPUB (no package document)`), a skeleton file
 over its limit or not well-formed (`not an EPUB (<XML error> in <path>)`)
 or unreadable (`damaged EPUB: <reason>`), no spine or an empty one (`book
-has no spine`), too many chapters, and a book over 64 MiB. Everything
+has no spine`), too many chapters, a book over 64 MiB, and a book whose
+every XHTML chapter is encrypted (`book is DRM-protected`). Everything
 else fails only the chapter it concerns.
 
 ### The machine side
