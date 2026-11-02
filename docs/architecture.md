@@ -202,8 +202,9 @@ are in `CLAUDE.md`.
   (CommonMark plus tables, strikethrough, task lists and extended
   autolinks). The action writes GFM tables as aligned columns in a full
   line of 80 characters (the prefix of an enclosing list or quote
-  counts): two spaces between columns, a row of dashes under the header,
-  the column alignment kept as padding. When the table is wider, the widest
+  counts): two spaces between columns, a row of dashes under the header
+  (a header whose cells are all empty is left out with its dashes), the
+  column alignment kept as padding. When the table is wider, the widest
   columns give up width one character at a time, none below 10 (a column that is
   narrower stays as it is) and a cell wraps inside its column, at spaces, a
   longer word at a character boundary. If the minimums and gaps do not fit the

@@ -482,9 +482,13 @@ impl Writer {
     }
 
     /// The table as aligned columns: the header, a row of dashes, the rows.
+    /// A header whose cells are all empty (a table that has none, as a
+    /// book's often has not) is left out with its dashes: it would be an
+    /// empty line over a rule that heads nothing.
     fn aligned_table(&mut self, align: &[Align], widths: &[usize], grid: &[Vec<String>]) -> String {
         let mut out = String::new();
         let mut first = true;
+        let headless = grid[0].iter().all(String::is_empty);
         let line = |w: &mut Self, out: &mut String, pieces: &[(&str, usize, Align)]| {
             // Trailing empty columns are left out, and the last column
             // written has no right padding: no padding at the end of a line (a cell's
@@ -510,6 +514,9 @@ impl Writer {
             }
         };
         for (r, row) in grid.iter().enumerate() {
+            if r == 0 && headless {
+                continue;
+            }
             let wrapped: Vec<Vec<&str>> = row
                 .iter()
                 .enumerate()
@@ -1363,6 +1370,22 @@ mod tests {
              abcdef  z\n"
         );
         assert!(l.is_empty(), "{l:?}");
+    }
+
+    /// A header row whose cells are all empty (a book table without a
+    /// header) is left out with its row of dashes; the data rows keep
+    /// their alignment, the column widths still counting the empty header.
+    #[test]
+    fn all_empty_header_row_is_omitted() {
+        let (s, l) = gfm_txt("|  |  |\n|--|--:|\n| apple | 3 |\n| fig | 12345 |\n");
+        assert_eq!(s, "apple      3\nfig    12345\n");
+        assert!(l.is_empty(), "{l:?}");
+        // One non-empty header cell keeps the header and its dashes.
+        let (s, _) = gfm_txt("|  | n |\n|--|--:|\n| apple | 3 |\n");
+        assert_eq!(s, "         n\n-----  ---\napple    3\n");
+        // An all-empty header with no rows writes nothing.
+        let (s, _) = gfm_txt("|  |  |\n|--|--|\n");
+        assert_eq!(s, "");
     }
 
     #[test]
