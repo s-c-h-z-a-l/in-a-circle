@@ -61,6 +61,9 @@ const HAND: &[&str] = &[
     "<!DOCTYPE a [ <!ATTLIST a v CDATA \"]>\"> <!-- ]> --> ]><a/>",
     "<!DOCTYPE a SYSTEM \"file:///etc/passwd\"><a/>",
     "<!DOCTYPE a [ <!ENTITY e \"x\"> ]><a>&e;</a>",
+    "\u{FEFF}<a/>",
+    "\u{FEFF}\u{FEFF}<a/>",
+    "<a\r\nb='1'\r\nb='2'/>",
 ];
 
 /// libxml2's verdict: `Ok` if well-formed, else its first message.

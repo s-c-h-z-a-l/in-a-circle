@@ -289,7 +289,7 @@ are in `CLAUDE.md`.
   `xml::decode` takes UTF-8 (with or without a byte order mark, borrowed)
   or UTF-16 with a byte order mark (copied); any other declared encoding
   is `unsupported encoding <name>`, a declaration that contradicts the
-  bytes or invalid UTF-8/16 is not well-formed. `Reader::next` returns
+  bytes, invalid UTF-8/16 or a second byte order mark is not well-formed. `Reader::next` returns
   start tags (namespace URIs resolved, declarations applied, not listed),
   end tags and text (CDATA, references and line-end normalization
   included); an empty element is a start and an end. It never loads

@@ -813,3 +813,35 @@ fn long_namespace_name_is_linear() {
         ));
     }
 }
+
+/// `decode`, then the reader to the end.
+fn read_bytes(b: &[u8]) -> Result<(), Error> {
+    let t = decode(b)?;
+    events(&t, opts()).map(drop)
+}
+
+#[test]
+fn doubled_byte_order_mark_is_not_well_formed() {
+    // U+FEFF is not allowed before the root: one byte order mark is
+    // removed, never two (by decode and the reader each).
+    let utf16 = |s: &str| -> Vec<u8> {
+        [0xFF, 0xFE, 0xFF, 0xFE]
+            .into_iter()
+            .chain(s.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    };
+    for b in [
+        b"\xEF\xBB\xBF\xEF\xBB\xBF<a/>".to_vec(),
+        // The declaration behind the second mark is not skipped past the
+        // encoding check either.
+        b"\xEF\xBB\xBF\xEF\xBB\xBF<?xml version='1.0' encoding='windows-1250'?><a/>".to_vec(),
+        utf16("<a/>"),
+    ] {
+        let e = read_bytes(&b).unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::NotWellFormed(_)), "{e:?}");
+    }
+    // The reader alone removes one, too.
+    assert_eq!(not_wf("\u{FEFF}\u{FEFF}<a/>"), 1);
+    // One mark is fine.
+    assert!(read_bytes(b"\xEF\xBB\xBF<a/>").is_ok());
+}

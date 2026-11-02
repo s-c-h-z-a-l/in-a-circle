@@ -180,8 +180,9 @@ pub enum Event<'a> {
 /// order mark; borrowed) or UTF-16 with a byte order mark (copied). A
 /// declared encoding other than UTF-8 or UTF-16 is
 /// `ErrorKind::UnsupportedEncoding`; a declaration that contradicts the
-/// bytes, invalid UTF-8 or UTF-16, or UTF-16 without a byte order mark is
-/// not well-formed.
+/// bytes, invalid UTF-8 or UTF-16, UTF-16 without a byte order mark, or a
+/// second byte order mark is not well-formed. The text returned starts
+/// after the byte order mark.
 pub fn decode(bytes: &[u8]) -> Result<Cow<'_, str>, Error> {
     let (text, utf16): (Cow<'_, str>, Option<&str>) =
         if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
@@ -204,6 +205,16 @@ pub fn decode(bytes: &[u8]) -> Result<Cow<'_, str>, Error> {
         } else {
             (Cow::Borrowed(utf8(bytes)?), None)
         };
+    // The text starts after the byte order mark, so the reader (which
+    // removes one it is given, for text that did not come from here) must
+    // not find a second: U+FEFF is not allowed before the root, and the
+    // declaration behind it would escape the encoding check below.
+    if text.starts_with('\u{FEFF}') {
+        return Err(Error {
+            kind: ErrorKind::NotWellFormed("a second byte order mark"),
+            line: 1,
+        });
+    }
     let decl = xml_decl(&text).map_err(|(what, at)| Error {
         kind: ErrorKind::NotWellFormed(what),
         line: line_of(&text, at),
