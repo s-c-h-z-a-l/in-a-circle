@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root LEMENT c ANY>
+]>
+<root><a/>=<b>
+   <c></c > : End tag wa>&#0;</ith a space inside
+   content of b element
+</b><oro42 *-->
+

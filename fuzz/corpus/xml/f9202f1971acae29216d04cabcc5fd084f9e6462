@@ -1,0 +1,7 @@
+<?xml  version="1.0"?>
+<!-- validity test forÿProduction 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT a EMPTY>
+ <!ELEMENT b<<háml xmaÿÿ

@@ -1,0 +1,17 @@
+<a>&nbsp;Î¯<?xÿþml version="1.0" eÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿncoding="utf-8" stan!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+ÄÞº³º²º¨T leopard ANY>
+<!ELEMENT small a0;&#x8;&#1EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDA>TA version="1.0" eÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿncoding="utf-8" stan!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+ÄÞº³º²º¨T leopard!ANY>
+<!ELEMENT small a0;&#x8;&#1EMPTY>
+<!ELEMENT big EMP
+TY>
+<!ATTLIST tiger color CDA>TA #REQ†UIRED><
+a>]

@@ -1,0 +1,6 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ATTLIST y tr= '1.a.name.token.but.n <!ATTLIST z attr '1.a.name.token.but.not.a.name'></y>
+</r=ot>

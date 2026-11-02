@@ -1,0 +1,21 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>ûÃÞº³º²ºNT small E<a
+ x="1" y="2MPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT LEMT tiger colþÿ=orC DATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music ”Here is a PI" ?> 
+<animal>>
+   <cat/>
+   <tiger lncolor="white">This is a white tiger i#	/n Mirage!!</tiger>
+   <cat/>
+  <?muss:aic "Here is a PI" ?> 
+<animal>
+   ><cat/>
+   <t/>iger color="white"

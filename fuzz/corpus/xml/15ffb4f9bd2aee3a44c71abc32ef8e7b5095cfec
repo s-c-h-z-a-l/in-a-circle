@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root (c ANY>
+]>
+<root><a/><b>
+   <c></c > : End tag wi><a/><b>
+   <c></c > : End tag with a spath a space ins->
+

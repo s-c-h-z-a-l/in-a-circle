@@ -1,0 +1,11 @@
+ÿþ<ÿÿÿÿÿÿÿ3a="urn:1ญญญญญญญญญญญญญญญญญญญญญํญญญ!-- Above is XMLal [
+<?xml version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT<?xml  version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT student (#PCDATA)> 
+]>student (#PCDATA)> 
+]>
+<!--* Tests empty comment *-->
+<!---->
+<student>M

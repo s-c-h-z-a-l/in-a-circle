@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animel [
+<!ELEMENT animal (cat|tiger|lard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #RE2UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is« a PI" ?> 
+<anial>m
+   <cat/>
+   <tiger color= <metadata38="38 a7="x"/>
+

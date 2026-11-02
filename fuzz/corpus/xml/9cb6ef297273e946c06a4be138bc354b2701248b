@@ -1,0 +1,47 @@
+<a>,&Lt;<a><![CDATA[<b>LLLLLLLLLLLLLLLl ANY>
+<?Ó† an only leg<?al per 5th edition c<!EL?ME<N
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT catLLLLLLLLLLLLV ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white t&;iger in Mirage!!Ú„uot;</tige?>
+   <cat/>
+   <leopar<?xml  version<?xml  version="1.0"?>
+<!-- valid test for Production 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT one ANY>
+ <!ELEMENT two ANY>
+ <!Eion c<!EL?ME<N
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT catLLLLLLLLLLLLV ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is aLEMENT three ANY>
+ <!ELEMENT four ANY>
+ELEMENT four ANY>
+ <!ELEMENT five ANY>
+ <!NOTATION this SYSTEM "alpha">
+ <!NOTATION that SYSTEM "beta">
+ <!ATTLIST one attr NOTATION >
+ <!ATTLIST four attr NOTATION (that |this) #IMPLIED>
+ <!ATTLIST five attz NOTATION ( that ) #IMPLIED>
+ ]>
+ <test>
+T(this) #IMPLIED>
+ <!ATTLIST two attr NOTATION ( this) #IMPLhis is a positive test with different patterns for NOTATIONIED>
+ <!ATTLIST three attr NOTATÿÿÿÿÿÿÿ <!ELEMENT four ANY>
+ <a>&Lt;L<!ELEMENT five ANY>
+ <!NOTATIterns for NOTATIONIED>
+ <!ATTLIST three attr NOTATION (this|that) #IMPLIED>
+ <!ATTLIST four attr NOMATION (that |thoLL</aLLLLLLLLL±LLLLL'am<p;]]></tesve is elem>ent/ animala>t> 
+-->
+
+

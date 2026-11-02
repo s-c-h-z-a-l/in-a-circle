@@ -1,0 +1,14 @@
+<?xml  version="1.0"?>
+<!-- valid test for Productio<a>n 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tLEMENT t@o ANY>
+ <!ELEMENT thY>
+ <!ELEMENT four ANY>
+ <!ELEMENT five ANY>
+ <!NOTATION this S>
+ <!ATTLIST three attr NOTATION (this|that) TATION ( that ) #IMPLIED>
+ ]>
+ <tes<a>&t>@
+This is a prns for NOTATION
+</test>

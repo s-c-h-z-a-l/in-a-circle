@@ -1,0 +1,16 @@
+<a>,&Lt;<a><![CDATA[<b>LLLLLLLLLÖLLLLLLl ANY>
+<?Ó† an only leg<?al per 5th edition c<!ELEME<N
+<?xml version="1.0" encoding="utf-8" standalone= e?>s"y"
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATT0LIST tiger color CDNÿÿÿ#REQUIRED>
+]>
+<!-- Ab #REQUove itle></head><body><section epub</anLLLLLLLLimal>
+<!--LLLLLL AboLL</aLLLLLLLLor Production 58-e is elem>ent/ animala> -->
+

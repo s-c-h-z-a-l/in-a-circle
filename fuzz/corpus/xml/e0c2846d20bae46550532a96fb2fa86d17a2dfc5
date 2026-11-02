@@ -1,0 +1,10 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT rDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x !DOCTYPE root
+ [
+ <!ELEMENT root (root>

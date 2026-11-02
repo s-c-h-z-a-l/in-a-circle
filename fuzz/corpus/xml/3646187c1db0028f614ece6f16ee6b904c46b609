@@ -1,0 +1,16 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesj) "a"> 
+ <!ATTLIST nametoken namewalue NMTOKEN "hello">
+  ]>
+<test>
+The def<i><a>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿault est>
+The default value specified for an attribute meeÿz tèe 
+lexical constraints of the declared attNMTOKEN "hello">
+  ]>
+<test>
+Thevalue specifiÿÿÿÿÿÿÿ,ed ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<i>aÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ`ÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xRmlns:p=""/>ÿÿÿÿthe /test>
+

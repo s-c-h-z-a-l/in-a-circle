@@ -1,0 +1,13 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc TY>
+<!ATTLIST a>
+<!ATTLIST b >
+<!ATTLIST c att CDATA #IMPLIED>
+<!ATTLIST d STñc att CDATA
+ #IMPLIED
+att2
+ CDATA
+ "second declaration is OK"
+aƒƒƒƒƒƒxmlns:p="]>
+<doc><c/><c att2="test"/></doc>

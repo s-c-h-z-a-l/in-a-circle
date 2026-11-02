@@ -1,0 +1,6 @@
+<?xml  version="1.0"?>
+<!-- valid test for Production 13-->
+<!DOCTYPE st
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT SYSTEM "/test>

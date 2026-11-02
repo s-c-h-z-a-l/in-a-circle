@@ -1,0 +1,19 @@
+<!DOCTYPE doc
+[
+<!ELEMENT PTY>
+<!ELEMENT b EMPTY>
+<!ELEMENT c EMPTY>
+<!ELEMENT d EMPTY>
+<!ATTLIST att CDATA
+ #IMPLIED
+att2
+ CDATA
+ "second declaration is OK"
+$tt2 CDATA
+ #REQUIRED
+ >
+<!ATTLIST d>
+]>
+<doc><c/><c att2="test"/></doc><doc>
+<!TA [  ]]>
+</doc>

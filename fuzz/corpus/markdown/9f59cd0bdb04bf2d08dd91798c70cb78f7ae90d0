@@ -1,0 +1,5 @@
+[foo]
+
+[foo]][foo]]
+
+[foo]: /foo "f&ouml;&oumml;&ouMl"

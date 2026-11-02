@@ -1,0 +1,15 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT a EMoken namevalue NMTOKEN "hello2>
+  ]><!DOCTYPE a [<!E<!--Y % pe "x">]><a/> for an attribute <!ELEMENT a EMPTY>
+ <!ELEMENT b EMPTY>
+ <!ELEMENT attr EMPTY>
+ <!ELEMENT nametoken EMPTY>
+ <!ATTLIST attr value (a|b) "a"> 
+ <!ATTLIST nametoken namevalue NMTOKEN "hello2>
+  ]><!DOCTYPE a [<!E<!--Y % pe "x">]><a/> for an attribute meets ns{raints of the declared attribute type.
+</test>
+

@@ -1,0 +1,6 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc (#PCDATA|a|b|c|d)*>
+<!ELEMENT a EMPTY>
+<!ELEMENT b EMPTY>
+<!!DOCTYPE animal [tt CargeDATA ,#IMPLi

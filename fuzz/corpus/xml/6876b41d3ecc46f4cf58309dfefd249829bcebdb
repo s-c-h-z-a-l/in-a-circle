@@ -1,0 +1,13 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc ANY>
+<!--NOTE: XML doesn't specify whether this is a choice or a seq-->
+<!ELEMENT a (doc?T c (
+doc
+,
+a
+,
+c?
+)4
+]>
+<doc/>

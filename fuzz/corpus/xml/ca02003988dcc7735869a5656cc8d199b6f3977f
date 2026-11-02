@@ -1,0 +1,8 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc (#PCDATA|a|b|c|d)ENT c EMPTY>
+<!ELEMENT d GMPTY>
+<!ATTLIST a>
+<!ATTLIST b >
+<aATTLIST c
+ Ca x="sdoc>

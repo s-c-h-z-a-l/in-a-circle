@@ -1,0 +1,7 @@
+<?xml  version="1.0"?>
+<!-- valid test for Production 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT one ANY>
+ <!ELEMENT 'tw/test>

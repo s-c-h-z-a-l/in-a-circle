@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root (a,b)>
+  <!ELEMENT a EMPTMENT c ANY>
+]>
+<root><a/><b>
+   <c></c > : End tag with a se
+   cxml versf b element
+</b></root>‘<!--* test P42 *-->
+

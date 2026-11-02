@@ -1,0 +1,59 @@
+<?xml version="1. Above is XMLDecl -->
+<!DGCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST MLDecl -->
+<
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST M(LDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST MLDecl -->
+<
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST MLDecl -->
+<!DOCTYPE animal([
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!!DOCTYPE animal [
+<!ELEMENT animae (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT 
+]>
+<!-- Above isY>
+<!ATTLIST ti<1ger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is as a w&amp;&amp;&amp;&ap;&amp;&ampn Mirage!;&a!</tiger>
+   <cat/>
+   <leopard>
+      <small/>
+ mp;&amp;&amp;&amp;&amp;&amp;&   am

@@ -1,0 +1,11 @@
+<?xml  version="1.0"?>
+<!-- validity test <?˜for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT a MPTY>
+ <!ELEMENT attr EMPTY>
+ <!ELEMENT nametoken EMPTY>
+ <!ATTLIST attr value (a|b) "a"> 
+ <!ATTLIST nametoken namevalue NM
+

@@ -1,0 +1,7 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 6<!0-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT a EMPTY
+ <!ATTLIST namexxy

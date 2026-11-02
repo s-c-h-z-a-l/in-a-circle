@@ -1,0 +1,63 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#[
+<!E)>
+<!ELEMENT LEMENT big EltTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)></<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first CDATA #REQUIRED
+NT big EMPTY>
+<!ATTLIST tiger colo`r CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENTÜíá leopard AN¥Áòõ<!ELEMTE Nsmall EMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMP'Y>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first CDATA #REQUIRED
+		  la<?xm->
+<?music ”Here is a PI" ?>al  
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopŸ›ß¾±¦¹
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #Rst="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studu;><?env first CDATA #REQUIRED
+		  la<?xm->
+<?mu> 
+<animal>
+   <cat

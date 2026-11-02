@@ -1,0 +1,11 @@
+<!DOCTYPE animal [
+<!ELEMENT animal ANY>
+<?á„MENT root (a,b)>
+  <!ELEMENØT a EMPTY>
+  <!ELEMENT b (#PCDATA|c)* >
+  <!ELEMENT c ANY>
+]>ANY>
+<?á„M<dï¿root (a,b)>
+  <!EL@MENØT a EMPTY„„„„„41PITarget ?>
+]>
+<anidÁocma 

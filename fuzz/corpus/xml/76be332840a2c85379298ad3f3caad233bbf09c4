@@ -1,0 +1,16 @@
+<!DOCTYPE animal [
+<!ELEMENT animal ANY>
+<?á„MENT root (a,b)>
+  <!ELEMENØT a EMPTY>
+  <!ELEMENT b (#PCDATA|c)* >
+  <!ELEMENT c ANY>
+]> an onlY>
+<?á„MENT root (a,b)>
+  <!ELEMENØT a EMPTY>
+  <!ELEMENT b (#PCDATA|c)* >
+  <!ELEMENT c ANY>
+]> an only legal per 4th edit<!Dchar #x1141PITarget ?>
+]>
+<anidÁocma >
+<doc>&#ˆl/>»ÉÏÏÄÃÒdoc>
+

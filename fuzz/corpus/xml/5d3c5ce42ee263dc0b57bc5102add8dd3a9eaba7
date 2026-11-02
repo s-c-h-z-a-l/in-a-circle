@@ -1,0 +1,11 @@
+<!DOCTYPE animal [
+<!ELEMENT animal ANY>
+<?ᄁMENT root (a,b)>
+  <!ELEMENT a EMPTY>
+  <!ELEMENT b (#PCDATɃc)* >
+  <!ELEMENT c ANY>
+]> an only legal per 2th edit<!DOCTYP?>
+]>
+<anid�ocma >
+<doc>&#doc>
+

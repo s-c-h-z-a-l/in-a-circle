@@ -1,0 +1,7 @@
+<!DOCTYPE deeeeeeeeeeeeeeeeeeeeeeeeoc
+[
+<!ELEMENT doc (#PCDATA|a|b|c|d)*>
+<!ELEMENT a EMPTY>
+<!ELEMENT b EMPTY>
+<!ATTLISTêb >
+<!ATTLIST c att CargeDATA ,#IMPLi

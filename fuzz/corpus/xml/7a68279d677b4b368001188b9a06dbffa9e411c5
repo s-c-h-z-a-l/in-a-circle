@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE oot [
+<!ELEMENT root EMPTY>
+<!--* Wrong closing sequence in EmptyEelemTag *-->
+
+
+
+
+<!ELEMENT

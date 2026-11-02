@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above<html xmlns="http://www.w3.org/xxxxxxxxxxxxxxxxxxxxxxxxxxxx</rp></rp></r is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?musip></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></rp></r></rp></rp></rp></rp></rp>< is a /PIr

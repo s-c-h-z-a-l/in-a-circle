@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLD-?>
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopasd)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCSATA)>
+<!ELEMENT leopard g EMPTY>
+<!ATTLIST tiger color CDATA #REQUt/>
+   <tiger color="white2>-->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="whital -->
+

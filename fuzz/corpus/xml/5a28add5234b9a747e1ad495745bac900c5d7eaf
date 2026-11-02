@@ -1,0 +1,57 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>ìÃ!ATTLIST tiger colCr oDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+Y$PE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!E version="190" xmlBns="urn:oaXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX¨§.¥XXXXXXXXXXr>
+<!---->
+<student>LEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopŸ›ß¾±¦¹
+<!ELEMENT small EMPTY>
+<!ELEMENT big<?xmlOversion
+
+<!-
+<doc/>
+r CDATA #REQUIRED>
+]>
+<!-- Above is DTDTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!iger>
+   <cat/>
+  <?music "Here is a PI" ?> 
+</nimal>
+   <cat/>
+   <tiger color="whitELEMENT small EMPTY>
+<!ELEMENT big E->
+Yhis is a white tiger in Mirage!!</tiger>
+   <cat/>
+   l’š‘t animal -->
+
