@@ -118,6 +118,7 @@ fn warnings(done: &Converted) -> Vec<String> {
         lines.push(format!("{} chapter(s) could not be read", done.unread));
     }
     lines.extend(done.losses.iter().map(|l| l.message().to_string()));
+    debug_assert!(lines.len() <= MAX_WARN, "{} warn lines", lines.len());
     lines
 }
 
