@@ -678,6 +678,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   `Comic book`. Only the head already read and the name decide; the engine
   does not open the archive. Any other ZIP stays a label ("ZIP") without a
   type.
+- **EPUB books:** the same rule for the extension `epub` (any case):
+  `application/epub+zip`, label `EPUB`. The `mimetype` entry is not read at
+  classification; the action validates the book.
 - **Images:** a PNG or JPEG signature gives `image/png` or `image/jpeg`
   (the join action `images-to-pdf` takes them). Whether a given file is one
   the action can place (a PNG with alpha, say) is the action's call, not the
