@@ -46,8 +46,10 @@ pub const GROUPS: &[Group] = &[
 /// flat offer's most common type picks the first preset's input on a tie
 /// the same way. Plain text therefore precedes Markdown for HTML and EPUB,
 /// as `markdown` (which takes plain text) does at the head of the table.
-/// `plain-text-epub` takes a type no other preset does, so its place at the
-/// end ties with nothing.
+/// `plain-text-epub` shares Document's south slot with `plain-text`: on a
+/// tie (one EPUB and one Markdown file) the earlier preset, `plain-text`,
+/// holds the slot and wins the flat offer; more EPUBs than Markdown files
+/// give it to `plain-text-epub`.
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "markdown",
@@ -876,6 +878,51 @@ mod tests {
                 .preset;
             assert_eq!(flat, wheel, "{g}");
             assert!(flat.ends_with("-txt"), "{g}: {flat}");
+        }
+    }
+
+    /// EPUB and Markdown share Document's south slot: a tie goes to the
+    /// earlier preset (Markdown), more EPUBs take it, at both levels.
+    #[test]
+    fn epub_and_md_share_the_south_slot_by_count_then_order() {
+        let cat = Catalog {
+            actions: vec![
+                act("md-txt", "text/markdown", "text/plain", 1, false),
+                act("epub-txt", "application/epub+zip", "text/plain", 1, false),
+            ],
+        };
+        let md = file("a.md", "text/markdown");
+        let ep = |n: &str| file(n, "application/epub+zip");
+        for (files, want) in [
+            (vec![ep("a.epub"), md.clone()], "md-txt"),
+            (vec![ep("a.epub"), ep("b.epub"), md.clone()], "epub-txt"),
+        ] {
+            let mut t = Tally::default();
+            for (n, k) in &files {
+                t.add(n, k);
+            }
+            let preset = offer_group(&cat, &t, "document").slices[4]
+                .as_ref()
+                .unwrap()
+                .preset;
+            let flat = offer(&cat, &files);
+            let flat_south = flat
+                .groups
+                .iter()
+                .find(|(g, _)| *g == "document")
+                .unwrap()
+                .1
+                .slices[4]
+                .as_ref()
+                .unwrap()
+                .preset;
+            let id = if want == "md-txt" {
+                "plain-text"
+            } else {
+                "plain-text-epub"
+            };
+            assert_eq!(preset, id, "{want}");
+            assert_eq!(flat_south, id);
         }
     }
 

@@ -1046,7 +1046,9 @@ compositor.
   files fit both inputs, a preset that can run beats a dim one, then the one
   that takes more of the files holds the slot, then the earlier preset in
   the table, plain text before Markdown, which is also the flat offer's tie
-  order): lit if
+  order; so one EPUB and one Markdown file leave `plain-text` (from Markdown)
+  in the south slot, and more EPUBs than Markdown files give it to
+  `plain-text-epub`): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
   takes (`n`, the count the run would take) is below the number dropped.
