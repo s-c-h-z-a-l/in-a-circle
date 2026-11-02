@@ -390,7 +390,10 @@ enum Frame {
         items: Vec<ListItem>,
         loose: bool,
     },
-    Table(Box<Grid>),
+    /// Not boxed: a box cannot be allocated fallibly, and the stack holds
+    /// at most one frame per open element (the XML depth limit) plus the
+    /// implicit ones, so the larger frame costs a few kilobytes at most.
+    Table(Grid),
     Row {
         cells: Vec<Cell>,
         implicit: bool,
@@ -832,7 +835,7 @@ impl Builder {
                 }
                 (Ctx::Block, Tag::Table) => {
                     self.push_open(End::Nothing);
-                    self.push_frame(Frame::Table(Box::new(Grid {
+                    self.push_frame(Frame::Table(Grid {
                         section: Section::Body,
                         head: Vec::new(),
                         body: Vec::new(),
@@ -840,7 +843,7 @@ impl Builder {
                         spans: Vec::new(),
                         hi: 0,
                         caption: Vec::new(),
-                    })));
+                    }));
                 }
                 (Ctx::Block, _) => self.push_open(End::Nothing),
             }
@@ -984,7 +987,7 @@ impl Builder {
                     });
                 }
             }
-            Frame::Table(g) => self.finish_table(*g),
+            Frame::Table(g) => self.finish_table(g),
             Frame::Row { cells, .. } => {
                 if let Some(Frame::Table(g)) = self.stack.last_mut() {
                     place_row(g, cells, &mut self.m, &mut self.losses, &mut self.steps);
@@ -1121,7 +1124,18 @@ impl Builder {
             Some(r) if has_head || r.all_th => rows.next().map(|r| r.cells),
             _ => None,
         };
-        let rows: Vec<Vec<Vec<Inline>>> = rows.map(|r| r.cells).collect();
+        // Every allocation here is fallible, like the rest of the builder:
+        // the sizes are bounded by nodes already charged, but an allocator
+        // that refuses ends the chapter with `Allocation`, not an abort.
+        let mut kept: Vec<Vec<Vec<Inline>>> = Vec::new();
+        if kept.try_reserve_exact(rows.size_hint().0).is_err() {
+            self.m.fail_allocation();
+            return;
+        }
+        for r in rows {
+            self.m.push(&mut kept, r.cells);
+        }
+        let rows = kept;
         let width = rows
             .iter()
             .map(Vec::len)
@@ -1142,11 +1156,13 @@ impl Builder {
                 self.m.push(row, Vec::new());
             }
         }
-        self.add_block(Block::Table {
-            align: vec![Align::None; width],
-            head,
-            rows,
-        });
+        let mut align = Vec::new();
+        if align.try_reserve_exact(width).is_err() {
+            self.m.fail_allocation();
+            return;
+        }
+        align.resize(width, Align::None);
+        self.add_block(Block::Table { align, head, rows });
     }
 
     /// Pending line break before new content (an image, inline code).
