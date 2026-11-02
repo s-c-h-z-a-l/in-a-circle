@@ -310,8 +310,12 @@ are in `CLAUDE.md`.
   and only text or a value that a reference or normalization changes is
   copied. Elements nest at most `Options::max_depth` (`MAX_DEPTH`, 256)
   deep, past it `TooDeep`; the open elements are the reader's own stack,
-  not recursion, and the work is linear in the input (a step count the
-  tests and the fuzz target bound per byte).
+  not recursion, and the work is linear in the input (a step count of
+  every byte examined, copied, hashed or compared, which the tests and the
+  fuzz target bound per byte): a namespace name is hashed when its
+  declaration comes into and goes out of scope, and attributes are told
+  apart by its id, so a long one costs its length, not its length per
+  attribute.
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always

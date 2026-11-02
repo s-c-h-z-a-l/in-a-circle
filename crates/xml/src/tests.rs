@@ -245,6 +245,34 @@ fn duplicate_attribute_is_not_well_formed() {
     not_wf(&format!(
         "<a xmlns:a='urn:u' xmlns:b='urn:u'{many} a:x='1' b:x='2'/>"
     ));
+    // One namespace bound on different elements, while one binding of it
+    // stays in scope and after another went out of scope.
+    not_wf("<r xmlns:a='urn:u'><e xmlns:b='urn:u' a:x='' b:x=''/></r>");
+    not_wf("<r xmlns:a='urn:u'><e xmlns:b='urn:u'/><e xmlns:c='urn:u' a:x='' c:x=''/></r>");
+    not_wf("<r><e xmlns:a='urn:u'/><e xmlns:b='urn:u' xmlns:c='urn:u' b:x='' c:x=''/></r>");
+    // The xml namespace, by its prefix, declared or not.
+    not_wf("<a xml:lang='en' xml:lang='de'/>");
+    not_wf(&format!(
+        "<a xmlns:xml='{XML_NS}' xml:lang='en'{many} xml:lang='de'/>"
+    ));
+    // Equal local names in namespaces that were bound in turn: distinct.
+    assert!(
+        events(
+            "<r xmlns:a='urn:1'><e xmlns:b='urn:2' a:x='' b:x=''/><e xmlns:b='urn:3' a:x='' b:x=''/></r>",
+            opts()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn duplicate_attribute_reports_its_line() {
+    // The line of the second attribute, not of the start tag.
+    assert_eq!(not_wf("<a\r\nb='1'\r\nb='2'/>"), 3);
+    assert_eq!(not_wf("<a b='1'\n\n\nb='2'/>"), 4);
+    assert_eq!(not_wf("<a xmlns:p='u'\nxmlns:p='u'/>"), 2);
+    let many: String = (0..20).map(|i| format!("\nv{i}='{i}'")).collect();
+    assert_eq!(not_wf(&format!("<a{many}\nv3='x'/>")), 22);
 }
 
 #[test]
@@ -592,6 +620,18 @@ fn long_attribute_list_is_linear() {
         |n| format!("<r>{}</r>", format!("<e{eight}/>").repeat(n)),
         opts(),
     );
+    // Long names at the pairwise threshold: each comparison counts the
+    // bytes it walks, which the equal lengths make it walk.
+    assert_linear(
+        |n| {
+            let names = "n".repeat(n);
+            let attrs: String = (0..PAIRWISE_ATTRS)
+                .map(|i| format!(" {names}{i}=''"))
+                .collect();
+            format!("<a{attrs}/>")
+        },
+        opts(),
+    );
     // Prefixed attributes, each resolved through the bindings.
     assert_linear(
         |n| {
@@ -703,4 +743,73 @@ fn many_entities_are_linear() {
         |n| format!("<a>{}</a>", "x&amp;<!---->y\r".repeat(n)),
         opts(),
     );
+}
+
+/// Length of the long namespace name: 1 MiB is far longer than any real
+/// one (tens of bytes), long enough that walking it once per attribute
+/// dwarfs everything else the reader does.
+const LONG_URI: usize = 1024 * 1024;
+
+/// Elements carrying the prefixed attributes: with `LONG_URI` a document
+/// of about 2 MB, where walking the name per attribute is 8,192 x 28
+/// comparisons of 1 MiB (seconds), against tens of milliseconds for the
+/// whole linear read.
+const LONG_URI_ELEMENTS: usize = 8192;
+
+/// How much slower than the same document with a one-byte namespace name
+/// the long-name document may read: the extra 1 MiB is read a few times
+/// (checked, lexed, hashed), well within 4 x a read of 2 MB, while a
+/// per-attribute walk of it is 30 x or more. The fixed allowance absorbs
+/// scheduling noise on a loaded test run, where each read takes tens of
+/// milliseconds.
+const SLOWDOWN_FACTOR: u32 = 4;
+const SLOWDOWN_ALLOWANCE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Reads `build(uri)` with a `LONG_URI`-byte namespace name and checks
+/// the step bound, and that it reads about as fast as `build("u")`: a
+/// cost the step count does not see still shows in the time.
+fn assert_long_uri_linear(build: impl Fn(&str) -> String) {
+    let time = |s: &str| {
+        let t = std::time::Instant::now();
+        let st = steps(s, opts());
+        (st, t.elapsed())
+    };
+    let long = build(&"u".repeat(LONG_URI));
+    let short = build("u");
+    let (_, base) = time(&short);
+    let (st, took) = time(&long);
+    assert!(
+        st <= STEPS_PER_BYTE * long.len() as u64,
+        "{st} steps for {} bytes",
+        long.len()
+    );
+    assert!(
+        took <= base * SLOWDOWN_FACTOR + SLOWDOWN_ALLOWANCE,
+        "{took:?} for {} bytes, {base:?} with a short name",
+        long.len()
+    );
+}
+
+#[test]
+fn long_namespace_name_is_linear() {
+    // At the pairwise threshold and one above it (the hash-set path).
+    for n in [PAIRWISE_ATTRS, PAIRWISE_ATTRS + 1] {
+        let attrs: String = (0..n).map(|i| format!(" a:x{i}=''")).collect();
+        let body = format!("<e{attrs}/>").repeat(LONG_URI_ELEMENTS);
+        assert_long_uri_linear(|uri| format!("<r xmlns:a='{uri}'>{body}</r>"));
+    }
+    // Two prefixes bound to one long name: the names are equal, not the
+    // same slice, so the check cannot stop at the slice's address.
+    for n in [PAIRWISE_ATTRS, PAIRWISE_ATTRS + 1] {
+        let attrs: String = (0..n)
+            .map(|i| format!(" {}:x{i}=''", if i % 2 == 0 { 'a' } else { 'b' }))
+            .collect();
+        let body = format!("<e{attrs}/>").repeat(LONG_URI_ELEMENTS);
+        assert_long_uri_linear(|uri| format!("<r xmlns:a='{uri}' xmlns:b='{uri}'>{body}</r>"));
+        // A real duplicate through them is still found.
+        let uri = "u".repeat(LONG_URI);
+        not_wf(&format!(
+            "<r xmlns:a='{uri}' xmlns:b='{uri}'><e{attrs} b:x0=''/></r>"
+        ));
+    }
 }

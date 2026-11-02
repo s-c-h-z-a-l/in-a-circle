@@ -16,9 +16,12 @@
 //!   is an `Error` with the line where it was found; there is no recovery.
 //!   Attribute defaults declared in the internal subset are not applied.
 //! - **Bounded:** element nesting is limited by `Options::max_depth`; the
-//!   work is linear in the input length (`Reader::steps` counts it); names
-//!   and values borrow from the input, and memory is allocated only for a
-//!   text or attribute value that a reference or a line-end normalization
+//!   work is linear in the input length (`Reader::steps` counts every byte
+//!   examined, copied, hashed or compared; a namespace name is hashed when
+//!   its declaration comes into and goes out of scope, and the
+//!   duplicate-attribute check compares its id, never the name); names and
+//!   values borrow from the input, and memory is allocated only for a text
+//!   or attribute value that a reference or a line-end normalization
 //!   changes, the attribute list of an element, the open-element stack and
 //!   the namespace bindings in scope.
 //!
@@ -57,15 +60,19 @@ const PAIRWISE_ATTRS: usize = 8;
 const ENTITY_LOOKUP_STEPS: u64 = (usize::BITS - entities::ENTITIES.len().leading_zeros()) as u64;
 
 /// Upper bound of `Reader::steps` per input byte, for the linearity tests
-/// and the fuzz target. Each byte is counted by the character check (1),
-/// by the lexer as it moves past it (1), and at most twice more as part of
-/// a name (resolving it, hashing it for the duplicate check, matching it
-/// against an end tag or undoing its binding) or of a value (normalizing
-/// it and copying it into owned text); a reference adds at most
-/// `ENTITY_LOOKUP_STEPS` comparisons for at least 3 bytes (`&x;`), 4 per
-/// byte. That is at most 10; 16 leaves room for constant per-construct
-/// overheads, while a quadratic path at the tests' sizes (64,000 units)
-/// exceeds it by orders of magnitude.
+/// and the fuzz target. Each byte is counted by the character check (1)
+/// and by the lexer as it moves past it (1). A name byte is counted again
+/// when the name is resolved, matched against an end tag or unbound (1
+/// each, at most 2 of them per name), and by the duplicate check: hashed
+/// once, or compared with each of at most `PAIRWISE_ATTRS - 1` other names,
+/// each comparison walking at most the shorter name, at most 3.5 per byte
+/// summed over the pairs. A value byte is normalized and copied (2); a
+/// namespace name is hashed and compared once when bound and again when
+/// unbound (4). A reference adds at most `ENTITY_LOOKUP_STEPS` comparisons
+/// for at least 3 bytes (`&x;`), 4 per byte. That is at most 7.5 per byte;
+/// 16 leaves room for constant per-construct overheads, while a quadratic
+/// path at the tests' sizes (64,000 units, or a 1 MiB namespace name in
+/// 8,192 elements) exceeds it by orders of magnitude.
 #[doc(hidden)]
 pub const STEPS_PER_BYTE: u64 = 16;
 
@@ -125,6 +132,9 @@ impl std::error::Error for Error {}
 
 /// An element or attribute name: the namespace URI its prefix (or the
 /// default namespace, for elements) is bound to, and the local part.
+/// The URI is a slice of the declaration, as long as the input made it:
+/// compare it with a known constant (`Element::attr` does), not with
+/// another name's URI once per name, which walks a long URI each time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct QName<'a> {
     pub ns: Option<&'a str>,
@@ -412,6 +422,7 @@ struct Open<'a> {
 #[derive(Clone, Copy)]
 struct RawAttr<'a> {
     name: &'a str,
+    name_at: usize,
     value: &'a str,
     at: usize,
     /// The value holds `&`, `\t`, `\n` or `\r`: normalization changes it.
@@ -425,11 +436,35 @@ enum Ref {
 }
 
 /// The duplicate-attribute key: namespace declarations by prefix (`""` for
-/// the default), other attributes by expanded name.
+/// the default), other attributes by expanded name with the namespace
+/// name as its id (`Reader::uris`), so a check never walks a namespace
+/// name: a long one would be walked once per attribute in its scope.
 #[derive(PartialEq, Eq, Hash)]
 enum Key<'a> {
     Decl(&'a str),
-    Attr(Option<&'a str>, &'a str),
+    Attr(Option<usize>, &'a str),
+}
+
+impl Key<'_> {
+    /// The bytes hashing or comparing the key walks at most, plus one for
+    /// the discriminant and the id.
+    fn cost(&self) -> u64 {
+        (match self {
+            Key::Decl(p) => p.len(),
+            Key::Attr(_, l) => l.len(),
+        } + 1) as u64
+    }
+}
+
+/// The id of the namespace the `xml` prefix is bound to by definition;
+/// declared namespace names get ids from `FIRST_ID` on.
+const XML_ID: usize = 0;
+const FIRST_ID: usize = 1;
+
+/// A namespace name in scope: how many bindings name it, and its id.
+struct Uri {
+    id: usize,
+    bindings: usize,
 }
 
 /// Text being gathered for one `Event::Text`: borrowed while it is one
@@ -454,14 +489,25 @@ pub struct Reader<'a> {
     /// The last start tag was empty (`<a/>`): its end comes next.
     close_empty: bool,
     /// Prefix (`""` = default namespace) -> the URIs bound to it, innermost
-    /// last; `""` as a default namespace URI means "no namespace".
-    ns: HashMap<&'a str, Vec<&'a str>>,
+    /// last, each with its id; `""` as a default namespace URI means "no
+    /// namespace".
+    ns: HashMap<&'a str, Vec<(&'a str, usize)>>,
+    /// The namespace names bound in scope, each hashed once per binding:
+    /// equal names (even bound to different prefixes) share one id, so
+    /// the duplicate check compares ids. A name leaves when its last
+    /// binding goes out of scope, so this holds no more than the bindings
+    /// in scope.
+    uris: HashMap<&'a str, Uri>,
+    /// The next id for a namespace name; ids are not reused, so one never
+    /// names two different names.
+    next_id: usize,
     /// The prefixes bound by the open elements, in binding order.
     undo: Vec<&'a str>,
     /// Scratch lists of the current start tag's attributes and their
-    /// duplicate-check keys, kept to reuse their memory.
+    /// duplicate-check keys (with the byte offset of the attribute's
+    /// name), kept to reuse their memory.
     raw: Vec<RawAttr<'a>>,
-    keys: Vec<Key<'a>>,
+    keys: Vec<(Key<'a>, usize)>,
     /// General entities the internal subset declares (never expanded).
     declared: HashSet<&'a str>,
     /// Entity declarations may exist that the reader did not see (an
@@ -489,6 +535,8 @@ impl<'a> Reader<'a> {
             stack: Vec::new(),
             close_empty: false,
             ns: HashMap::new(),
+            uris: HashMap::new(),
+            next_id: FIRST_ID,
             undo: Vec::new(),
             raw: Vec::new(),
             keys: Vec::new(),
@@ -1133,7 +1181,7 @@ impl<'a> Reader<'a> {
             self.bind(prefix, a)?;
             bindings += 1;
         }
-        let name = self.resolve(raw_name, true, at)?;
+        let (name, _) = self.resolve(raw_name, true, at)?;
         let mut attrs = Vec::with_capacity(plain);
         let mut keys = std::mem::take(&mut self.keys);
         keys.clear();
@@ -1141,15 +1189,15 @@ impl<'a> Reader<'a> {
             if let Some(p) = a.name.strip_prefix("xmlns")
                 && (p.is_empty() || p.starts_with(':'))
             {
-                keys.push(Key::Decl(p.strip_prefix(':').unwrap_or("")));
+                keys.push((Key::Decl(p.strip_prefix(':').unwrap_or("")), a.name_at));
                 continue;
             }
-            let q = self.resolve(a.name, false, a.at)?;
+            let (q, id) = self.resolve(a.name, false, a.at)?;
             let v = self.attr_value(a)?;
-            keys.push(Key::Attr(q.ns, q.local));
+            keys.push((Key::Attr(id, q.local), a.name_at));
             attrs.push((q, v));
         }
-        let unique = self.unique(&keys, at);
+        let unique = self.unique(&keys);
         self.keys = keys;
         unique?;
         self.stack.push(Open {
@@ -1163,6 +1211,7 @@ impl<'a> Reader<'a> {
 
     /// `name = "value"` at the current position.
     fn attribute(&mut self) -> Res<RawAttr<'a>> {
+        let name_at = self.pos;
         let name = self.name()?;
         self.space();
         self.expect("=", "an attribute without a value")?;
@@ -1191,6 +1240,7 @@ impl<'a> Reader<'a> {
         self.pos += 1;
         Ok(RawAttr {
             name,
+            name_at,
             value,
             at: start,
             special,
@@ -1228,7 +1278,19 @@ impl<'a> Reader<'a> {
             return self.err("the xmlns namespace declared", a.at);
         }
         self.steps += (prefix.len() + 1) as u64;
-        self.ns.entry(prefix).or_default().push(uri);
+        // One hash of the name and one comparison with an equal one.
+        self.steps += 2 * uri.len() as u64 + 1;
+        let next = self.next_id;
+        let u = self.uris.entry(uri).or_insert(Uri {
+            id: next,
+            bindings: 0,
+        });
+        if u.id == next {
+            self.next_id += 1;
+        }
+        u.bindings += 1;
+        let id = u.id;
+        self.ns.entry(prefix).or_default().push((uri, id));
         self.undo.push(prefix);
         Ok(())
     }
@@ -1236,18 +1298,30 @@ impl<'a> Reader<'a> {
     /// Removes the last `n` bindings.
     fn unbind(&mut self, n: usize) {
         for _ in 0..n {
-            if let Some(p) = self.undo.pop() {
-                self.steps += (p.len() + 1) as u64;
-                if let Some(v) = self.ns.get_mut(p) {
-                    v.pop();
+            let Some(p) = self.undo.pop() else { return };
+            self.steps += (p.len() + 1) as u64;
+            let Some((uri, _)) = self.ns.get_mut(p).and_then(Vec::pop) else {
+                continue;
+            };
+            self.steps += 2 * uri.len() as u64 + 1;
+            if let Some(u) = self.uris.get_mut(uri) {
+                u.bindings -= 1;
+                if u.bindings == 0 {
+                    self.uris.remove(uri);
                 }
             }
         }
     }
 
     /// A raw `prefix:local` or `local` resolved against the bindings in
-    /// scope. Unprefixed attributes have no namespace.
-    fn resolve(&mut self, raw: &'a str, element: bool, at: usize) -> Res<QName<'a>> {
+    /// scope, with the namespace name's id. Unprefixed attributes have no
+    /// namespace.
+    fn resolve(
+        &mut self,
+        raw: &'a str,
+        element: bool,
+        at: usize,
+    ) -> Res<(QName<'a>, Option<usize>)> {
         self.steps += (raw.len() + 1) as u64;
         let (prefix, local) = match raw.split_once(':') {
             None => ("", raw),
@@ -1269,26 +1343,38 @@ impl<'a> Reader<'a> {
                     .get("")
                     .and_then(|v| v.last())
                     .copied()
-                    .filter(|u| !u.is_empty())
+                    .filter(|(u, _)| !u.is_empty())
             } else {
                 None
             };
-            return Ok(QName { ns, local });
+            return Ok((
+                QName {
+                    ns: ns.map(|(u, _)| u),
+                    local,
+                },
+                ns.map(|(_, id)| id),
+            ));
         }
         if prefix == "xml" {
-            return Ok(QName {
-                ns: Some(XML_NS),
-                local,
-            });
+            return Ok((
+                QName {
+                    ns: Some(XML_NS),
+                    local,
+                },
+                Some(XML_ID),
+            ));
         }
         if prefix == "xmlns" {
             return self.err("an element with the xmlns prefix", at);
         }
         match self.ns.get(prefix).and_then(|v| v.last()) {
-            Some(&uri) => Ok(QName {
-                ns: Some(uri),
-                local,
-            }),
+            Some(&(uri, id)) => Ok((
+                QName {
+                    ns: Some(uri),
+                    local,
+                },
+                Some(id),
+            )),
             None => self.err("an unbound namespace prefix", at),
         }
     }
@@ -1348,33 +1434,36 @@ impl<'a> Reader<'a> {
     }
 
     /// No two attributes of one element share an expanded name, and no
-    /// prefix is declared twice.
-    fn unique(&mut self, keys: &[Key<'a>], at: usize) -> Res<()> {
+    /// prefix is declared twice. A duplicate is reported at the later of
+    /// the two. Every comparison and hash counts the bytes it may walk.
+    fn unique(&mut self, keys: &[(Key<'a>, usize)]) -> Res<()> {
         let dup = if keys.len() <= PAIRWISE_ATTRS {
-            let mut dup = false;
-            for (i, k) in keys.iter().enumerate() {
-                for l in &keys[i + 1..] {
-                    self.steps += 1;
-                    dup |= k == l;
+            let mut dup = None;
+            for (j, (k, at)) in keys.iter().enumerate() {
+                for (l, _) in &keys[..j] {
+                    self.steps += k.cost().min(l.cost());
+                    if k == l {
+                        dup = dup.or(Some(*at));
+                    }
                 }
             }
             dup
         } else {
             let mut seen = HashSet::with_capacity(keys.len());
-            let mut dup = false;
-            for k in keys {
-                self.steps += match k {
-                    Key::Decl(p) => p.len() + 1,
-                    Key::Attr(ns, l) => ns.map_or(0, str::len) + l.len() + 1,
-                } as u64;
-                dup |= !seen.insert(k);
+            let mut dup = None;
+            for (k, at) in keys {
+                self.steps += k.cost();
+                if !seen.insert(k) {
+                    dup = Some(*at);
+                    break;
+                }
             }
             dup
         };
-        if dup {
-            return self.err("a duplicate attribute", at);
+        match dup {
+            Some(at) => self.err("a duplicate attribute", at),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// An end tag at `</`; it must close the innermost open element.
