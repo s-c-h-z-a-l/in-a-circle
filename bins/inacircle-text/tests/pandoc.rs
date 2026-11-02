@@ -70,7 +70,15 @@ const BOOKS: &[Book] = &[
     Book {
         file: "pride-and-prejudice-epub2.epub",
         warns: TABLE_WARNS,
-        diverges: &[],
+        diverges: &[Divergence {
+            ours: &["house", "156", "charing"],
+            theirs: &["156", "charing", "house"],
+            times: 1,
+            why: "title-page table: the cells hold <br/> breaks (\"Ruskin<br/>House.\" | \"156. Charing<br/>Cross Road.\"); \
+                  pandoc keeps the break inside a cell and prints the row line by line, \
+                  interleaving the cells' lines, while our writer flattens each cell to one \
+                  line: the same words in a different order",
+        }],
     },
 ];
 
