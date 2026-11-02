@@ -10,3 +10,7 @@ workspace = true
 [dependencies]
 doc = { path = "../doc" }
 zip = { path = "../zip" }
+xml = { path = "../xml" }
+
+[dev-dependencies]
+testzip = { path = "../../tools/testzip" }

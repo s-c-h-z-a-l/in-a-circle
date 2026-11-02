@@ -245,7 +245,7 @@ are in `CLAUDE.md`.
   `left`, `center` or `right` class, so the output needs no form element and no
   inline style. Every piece counts against the output budget before it is
   appended.
-- The book packer, `crates/epub` (doc and zip, no XML parser), writes a
+- The book packer, `crates/epub` (doc, zip and xml), writes a
   document as an EPUB 3 book through the stored ZIP writer: `mimetype`
   first and stored, `META-INF/container.xml`, `OEBPS/content.opf`,
   `OEBPS/nav.xhtml` (the EPUB 3 table of contents; no NCX),
@@ -316,6 +316,27 @@ are in `CLAUDE.md`.
   declaration comes into and goes out of scope, and attributes are told
   apart by its id, so a long one costs its length, not its length per
   attribute.
+- The EPUB reader, `epub::read`, opens a book on disk that is foreign
+  input. `open` reads the ZIP directory (the CBZ reader's limits: 12,000
+  entries, ratio 1032, 512-byte names, no ZIP64), then
+  `META-INF/container.xml` and the first rootfile of type
+  `application/oebps-package+xml`, then that package document (EPUB 2 or
+  3: the spine is the same in both): the first non-empty `dc:title` and
+  every non-empty `dc:creator` in order (whitespace collapsed), the
+  manifest and the spine. The `mimetype` entry is not required. All three
+  files are plain XML (no HTML entity names), at most 8 MiB and 2^19 XML
+  events each. Every `itemref` is kept in spine order, `linear="no"`
+  included, a repeated one as often as it appears, numbered from 1 (the
+  `N` of `Chapter N`). An `href` is relative to the package's folder: the
+  `#fragment` is cut, `%XX` decoded, the path normalized lexically
+  (`doc::xhtml::normalize`), and the entry name matched exactly, case
+  included. `Book::chapter` reads one spine item's raw bytes when asked
+  and keeps nothing: an XHTML item (`application/xhtml+xml`) up to 8 MiB,
+  an SVG page as nothing (it has no text), anything else is
+  `unsupported type <mime>`. A broken skeleton fails the whole book
+  (`BookError`, the texts in `docs/resource-limits.md`); a spine item
+  that is missing, too large, of another type or whose data is damaged
+  fails only itself (`ChapterError`) and the rest of the book reads.
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
@@ -1246,7 +1267,7 @@ crates/   wire, dbus, ui, engine, manifest, action, doc, epub, flate,
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
           `inacircle-pages`, zip also writes archives with stored
-          entries only; epub: the EPUB packer of `inacircle-text`; xml:
+          entries only; epub: the EPUB packer and reader of `inacircle-text`; xml:
           the non-validating XML reader; the shipped `inacircle` links
           wire, dbus, ui, engine, manifest and action, never `doc`,
           `epub`, `flate`, `zip`, `probe`, `pdf` or `xml`;

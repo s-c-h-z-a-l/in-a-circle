@@ -226,6 +226,33 @@ of 256 chapters of 32 KiB each (8.5 MB of XHTML) peaks at about 0.27 MB of
 heap in the packer (debug build, measured by the test's counting
 allocator), not the sum of the chapters.
 
+A book is read back (`epub::read`) under limits of its own, each checked
+before the bytes are read (on the declared size, which the ZIP reader
+never lets the data exceed) and named when it is hit.
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| book file | 4 GiB - 1 | every offset and size is 32 bits (no ZIP64); `damaged EPUB: ZIP64 archives are not supported` |
+| entries | 12,000 | the CBZ reader's value, so both archive readers accept the same archives; about 200 B per record, 2.4 MB at the limit; `damaged EPUB: too many entries` |
+| ratio | 1032 | the most a deflate stream can reach, the CBZ reader's value; a header claiming more is refused before anything is inflated; `damaged EPUB: an entry's compression ratio is too high` |
+| name | 512 B | the CBZ reader's value; `damaged EPUB: an entry name is too long` |
+| skeleton file | 8 MiB, 524,288 XML events | `container.xml` and the package document each, at most the text family's input and node budgets; a real package is tens of KiB; `not an EPUB (package document too large)` |
+| XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
+| chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); about 500 B each; `book has more than 10000 chapters` |
+| chapter | 8 MiB | uncompressed, the text family's input limit; only that chapter fails, `too large`, the rest of the book reads |
+| book | 64 MiB | the sum of the chapters to read, each as often as the spine has it (a chapter too large alone does not count): twice the 32 MiB text output, since XHTML markup is at least as large as its text; `book is too large`, nothing is read |
+
+These fail the whole book (nothing is written for it): an archive the
+ZIP reader refuses at `open` (`damaged EPUB: <reason>`: not a ZIP,
+truncated, ZIP64, an entry outside the file, overlapping entries, two
+entries of the same name, the limits above), no `META-INF/container.xml`
+(`not an EPUB (no META-INF/container.xml)`), no package rootfile or no
+package at its path (`not an EPUB (no package document)`), a skeleton file
+over its limit or not well-formed (`not an EPUB (<XML error> in <path>)`)
+or unreadable (`damaged EPUB: <reason>`), no spine or an empty one (`book
+has no spine`), too many chapters, and a book over 64 MiB. Everything
+else fails only the chapter it concerns.
+
 ### The machine side
 
 A basic user has 8 GB RAM, a power user 32-96 GB. Spawn-per-use lets several
