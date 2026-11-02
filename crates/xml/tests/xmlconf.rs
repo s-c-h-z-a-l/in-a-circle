@@ -109,6 +109,22 @@ fn cases() -> Vec<Case> {
     out
 }
 
+/// Well-formed cases refused because they reference an entity their
+/// internal subset declares (never expanded, by design). Pinned: another
+/// count means the reader refuses (or accepts) a different set, which a
+/// count by error kind alone would hide.
+const ENTITY_SKIPS: usize = 42;
+
+/// The case declares a general entity in its internal subset: the only
+/// reason a well-formed case in scope (`ENTITIES="none"`, so no external
+/// subset or entity) may be refused with `EntityDeclarations`.
+fn declares_entity(path: &Path) -> bool {
+    std::fs::read(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .windows(b"<!ENTITY".len())
+        .any(|w| w == b"<!ENTITY")
+}
+
 /// The verdict on one file: `Ok` if it reads to the end.
 fn read(path: &Path) -> Result<(), xml::Error> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -131,7 +147,9 @@ fn standalone_cases_agree_with_the_suite() {
         match &verdict {
             // Entity declarations are never expanded: a well-formed case
             // that references one is refused by design.
-            Err(e) if wf && e.kind == ErrorKind::EntityDeclarations => entity += 1,
+            Err(e) if wf && e.kind == ErrorKind::EntityDeclarations && declares_entity(&c.path) => {
+                entity += 1
+            }
             // Only UTF-8 and UTF-16 are read.
             Err(e) if wf && matches!(e.kind, ErrorKind::UnsupportedEncoding(_)) => encoding += 1,
             Ok(()) if !wf && listed => grammar += 1,
@@ -160,6 +178,7 @@ fn standalone_cases_agree_with_the_suite() {
         wrong.len(),
         wrong.join("\n")
     );
+    assert_eq!(entity, ENTITY_SKIPS, "entity-declaration skips");
     // The subset is the suite, not a handful: a broken catalog reader
     // would otherwise pass with nothing read.
     assert!(cases.len() > 1500, "{}", cases.len());
