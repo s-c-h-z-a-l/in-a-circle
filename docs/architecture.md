@@ -1037,7 +1037,9 @@ compositor.
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
+  north, `plain-text` (from Markdown) and `plain-text-epub` (from an EPUB)
+  south, so an EPUB lights only Document, with its other slices dim and
+  nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has
   no one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
