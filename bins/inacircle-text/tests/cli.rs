@@ -2198,6 +2198,62 @@ mod epub_to_txt {
         fails_alone(&o, &work, "book is DRM-protected");
     }
 
+    /// One encrypted chapter among readable ones is not DRM: its line
+    /// stands in its place and is counted once.
+    #[test]
+    fn partially_encrypted_chapter_in_place() {
+        let (root, work) = workdir("epub-enc1");
+        let p = root.join("enc.epub");
+        let enc = encryption(&[(AES, "OEBPS/b.xhtml")]);
+        book_at(
+            &p,
+            "3.0",
+            "",
+            &[
+                ch("a.xhtml", "<p>a</p>"),
+                ch("b.xhtml", "<p>b</p>"),
+                ch("c.xhtml", "<p>c</p>"),
+            ],
+            1,
+            &[("META-INF/encryption.xml", &enc)],
+        );
+        let (text, warns, o) = txt(&p, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "a\n\n[Chapter 2 could not be read: encrypted]\n\nc\n");
+        assert_eq!(warns, ["1 chapter(s) could not be read", STYLES]);
+    }
+
+    /// A chapter in UTF-16 (little-endian, with its byte order mark) is
+    /// decoded: its text comes out as UTF-8, characters intact.
+    #[test]
+    fn utf16le_bom_chapter() {
+        let (root, work) = workdir("epub-utf16");
+        let src = String::from_utf8(xhtml("<p>Árvíztűrő tükörfúrógép ✓</p>"))
+            .unwrap()
+            .replace("UTF-8", "UTF-16");
+        let mut data = vec![0xFF, 0xFE];
+        data.extend(src.encode_utf16().flat_map(u16::to_le_bytes));
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[
+                Ch {
+                    href: "u.xhtml".into(),
+                    media: XHTML,
+                    data: Some(data),
+                    spine: true,
+                    linear: true,
+                },
+                ch("a.xhtml", "<p>next</p>"),
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "Árvíztűrő tükörfúrógép ✓\n\nnext\n");
+        assert_eq!(warns, [STYLES]);
+    }
+
     /// Font obfuscation is not DRM: the book converts and only the styles
     /// loss is reported.
     #[test]
@@ -2312,7 +2368,8 @@ mod epub_to_txt {
                 "<p>See<a href=\"notes.xhtml#fn1\">1</a>, <a href=\"#x\">here</a>, \
                  <a href=\"../Text/c2.xhtml\">there</a>, \
                  <a href=\"https://example.org/\">site</a>, \
-                 <a href=\"http://example.org/a\">old</a> and \
+                 <a href=\"http://example.org/a\">old</a>, \
+                 <a href=\"//example.org/b\">net</a> and \
                  <a href=\"mailto:a@example.org\">mail</a>.</p>",
             )],
         );
@@ -2321,7 +2378,8 @@ mod epub_to_txt {
         assert_eq!(
             text,
             "See1, here, there, site (https://example.org/), \
-             old (http://example.org/a) and mail (mailto:a@example.org).\n"
+             old (http://example.org/a), net (//example.org/b) and \
+             mail (mailto:a@example.org).\n"
         );
         assert_eq!(warns, [LINKS, STYLES]);
     }

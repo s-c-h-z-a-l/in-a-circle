@@ -15,7 +15,7 @@ use std::path::Path;
 
 use action::{Events, Invocation};
 use doc::xhtml_read::{self, XhtmlError};
-use doc::{Block, Document, Inline, LimitError, Loss};
+use doc::{Block, Document, Inline, LimitError, Limits, Loss};
 use epub::read::Book;
 use xml::ErrorKind;
 
@@ -88,17 +88,8 @@ pub(crate) fn process(
     match convert(&book, &mut out) {
         Ok(done) => {
             ev.done(input, path.strip_prefix(&inv.work).unwrap_or(&path));
-            // One counted line for every chapter that could not be read,
-            // then each loss once: at most 1 + 14 kinds, under the
-            // supervisor's 16 `warn` per input.
-            if done.unread > 0 {
-                ev.warn(
-                    input,
-                    &format!("{} chapter(s) could not be read", done.unread),
-                );
-            }
-            for loss in done.losses {
-                ev.warn(input, loss.message());
+            for line in warnings(&done) {
+                ev.warn(input, &line);
             }
             Outcome::Done
         }
@@ -112,6 +103,22 @@ pub(crate) fn process(
             Outcome::Failed
         }
     }
+}
+
+/// The `warn` lines the supervisor accepts per input (16, see
+/// `docs/architecture.md`); one past it would be dropped.
+const MAX_WARN: usize = 16;
+
+/// One counted line for every chapter that could not be read, then each
+/// loss once: at most 1 + one per `Loss` kind, held to [`MAX_WARN`] by a
+/// test over every kind.
+fn warnings(done: &Converted) -> Vec<String> {
+    let mut lines = Vec::new();
+    if done.unread > 0 {
+        lines.push(format!("{} chapter(s) could not be read", done.unread));
+    }
+    lines.extend(done.losses.iter().map(|l| l.message().to_string()));
+    lines
 }
 
 /// What a converted book reports.
@@ -202,7 +209,7 @@ fn convert(book: &Book<'_>, file: &mut File) -> Result<Converted, String> {
                     text |= xhtml_read::has_text(&d);
                     losses.extend(more);
                     unlink_internal(&mut d);
-                    let (s, more) = doc::txt::write_limited(&d, LIMITS).map_err(book_limit)?;
+                    let (s, more) = chapter_text(&d, sink.written)?;
                     losses.extend(more);
                     s
                 }
@@ -258,6 +265,17 @@ fn unreadable(n: usize, why: &str) -> String {
     format!("[Chapter {n} could not be read: {why}]\n")
 }
 
+/// One chapter's text, written under what is left of the book's output
+/// budget after `written` bytes: a chapter late in the book cannot build
+/// more text than can still be written.
+fn chapter_text(d: &Document, written: usize) -> Result<(String, BTreeSet<Loss>), String> {
+    let left = Limits {
+        output_bytes: LIMITS.output_bytes.saturating_sub(written),
+        ..LIMITS
+    };
+    doc::txt::write_limited(d, left).map_err(book_limit)
+}
+
 /// The writer's budget error for one chapter: its text alone is past the
 /// book's output budget, so the book is.
 fn book_limit(e: LimitError) -> String {
@@ -307,6 +325,13 @@ fn limit_reason(e: LimitError) -> String {
     }
 }
 
+/// Whether `dest` points outside the book: it has a URL scheme, or it is
+/// a network-path reference (`//host/...`, RFC 3986, section 4.2), which
+/// names another host.
+fn external(dest: &str) -> bool {
+    has_scheme(dest) || dest.starts_with("//")
+}
+
 /// Whether `dest` starts with a URL scheme (RFC 3986, section 3.1: a
 /// letter, then letters, digits, `+`, `-` or `.`, then `:`).
 fn has_scheme(dest: &str) -> bool {
@@ -321,7 +346,7 @@ fn has_scheme(dest: &str) -> bool {
 /// A link to a place in the book (no URL scheme: `notes.xhtml#fn1`, `#x`)
 /// means nothing in a text file: its destination is dropped, so the
 /// writer prints the text alone (still a links loss). A link with a
-/// scheme keeps `text (destination)`. Walked with explicit stacks, no
+/// scheme, or to another host (`//host/...`), keeps `text (destination)`. Walked with explicit stacks, no
 /// recursion.
 fn unlink_internal(d: &mut Document) {
     let mut blocks: Vec<&mut Vec<Block>> = vec![&mut d.blocks];
@@ -350,7 +375,7 @@ fn unlink_internal(d: &mut Document) {
                     auto,
                     ..
                 } => {
-                    if !has_scheme(dest) {
+                    if !external(dest) {
                         dest.clear();
                         // Never the loss-free autolink form: the link is gone.
                         *auto = false;
@@ -389,6 +414,82 @@ mod tests {
         ] {
             assert!(!has_scheme(d), "{d}");
         }
+    }
+
+    /// A network-path reference names another host: it keeps its
+    /// destination; a path in the book does not.
+    #[test]
+    fn network_path_is_external() {
+        for d in ["//example.org/x", "//h", "https://x"] {
+            assert!(external(d), "{d}");
+        }
+        for d in ["/x", "a//b", "#x", "", "notes.xhtml#fn1"] {
+            assert!(!external(d), "{d}");
+        }
+    }
+
+    /// A chapter is written under what is left of the book's budget, not
+    /// a fresh one: one byte too many fails the book before its text is
+    /// built.
+    #[test]
+    fn chapter_text_gets_the_rest_of_the_budget() {
+        let d = Document {
+            blocks: vec![Block::Paragraph(vec![Inline::Text("abcd".into())])],
+        };
+        let full = LIMITS.output_bytes;
+        // "abcd\n": five bytes.
+        assert_eq!(chapter_text(&d, full - 5).unwrap().0, "abcd\n");
+        assert_eq!(chapter_text(&d, full - 4).unwrap_err(), "book is too large");
+        assert_eq!(chapter_text(&d, full).unwrap_err(), "book is too large");
+    }
+
+    /// Every loss kind plus the chapters line stays within the
+    /// supervisor's `warn` cap. The match has no wildcard: a new `Loss`
+    /// kind does not compile here until it is added to the list.
+    #[test]
+    fn warn_lines_fit_the_supervisor_cap() {
+        let all = [
+            Loss::Emphasis,
+            Loss::InlineCode,
+            Loss::Links,
+            Loss::Images,
+            Loss::Html,
+            Loss::HeadingLevels,
+            Loss::BlankLines,
+            Loss::Whitespace,
+            Loss::Strikethrough,
+            Loss::TableLayout,
+            Loss::TableWidth,
+            Loss::ControlCharacters,
+            Loss::Styles,
+            Loss::MergedCells,
+        ];
+        for l in all {
+            match l {
+                Loss::Emphasis
+                | Loss::InlineCode
+                | Loss::Links
+                | Loss::Images
+                | Loss::Html
+                | Loss::HeadingLevels
+                | Loss::BlankLines
+                | Loss::Whitespace
+                | Loss::Strikethrough
+                | Loss::TableLayout
+                | Loss::TableWidth
+                | Loss::ControlCharacters
+                | Loss::Styles
+                | Loss::MergedCells => {}
+            }
+        }
+        let done = Converted {
+            unread: 3,
+            losses: BTreeSet::from(all),
+        };
+        let lines = warnings(&done);
+        assert_eq!(lines.len(), 1 + all.len());
+        assert_eq!(lines[0], "3 chapter(s) could not be read");
+        assert!(lines.len() <= MAX_WARN, "{} warn lines", lines.len());
     }
 
     /// Each budget a chapter can run out of has its own reason.

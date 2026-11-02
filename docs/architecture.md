@@ -440,10 +440,11 @@ are in `CLAUDE.md`.
   chapters; a chapter's title is its own heading, none is added and the
   navigation document is read as any chapter. One chapter at a time:
   its bytes, `xml::decode`, `doc::xhtml_read` under fresh text-family
-  budgets, the writer, appended to the file; its tree is dropped before
-  the next. A link to a place in the book (no URL scheme, such as
-  `notes.xhtml#fn1` or `#x`) is written as its text alone; one with a
-  scheme as `text (destination)`; either is reported. An SVG page has
+  budgets, the writer under what is left of the book's output budget,
+  appended to the file; its tree is dropped before the next. A link to
+  a place in the book (no URL scheme, such as `notes.xhtml#fn1` or
+  `#x`) is written as its text alone; one with a scheme, or to another
+  host (`//host/...`), as `text (destination)`; either is reported. An SVG page has
   no text and is reported as an image. A spine item that cannot be read
   is the paragraph `[Chapter N could not be read: <reason>]` in its
   place (the reasons in `docs/resource-limits.md`), and one `warn`,
