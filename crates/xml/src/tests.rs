@@ -889,3 +889,68 @@ fn declared_encoding_matching_the_bytes_reads() {
         assert_eq!(text(&decode(&b).unwrap(), opts()), "é", "{enc}");
     }
 }
+
+/// The step count of one small document per construct, derived by hand
+/// from what each part of the reader counts: the linearity tests only
+/// bound it from above, so a counter that stops counting (or counts a
+/// construct twice) would pass them. Every document starts with the
+/// character check (1 per byte); `<a/>` adds the name (1), `/>` (2) and
+/// its resolution (name + 1).
+#[test]
+fn step_counts_per_construct() {
+    let nine: String = (0..PAIRWISE_ATTRS + 1)
+        .map(|i| format!(" a{i}=''"))
+        .collect();
+    let nine = format!("<a{nine}/>");
+    for (s, o, want) in [
+        // 4 + 1 + 2 + 2.
+        ("<a/>", opts(), 9),
+        // 30 + declaration 21 + space 1 + name 1 + resolve 2 + text 1 +
+        // end tag (name 1, `>` 1, matched against the start 1).
+        ("<?xml version=\"1.0\"?>\n<a>t</a>", opts(), 59),
+        // 23 + <a> 3; comment: found 2 + `--` 2; PI: target 1, space 1,
+        // found 1 + `?>` 2; end tag 3.
+        ("<a><!--xx--><?p d?></a>", opts(), 38),
+        // 11 + <a> 3 + text 2; the unclosed comment walks the 2 bytes
+        // after `<!--`.
+        ("<a>xy<!--xx", opts(), 18),
+        // 61; spaces 1 + 1 + 1 + 1; DOCTYPE name 1; literal "s" 3;
+        // ENTITY: space 1, name 1, recorded 1, space 1, literal 3, `>` 1;
+        // ELEMENT: name 7, body 6, `>` 1; `>` 1; <a/> 5.
+        (
+            "<!DOCTYPE a SYSTEM \"s\" [<!ENTITY e \"v\"><!ELEMENT a ANY>]><a/>",
+            opts(),
+            97,
+        ),
+        // 13 + <a> 3; x 1; \r: "\n" 1, copy of "x" 1, the line end 1;
+        // y 1; \r\n: copy of "y" 1, "\n" 1, the line end 1; z 1, copied
+        // 1; end tag 3.
+        ("<a>x\ry\r\nz</a>", opts(), 29),
+        // 22 + <a> 3; CDATA found 3 + `]]>` 3; its body walked 3; \r:
+        // "\n" 1 + copy of "p" 1; copy of "q" 1; end tag 3.
+        ("<a><![CDATA[p\rq]]></a>", opts(), 40),
+        // 23 + <a> 3; &#65; walks 4, "A" 1; &amp; name 3, "&" 1; &nbsp;
+        // name 4, looked up 4 + the table search, "\u{A0}" 2; end tag 3.
+        ("<a>&#65;&amp;&nbsp;</a>", html(), 48 + ENTITY_LOOKUP_STEPS),
+        // 25 + name 1; x: space 1, name 1, `=` 1, value 1; yy: space 1,
+        // name 2, `=` 1, value 9; `/>` 2; resolve a 2, x 2, yy 3; yy's
+        // value normalized: 4 bytes 1 each, &amp; name 3 + "&" 1; one
+        // pairwise comparison, the shorter key: x + 1.
+        ("<a x=\"1\" yy=\"a&amp;b\tc\"/>", opts(), 62),
+        // 58 + name 1; 9 attributes of 4 (space, name 2, `=`); `/>` 2;
+        // resolve a 2, each attribute 3; the hash-set check hashes each
+        // key: name + 1.
+        (&nine, opts(), 153),
+        // 50 + name 3; attributes 14, 13, 6; bind p: prefix 2 + name
+        // 2 * 5 + 1, default: 1 + 2 * 6 + 1; resolve p:a 4, p:b 4; three
+        // pairwise comparisons 1 + 2 + 1; end tag 3 + 1 + 3; unbind both
+        // (prefix + 1 and 2 * name + 1 each).
+        (
+            "<p:a xmlns:p=\"urn:x\" xmlns=\"urn:yy\" p:b=\"1\"></p:a>",
+            opts(),
+            159,
+        ),
+    ] {
+        assert_eq!(steps(s, o), want, "{s:?}");
+    }
+}
