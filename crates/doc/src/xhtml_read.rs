@@ -6,7 +6,8 @@
 //! - Blocks: `p`, `h1`-`h6`, `ul`/`ol` (`start`, at most 999,999,999;
 //!   `menu`, `dir` as `ul`), `li`, `blockquote`, `pre` (a line feed
 //!   right after its start tag is dropped; markup inside keeps its text,
-//!   `br` is a line feed), `hr`,
+//!   `br` is a line feed, a block inside is a line of its own, a cell a
+//!   space), `hr`,
 //!   `table` with `thead`/`tbody`/`tfoot`/`tr`/`th`/`td`/`caption`.
 //! - Inlines: `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/
 //!   `samp` (flat text), `a href` (a link inside a link is its text),
@@ -419,6 +420,9 @@ enum End {
     /// A block inside inline content: the next content goes on a new line.
     Break,
     Text(&'static str),
+    /// Inside `pre`: a line feed, unless the text is empty or already
+    /// ends with one (see [`Builder::pre_gap`]).
+    Line,
     /// A table row group: back to the body.
     Group,
 }
@@ -561,6 +565,7 @@ impl Builder {
             End::Nothing => {}
             End::Break => self.pending_break = true,
             End::Text(s) => self.text(s),
+            End::Line => self.pre_gap("\n"),
             End::Group => {
                 if let Some(Frame::Table(g)) = self.stack.last_mut() {
                     g.section = Section::Body;
@@ -594,8 +599,9 @@ impl Builder {
     }
 
     /// Inside `pre` or inline code every element is its text: a break is a
-    /// line feed (a space in code), a block a space in code, an image its
-    /// alt text, a link its text.
+    /// line feed (a space in code), a block starts and ends a line in `pre`
+    /// (a cell is a space) and is a space in code, an image its alt text,
+    /// a link its text.
     fn flat_start(&mut self, tag: Tag, e: &Element<'_>, raw: bool) {
         let end = match tag {
             Tag::Br => {
@@ -626,15 +632,43 @@ impl Builder {
             | Tag::Table
             | Tag::Row
             | Tag::Cell(_)
-            | Tag::Caption
-                if !raw =>
-            {
-                self.text(" ");
-                End::Text(" ")
+            | Tag::Caption => {
+                if !raw {
+                    self.text(" ");
+                    End::Text(" ")
+                } else if matches!(tag, Tag::Cell(_)) {
+                    // Cells of a row go on one line, a space apart.
+                    self.pre_gap(" ");
+                    End::Nothing
+                } else {
+                    self.pre_gap("\n");
+                    End::Line
+                }
             }
             _ => End::Nothing,
         };
         self.push_open(end);
+    }
+
+    /// In `pre`, writes `gap` (a line feed or a space) between a block
+    /// and the text around it, unless the text is empty or already ends
+    /// with a line feed (or, for a space, with white space): markup that
+    /// lays a listing out in blocks keeps its words apart.
+    fn pre_gap(&mut self, gap: &'static str) {
+        let Some(Frame::Flat {
+            raw: true, text, ..
+        }) = self.stack.last()
+        else {
+            return;
+        };
+        let at_gap = match text.as_bytes().last() {
+            None | Some(b'\n') => true,
+            Some(b' ' | b'\t') => gap == " ",
+            Some(_) => false,
+        };
+        if !at_gap {
+            self.text(gap);
+        }
     }
 
     fn inline_start(&mut self, tag: Tag, e: &Element<'_>) {

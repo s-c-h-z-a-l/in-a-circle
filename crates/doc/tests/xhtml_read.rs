@@ -261,6 +261,29 @@ fn whitespace_collapses_except_pre() {
 }
 
 #[test]
+fn blocks_inside_pre_keep_words_apart() {
+    let code = |body: &str| match &blocks(body)[..] {
+        [Block::CodeBlock { text, .. }] => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    // A block starts and ends a line, a cell is a space, inline markup
+    // and an image's alt text stay where they are.
+    assert_eq!(
+        code(
+            r#"<pre>a<b>b</b><br/>c<img alt="I"/><p>d</p><table><tr><td>e</td><td>f</td></tr></table>g</pre>"#
+        ),
+        "ab\ncI\nd\ne f\ng\n"
+    );
+    // A listing written one block per line.
+    assert_eq!(
+        code("<pre><div>line1</div><div>line2</div></pre>"),
+        "line1\nline2\n"
+    );
+    // No line feed is doubled, none written before the first text.
+    assert_eq!(code("<pre>x\n<div>y\n</div>\nz</pre>"), "x\ny\n\nz\n");
+}
+
+#[test]
 fn inline_at_block_level_wrapped_in_paragraph() {
     let b = blocks(
         "loose <em>text</em><p>p</p>tail<blockquote>q <b>r</b></blockquote><ul>stray<li>i</li></ul>",
