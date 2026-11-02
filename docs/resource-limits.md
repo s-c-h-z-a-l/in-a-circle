@@ -269,9 +269,16 @@ Everything else fails only the chapter it concerns.
 
 `text.epub-to-txt` reads such a book one spine item at a time and holds
 one chapter: its bytes (at most 8 MiB, up to 1.5 times that once UTF-16 is
-decoded), its tree and its text. A book of three 8 MiB chapters peaks at
-about 40 MB RSS, a chapter of 260,000 elements (the dense case) at about
-125 MB.
+decoded), its tree and its text. Peak RSS (release build, `ru_maxrss` of
+the action alone, median of 7 runs; preliminary, not an acceptance
+measurement): a book of three 8 MiB chapters, about 35,900 KiB; a chapter
+of 262,000 `<b>` elements, about 125,800 KiB. The heaviest chapter pairs
+a near-limit tree with nearly the whole output budget: 240,000 `<p>`
+inside 30 nested `<blockquote>` (1.9 MB of XHTML, about 29 MiB of text)
+converts at about 180,000 KiB (176 MiB, the largest seen); 200,000 `<p>`
+inside 250 of them fails with `book is too large` at about 177,800 KiB.
+The same 240,000-paragraph chapter after three 8 MiB chapters fails at
+about 137,600 KiB, since its writer gets only the budget left.
 
 | Limit | Value | Why, and what happens past it |
 |---|---|---|
