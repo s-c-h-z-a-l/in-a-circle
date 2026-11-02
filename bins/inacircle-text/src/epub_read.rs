@@ -328,9 +328,10 @@ fn limit_reason(e: LimitError) -> String {
 
 /// Whether `dest` points outside the book: it has a URL scheme, or it is
 /// a network-path reference (`//host/...`, RFC 3986, section 4.2), which
-/// names another host.
+/// names another host. A bare `//` names none: more than its two
+/// slashes are needed.
 fn external(dest: &str) -> bool {
-    has_scheme(dest) || dest.starts_with("//")
+    has_scheme(dest) || (dest.len() > 2 && dest.starts_with("//"))
 }
 
 /// Whether `dest` starts with a URL scheme (RFC 3986, section 3.1: a
@@ -347,8 +348,8 @@ fn has_scheme(dest: &str) -> bool {
 /// A link to a place in the book (no URL scheme: `notes.xhtml#fn1`, `#x`)
 /// means nothing in a text file: its destination is dropped, so the
 /// writer prints the text alone (still a links loss). A link with a
-/// scheme, or to another host (`//host/...`), keeps `text (destination)`. Walked with explicit stacks, no
-/// recursion.
+/// scheme, or to another host (`//host/...`), keeps `text
+/// (destination)`. Walked with explicit stacks, no recursion.
 fn unlink_internal(d: &mut Document) {
     let mut blocks: Vec<&mut Vec<Block>> = vec![&mut d.blocks];
     let mut inlines: Vec<&mut Vec<Inline>> = Vec::new();
@@ -424,7 +425,7 @@ mod tests {
         for d in ["//example.org/x", "//h", "https://x"] {
             assert!(external(d), "{d}");
         }
-        for d in ["/x", "a//b", "#x", "", "notes.xhtml#fn1"] {
+        for d in ["/x", "a//b", "#x", "", "notes.xhtml#fn1", "//", "/"] {
             assert!(!external(d), "{d}");
         }
     }
@@ -444,53 +445,78 @@ mod tests {
         assert_eq!(chapter_text(&d, full).unwrap_err(), "book is too large");
     }
 
+    /// Every `Loss` kind, in order, produced by one wildcard-free match:
+    /// each kind names the next, so a new kind does not compile until it
+    /// has its place in the chain (the only list of kinds here).
+    fn every_loss() -> Vec<Loss> {
+        let mut all = Vec::new();
+        let mut next = Some(Loss::Emphasis);
+        while let Some(l) = next {
+            all.push(l);
+            next = match l {
+                Loss::Emphasis => Some(Loss::InlineCode),
+                Loss::InlineCode => Some(Loss::Links),
+                Loss::Links => Some(Loss::Images),
+                Loss::Images => Some(Loss::Html),
+                Loss::Html => Some(Loss::HeadingLevels),
+                Loss::HeadingLevels => Some(Loss::BlankLines),
+                Loss::BlankLines => Some(Loss::Whitespace),
+                Loss::Whitespace => Some(Loss::Strikethrough),
+                Loss::Strikethrough => Some(Loss::TableLayout),
+                Loss::TableLayout => Some(Loss::TableWidth),
+                Loss::TableWidth => Some(Loss::ControlCharacters),
+                Loss::ControlCharacters => Some(Loss::Styles),
+                Loss::Styles => Some(Loss::MergedCells),
+                Loss::MergedCells => None,
+            };
+            // A chain that loops back would never end.
+            assert!(next.is_none_or(|n| !all.contains(&n)), "{next:?} twice");
+        }
+        all
+    }
+
     /// Every loss kind plus the chapters line stays within the
-    /// supervisor's `warn` cap. The match has no wildcard: a new `Loss`
-    /// kind does not compile here until it is added to the list.
+    /// supervisor's `warn` cap.
     #[test]
     fn warn_lines_fit_the_supervisor_cap() {
-        let all = [
-            Loss::Emphasis,
-            Loss::InlineCode,
-            Loss::Links,
-            Loss::Images,
-            Loss::Html,
-            Loss::HeadingLevels,
-            Loss::BlankLines,
-            Loss::Whitespace,
-            Loss::Strikethrough,
-            Loss::TableLayout,
-            Loss::TableWidth,
-            Loss::ControlCharacters,
-            Loss::Styles,
-            Loss::MergedCells,
-        ];
-        for l in all {
-            match l {
-                Loss::Emphasis
-                | Loss::InlineCode
-                | Loss::Links
-                | Loss::Images
-                | Loss::Html
-                | Loss::HeadingLevels
-                | Loss::BlankLines
-                | Loss::Whitespace
-                | Loss::Strikethrough
-                | Loss::TableLayout
-                | Loss::TableWidth
-                | Loss::ControlCharacters
-                | Loss::Styles
-                | Loss::MergedCells => {}
-            }
-        }
+        let all = every_loss();
         let done = Converted {
             unread: 3,
-            losses: BTreeSet::from(all),
+            losses: all.iter().copied().collect(),
         };
         let lines = warnings(&done);
         assert_eq!(lines.len(), 1 + all.len());
         assert_eq!(lines[0], "3 chapter(s) could not be read");
         assert!(lines.len() <= MAX_WARN, "{} warn lines", lines.len());
+    }
+
+    /// The budget left also pays the writer's working memory, not only
+    /// its text: a table's cell grid (one `String` per cell) is charged
+    /// to it, so a late table whose text would still fit can fail the
+    /// book (`book is too large`).
+    #[test]
+    fn late_table_grid_is_charged_to_the_budget_left() {
+        let cell = || vec![Inline::Text("x".into())];
+        let d = Document {
+            blocks: vec![Block::Table {
+                align: vec![doc::Align::None; 10],
+                head: (0..10).map(|_| cell()).collect(),
+                rows: (0..200)
+                    .map(|_| (0..10).map(|_| cell()).collect())
+                    .collect(),
+            }],
+        };
+        let text = doc::txt::write(&d).0.len();
+        let grid = 10 * 201 * std::mem::size_of::<String>();
+        assert!(grid > text, "grid {grid} <= text {text}");
+        let full = LIMITS.output_bytes;
+        // With the whole budget it converts; with just its text's length
+        // left, the grid's charge fails it.
+        assert_eq!(chapter_text(&d, 0).unwrap().0.len(), text);
+        assert_eq!(
+            chapter_text(&d, full - text).unwrap_err(),
+            "book is too large"
+        );
     }
 
     /// Each budget a chapter can run out of has its own reason.

@@ -204,8 +204,9 @@ are in `CLAUDE.md`.
   line of 80 characters (the prefix of an enclosing list or quote
   counts): two spaces between columns, a row of dashes under the header
   (a header whose cells are all empty is left out with its dashes and
-  the empty rows right after it), the column alignment kept as padding. When the table is wider, the widest
-  columns give up width one character at a time, none below 10 (a column that is
+  the empty rows right after it), the column alignment kept as padding.
+  When the table is wider, the widest columns give up width one
+  character at a time, none below 10 (a column that is
   narrower stays as it is) and a cell wraps inside its column, at spaces, a
   longer word at a character boundary. If the minimums and gaps do not fit the
   line, each row becomes `header: cell` lines (`Column <n>` for an empty header)
@@ -444,8 +445,8 @@ are in `CLAUDE.md`.
   appended to the file; its tree is dropped before the next. A link to
   a place in the book (no URL scheme, such as `notes.xhtml#fn1` or
   `#x`) is written as its text alone; one with a scheme, or to another
-  host (`//host/...`), as `text (destination)`; either is reported. An SVG page has
-  no text and is reported as an image. A spine item that cannot be read
+  host (`//host/...`), as `text (destination)`; either is reported. An
+  SVG page has no text and is reported as an image. A spine item that cannot be read
   is the paragraph `[Chapter N could not be read: <reason>]` in its
   place (the reasons in `docs/resource-limits.md`), and one `warn`,
   `N chapter(s) could not be read`, counts them; then each loss once
