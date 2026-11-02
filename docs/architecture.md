@@ -332,26 +332,27 @@ are in `CLAUDE.md`.
   and kept once, however often the spine names it, its path at most 512
   bytes (the longest entry name: a longer one is `missing`) and its media
   type at most 255 (RFC 6838: a longer one is `unsupported type`). An
-  `href` is relative to the package's folder: the `#fragment` is cut,
-  `%XX` decoded, the path normalized lexically (`doc::xhtml::normalize`),
-  and the entry name matched exactly, case included; an href with a URL
-  scheme, an absolute one, or one that climbs above the container root
-  (also once decoded) is `outside the book` and never looked up. A
-  resource `encryption.xml` lists under an `EncryptedData` with a cipher
-  among its own `EncryptionMethod`s (in any order), or with none, is
-  encrypted, and so is a ZIP entry with an encryption flag; font
-  obfuscation (`http://www.idpf.org/2008/embedding`,
+  `href` is relative to the package's folder: the `?query` and `#fragment`
+  are cut, `%XX` decoded, the path normalized lexically
+  (`doc::xhtml::normalize`), and the entry name matched exactly, case
+  included; an href with a URL scheme, an absolute one, or one that climbs
+  above the container root (also once decoded) is `outside the book` and
+  never looked up. A resource `encryption.xml` lists under an
+  `EncryptedData` with a cipher among its own `EncryptionMethod`s (in any
+  order), or with none, is encrypted, and so is a ZIP entry with an
+  encryption flag; font obfuscation (`http://www.idpf.org/2008/embedding`,
   `http://ns.adobe.com/pdf/enc#RC`) is not, and `rights.xml` decides
   nothing. When every XHTML spine item in the book is encrypted the book
   is `book is DRM-protected`; otherwise an encrypted item fails alone,
   `encrypted`. `Book::chapter` reads one spine item's raw bytes when asked
-  and keeps nothing: an XHTML item (`application/xhtml+xml`) up to 8 MiB,
-  an SVG page as nothing (it has no text), anything else is `unsupported
-  type <mime>`. A broken skeleton fails the whole book (`BookError`, the
-  texts in `docs/resource-limits.md`); a spine item that is missing,
-  outside the book, encrypted, too large, of another type or whose data is
-  damaged fails only itself (`ChapterError`) and the rest of the book
-  reads.
+  and keeps nothing (media types are compared by `type/subtype`, ASCII
+  case ignored, parameters cut): an XHTML item (`application/xhtml+xml`)
+  up to 8 MiB, an SVG page as nothing (it has no text), anything else is
+  `unsupported type <mime>`. A broken skeleton fails the whole book
+  (`BookError`, the texts in `docs/resource-limits.md`); a spine item that
+  is missing, outside the book, encrypted, too large, of another type or
+  whose data is damaged fails only itself (`ChapterError`) and the rest of
+  the book reads.
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always

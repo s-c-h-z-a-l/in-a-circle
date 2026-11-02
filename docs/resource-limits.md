@@ -240,7 +240,7 @@ never lets the data exceed) and named when it is hit.
 | XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
 | chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); a few dozen bytes each, and each manifest item they name is resolved and kept once, at most about 1 KB (the two caps below), however often the spine names it; `book has more than 10000 chapters` |
 | item path | 512 B | the ZIP reader's name limit: a longer resolved path names no entry, the item is `missing`, and only its first 512 B are kept |
-| media type | 255 B | RFC 6838: type and subtype names at most 127 characters each, and the `/`; a longer one is `unsupported type <its first 255 B>...` |
+| media type | 255 B | RFC 6838: type and subtype names at most 127 characters each, and the `/` (parameters are cut before the check); a longer one is `unsupported type <its first 255 B>...` |
 | chapter | 8 MiB | uncompressed, the text family's input limit; only that chapter fails, `too large`, the rest of the book reads |
 | book | 64 MiB | the sum of the chapters to read, each as often as the spine has it (a chapter too large alone does not count): twice the 32 MiB text output, since XHTML markup is at least as large as its text; `book is too large`, nothing is read |
 

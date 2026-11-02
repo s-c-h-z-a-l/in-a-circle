@@ -13,10 +13,12 @@
 //! and the caller reports it in its place.
 //!
 //! Paths: an `href` is relative to the package document's folder, its
-//! `#fragment` cut, `%XX` decoded and normalized lexically; entry names
-//! are matched exactly (case-sensitive), as the ZIP holds them. An href
-//! with a URL scheme, an absolute one, or one that climbs above the
-//! container root is outside the book and never looked up.
+//! `?query` and `#fragment` cut, `%XX` decoded and normalized lexically;
+//! entry names are matched exactly (case-sensitive), as the ZIP holds
+//! them. An href with a URL scheme, an absolute one, or one that climbs
+//! above the container root is outside the book and never looked up.
+//! Media types are compared by their `type/subtype`, ASCII case ignored,
+//! parameters cut.
 //!
 //! DRM: `META-INF/encryption.xml` lists the encrypted resources
 //! (`EncryptedData`, its `EncryptionMethod` and `CipherReference URI`,
@@ -84,8 +86,9 @@ pub const MAX_SPINE: usize = 10_000;
 /// href of megabytes holds 512 bytes, not 10,000 copies.
 pub const MAX_PATH: usize = ZIP_NAME_BYTES;
 
-/// Longest media type: 255 bytes, RFC 6838 section 4.2 (type and subtype
-/// names at most 127 characters each, and the `/`). A longer one is no
+/// Longest media type (its `type/subtype`, parameters cut): 255 bytes,
+/// RFC 6838 section 4.2 (type and subtype names at most 127 characters
+/// each, and the `/`). A longer one is no
 /// media type: the item is `unsupported type <first 255 bytes>...` (cut at
 /// a character boundary, `...` appended), and only that is kept.
 pub const MAX_MEDIA_TYPE: usize = 255;
@@ -238,8 +241,9 @@ pub struct Item {
     /// `href` as written. At most [`MAX_PATH`] bytes (cut at a character
     /// boundary).
     pub path: String,
-    /// The manifest's `media-type`, trimmed; at most [`MAX_MEDIA_TYPE`]
-    /// bytes and `...` (a longer one is cut).
+    /// The essence of the manifest's `media-type` (`type/subtype` as
+    /// written, parameters and blanks cut); at most
+    /// [`MAX_MEDIA_TYPE`] bytes and `...` (a longer one is cut).
     pub media_type: String,
 }
 
@@ -382,6 +386,7 @@ fn resolve_item(
     encrypted: &HashSet<String>,
     limits: &Limits,
 ) -> (Item, Slot, Option<bool>) {
+    let media_type = essence(media_type);
     let shown_type = cut(media_type, MAX_MEDIA_TYPE);
     let item = |path: &str| Item {
         path: cut(path, MAX_PATH),
@@ -399,7 +404,9 @@ fn resolve_item(
     };
     let entry = &archive.entries()[i];
     let is_locked = entry.encrypted || encrypted.contains(&path);
-    let xhtml = (media_type == XHTML_TYPE).then_some(is_locked);
+    let xhtml = media_type
+        .eq_ignore_ascii_case(XHTML_TYPE)
+        .then_some(is_locked);
     let slot = if is_locked {
         Slot::Fail(ChapterError::Encrypted)
     } else if media_type.len() > MAX_MEDIA_TYPE {
@@ -423,14 +430,28 @@ fn cut(s: &str, max: usize) -> String {
     format!("{}...", &s[..end])
 }
 
-/// What a resolved spine item in entry `i` is.
+/// What a resolved spine item in entry `i` is, by its media type's
+/// essence (ASCII case ignored).
 fn classify(entry: &zip::Entry, i: usize, media_type: &str, limits: &Limits) -> Slot {
-    match media_type {
-        SVG_TYPE => Slot::Picture,
-        XHTML_TYPE if entry.size > limits.chapter_bytes => Slot::Fail(ChapterError::TooLarge),
-        XHTML_TYPE => Slot::Chapter(i),
-        other => Slot::Fail(ChapterError::UnsupportedType(other.to_string())),
+    if media_type.eq_ignore_ascii_case(SVG_TYPE) {
+        Slot::Picture
+    } else if !media_type.eq_ignore_ascii_case(XHTML_TYPE) {
+        Slot::Fail(ChapterError::UnsupportedType(media_type.to_string()))
+    } else if entry.size > limits.chapter_bytes {
+        Slot::Fail(ChapterError::TooLarge)
+    } else {
+        Slot::Chapter(i)
     }
+}
+
+/// A media type's essence, `type/subtype`: its parameters (`; charset=…`)
+/// cut and blanks trimmed. Compare it ignoring ASCII case (RFC 6838
+/// section 4.2: type and subtype names are case-insensitive).
+fn essence(media_type: &str) -> &str {
+    media_type
+        .split_once(';')
+        .map_or(media_type, |(t, _)| t)
+        .trim()
 }
 
 impl Book<'_> {
@@ -593,7 +614,8 @@ fn parse_container(bytes: &[u8], limits: &Limits) -> Result<Option<String>, Book
         if let Event::Start(e) = ev
             && found.is_none()
             && e.name.local == "rootfile"
-            && e.attr(None, "media-type").map(str::trim) == Some(PACKAGE_TYPE)
+            && e.attr(None, "media-type")
+                .is_some_and(|t| essence(t).eq_ignore_ascii_case(PACKAGE_TYPE))
             && let Some(p) = e.attr(None, "full-path")
             && !p.is_empty()
         {
@@ -726,12 +748,13 @@ fn escapes(path: &str) -> bool {
     path == ".." || path.starts_with("../") || path.starts_with('/')
 }
 
-/// The entry name `href` (relative to the folder `base`) names: fragment
-/// cut, `%XX` decoded, normalized; `None` when it is outside the book (a
+/// The entry name `href` (relative to the folder `base`) names: query and
+/// fragment cut (the first `?` or `#` and all after it, before decoding),
+/// `%XX` decoded, normalized; `None` when it is outside the book (a
 /// URL scheme, an absolute path, or above the container root, also when
 /// that is only seen once decoded).
 fn resolve(base: &str, href: &str) -> Option<String> {
-    let href = href.split_once('#').map_or(href, |(p, _)| p);
+    let href = href.find(['?', '#']).map_or(href, |end| &href[..end]);
     if has_scheme(href) || href.starts_with('/') {
         return None;
     }

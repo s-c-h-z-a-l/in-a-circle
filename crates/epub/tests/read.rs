@@ -789,6 +789,94 @@ fn svg_spine_item_and_unsupported_type() {
 }
 
 #[test]
+fn media_types_ignore_case_and_parameters() {
+    // MIME types are ASCII case-insensitive and may carry parameters
+    // (RFC 6838, RFC 2045); only type/subtype decides, and only it is kept.
+    let manifest = [
+        r#"<item id="a" href="a.xhtml" media-type="Application/XHTML+xml"/>"#,
+        r#"<item id="b" href="b.xhtml" media-type="application/xhtml+xml ; charset=utf-8"/>"#,
+        r#"<item id="s" href="s.svg" media-type="IMAGE/svg+XML;q=1"/>"#,
+        r#"<item id="h" href="b.xhtml" media-type="text/html; charset=utf-8"/>"#,
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("s"), itemref("h")].concat();
+    let opf = package("", &manifest, &spine);
+    // The container's rootfile type likewise.
+    let cont = container("content.opf").replace(
+        "application/oebps-package+xml",
+        "Application/OEBPS-Package+XML; charset=utf-8",
+    );
+    let (a, b) = (xhtml("a"), xhtml("b"));
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("a.xhtml", &a, Stored),
+        ("b.xhtml", &b, Stored),
+        ("s.svg", b"<svg/>", Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[0].as_ref().unwrap(), &a);
+    assert_eq!(all[1].as_ref().unwrap(), &b);
+    assert_eq!(all[2], Ok(Vec::new()));
+    assert_eq!(
+        all[3],
+        Err(ChapterError::UnsupportedType("text/html".into()))
+    );
+    let types: Vec<_> = book.items.iter().map(|i| i.media_type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "Application/XHTML+xml",
+            "application/xhtml+xml",
+            "IMAGE/svg+XML",
+            "text/html"
+        ]
+    );
+    // An encrypted XHTML item of any spelling counts toward DRM.
+    let enc = encryption(&[(AES, "a.xhtml"), (AES, "b.xhtml")]);
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("a.xhtml", &a, Stored),
+        ("b.xhtml", &b, Stored),
+        ("s.svg", b"<svg/>", Stored),
+        ("META-INF/encryption.xml", enc.as_bytes(), Stored),
+    ]);
+    assert!(matches!(err(open(&f)), BookError::DrmProtected));
+}
+
+#[test]
+fn href_query_is_cut_like_a_fragment() {
+    // A URL's query is no part of its path: `c1.xhtml?q=1` names
+    // `c1.xhtml`. A `?` that is percent-encoded is a name byte.
+    let manifest = [
+        item("a", "c1.xhtml?q=1"),
+        item("b", "c1.xhtml?q#f"),
+        item("c", "c1.xhtml#f?x"),
+        item("d", "a%3Fb.xhtml"),
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("c"), itemref("d")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let (c1, q) = (xhtml("1"), xhtml("q"));
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("c1.xhtml", &c1, Stored),
+        ("a?b.xhtml", &q, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    for r in &all[..3] {
+        assert_eq!(r.as_ref().unwrap(), &c1);
+    }
+    assert_eq!(all[3].as_ref().unwrap(), &q);
+    assert_eq!(path(&book, 1), "c1.xhtml");
+}
+
+#[test]
 fn mimetype_not_first_is_accepted() {
     // The mimetype entry last, and deflated.
     let opf = package("", &item("c1", "c1.xhtml"), &itemref("c1"));
