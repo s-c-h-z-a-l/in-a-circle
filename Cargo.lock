@@ -165,6 +165,7 @@ dependencies = [
  "manifest",
  "probe",
  "testzip",
+ "xml",
  "zip",
 ]
 

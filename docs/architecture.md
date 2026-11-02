@@ -429,6 +429,32 @@ are in `CLAUDE.md`.
   script and nothing loaded from outside. The losses are those of the
   book. The page is created new too (never overwritten) and checked
   against the output size ceiling before it is written.
+- `text.epub-to-txt` (`in=application/epub+zip`, `group=document`,
+  `lossy=yes`) writes one plain-text file per book, `<stem>.txt`. The book
+  file is read entry by entry (`epub::read`), never whole, so it is not
+  held to the text input budget. The file starts with the book's title
+  and its authors (joined by `, `), one line each, and a blank line; what
+  the book lacks is left out, and with neither, the header too. Then
+  every spine item in spine order (`linear="no"` ones in their place),
+  each with the plain-text writer's block rules, a blank line between
+  chapters; a chapter's title is its own heading, none is added and the
+  navigation document is read as any chapter. One chapter at a time:
+  its bytes, `xml::decode`, `doc::xhtml_read` under fresh text-family
+  budgets, the writer, appended to the file; its tree is dropped before
+  the next. A link to a place in the book (no URL scheme, such as
+  `notes.xhtml#fn1` or `#x`) is written as its text alone; one with a
+  scheme as `text (destination)`; either is reported. An SVG page has
+  no text and is reported as an image. A spine item that cannot be read
+  is the paragraph `[Chapter N could not be read: <reason>]` in its
+  place (the reasons in `docs/resource-limits.md`), and one `warn`,
+  `N chapter(s) could not be read`, counts them; then each loss once
+  (styles always: no stylesheet is read). A book that cannot be read
+  fails with the reader's reason before any file exists; when no
+  chapter could be read (`no chapter could be read`), none holds text
+  (`book has no text`), or the text passes the 32 MiB output budget
+  (`book is too large`) or the output ceiling (`Plain text would be
+  larger than <N> MiB`), the file is cut back to empty and removed and
+  the input fails.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -447,6 +473,7 @@ action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=e
 action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1

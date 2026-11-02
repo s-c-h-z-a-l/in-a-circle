@@ -267,6 +267,29 @@ These fail the whole book (nothing is written for it), each with its text:
 
 Everything else fails only the chapter it concerns.
 
+`text.epub-to-txt` reads such a book one spine item at a time and holds
+one chapter: its bytes (at most 8 MiB, up to 1.5 times that once UTF-16 is
+decoded), its tree and its text. A book of three 8 MiB chapters peaks at
+about 40 MB RSS, a chapter of 260,000 elements (the dense case) at about
+125 MB.
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| chapter budgets | the text family's, fresh per chapter | each chapter is read under its own input (8 MiB), node (524,288) and text (32 MiB) budgets, so a book costs one chapter at a time; past one only that chapter fails: `too large`, `too large (nodes limit)`, `too large (text limit)` |
+| XML depth | 256 | the XML reader's `MAX_DEPTH`; that chapter fails, `too large (nesting limit)` |
+| encoding name | 40 characters | the longest name the IANA charset registry allows (RFC 2978); a longer declared name is cut with `...` in `unsupported encoding <name>` |
+| text output | 32 MiB | the text family's output budget, for the whole book (header, chapters and their reason lines), checked before each write; `book is too large`, the file is cut back to empty and removed |
+| output ceiling | `RLIMIT_FSIZE` | checked before each write (and `SIGXFSZ` ignored, so a write past it fails with `EFBIG`, not the process); `Plain text would be larger than <N> MiB` (N rounded down, KiB below 1 MiB), the file is cut back to empty and removed, the rest of the batch still converts |
+
+A chapter fails alone, in its place, with one of: `too large`, `too large
+(nodes limit)`, `too large (text limit)`, `too large (nesting limit)`,
+`not well-formed XML (line L)`, `unsupported encoding <name>`, `entity
+declarations are not supported`, `encrypted`, `outside the book`,
+`missing`, `unsupported type <mime>`, `damaged (<ZIP reason>)`. The book
+leaves no file when no chapter could be read (`no chapter could be
+read`) or none holds text (`book has no text`; an image's alt text is
+not text).
+
 ### The machine side
 
 A basic user has 8 GB RAM, a power user 32-96 GB. Spawn-per-use lets several
