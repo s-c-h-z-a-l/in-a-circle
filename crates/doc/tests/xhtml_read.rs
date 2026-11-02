@@ -813,6 +813,32 @@ fn span_heavy_chapter_is_linear() {
 }
 
 #[test]
+fn nested_rp_is_linear() {
+    // Only the outermost rp collects its text and decides once: nested rp
+    // elements do not copy it again per level.
+    let s = page(&format!(
+        "<p>{}{}{}</p>",
+        "<rp>".repeat(250),
+        "word ".repeat(24_000),
+        "</rp>".repeat(250)
+    ));
+    let (d, _) = assert_linear(&s).unwrap();
+    assert!(txt::write(&d).0.starts_with("word word"));
+    // A fuzz input that broke the bound by copying per level.
+    let crash = include_str!("data/nested-rp.xhtml");
+    let (r, steps) = read_steps(crash, Limits::DEFAULT);
+    assert!(
+        steps <= STEPS_PER_BYTE * crash.len() as u64,
+        "{steps} steps for {} bytes",
+        crash.len()
+    );
+    assert_eq!(
+        txt::write(&r.unwrap().0).0,
+        format!("{}\n", "x".repeat(200))
+    );
+}
+
+#[test]
 fn has_text_ignores_alt_text_and_white_space() {
     let doc = |b: &str| read(&page(b)).0;
     assert!(!has_text(&doc("")));

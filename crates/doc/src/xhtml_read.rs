@@ -775,9 +775,14 @@ impl Builder {
     /// `rp` collects its text flat (an element inside is its text, as in
     /// inline code); [`Builder::close_top`] then drops it when it holds
     /// only brackets and white space, else writes it where it stands.
+    /// An `rp` inside one is its text: only the outermost collects and
+    /// decides, so nesting does not copy the text again per level.
     fn rp_start(&mut self) {
         let space = self.last_space;
         self.push_open(End::Nothing);
+        if let Some(Frame::Flat { rp: Some(_), .. }) = self.stack.last() {
+            return;
+        }
         self.push_frame(Frame::Flat {
             raw: false,
             text: String::new(),
