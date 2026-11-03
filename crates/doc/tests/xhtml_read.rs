@@ -1716,3 +1716,36 @@ fn inline_between_table_rows_opens_no_row() {
         }]
     );
 }
+
+/// The steps the ids cost on top of the reader's own for a body.
+fn id_steps(body: &str) -> u64 {
+    let s = page(body);
+    let (r, with) = read_with_ids_steps(&s, Limits::DEFAULT);
+    r.unwrap_or_else(|e| panic!("{e:?} for {s}"));
+    with - steps(&s)
+}
+
+#[test]
+fn id_step_counts_per_construct() {
+    // The linearity test bounds the steps only from above, so an id that
+    // costs nothing would pass it: each id costs one step when it is
+    // settled, and a heading's ids one more when the heading closes.
+    //
+    // Containers without a heading: each waiting id is settled at the end
+    // of its container, 1 each.
+    assert_eq!(id_steps(r#"<div id="a"><p>x</p></div>"#), 1);
+    assert_eq!(
+        id_steps(r#"<div id="a"><div id="b"><div id="c"><p>x</p></div></div></div>"#),
+        3
+    );
+    // A heading's own id: 1 when it starts, 1 when it closes.
+    assert_eq!(id_steps(r#"<h1 id="b">T</h1>"#), 2);
+    // A waiting container id and the heading's own: the waiting id 1, the
+    // own id 1, both again when the heading closes, 2.
+    assert_eq!(id_steps(r#"<div id="a"><h1 id="b">T</h1></div>"#), 4);
+    // Three waiting ids settled by one heading, none of its own: 3 + 3.
+    assert_eq!(
+        id_steps(r#"<div id="a"><div id="b"><div id="c"><h1>T</h1></div></div></div>"#),
+        6
+    );
+}
