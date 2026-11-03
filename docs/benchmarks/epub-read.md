@@ -103,3 +103,44 @@ EPUBs of the shapes above (container, a package document listing every
 chapter in the spine, one XHTML file per chapter), run
 `inacircle-text run text.epub-to-txt --work <dir> -- <book>` from a small
 C parent (`fork`, `execv`, `wait4`) and read that child's `ru_maxrss`.
+
+## EPUB to Markdown
+
+What `text.epub-to-md` costs on the same kinds of books, plus books with
+images. Same machine, same release build, same C parent and the same 7 runs
+per shape (median and maximum of `ru_maxrss`; wall time around the child).
+The book layout is the one above, with a title, an author and a language in
+the package, and every image a stored JPEG (SOI, a baseline SOF segment, an
+SOS segment, zero padding, EOI) listed in the manifest and referenced by a
+`<p><img src="iN.jpg" alt="aN"/></p>`. The work directory is emptied between
+runs.
+
+- (a) the largest accepted book: 10,000 identical chapters of 6,659 B (the
+  shape of (a) above), 68,645,381 B file.
+- (b) the densest chapter that passes: 30 `<blockquote>`, 240,000
+  `<p>a</p>`, 30 `</blockquote>` (the shape of (b) above), 1,922,003 B file.
+- (c) the image count limit: one chapter with a paragraph of text and 1,023
+  images of 64 KiB, 67,248,670 B file.
+- (d) the image budget: an image chapter referencing 20 JPEGs of 8 MiB
+  (deflated in the ZIP, so the book is small), then three text chapters of
+  8 MiB; 25,333,812 B file, so the written images may total at most twice
+  that.
+
+| Shape | Peak RSS median / max (KiB) | Wall median (s) | Result |
+|---|---|---|---|
+| (a) 10,000 chapters | 10,280 / 10,412 | 1.514 | Markdown written |
+| (b) 240k `<p>` in 30 blockquotes | 181,556 / 181,684 | 0.486 | Markdown written |
+| (c) 1,023 images of 64 KiB | 4,468 / 4,676 | 0.141 | Markdown and 1,023 images written |
+| (d) images reach twice the book size | 46,160 / 46,372 | 0.601 | Markdown and 6 images written, `14 image(s) replaced by alt text` |
+
+Images are held one at a time (at most 64 MiB each) and written before the
+next is read, so the peak grows with the largest image and not with their
+count or total: (c) peaks at the level of a book without images and (d)
+holds one 8 MiB image beside the text chapters, one of which is held at a
+time. As with the plain-text action the
+dense chapter (b) is the memory worst case, about 177 MiB, far below the
+smallest `RLIMIT_DATA` net (1 GiB). The Markdown action reads the chapters
+twice (a pass for the headings, then the writing pass), so (a) takes about
+twice the time of the plain-text action on the same book, for the same
+memory. These are 7 samples per shape, preliminary diagnosis and not a
+50-sample acceptance.
