@@ -2436,6 +2436,93 @@ mod epub_to_txt {
         assert_eq!(left, [work.join(done[0][2])]);
     }
 
+    /// A book of nothing but picture pages has no text, and it read: the
+    /// failure is "no text", not "no chapter could be read".
+    #[test]
+    fn picture_only_book_has_no_text() {
+        let (root, work) = workdir("epub-svg-only");
+        let svg = Ch {
+            href: "p.svg".into(),
+            media: "image/svg+xml",
+            data: Some(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let b = book(&root, "pics.epub", "", &[svg]);
+        let o = run_raw(ID, &work, &[&b]);
+        fails_alone(&o, &work, "book has no text");
+    }
+
+    /// The whole book is held to the 32 MiB output budget, separators and
+    /// head included: a book of exactly 32 MiB converts, one byte more
+    /// fails (the last chapter alone still fits what was left before its
+    /// separator, so only the file's own check can refuse it). Two
+    /// chapters of 5,592,000 bytes of text, three times each in the
+    /// spine: 3 * 11,184,000 + 5 blank-line separators + the head (title
+    /// of `len` bytes, its line feed and the blank line).
+    #[test]
+    fn output_budget_boundary_is_exact() {
+        const LIMIT: usize = 32 << 20;
+        let (root, work) = workdir("epub-outbudget-exact");
+        for (len, ok) in [(2425usize, true), (2426, false)] {
+            let p = root.join(format!("b{len}.epub"));
+            let para = format!("<p>{}</p>", "a".repeat(5_591_999));
+            let chs = [ch("c0.xhtml", &para), ch("c1.xhtml", &para)];
+            let meta = format!("<dc:title>{}</dc:title>", "t".repeat(len));
+            book_at(&p, "3.0", &meta, &chs, 3, &[]);
+            assert_eq!((len + 2) + 3 * 11_184_000 + 5, LIMIT - 2425 + len);
+            let o = run_raw(ID, &work, &[&p]);
+            if ok {
+                let out = stdout(&o);
+                assert_eq!(o.status.code(), Some(0), "{out}");
+                let done = lines(&out, "done");
+                let size = fs::metadata(work.join(done[0][2])).unwrap().len();
+                assert_eq!(size, LIMIT as u64);
+                fs::remove_file(work.join(done[0][2])).unwrap();
+            } else {
+                fails_alone(&o, &work, "book is too large");
+            }
+        }
+    }
+
+    /// An output of exactly `RLIMIT_FSIZE` bytes is written (the file may
+    /// reach the ceiling); one byte more fails with the size copy.
+    #[test]
+    fn output_of_exactly_the_ceiling_is_written() {
+        const CAP: u64 = 1 << 20;
+        let (root, work) = workdir("epub-ceiling-exact");
+        // One paragraph of `n` bytes is `n + 1` bytes of text; no head.
+        let at = book(
+            &root,
+            "at.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                &format!("<p>{}</p>", "a".repeat(CAP as usize - 1)),
+            )],
+        );
+        let over = book(
+            &root,
+            "over.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                &format!("<p>{}</p>", "a".repeat(CAP as usize)),
+            )],
+        );
+        let o = run_with_fsize_of(ID, &work, &[&at, &over], CAP);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(0), "{out}");
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{out}");
+        assert_eq!(done[0][1], at.to_str().unwrap());
+        assert_eq!(fs::metadata(work.join(done[0][2])).unwrap().len(), CAP);
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 1, "{out}");
+        assert_eq!(fails[0][1], over.to_str().unwrap());
+        assert_eq!(fails[0][2], "Plain text would be larger than 1 MiB");
+    }
+
     #[test]
     fn deterministic_output() {
         let (root, work) = workdir("epub-det");

@@ -590,4 +590,65 @@ mod tests {
         assert_eq!(s, "> t\n\n- t\n\nt\n-------------\nt (https://x)\n");
         assert!(l.contains(&Loss::Links));
     }
+    /// A name cut inside a multi-byte character ends at the character
+    /// before it: 39 bytes and a two-byte `é` across byte 40.
+    #[test]
+    fn encoding_name_is_cut_at_a_character_boundary() {
+        let e = |name: &str| xml::Error {
+            kind: ErrorKind::UnsupportedEncoding(name.to_string()),
+            line: 1,
+        };
+        let name = format!("{}{}", "a".repeat(MAX_ENCODING_NAME - 1), "é".repeat(3));
+        assert!(!name.is_char_boundary(MAX_ENCODING_NAME));
+        assert_eq!(
+            xml_reason(&e(&name)),
+            format!(
+                "unsupported encoding {}...",
+                "a".repeat(MAX_ENCODING_NAME - 1)
+            )
+        );
+    }
+
+    /// The input is opened without waiting: `O_NONBLOCK` is set on the
+    /// descriptor (a FIFO would otherwise block the open until a writer
+    /// shows up), and a FIFO is refused, not read.
+    #[test]
+    fn input_opens_nonblocking_and_a_fifo_is_refused() {
+        let dir = std::env::temp_dir().join(format!("inacircle-epub-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("book.epub");
+        fs::write(&plain, b"x").unwrap();
+        let f = open_input(&plain).unwrap();
+        // SAFETY: `fcntl` with F_GETFL only reads the flags of a valid
+        // descriptor `f` owns for the whole call.
+        let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&f), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0, "flags {flags:#x}");
+
+        let q = dir.join("q.epub");
+        let c =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(q.as_os_str())).unwrap();
+        // SAFETY: `c` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let e = open_input(&q).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(e.to_string(), "not a regular file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A write the system refuses (`/dev/full`: ENOSPC) is a write
+    /// error, not the size copy; nothing counts as written.
+    #[test]
+    fn a_failed_write_is_reported_as_such() {
+        let mut full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let mut sink = Sink {
+            file: &mut full,
+            written: 0,
+            cap: None,
+        };
+        let e = sink.write("x").unwrap_err();
+        assert!(e.starts_with("cannot write output: "), "{e}");
+        assert_eq!(sink.written, 0);
+    }
 }
