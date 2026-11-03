@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use epub::read::{BookError, ChapterError, MAX_MEDIA_TYPE, MAX_PATH, open};
+use epub::read::{BookError, ChapterError, Limits, MAX_MEDIA_TYPE, MAX_PATH, open, open_with};
 use testzip::Store::{self, Deflated, Stored};
 
 const MIB: usize = 1024 * 1024;
@@ -1318,4 +1318,141 @@ fn path_and_media_type_at_their_caps() {
     assert_eq!(all[2], Err(ChapterError::UnsupportedType(t255.clone())));
     let cut = format!("{}...", &t256[..MAX_MEDIA_TYPE]);
     assert_eq!(all[3], Err(ChapterError::UnsupportedType(cut)));
+}
+
+#[test]
+fn open_counts_exactly_the_bytes_it_examines() {
+    // Each distinct manifest item the spine names counts the raw lengths
+    // of its href and (trimmed) media type once, however often it is
+    // named; an item the spine does not name counts nothing.
+    let ty = "application/xhtml+xml";
+    let ty_params = format!("{ty}; charset=utf-8");
+    let manifest = [
+        item("a", "a.xhtml"),
+        format!(r#"<item id="b" href="b.xhtml?q#f" media-type=" {ty_params} "/>"#),
+        item("unused", "unused-item-not-in-the-spine.xhtml"),
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("a"), itemref("b")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let body = xhtml("x");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("a.xhtml", &body, Stored),
+        ("b.xhtml", &body, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    assert_eq!(book.chapters.len(), 4);
+    assert_eq!(
+        book.steps(),
+        ("a.xhtml".len() + ty.len() + "b.xhtml?q#f".len() + ty_params.len()) as u64
+    );
+    assert_eq!(book.steps(), 7 + 21 + 11 + 36);
+}
+
+#[test]
+fn package_node_budget_is_exact() {
+    // The package of `simple(1)` has 16 nodes: 12 elements and attributes
+    // (package 1 + version and unique-identifier 2, metadata 1, manifest
+    // 1, item 1 + 3, spine 1, itemref 1 + 1; namespace declarations are
+    // not attributes) and 4 white-space text runs between the elements.
+    // The container has fewer. `package_nodes` is the most a skeleton file
+    // may have: 16 opens, 15 does not.
+    let f = simple(1, &[]);
+    let with = |n| {
+        open_with(
+            &f,
+            Limits {
+                package_nodes: n,
+                ..Limits::DEFAULT
+            },
+        )
+    };
+    assert!(with(16).is_ok());
+    assert!(matches!(err(with(15)), BookError::PackageTooLarge));
+}
+
+#[test]
+fn only_the_first_spine_is_read() {
+    // A second `<spine>` after the first has ended is not read: its
+    // itemrefs are not chapters.
+    let manifest = [item("a", "a.xhtml"), item("b", "b.xhtml")].concat();
+    let spine = format!(r#"{}</spine><spine>{}"#, itemref("a"), itemref("b"));
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let body = xhtml("x");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("a.xhtml", &body, Stored),
+        ("b.xhtml", &body, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    assert_eq!(paths_of(&book), ["a.xhtml"]);
+}
+
+#[test]
+fn title_collects_the_text_of_nested_elements() {
+    // The title ends at its own end tag, not at the end of an element
+    // inside it.
+    let meta = "<dc:title>A <i>B</i> C</dc:title><dc:creator>X<b>Y</b>Z</dc:creator>";
+    let opf = package(meta, &item("c1", "c1.xhtml"), &itemref("c1"));
+    let cont = container("content.opf");
+    let body = xhtml("x");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("c1.xhtml", &body, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    assert_eq!(book.title.as_deref(), Some("A B C"));
+    assert_eq!(book.authors, ["XYZ"]);
+}
+
+#[test]
+fn hrefs_that_only_look_like_a_scheme_are_paths() {
+    // A scheme is a letter, then letters, digits, `+`, `-` or `.`, then
+    // `:` (RFC 3986): `1a:` starts with a digit and `a b:` has a blank, so
+    // these are file names, not URLs outside the book. `a+b.c-d:` is one.
+    let manifest = [
+        item("a", "1a:c.xhtml"),
+        item("b", "a b:c.xhtml"),
+        item("c", "a+b.c-d:c.xhtml"),
+    ]
+    .concat();
+    let spine = [itemref("a"), itemref("b"), itemref("c")].concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("content.opf");
+    let body = xhtml("x");
+    let f = zip_file(&[
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("content.opf", opf.as_bytes(), Stored),
+        ("1a:c.xhtml", &body, Stored),
+        ("a b:c.xhtml", &body, Stored),
+        ("a+b.c-d:c.xhtml", &body, Stored),
+    ]);
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[0].as_ref().unwrap(), &body);
+    assert_eq!(all[1].as_ref().unwrap(), &body);
+    assert_eq!(all[2], Err(ChapterError::OutsideTheBook));
+}
+
+#[test]
+fn encrypted_data_below_a_wrapper_is_still_read() {
+    // `EncryptedData` is matched by its own depth, not by a fixed one:
+    // here it is the grandchild of the root. Its method and its
+    // `CipherReference` (inside `CipherData`) are read relative to it, so
+    // the chapter is encrypted.
+    let enc = format!(
+        r#"<?xml version="1.0"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#"><wrap><enc:EncryptedData><enc:EncryptionMethod Algorithm="{AES}"/><enc:CipherData><enc:CipherReference URI="OEBPS/b.xhtml"/></enc:CipherData></enc:EncryptedData></wrap></encryption>"#
+    );
+    let f = file_of(&encrypted_book(Some(&enc)));
+    let book = open(&f).unwrap();
+    let all = read_all(&book);
+    assert_eq!(all[1].as_ref().unwrap(), &xhtml("a"));
+    assert_eq!(all[2], Err(ChapterError::Encrypted));
 }
