@@ -780,6 +780,59 @@ fn wheel_offers_and_runs_epub_to_txt() {
     assert_one_group_and_undo(&root, "könyv", "könyv.txt");
 }
 
+/// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document
+/// (north); its north slice is Markdown; clicking it writes the book's
+/// Markdown and the images it shows into one wrapper folder next to the
+/// source, as one history group that Undo trashes. The drawn wheel's slices
+/// (Markdown north and Plain text south lit, east dim) are pinned by
+/// `epub_menus_offer_markdown_north_and_plain_text_south` in the binary's
+/// unit tests.
+#[test]
+fn wheel_offers_and_runs_epub_to_md() {
+    use testzip::Store::Stored;
+    let jpg_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    let jpg = fs::read(&jpg_path).unwrap();
+    let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+    let opf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Kis könyv</dc:title></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="i1" href="k.jpg" media-type="image/jpeg"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+    let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body><p>Első fejezet.</p><p><img src=\"k.jpg\" alt=\"kép\"/></p></body></html>";
+    let book = testzip::zip(&[
+        (b"mimetype", b"application/epub+zip", Stored),
+        (b"META-INF/container.xml", container.as_bytes(), Stored),
+        (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+        (b"OEBPS/c1.xhtml", page.as_bytes(), Stored),
+        (b"OEBPS/k.jpg", &jpg, Stored),
+    ]);
+    let root = Root::new("epub2md");
+    root.real_action_cached("inacircle-text", ("primer.epub", &book), "markdown-epub");
+    let src = root.0.join("f/könyv.epub");
+    fs::write(&src, &book).unwrap();
+    // The flat offer names the Markdown slice for this file, lit.
+    let offer = root.cmd().arg("offer").arg(&src).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(
+        offer.contains(
+            "slice\tgroup=document\tdir=0\tpreset=markdown-epub\tlabel=Markdown\tapplicable=1"
+        ) && !offer.contains("preset=markdown-epub\tlabel=Markdown\tapplicable=1\tdisabled"),
+        "{offer}"
+    );
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Document is north of the center, Markdown is its north slice.
+    let code = choose_on_the_wheel(&root, &list, (960, 390), (960, 390));
+    assert_eq!(code, Some(0));
+    let wrapper = root.0.join("f/könyv");
+    let md = fs::read_to_string(wrapper.join("könyv.md")).expect("no Markdown written");
+    assert_eq!(
+        md,
+        "# Kis könyv\n\nElső fejezet.\n\n![kép](könyv-0001.jpg)\n"
+    );
+    assert_eq!(fs::read(wrapper.join("könyv-0001.jpg")).unwrap(), jpg);
+    assert_eq!(fs::read(&src).unwrap(), book, "the book changed");
+    assert_one_group_and_undo(&root, "könyv", "könyv.md");
+}
+
 /// Fixture of the Markdown-and-images wheel tests: the real text and pages
 /// actions (both primed into the catalog cache), and in `f/Utazás` two
 /// Markdown files (the first referencing `1.png`), three images, a text
