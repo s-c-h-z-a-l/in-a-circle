@@ -2,7 +2,7 @@
 //! everything that could be read as structure; these tests prove it on
 //! fixtures and on a deterministic pseudo-random corpus.
 
-use doc::{Block, Dialect, Document, Inline, Loss, md, txt};
+use doc::{Block, Dialect, Document, Inline, Limits, Loss, md, txt};
 use std::collections::BTreeSet;
 
 /// Inline text concatenated, `HardBreak` = "\n"; blocks separated by a blank
@@ -559,4 +559,136 @@ fn random_inputs_round_trip() {
             );
         }
     }
+}
+
+/// The GFM 0.29 spec (cmark-gfm's unmodified `test/spec.txt`, the same
+/// fixture `gfm.rs` reads; its 672 examples hold the CommonMark ones and
+/// the extension ones).
+const GFM_SPEC: &str = include_str!("data/gfm-spec-0.29.0.gfm.13.txt");
+
+/// The Markdown of every example of [`GFM_SPEC`] (number from 1), tabs
+/// restored from the spec's arrows.
+fn spec_markdown() -> Vec<(u32, String)> {
+    const FENCE: &str = "````````````````````````````````";
+    let mut out = Vec::new();
+    let mut lines = GFM_SPEC.lines();
+    while let Some(line) = lines.next() {
+        if !line.starts_with(&format!("{FENCE} example")) {
+            continue;
+        }
+        let mut md = String::new();
+        for l in lines.by_ref() {
+            if l == "." {
+                break;
+            }
+            md.push_str(l);
+            md.push('\n');
+        }
+        for l in lines.by_ref() {
+            if l == FENCE {
+                break;
+            }
+        }
+        out.push((out.len() as u32 + 1, md.replace('\u{2192}', "\t")));
+    }
+    assert_eq!(out.len(), 672, "the spec holds 672 examples");
+    out
+}
+
+/// 64-bit FNV-1a, to pin a large output without storing it.
+fn fnv1a(h: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h ^= u64::from(b);
+        *h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+}
+
+/// The CommonMark-mode writer (what txt -> md ships) is byte for byte what
+/// it was before the GFM mode existed: its output and losses over every
+/// spec example's tree, read in both dialects (so tables and strikethrough
+/// take the CommonMark-mode flattening), are pinned by a hash taken from
+/// the writer before the change. The txt -> md outputs of the CLI tests
+/// and the writer's own unit tests pin the rest.
+#[test]
+fn commonmark_mode_unchanged() {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mut total = 0usize;
+    for (_, md_in) in spec_markdown() {
+        for dialect in [Dialect::CommonMark, Dialect::Gfm] {
+            let d = md::read_with(md_in.as_bytes(), dialect).unwrap();
+            let (out, losses) = md::write(&d);
+            let limited = md::write_limited_with(&d, Limits::DEFAULT, Dialect::CommonMark);
+            assert_eq!(limited.unwrap(), (out.clone(), losses.clone()));
+            fnv1a(&mut h, out.as_bytes());
+            fnv1a(&mut h, format!("{losses:?}").as_bytes());
+            total += out.len();
+        }
+    }
+    // Taken from the writer as it was before the GFM mode.
+    assert_eq!((total, h), (31_195, 4_507_573_369_675_658_427));
+}
+
+/// Spec examples whose tree the GFM writer does not give back unchanged,
+/// each a flattening of the code it shares with the CommonMark mode. No
+/// table, strikethrough or task list example is among them.
+const GFM_ROUNDTRIP_EXCEPTIONS: &[(u32, &str)] = &[
+    (
+        51,
+        "a line break in a heading is a space (an ATX heading is one line)",
+    ),
+    (
+        52,
+        "a line break in a heading is a space (an ATX heading is one line)",
+    ),
+    (
+        65,
+        "a line break in a heading is a space (an ATX heading is one line)",
+    ),
+    (187, "an empty block quote writes nothing"),
+    (217, "an empty block quote writes nothing"),
+    (218, "an empty block quote writes nothing"),
+    (
+        301,
+        "a block after a block quote in a tight item needs a blank line, so the list reads loose",
+    ),
+    (
+        335,
+        "a line feed inside text (`&#10;`) is written as a line break, so the paragraph splits",
+    ),
+    (
+        626,
+        "the backslash of an escaped `&` right after an extended autolink becomes part of the link",
+    ),
+    (
+        627,
+        "the backslash of an escaped `<` right after an extended autolink becomes part of the link",
+    ),
+];
+
+/// Every spec example's GFM tree, written in GFM mode and read back by the
+/// GFM reader, is the same tree, except the listed flattenings (each of
+/// which must still differ, so the list cannot go stale).
+#[test]
+fn gfm_roundtrip_is_stable() {
+    for (n, why) in GFM_ROUNDTRIP_EXCEPTIONS {
+        assert!(!why.is_empty(), "exception {n} needs a reason");
+    }
+    let mut failed = Vec::new();
+    let mut tables = 0;
+    for (n, md_in) in spec_markdown() {
+        let d1 = md::read_with(md_in.as_bytes(), Dialect::Gfm).unwrap();
+        // Seven of the eight table examples make a table (one shows a
+        // header and delimiter row of different widths), at any depth.
+        tables += usize::from(format!("{d1:?}").contains("Table {"));
+        let (w1, _) = md::write_limited_with(&d1, Limits::UNLIMITED, Dialect::Gfm).unwrap();
+        let d2 = md::read_with(w1.as_bytes(), Dialect::Gfm).unwrap();
+        let known = GFM_ROUNDTRIP_EXCEPTIONS.iter().any(|&(e, _)| e == n);
+        if known {
+            assert_ne!(d1, d2, "example {n} round-trips now: drop its exception");
+        } else if d1 != d2 {
+            failed.push(format!("{n}: {md_in:?} -> {w1:?}\n  {d1:?}\n  {d2:?}"));
+        }
+    }
+    assert_eq!(tables, 7, "the spec's table examples were read as tables");
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

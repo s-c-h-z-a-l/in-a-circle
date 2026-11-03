@@ -198,6 +198,25 @@ are in `CLAUDE.md`.
   lost for a run whose output actually lost something.
 - `text.txt-to-md` escapes every tilde of a run of two or more, so that
   plain text is never read back as strikethrough.
+- The Markdown writer (`doc::md`) has two modes. The CommonMark mode
+  (`write`, `write_limited`) is what `text.txt-to-md` writes; a table in
+  it is one line per row (reported) and strikethrough loses its marks
+  (reported). The GFM mode (`write_limited_with(.., Dialect::Gfm)`)
+  writes everything else the same way and adds: a table as a pipe table
+  (a header row, kept even when all its cells are empty, the delimiter
+  row `---`, `:--`, `:-:` or `--:` per column, then the body rows, a row
+  short of cells padded with empty ones), every `|` in a cell written
+  `\|`, a line break in a cell (a block in a book's cell) written as a
+  space and reported as a table layout loss only when one was there;
+  strikethrough as `~~...~~` (adjacent ones joined, a nested one written
+  as its outer one, an empty one left out), with a tilde next to a
+  delimiter escaped; a line-start `:` escaped, so a paragraph line never
+  becomes a delimiter row. Task list items and extended autolinks are
+  written as in the CommonMark mode. A `www.` or `://` in text whose run
+  (to white space or `<`) would hold one of the writer's escapes, or
+  runs into the next inline, gets its `.` or `:` as an entity, so a GFM
+  reader does not make a link that holds the backslash; elsewhere a
+  GFM reader links the text as it reads.
 - `text.md-to-txt` reads a `.md` input as GitHub Flavored Markdown
   (CommonMark plus tables, strikethrough, task lists and extended
   autolinks). The action writes GFM tables as aligned columns in a full
