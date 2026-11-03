@@ -391,7 +391,16 @@ are in `CLAUDE.md`.
   texts in `docs/resource-limits.md`); a spine item that
   is missing, outside the book, encrypted, too large, of another type or
   whose data is damaged fails only itself (`ChapterError`) and the rest of
-  the book reads.
+  the book reads. `Book::resolve` resolves an `href` or `src` written in a
+  chapter by the same rules, relative to the chapter's folder (not the
+  package's); one that is empty once the query and fragment are cut
+  (`#id`) names the chapter itself; a chapter outside the book, or a path
+  over 512 bytes, resolves to nothing. `Book::resource` reads one file
+  entry by its exact name under a cap the caller gives, checked on the
+  declared size before anything is reserved or inflated and on the bytes
+  produced (`too large`); no such file entry is `missing`, a ZIP
+  encryption flag or a cipher in `encryption.xml` is `encrypted`, the ZIP
+  reader's reason is `damaged`. Neither keeps anything.
 - The XHTML chapter reader, `doc::xhtml_read`, maps one chapter (decoded by
   `xml::decode`, then read with the HTML named characters and the XML
   depth limit) to the document tree; text disappears only with a reported

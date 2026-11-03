@@ -8,7 +8,13 @@
 //! often as the spine has it) within the book limit; an empty buffer on
 //! every error. Each chapter read is decoded and mapped to the document
 //! tree (`doc::xhtml_read`, fresh default budgets per chapter, as the
-//! action reads it) and written as text.
+//! action reads it) and written as text; read again with its ids
+//! (`read_with_ids`: the same tree, the ids' heading ordinals within the
+//! tree's headings, the work within the reader's step bound). Every image
+//! `src` of the tree is resolved against its chapter (`Book::resolve`: a
+//! path inside the container, within `MAX_PATH`) and each path, once per
+//! book, read under `IMAGE_BYTES` (`Book::resource`: never more than the
+//! cap, an empty buffer on every error).
 //!
 //! Before the bytes are written, the CRC-32 of every stored entry the
 //! directory locates is recomputed into both its headers (`fix_crcs`):
@@ -21,6 +27,10 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
+use doc::xhtml_read::{
+    Ids, STEPS_PER_BYTE, STEPS_PER_NODE, XhtmlError, read_limited, read_with_ids_steps,
+};
+use doc::{Block, Document, Inline};
 use epub::read::{Limits, MAX_MEDIA_TYPE, MAX_PATH, MAX_SPINE, open_with};
 
 /// Small limits so the fuzzer reaches each of them at speed, as the
@@ -37,6 +47,14 @@ const LIMITS: Limits = Limits {
     package_bytes: 256 << 10,
     package_nodes: 4096,
 };
+
+/// The image cap, scaled down like `LIMITS`: the action's 64 MiB per
+/// image is 8 x its 8 MiB chapter limit, so 8 x the 256 KiB chapter limit
+/// here, 2 MiB (below libFuzzer's 16 MB malloc limit for this target).
+/// Each resolved path is read once per book, so the inflation stays
+/// within what the archive's entries declare (at most the input x the
+/// 1032 ratio), as when the chapters are read.
+const IMAGE_BYTES: u64 = 8 * LIMITS.chapter_bytes;
 
 thread_local! {
     /// One scratch file per process in the fuzz crate's own `target/`
@@ -110,6 +128,94 @@ fn max_declared(b: &[u8]) -> u64 {
         .unwrap_or(0) as u64
 }
 
+/// Every heading (in document order) and image `src` of `d`.
+fn walk(d: &Document) -> (usize, Vec<&str>) {
+    enum Part<'a> {
+        Blocks(&'a [Block]),
+        Inlines(&'a [Inline]),
+    }
+    let (mut headings, mut srcs) = (0, Vec::new());
+    let mut stack = vec![Part::Blocks(&d.blocks)];
+    while let Some(part) = stack.pop() {
+        match part {
+            Part::Blocks(blocks) => {
+                for b in blocks {
+                    match b {
+                        Block::Heading { content, .. } => {
+                            headings += 1;
+                            stack.push(Part::Inlines(content));
+                        }
+                        Block::Paragraph(c) => stack.push(Part::Inlines(c)),
+                        Block::BlockQuote(inner) => stack.push(Part::Blocks(inner)),
+                        Block::List { items, .. } => {
+                            stack.extend(items.iter().map(|i| Part::Blocks(&i.blocks)));
+                        }
+                        Block::Table { head, rows, .. } => stack.extend(
+                            head.iter()
+                                .chain(rows.iter().flatten())
+                                .map(|c| Part::Inlines(c)),
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            Part::Inlines(inlines) => {
+                for i in inlines {
+                    match i {
+                        Inline::Image { dest, .. } => srcs.push(dest.as_str()),
+                        Inline::Emph(c)
+                        | Inline::Strong(c)
+                        | Inline::Strikethrough(c)
+                        | Inline::Link { content: c, .. } => stack.push(Part::Inlines(c)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    (headings, srcs)
+}
+
+/// What `read_with_ids` promises against `read_limited` on one chapter.
+fn check_ids(text: &str) -> Option<(Document, Ids)> {
+    let limits = doc::Limits::DEFAULT;
+    let plain = read_limited(text, limits);
+    let (with, steps) = read_with_ids_steps(text, limits);
+    assert!(
+        steps <= STEPS_PER_BYTE * text.len() as u64 + STEPS_PER_NODE * limits.nodes as u64,
+        "{steps} steps for {} bytes",
+        text.len()
+    );
+    match (plain, with) {
+        (Ok((d, l)), Ok((d2, l2, ids))) => {
+            assert!(d == d2 && l == l2, "the ids changed the tree");
+            let (headings, _) = walk(&d2);
+            assert!(ids.headings.windows(2).all(|w| w[0].0 <= w[1].0));
+            assert!(
+                ids.headings
+                    .iter()
+                    .all(|(n, id)| *n < headings && !id.is_empty())
+            );
+            assert!(ids.others.iter().all(|id| !id.is_empty()));
+            Some((d2, ids))
+        }
+        (Err(e), Ok(_)) => panic!("read with ids, not without: {e:?}"),
+        // The ids are charged to the same budget: only a limit may stop
+        // the one that collects them alone.
+        (Ok(_), Err(e)) => {
+            assert!(matches!(e, XhtmlError::Limit(_)), "{e:?}");
+            None
+        }
+        // Both an XML error: the XML reader's own, the same.
+        (Err(e), Err(e2)) => {
+            if let (XhtmlError::Xml(_), XhtmlError::Xml(_)) = (&e, &e2) {
+                assert_eq!(e, e2);
+            }
+            None
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut data = data.to_vec();
     let _ = fix_crcs(&mut data);
@@ -141,6 +247,8 @@ fuzz_target!(|data: &[u8]| {
             book.steps()
         );
         let mut out = Vec::new();
+        let mut img = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut produced = 0u64;
         for (k, c) in book.chapters.iter().enumerate() {
             assert_eq!(c.index, k + 1);
@@ -150,11 +258,27 @@ fuzz_target!(|data: &[u8]| {
                     assert!(out.len() as u64 <= LIMITS.chapter_bytes);
                     produced += out.len() as u64;
                     if let Ok(text) = xml::decode(&out)
-                        && let Ok((d, _)) =
-                            doc::xhtml_read::read_limited(&text, doc::Limits::DEFAULT)
+                        && let Some((d, _)) = check_ids(&text)
                     {
                         let _ = doc::xhtml_read::has_text(&d);
                         let _ = doc::txt::write_limited(&d, doc::Limits::DEFAULT);
+                        for src in walk(&d).1 {
+                            let Ok(path) = book.resolve(c, src) else {
+                                continue;
+                            };
+                            assert!(path.len() <= MAX_PATH, "{} B path", path.len());
+                            assert!(
+                                !path.starts_with('/') && path.split('/').all(|s| s != ".."),
+                                "{path:?} from {src:?} leaves the book"
+                            );
+                            if !seen.insert(path.clone()) {
+                                continue;
+                            }
+                            match book.resource(&path, IMAGE_BYTES, &mut img) {
+                                Ok(()) => assert!(img.len() as u64 <= IMAGE_BYTES),
+                                Err(_) => assert!(img.is_empty()),
+                            }
+                        }
                     }
                 }
                 Err(_) => assert!(out.is_empty()),
