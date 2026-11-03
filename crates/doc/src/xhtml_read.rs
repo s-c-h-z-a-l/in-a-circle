@@ -152,10 +152,17 @@ pub fn read_limited(text: &str, limits: Limits) -> Result<(Document, BTreeSet<Lo
 ///   last. Anything the tree keeps before the heading (text, a paragraph,
 ///   a rule, a list, a quote or a table) makes it the container's own,
 ///   and so does a container that ends with no heading.
+/// - An `id` on anything inside a heading the tree keeps (its inline
+///   content: an empty anchor, `<h2><a id="c2"/>II.</h2>` as tables of
+///   contents link to, a span, emphasis, a link) is that heading's too,
+///   after the heading's own; so is the id of an element the heading
+///   holds that would be a block elsewhere (it is inline content there).
+///   An anchor just before the heading, outside it, is not.
 /// - Every other `id` is in `others`, in the order it is settled: a
-///   footnote anchor (`<a id>`), a paragraph, a span, an element in `pre`
-///   or code, a heading where only inline content fits (a cell), an empty
-///   heading (no heading in the tree), and the containers above.
+///   footnote anchor (`<a id>`) outside a heading, a paragraph, a span,
+///   an element in `pre` or code, a heading where only inline content
+///   fits (a cell) and what is inside it, an empty heading (no heading in
+///   the tree) and what is inside it, and the containers above.
 ///
 /// An empty `id` is none; an element dropped with its content (`head`,
 /// `script`, inline SVG...) keeps none. Ids are kept as written (not
@@ -599,6 +606,9 @@ struct IdState {
     /// Ids of the heading being built (at most one is open: a heading
     /// inside one is inline content).
     heading: Vec<String>,
+    /// A heading is being built: an id met inside it (on its inline
+    /// content) is its own.
+    in_heading: bool,
     /// Headings in the tree so far: the next one's ordinal.
     count: usize,
 }
@@ -714,13 +724,21 @@ impl Builder {
         }
     }
 
-    /// An id that belongs to no heading.
+    /// An id that is no block's: inside a heading being built (a table of
+    /// contents anchor, `<h2><a id="c2"/>II.</h2>`, or a span around its
+    /// text) the heading's, which files it when it closes; anywhere else
+    /// another id.
     fn other_id(&mut self, id: Option<&str>) {
         if let (Some(id), Some(_)) = (id, &self.ids) {
             self.steps += 1;
             let id = self.m.own(id);
             if let Some(st) = &mut self.ids {
-                self.m.push(&mut st.out.others, id);
+                let to = if st.in_heading {
+                    &mut st.heading
+                } else {
+                    &mut st.out.others
+                };
+                self.m.push(to, id);
             }
         }
     }
@@ -765,6 +783,7 @@ impl Builder {
             return;
         };
         let (height, attached) = (self.stack.len(), self.attached);
+        st.in_heading = true;
         for p in std::mem::take(&mut st.pending) {
             self.steps += 1;
             let first = p.height == height && p.attached == attached;
@@ -788,6 +807,7 @@ impl Builder {
         let Some(st) = &mut self.ids else {
             return;
         };
+        st.in_heading = false;
         let n = st.count;
         if kept {
             st.count += 1;

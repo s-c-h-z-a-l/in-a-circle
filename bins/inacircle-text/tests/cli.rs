@@ -3154,6 +3154,41 @@ mod epub_to_txt {
             }
         }
 
+        /// A table of contents links to an anchor inside the heading
+        /// (`<h2><a id="x"/>...</h2>`, as Project Gutenberg's books do) or
+        /// to a span around its text: the link lands on that heading.
+        #[test]
+        fn toc_anchor_inside_heading_links() {
+            let (root, work) = workdir("md-toc-anchor");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        "toc.xhtml",
+                        "<p><a href=\"c1.xhtml#chap01\">I</a> <a href=\"c2.xhtml#t2\">II</a></p>",
+                    ),
+                    ch(
+                        "c1.xhtml",
+                        "<h2><a id=\"chap01\"/>CHAPTER I.</h2><p>one</p>",
+                    ),
+                    ch(
+                        "c2.xhtml",
+                        "<h2><span id=\"t2\">CHAPTER II.</span></h2><p>two</p>",
+                    ),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "[I](#chapter-i) [II](#chapter-ii)\n\n## CHAPTER I.\n\none\n\n\
+                 ## CHAPTER II.\n\ntwo\n"
+            );
+            assert_eq!(r.warns, [STYLES]);
+        }
+
         /// A link to a footnote anchor (not a heading), to a chapter with
         /// no heading, and with a scheme other than the web's or mail's
         /// keeps only its text; a web link stays.

@@ -535,7 +535,10 @@ are in `CLAUDE.md`.
   order) and records where each heading `id` attribute lands; then one
   chapter at a time to write it. A link into the book (no URL scheme)
   becomes `#<id>` when it lands on a heading (its fragment names a
-  heading's `id`, or with no fragment the chapter has a first heading),
+  heading's `id`, an `id` inside the heading such as a table of
+  contents anchor `<h2><a id="c2"/>II.</h2>`, or that of a container
+  the heading leads; or with no fragment the chapter has a first
+  heading),
   else it keeps only its text; `http:`, `https:`, `mailto:` and
   `//host/...` links stay as they are, any other scheme keeps only its
   text (so the md never carries a `javascript:` or `file:` link); each

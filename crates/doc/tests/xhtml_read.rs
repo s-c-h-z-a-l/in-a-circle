@@ -1423,11 +1423,22 @@ fn gen_markup(rng: &mut Rng, depth: u32, next: &mut u32, out: &mut String, ids: 
                 let n = *next;
                 *next += 1;
                 let tag = 1 + rng.below(6);
-                if rng.below(4) == 0 {
-                    out.push_str(&format!("<h{tag}>plain{n}</h{tag}>"));
-                } else {
-                    out.push_str(&format!(r#"<h{tag} id="h{n}">h{n}</h{tag}>"#));
-                    ids.push(format!("h{n}"));
+                // The id on the heading, or inside it on an empty anchor
+                // (a table of contents target) or a span around its text.
+                match rng.below(8) {
+                    0 | 1 => out.push_str(&format!("<h{tag}>plain{n}</h{tag}>")),
+                    2 | 3 => {
+                        out.push_str(&format!(r#"<h{tag}><a id="h{n}"/>h{n}</h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
+                    4 => {
+                        out.push_str(&format!(r#"<h{tag}><span id="h{n}">h{n}</span></h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
+                    _ => {
+                        out.push_str(&format!(r#"<h{tag} id="h{n}">h{n}</h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
                 }
             }
             2 => out.push_str("<p>text</p>"),
@@ -1506,6 +1517,44 @@ fn heading_ordinals_map_to_own_ids_in_random_nesting() {
             "case {case}"
         );
     }
+}
+
+#[test]
+fn ids_inside_a_heading_are_its_own() {
+    // A table of contents anchor at the start of the heading, a span
+    // around its text, emphasis and a link inside it, and a block element
+    // it holds (inline content there): all the heading's, after its own
+    // id and its container's. An anchor before the heading, outside it,
+    // and ids inside an empty or a cell's heading stay others.
+    let (_, ids) = read_ids(concat!(
+        r#"<div id="d"><h2 id="own"><a id="toc"/>Chapter <span id="s">II</span>"#,
+        r#"<em id="e">.</em><a id="l" href="x.xhtml">x</a><p id="p">y</p></h2></div>"#,
+        r#"<a id="before"/><h2><span id="only">Three</span></h2>"#,
+        r#"<h3><a id="empty"/></h3>"#,
+        r#"<table><tr><td><h2><a id="cell"/>c</h2></td></tr></table>"#,
+        r#"<p><a id="after"/>z</p>"#,
+    ));
+    assert_eq!(
+        ids.headings,
+        [
+            (0, "d"),
+            (0, "own"),
+            (0, "toc"),
+            (0, "s"),
+            (0, "e"),
+            (0, "l"),
+            (0, "p"),
+            (1, "only"),
+        ]
+        .map(|(n, id)| (n, id.to_string()))
+        .to_vec()
+    );
+    assert_eq!(
+        ids.others,
+        ["before", "empty", "cell", "after"]
+            .map(String::from)
+            .to_vec()
+    );
 }
 
 #[test]

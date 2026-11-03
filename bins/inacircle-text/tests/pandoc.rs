@@ -422,12 +422,70 @@ fn convert_md(book: &Book, work: &Path) -> (String, Vec<String>, Vec<String>) {
     (text, done, warns)
 }
 
+/// An in-book link (`#id`) as its text, as the plain-text reading has it.
+fn unlink_internal(b: &mut doc::Block) {
+    fn inlines(is: &mut Vec<doc::Inline>) {
+        for i in std::mem::take(is) {
+            match i {
+                doc::Inline::Link {
+                    dest, mut content, ..
+                } if dest.starts_with('#') => {
+                    inlines(&mut content);
+                    is.extend(content);
+                }
+                doc::Inline::Link {
+                    dest,
+                    title,
+                    mut content,
+                    auto,
+                } => {
+                    inlines(&mut content);
+                    is.push(doc::Inline::Link {
+                        dest,
+                        title,
+                        content,
+                        auto,
+                    });
+                }
+                doc::Inline::Emph(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Emph(c));
+                }
+                doc::Inline::Strong(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Strong(c));
+                }
+                doc::Inline::Strikethrough(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Strikethrough(c));
+                }
+                other => is.push(other),
+            }
+        }
+    }
+    match b {
+        doc::Block::Paragraph(c) | doc::Block::Heading { content: c, .. } => inlines(c),
+        doc::Block::BlockQuote(bs) => bs.iter_mut().for_each(unlink_internal),
+        doc::Block::List { items, .. } => items
+            .iter_mut()
+            .flat_map(|i| i.blocks.iter_mut())
+            .for_each(unlink_internal),
+        doc::Block::Table { head, rows, .. } => {
+            head.iter_mut().for_each(inlines);
+            rows.iter_mut().flatten().for_each(inlines);
+        }
+        _ => {}
+    }
+}
+
 /// Every corpus book converts to Markdown too, with its images beside it,
 /// and the md read back (GFM) as plain text has the word sequence of the
-/// book's own plain text: the two readings of a book agree. The in-book
-/// links of the md (` (#id)` in plain text) are left out of the words.
+/// book's own plain text: the two readings of a book agree. Every in-book
+/// link lands on a heading, and at least one survives over the corpus;
+/// they are read as their text for the words.
 #[test]
 fn books_convert_to_md_and_read_back_to_the_txt_words() {
+    let mut internal = 0;
     for book in BOOKS {
         let txt_work = tmp(book.file);
         let (text, _) = convert(book, &txt_work.0);
@@ -452,14 +510,33 @@ fn books_convert_to_md_and_read_back_to_the_txt_words() {
         let doc =
             doc::md::read_limited_with(md.as_bytes(), doc::Limits::DEFAULT, doc::Dialect::Gfm)
                 .unwrap();
+        // Every internal link lands on a heading of the md, numbered as a
+        // viewer numbers them.
+        let mut texts = Vec::new();
+        doc::xhtml::headings(&doc.blocks, &mut texts);
+        let mut slugs = doc::xhtml::Slugs::default();
+        let ids: Vec<String> = texts.iter().map(|t| slugs.unique(t)).collect();
+        let links: Vec<&str> = md
+            .split("](#")
+            .skip(1)
+            .map(|r| &r[..r.find([')', ' ']).unwrap()])
+            .collect();
+        for l in &links {
+            assert!(
+                ids.iter()
+                    .any(|id| id == l || id.strip_prefix("h-") == Some(l)),
+                "{}: #{l} lands on no heading",
+                book.file
+            );
+        }
+        println!("{}: {} internal links", book.file, links.len());
+        internal += links.len();
+        let mut doc = doc;
+        for b in &mut doc.blocks {
+            unlink_internal(b);
+        }
         let (back, _) = doc::txt::write(&doc);
-        let strip = |t: &str| -> String {
-            t.split_whitespace()
-                .filter(|w| !w.starts_with("(#"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let (ours, theirs) = (words(&strip(&back), false), words(&strip(&text), false));
+        let (ours, theirs) = (words(&back, false), words(&text, false));
         let hs = hunks(&ours, &theirs);
         assert!(
             hs.is_empty(),
@@ -468,6 +545,9 @@ fn books_convert_to_md_and_read_back_to_the_txt_words() {
             hs.iter().map(show).collect::<Vec<_>>().join("\n")
         );
     }
+    // The books' tables of contents link to anchors inside their
+    // headings (`<h2><a id="c2"/>...</h2>`): those links stay links.
+    assert!(internal > 0, "no internal link survived");
 }
 
 #[test]
