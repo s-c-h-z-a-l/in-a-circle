@@ -1507,6 +1507,14 @@ impl<'a> InlineWriter<'a> {
         let mut lead_ahead = Ahead::new();
         let mut run_breaks = Ahead::new();
         let mut run_lead = Ahead::new();
+        // GFM: adjacent texts are written as one, as every reader reads
+        // them back: the autolink guards look at one text, and split, a
+        // `www.` run reaching a text's end is guarded (more follows)
+        // where the same run read back as one text is not, so the link
+        // would appear a round later. The texts before the last of a run
+        // gather here; one buffer per list, so it holds no more than the
+        // list's own text.
+        let mut joined = String::new();
         for (idx, item) in items.iter().enumerate() {
             if self.sink.failed() {
                 return;
@@ -1535,7 +1543,16 @@ impl<'a> InlineWriter<'a> {
                 Some(_) => gfm && end_of_line && breaks_after(),
             };
             match item {
+                Inline::Text(t) if gfm && matches!(next, Some(Inline::Text(_))) => {
+                    joined.push_str(t);
+                }
                 Inline::Text(t) => {
+                    let t = if joined.is_empty() {
+                        t.as_str()
+                    } else {
+                        joined.push_str(t);
+                        joined.as_str()
+                    };
                     let eol = item_eol;
                     let tilde_after = self.gfm
                         && match next {
@@ -1543,6 +1560,7 @@ impl<'a> InlineWriter<'a> {
                             Some(n) => strike(Some(n)) && !self.in_strike,
                         };
                     self.text(t, eol, tilde_after);
+                    joined.clear();
                 }
                 Inline::Emph(c) | Inline::Strong(c) if self.gfm => {
                     // Written without its marks, its content's end is
@@ -3506,6 +3524,111 @@ mod tests {
                 t4 < 8 * t1.max(Duration::from_millis(1)),
                 "{t1:?} -> {t4:?} for four times the cells"
             );
+        }
+    }
+
+    /// `inlines` with emphasis taken out (its content left in place, so
+    /// texts end up side by side) and autolinks made ordinary links: the
+    /// markdown fuzz target's shape for its GFM fixed point.
+    fn flatten(c: &mut Vec<Inline>) {
+        let mut out = Vec::with_capacity(c.len());
+        for mut i in std::mem::take(c) {
+            match &mut i {
+                Inline::Emph(inner) | Inline::Strong(inner) => {
+                    flatten(inner);
+                    out.append(inner);
+                    continue;
+                }
+                Inline::Link { auto, content, .. } => {
+                    *auto = false;
+                    flatten(content);
+                }
+                Inline::Strikethrough(inner) => flatten(inner),
+                _ => {}
+            }
+            out.push(i);
+        }
+        *c = out;
+    }
+
+    /// Writes `input`, read and flattened, three times in `dialect`, each
+    /// time from the tree the last one reads back (flattened again).
+    fn three_rounds(input: &str, dialect: Dialect) -> [String; 3] {
+        let mut d = read_with(input.as_bytes(), dialect).unwrap();
+        let mut w: [String; 3] = Default::default();
+        for out in &mut w {
+            for b in &mut d.blocks {
+                if let Block::Paragraph(c) = b {
+                    flatten(c);
+                }
+            }
+            *out = write_limited_with(&d, Limits::UNLIMITED, dialect)
+                .unwrap()
+                .0;
+            d = read_with(out.as_bytes(), dialect).unwrap();
+        }
+        w
+    }
+
+    /// Regression (fuzz): texts side by side were guarded one by one, a
+    /// `www.` run reaching the end of one getting an entity that the
+    /// same text read back as one did not, so the output changed one
+    /// round later (`\://(www&#46;b/`, `\://(www.b/`, `&#58;//(...`).
+    #[test]
+    fn adjacent_texts_autolink_guard_is_stable() {
+        for (input, first) in [
+            (":/_/(www.b_/", "\\://(www.b/\n"),
+            (":/_/(www.b_.", "&#58;//([www&#46;b](http://www.b).\n"),
+        ] {
+            let [w1, w2, w3] = three_rounds(input, Dialect::Gfm);
+            assert_eq!(w1, first, "{input:?}");
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        // Split texts are written as the one text they read back as.
+        let split = doc(vec![Block::Paragraph(vec![t(":/"), t("/(www.b"), t("/")])]);
+        let one = doc(vec![para("://(www.b/")]);
+        assert_eq!(gfm(&split), gfm(&one));
+        assert_eq!(gfm(&one).0, "\\://(www.b/\n");
+        // The CommonMark mode writes texts one by one, as before (it
+        // has no autolink guards, nor the line-start `:` escape).
+        assert_eq!(write(&split).0, "://(www.b/\n");
+    }
+
+    /// The GFM fixed point over generated strings of the autolink family
+    /// (`www.`, schemes, `://`, emphasis delimiters, brackets, `.`/`/`
+    /// endings, entities for `.` and `:`): after one round the output
+    /// no longer changes, wherever the CommonMark mode (the code both
+    /// modes share) is stable itself, as the fuzz target checks.
+    #[test]
+    fn autolink_family_reaches_a_fixed_point() {
+        const TOKENS: [&str; 16] = [
+            "www.", "http://", "://", "_", "*", "(", ")", ".", "/", "b", ":", " ", "&#46;",
+            "&#58;", "\\_", "~~",
+        ];
+        // 20 000 strings of up to 10 tokens (the artifacts have 9): a few
+        // seconds in a debug build; a fixed seed keeps a failure
+        // reproducible.
+        const CASES: usize = 20_000;
+        const MAX_TOKENS: u64 = 10;
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            // Knuth's MMIX linear congruential generator.
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            seed >> 33
+        };
+        for _ in 0..CASES {
+            let n = 1 + next() % MAX_TOKENS;
+            let input: String = (0..n)
+                .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+                .collect();
+            let [_, c2, c3] = three_rounds(&input, Dialect::CommonMark);
+            if c2 != c3 {
+                continue;
+            }
+            let [w1, w2, w3] = three_rounds(&input, Dialect::Gfm);
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
         }
     }
 }
