@@ -219,7 +219,13 @@ are in `CLAUDE.md`.
   one was there;
   strikethrough as `~~...~~` (adjacent ones joined, a nested one written
   as its outer one, an empty one left out), with a tilde next to a
-  delimiter escaped; a line-start `:` escaped, so a paragraph line never
+  delimiter escaped; emphasis, strong emphasis and strikethrough with
+  the white space at their edges moved outside the delimiters, a
+  delimiter that would touch a run of its own character switched to
+  `_`, and a mark whose delimiters still could not open or close by the
+  flanking rules (`a<del>"b"</del>c`), or whose opener could close an
+  enclosing mark, left out and reported as lost emphasis or
+  strikethrough, so a GFM reader never shows a stray `~~` or `*`; a line-start `:` escaped, so a paragraph line never
   becomes a delimiter row. Task list items and extended autolinks are
   written as in the CommonMark mode. A `www.` or `://` in text whose run
   (to white space or `<`) would hold one of the writer's escapes, or

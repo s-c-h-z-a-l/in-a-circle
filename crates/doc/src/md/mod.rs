@@ -324,6 +324,20 @@ pub fn write_limited(
 ///   one (`~~~~` would be no delimiter), one inside another as the outer
 ///   one, and one with nothing to show is left out; a tilde of the text
 ///   next to a delimiter is escaped, so it cannot lengthen the run.
+/// - Emphasis, strong emphasis and strikethrough are written so that a
+///   GFM reader pairs the delimiters as written, or not at all: white
+///   space at the edges of the content goes outside the delimiters; a
+///   delimiter that would touch a run of its own character (a mark next
+///   to it, or at the edge of an enclosing one) takes the other emphasis
+///   character (`_` for `*`); and where the opener still could not open
+///   or the closer close by the flanking rules (punctuation inside next
+///   to a letter outside, `a<del>"b"</del>c`), or the opener could close
+///   an enclosing mark of the same delimiter, the mark is left out and
+///   [`Loss::Strikethrough`] or [`Loss::Emphasis`] reported, its content
+///   written as it is. The test is made before the mark is written, on
+///   the first and last characters its content will put down, and again
+///   on what it did (a backstop). Hard breaks that end a paragraph are
+///   not written, inside a mark too.
 /// - A `:` at the start of a line is escaped too: under a paragraph line
 ///   it could start a delimiter row (`:--`) and turn the paragraph into a
 ///   table.
@@ -721,6 +735,275 @@ struct InlineWriter<'a> {
     /// so a tilde ending its last text must be escaped. Taken (reset) by
     /// every [`InlineWriter::inlines`] call as it starts.
     tilde_follows: bool,
+    /// GFM: what is written right after the list being written ends (at
+    /// worst), for the flanking test of a closer at its end.
+    follow: Class,
+    /// GFM: where the content of the innermost open mark starts in `out`,
+    /// and what precedes that mark. A mark opened right there may lose
+    /// that opener (left out after its content), so it takes what
+    /// precedes the opener as its own neighbour.
+    open_at: usize,
+    open_before: Class,
+    /// GFM: the delimiter of every mark open around what is being
+    /// written, innermost last, and how far its content from its
+    /// `open_at` is known to be edge white space only (`usize::MAX`: it
+    /// is not), so the check costs each byte once.
+    open_marks: Vec<(&'static str, usize)>,
+    /// GFM: the end of the list being written is the end of the
+    /// innermost open mark's content (edge white space aside).
+    at_end: bool,
+}
+
+/// What a delimiter run's neighbour is for the flanking rules: Unicode
+/// white space (a line edge too), Unicode punctuation, or anything else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Class {
+    Space,
+    Punct,
+    Other,
+}
+
+impl Class {
+    fn of(c: char) -> Class {
+        if inline::is_space(c) {
+            Class::Space
+        } else if inline::is_punct(c) {
+            Class::Punct
+        } else {
+            Class::Other
+        }
+    }
+
+    /// A mark's edge that is `self` if the mark is left out and its
+    /// delimiter (punctuation) if not: the worse of the two for a
+    /// delimiter next to it (white space, then punctuation).
+    fn or_delimiter(self) -> Class {
+        if self == Class::Space {
+            Class::Space
+        } else {
+            Class::Punct
+        }
+    }
+
+    /// What follows the content of a mark followed by `self`: its closer
+    /// (punctuation) if it is written, `self` if it is left out.
+    fn behind_closer(self) -> Class {
+        if self == Class::Other {
+            Class::Other
+        } else {
+            Class::Punct
+        }
+    }
+}
+
+/// Whether a run of `ch` between `before` and `first` can open (the
+/// reader's flanking rules; `~` follows `*`).
+fn can_open(ch: u8, before: Class, first: Class) -> bool {
+    let left = first != Class::Space && (first != Class::Punct || before != Class::Other);
+    let right = before != Class::Space && (before != Class::Punct || first != Class::Other);
+    if ch == b'_' {
+        left && (!right || before == Class::Punct)
+    } else {
+        left
+    }
+}
+
+/// Whether a run of `ch` between `last` and `after` can close.
+fn can_close(ch: u8, last: Class, after: Class) -> bool {
+    let right = last != Class::Space && (last != Class::Punct || after != Class::Other);
+    let left = after != Class::Space && (after != Class::Punct || last != Class::Other);
+    if ch == b'_' {
+        right && (!left || after == Class::Punct)
+    } else {
+        right
+    }
+}
+
+/// The class of the first character the GFM writer puts down for
+/// `items` (`None`: they write nothing), at worst: a mark whose content
+/// starts with a letter may be left out, so it counts as that letter.
+/// Stops at the first item that writes something, so a walk over a list
+/// costs the items it passes, and its depth at most the nesting depth.
+fn lead(items: &[Inline]) -> Option<Class> {
+    for i in items {
+        let c = match i {
+            // A white space character is written as it is or as an
+            // entity (`&`): both are no letter.
+            Inline::Text(t) => t.chars().next().map(Class::of),
+            Inline::Html(h) => h.chars().next().map(Class::of),
+            Inline::SoftBreak => Some(Class::Space),
+            // `\` before the line ending, or nothing at a line end.
+            Inline::HardBreak => Some(Class::Punct),
+            Inline::Code(t) => (!t.is_empty()).then_some(Class::Punct),
+            Inline::Image { .. } => Some(Class::Punct),
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => lead(content),
+            Inline::Link { .. } => Some(Class::Punct),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => match lead(c) {
+                // Edge white space goes in front of the mark.
+                Some(Class::Space) => Some(Class::Space),
+                Some(Class::Other) => Some(Class::Other),
+                Some(Class::Punct) => Some(Class::Punct),
+                None => None,
+            },
+        };
+        if c.is_some() {
+            return c;
+        }
+    }
+    None
+}
+
+/// Whether `items` write nothing but hard breaks (`gfm`: marks holding
+/// only those too, as the GFM mode writes no mark around nothing).
+fn breaks_only(items: &[Inline], gfm: bool) -> bool {
+    items.iter().all(|i| match i {
+        Inline::HardBreak => true,
+        Inline::Text(t) | Inline::Code(t) | Inline::Html(t) => t.is_empty(),
+        Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+            gfm && breaks_only(c, gfm)
+        }
+        _ => false,
+    })
+}
+
+/// Whether `items` write nothing but edge white space (which a mark
+/// around them moves out) or hard breaks (which one at a line end takes
+/// off), so what precedes them may end where they do.
+fn ends_here(items: &[Inline]) -> bool {
+    items.iter().all(|i| match i {
+        Inline::HardBreak => true,
+        Inline::Text(t) => t.chars().all(edge_space),
+        Inline::Code(t) | Inline::Html(t) => t.is_empty(),
+        Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => ends_here(c),
+        _ => false,
+    })
+}
+
+/// Whether `items` write nothing at all (the GFM mode writes no mark
+/// around nothing).
+fn writes_nothing(items: &[Inline]) -> bool {
+    items.iter().all(|i| match i {
+        Inline::Text(t) | Inline::Code(t) | Inline::Html(t) => t.is_empty(),
+        Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => writes_nothing(c),
+        _ => false,
+    })
+}
+
+/// The first character the GFM writer puts down for `items` past edge
+/// white space (`None`: there is none), at worst for an opener before
+/// it: a mark inside counts as the worse of its delimiter (punctuation)
+/// and its content's first character, as it may be left out. And whether edge white space
+/// comes first (it is moved out in front of the mark). Walks to the
+/// first character only, so its cost is that of the edge white space and
+/// the nesting depth.
+fn core_lead(items: &[Inline]) -> (Option<Class>, bool) {
+    let mut ws = false;
+    for i in items {
+        let c = match i {
+            Inline::Text(t) | Inline::Html(t) => {
+                let r = t.trim_start_matches(edge_space);
+                ws |= r.len() < t.len();
+                r.chars().next().map(Class::of)
+            }
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => {
+                let (c, w) = core_lead(content);
+                ws |= w;
+                c
+            }
+            Inline::SoftBreak => Some(Class::Space),
+            Inline::HardBreak | Inline::Image { .. } | Inline::Link { .. } => Some(Class::Punct),
+            Inline::Code(t) => (!t.is_empty()).then_some(Class::Punct),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+                let (f, w) = core_lead(c);
+                ws |= w;
+                f.map(Class::or_delimiter)
+            }
+        };
+        if c.is_some() {
+            return (c, ws);
+        }
+    }
+    (None, ws)
+}
+
+/// [`core_lead`] from the end, at worst for a closer after it. At a line
+/// end (`eol`) hard breaks at the end are not written.
+fn core_trail(items: &[Inline], eol: bool) -> (Option<Class>, bool) {
+    let mut ws = false;
+    for i in items.iter().rev() {
+        let c = match i {
+            Inline::Text(t) | Inline::Html(t) => {
+                let r = t.trim_end_matches(edge_space);
+                ws |= r.len() < t.len();
+                r.chars().next_back().map(Class::of)
+            }
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => {
+                let (c, w) = core_trail(content, false);
+                ws |= w;
+                c
+            }
+            Inline::HardBreak if eol => None,
+            Inline::SoftBreak | Inline::HardBreak => Some(Class::Space),
+            Inline::Image { .. } | Inline::Link { .. } => Some(Class::Punct),
+            Inline::Code(t) => (!t.is_empty()).then_some(Class::Punct),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+                let (f, w) = core_trail(c, false);
+                ws |= w;
+                f.map(Class::or_delimiter)
+            }
+        };
+        if c.is_some() {
+            return (c, ws);
+        }
+    }
+    (None, ws)
+}
+
+/// Where an open mark (`Emph`, `Strong`, a run of `Strikethrough`) stands
+/// in the output.
+#[derive(Clone, Copy)]
+struct Open {
+    /// Where its opener starts.
+    start: usize,
+    /// Where its content starts.
+    body: usize,
+    /// The line state before the opener.
+    line_start: bool,
+    /// What precedes the opener, at worst for opening (see `open_at`),
+    /// and as written now.
+    before: Class,
+    before_now: Class,
+}
+
+/// White space that goes outside a mark (a line ending stays in it).
+fn edge_space(c: char) -> bool {
+    c != '\n' && c != '\r' && inline::is_space(c)
+}
+
+/// The byte offset in `s` of a tilde that is text (one alone, unescaped)
+/// at the start (`front`) or end of `s`; a `~~` there is a delimiter.
+fn lone_tilde(s: &str, front: bool) -> Option<usize> {
+    let b = s.as_bytes();
+    if front {
+        (b.first() == Some(&b'~') && b.get(1) != Some(&b'~')).then_some(0)
+    } else {
+        let n = b.len().checked_sub(1)?;
+        let before = &b[..n];
+        let slashes = before.iter().rev().take_while(|&&c| c == b'\\').count();
+        (b[n] == b'~' && before.last() != Some(&b'~') && slashes % 2 == 0).then_some(n)
+    }
 }
 
 impl<'a> InlineWriter<'a> {
@@ -743,15 +1026,376 @@ impl<'a> InlineWriter<'a> {
             flattened: false,
             in_strike: false,
             tilde_follows: false,
+            follow: Class::Space,
+            open_at: usize::MAX,
+            open_before: Class::Space,
+            open_marks: Vec::new(),
+            at_end: false,
         }
+    }
+
+    /// Whether `out[..at]` ends with an unescaped `ch`.
+    fn ends_with_delim(&self, ch: u8, at: usize) -> bool {
+        let b = &self.out.as_bytes()[..at];
+        let Some((&last, rest)) = b.split_last() else {
+            return false;
+        };
+        last == ch && rest.iter().rev().take_while(|&&c| c == b'\\').count() % 2 == 0
+    }
+
+    /// Whether nothing but edge white space was written since the
+    /// innermost open mark's opener (so a mark opened now would end up
+    /// right after it).
+    fn at_mark_start(&mut self) -> bool {
+        let at = self.open_at;
+        let len = self.out.len();
+        let Some((_, seen)) = self.open_marks.last_mut() else {
+            return false;
+        };
+        if *seen == usize::MAX {
+            return false;
+        }
+        let from = (*seen).max(at);
+        *seen = if self.out[from..].chars().all(edge_space) {
+            len
+        } else {
+            usize::MAX
+        };
+        *seen != usize::MAX
+    }
+
+    /// A GFM `Emph` (`*`) or `Strong` (`**`, `two`). Two runs of the
+    /// same delimiter character side by side are one run to a reader,
+    /// which pairs it otherwise (`*a**b*` is no emphasis): where the
+    /// opener would follow such a character, or this mark would start or
+    /// end its enclosing mark of that character (`***x**y*`), the other
+    /// emphasis character (`_`) is used; where both would, or where
+    /// [`InlineWriter::decide`] finds that it cannot open or close, the
+    /// mark is left out: its content is written as it is, with `loss`.
+    /// `rest`: the items after it; `follow` and `eol` as for
+    /// [`InlineWriter::close`].
+    fn gfm_mark(&mut self, two: bool, c: &[Inline], rest: &[Inline], follow: Class, eol: bool) {
+        let at_start = self.at_mark_start();
+        let at_end = self.at_end && ends_here(rest);
+        let parent = self.open_marks.last().map(|&(d, _)| d.as_bytes()[0]);
+        let len = self.out.len();
+        let free = |w: &Self, ch: u8| {
+            !w.ends_with_delim(ch, len) && !((at_start || at_end) && parent == Some(ch))
+        };
+        match b"*_".iter().copied().find(|&ch| free(self, ch)) {
+            Some(ch) => {
+                let delim = match (two, ch) {
+                    (true, b'*') => "**",
+                    (true, _) => "__",
+                    (false, b'*') => "*",
+                    (false, _) => "_",
+                };
+                if self.decide(delim, core_lead(c), core_trail(c, eol), follow, at_start) {
+                    self.mark(delim, c, follow, eol);
+                } else {
+                    self.unmarked(c, rest, follow, eol, Loss::Emphasis);
+                }
+            }
+            _ => self.unmarked(c, rest, follow, eol, Loss::Emphasis),
+        }
+    }
+
+    /// Whether a mark `delim` can be written around content whose first
+    /// and last characters past edge white space are `lead` and `trail`
+    /// (with whether edge white space is there, see [`core_lead`]), with
+    /// `follow` after it: its opener must open and its closer close by
+    /// the flanking rules, where edge white space moved out is a neighbour
+    /// too. Inside a mark of the same delimiter, an opener that could also
+    /// close would close that one (a reader pairs a closer with the
+    /// nearest opener it may), so it must not; at the start of that mark
+    /// (`at_start`) the opener ends up next to its delimiter. A mark of
+    /// the same character but the other length does not count: the
+    /// reader's rule of 3 keeps a run of 1 and one of 2 that can both
+    /// open and close from pairing (`*a**b**c*`).
+    fn decide(
+        &self,
+        delim: &str,
+        lead: (Option<Class>, bool),
+        trail: (Option<Class>, bool),
+        follow: Class,
+        at_start: bool,
+    ) -> bool {
+        let ((Some(first), lead_ws), (Some(last), trail_ws)) = (lead, trail) else {
+            return false;
+        };
+        let ch = delim.as_bytes()[0];
+        // White space moved out to a line start is an entity (`&#32;`).
+        let before = match (lead_ws, self.line_start) {
+            (true, true) => Class::Punct,
+            (true, false) => Class::Space,
+            (false, _) => self.before(),
+        };
+        let after = if trail_ws { Class::Space } else { follow };
+        let nested = self.open_marks.iter().any(|&(d, _)| d == delim);
+        let closes_outer =
+            can_close(ch, before, first) || (at_start && can_close(ch, Class::Punct, first));
+        can_open(ch, before, first) && can_close(ch, last, after) && !(nested && closes_outer)
+    }
+
+    /// The content of a mark that is left out, written as it is (`loss`
+    /// reported if it shows anything).
+    fn unmarked(&mut self, c: &[Inline], rest: &[Inline], follow: Class, eol: bool, loss: Loss) {
+        if !writes_nothing(c) {
+            self.losses.insert(loss);
+        }
+        let list_follow = std::mem::replace(&mut self.follow, follow);
+        let inner_end = self.at_end && ends_here(rest);
+        let at_end = std::mem::replace(&mut self.at_end, inner_end);
+        self.inlines(c, eol);
+        self.follow = list_follow;
+        self.at_end = at_end;
+    }
+
+    /// Whether the current line of `out` is 1-9 ASCII digits so far (an
+    /// ordered list marker's number). Looks back 10 bytes at most.
+    fn after_line_digits(&self) -> bool {
+        let b = self.out.as_bytes();
+        let n = b
+            .iter()
+            .rev()
+            .take(10)
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        (1..=9).contains(&n) && (b.len() == n || b[b.len() - n - 1] == b'\n')
+    }
+
+    /// What precedes the next character written (see `open_at`).
+    fn before(&self) -> Class {
+        if self.out.len() == self.open_at {
+            return self.open_before;
+        }
+        self.out.chars().next_back().map_or(Class::Space, Class::of)
+    }
+
+    /// Opens a GFM mark: its opener `delim` is written, and its content
+    /// (written next) sees it as its `open_at`. Returns the mark and the
+    /// state to give back to [`InlineWriter::close`].
+    fn open(&mut self, delim: &'static str) -> (Open, (usize, Class)) {
+        let mut open = Open {
+            start: self.out.len(),
+            body: 0,
+            line_start: self.line_start,
+            before: self.before(),
+            before_now: self.out.chars().next_back().map_or(Class::Space, Class::of),
+        };
+        self.line_start = false;
+        self.sink.push_str(&mut self.out, delim);
+        open.body = self.out.len();
+        let outer = (self.open_at, self.open_before);
+        (self.open_at, self.open_before) = (open.body, open.before);
+        self.open_marks.push((delim, open.body));
+        (open, outer)
+    }
+
+    /// Closes a GFM mark opened by [`InlineWriter::open`] once its content
+    /// is written: `follow` is what comes after it (at worst), `eol`
+    /// whether that is the end of the line. White space at the edges of
+    /// the content goes outside the delimiters (an entity at a line edge).
+    /// Then, if the opener cannot open or the closer cannot close by the
+    /// flanking rules, the marks are left out and `loss` reported; what
+    /// they kept apart is escaped where it would now mean something (a
+    /// list marker at the line start, a lone tilde next to another).
+    /// Content that writes nothing takes its opener back. Copies the
+    /// content only when it changes something, so a mark costs its
+    /// content once per enclosing mark at most (the readers bound the
+    /// nesting depth).
+    fn close(
+        &mut self,
+        open: Open,
+        outer: (usize, Class),
+        delim: &str,
+        follow: Class,
+        eol: bool,
+        loss: Loss,
+    ) {
+        (self.open_at, self.open_before) = outer;
+        self.open_marks.pop();
+        if self.sink.failed() {
+            return;
+        }
+        // A hard break at the end of a line shows nothing (the paragraph
+        // writer leaves it out), but its `\` would show once the break
+        // is followed by nothing: at a line end, one ending the content
+        // (edge white space before it aside) is taken off.
+        if eol {
+            loop {
+                let body = &self.out[open.body..];
+                let kept = body.trim_end_matches(edge_space);
+                let Some(cut) = kept.strip_suffix("\\\n") else {
+                    break;
+                };
+                if cut.bytes().rev().take_while(|&c| c == b'\\').count() % 2 == 1 {
+                    break;
+                }
+                let at = open.body + cut.len();
+                self.out.replace_range(at..at + 2, "");
+            }
+        }
+        let content = &self.out[open.body..];
+        if content.is_empty() {
+            self.out.truncate(open.start);
+            self.line_start = open.line_start;
+            return;
+        }
+        let core_start = content.len() - content.trim_start_matches(edge_space).len();
+        let core_end = content.trim_end_matches(edge_space).len().max(core_start);
+        let core = &content[core_start..core_end];
+        let before = if core_start > 0 {
+            Class::Space
+        } else {
+            open.before
+        };
+        let after = if core_end < content.len() {
+            Class::Space
+        } else {
+            follow
+        };
+        let ch = delim.as_bytes()[0];
+        let (first, last) = (core.chars().next(), core.chars().next_back());
+        // The backstop of `decide` on what was written (see there).
+        let nested = self.open_marks.iter().any(|&(d, _)| d == delim);
+        let now = if core_start > 0 {
+            Class::Space
+        } else {
+            open.before_now
+        };
+        let keep = match (first, last) {
+            (Some(f), Some(l)) => {
+                let f = Class::of(f);
+                can_open(ch, before, f)
+                    && can_close(ch, Class::of(l), after)
+                    && !(nested && (can_close(ch, before, f) || can_close(ch, now, f)))
+            }
+            _ => false,
+        };
+        let tilde_edge = delim == "~~"
+            && (lone_tilde(core, true).is_some() || lone_tilde(core, false).is_some());
+        if keep && core_start == 0 && core_end == content.len() && !tilde_edge {
+            self.sink.push_str(&mut self.out, delim);
+            return;
+        }
+        if !keep {
+            self.losses.insert(loss);
+        }
+        let tail = self.out.split_off(open.start);
+        let body = &tail[open.body - open.start..];
+        let (lead, core, trail) = (
+            &body[..core_start],
+            &body[core_start..core_end],
+            &body[core_end..],
+        );
+        self.spaces(lead, open.line_start || (core.is_empty() && eol));
+        if keep {
+            self.sink.push_str(&mut self.out, delim);
+        }
+        let mut from = 0;
+        if !keep && open.line_start && lead.is_empty() {
+            from = self.line_start_escape(core);
+        }
+        let front = lone_tilde(&core[from..], true).map(|k| k + from);
+        let back = lone_tilde(core, false).filter(|&k| k >= from && Some(k) != front);
+        for k in [front, back].into_iter().flatten() {
+            self.sink.push_str(&mut self.out, &core[from..k]);
+            self.sink.push(&mut self.out, '\\');
+            from = k;
+        }
+        self.sink.push_str(&mut self.out, &core[from..]);
+        if keep {
+            self.sink.push_str(&mut self.out, delim);
+        }
+        self.spaces(trail, eol);
+        // A line break ending what was written starts a new line.
+        self.line_start = self.out.ends_with('\n') || (open.line_start && core.is_empty());
+    }
+
+    /// Writes `core`'s start as the text writer would at a line start:
+    /// a `- + = :` gets a backslash, so does the `.`/`)` after up to nine
+    /// digits (a lone `~` is escaped by the caller, a `~~` there is a
+    /// delimiter). Returns how much of `core` it wrote.
+    fn line_start_escape(&mut self, core: &str) -> usize {
+        let digits = core.bytes().take_while(u8::is_ascii_digit).count();
+        match core.as_bytes().get(digits) {
+            Some(b'.' | b')') if (1..=9).contains(&digits) => {
+                self.sink.push_str(&mut self.out, &core[..digits]);
+                self.sink.push(&mut self.out, '\\');
+                digits
+            }
+            Some(b'-' | b'+' | b'=' | b':') if digits == 0 => {
+                self.sink.push(&mut self.out, '\\');
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    /// White space moved out of a mark: as it is, or as entities at a
+    /// line edge (where rendering would strip it).
+    fn spaces(&mut self, ws: &str, entity: bool) {
+        if !entity {
+            self.sink.push_str(&mut self.out, ws);
+            return;
+        }
+        for ch in ws.chars() {
+            match ch {
+                ' ' => self.sink.push_str(&mut self.out, "&#32;"),
+                '\t' => self.sink.push_str(&mut self.out, "&#9;"),
+                _ => self
+                    .sink
+                    .push_str(&mut self.out, &format!("&#x{:X};", ch as u32)),
+            }
+        }
+    }
+
+    /// A link's text or an image's alt text between its brackets: a scope
+    /// of its own for emphasis (a reader pairs no delimiter inside with
+    /// one outside), followed by `]`.
+    fn link_text(&mut self, c: &[Inline]) {
+        let saved = (
+            std::mem::replace(&mut self.follow, Class::Punct),
+            std::mem::take(&mut self.open_marks),
+            std::mem::replace(&mut self.open_at, usize::MAX),
+            std::mem::replace(&mut self.at_end, false),
+        );
+        self.inlines(c, false);
+        (self.follow, self.open_marks, self.open_at, self.at_end) = saved;
+    }
+
+    /// A GFM `Emph` or `Strong` that [`InlineWriter::decide`] keeps (see
+    /// [`InlineWriter::close`]).
+    fn mark(&mut self, delim: &'static str, c: &[Inline], follow: Class, eol: bool) {
+        let (open, outer) = self.open(delim);
+        let list_follow = std::mem::replace(&mut self.follow, follow.behind_closer());
+        let at_end = std::mem::replace(&mut self.at_end, true);
+        self.tilde_follows = false;
+        self.inlines(c, false);
+        self.follow = list_follow;
+        self.at_end = at_end;
+        self.close(open, outer, delim, follow, eol, Loss::Emphasis);
     }
 
     /// `end_of_line`: the end of `items` is the end of a rendered line.
     fn inlines(&mut self, items: &[Inline], end_of_line: bool) {
         let tilde_after_list = std::mem::take(&mut self.tilde_follows);
-        // Where the `~~` opening the current run of strikethroughs ends
-        // in `out`, and the line state before it.
-        let mut strike_open = (0, false);
+        let list_follow = self.follow;
+        // The `~~` opening the current run of strikethroughs, and the
+        // marks open around it.
+        let mut strike_open = (
+            Open {
+                start: 0,
+                body: 0,
+                line_start: false,
+                before: Class::Space,
+                before_now: Class::Space,
+            },
+            (usize::MAX, Class::Space),
+        );
+        // Whether the current run of strikethroughs is written as one.
+        let mut strike_keep = false;
         for (idx, item) in items.iter().enumerate() {
             if self.sink.failed() {
                 return;
@@ -759,18 +1403,33 @@ impl<'a> InlineWriter<'a> {
             let next = items.get(idx + 1);
             let before = idx.checked_sub(1).and_then(|i| items.get(i));
             let strike = |i: Option<&Inline>| matches!(i, Some(Inline::Strikethrough(_)));
+            // What comes after this item, for a GFM mark's closer, and
+            // whether that ends the line.
+            let follow = || lead(&items[idx + 1..]).unwrap_or(list_follow);
+            // GFM: breaks after it that are not written (only breaks up to
+            // the end of the line) leave it at the line end.
+            let item_eol = match next {
+                None => end_of_line,
+                Some(Inline::SoftBreak) => true,
+                Some(_) => self.gfm && end_of_line && breaks_only(&items[idx + 1..], true),
+            };
             match item {
                 Inline::Text(t) => {
-                    let eol = match next {
-                        None => end_of_line,
-                        Some(n) => matches!(n, Inline::SoftBreak),
-                    };
+                    let eol = item_eol;
                     let tilde_after = self.gfm
                         && match next {
                             None => tilde_after_list,
                             Some(n) => strike(Some(n)) && !self.in_strike,
                         };
                     self.text(t, eol, tilde_after);
+                }
+                Inline::Emph(c) | Inline::Strong(c) if self.gfm => {
+                    let rest = &items[idx + 1..];
+                    // Written without its marks, its content's end is
+                    // this list's end (a `~~` may follow).
+                    self.tilde_follows = next.is_none() && tilde_after_list;
+                    let two = matches!(item, Inline::Strong(_));
+                    self.gfm_mark(two, c, rest, follow(), item_eol);
                 }
                 Inline::Emph(c) => {
                     // An `Emph` at the edge of an `Emph` would put two
@@ -806,32 +1465,80 @@ impl<'a> InlineWriter<'a> {
                 Inline::Strong(c) => self.wrapped("**", c),
                 Inline::Strikethrough(c) if self.gfm && !self.in_strike => {
                     // A run of adjacent strikethroughs shares one pair of
-                    // delimiters; a run that wrote nothing takes its
-                    // opener back (`~~~~` is text, not an empty strike).
+                    // delimiters: it is one mark, decided as it starts. A
+                    // `~` right before it would make a run of three.
                     if !strike(before) {
-                        strike_open.1 = self.line_start;
-                        self.line_start = false;
-                        self.sink.push_str(&mut self.out, "~~");
-                        strike_open.0 = self.out.len();
+                        let n = items[idx..].iter().take_while(|&i| strike(Some(i))).count();
+                        let (run, after_run) = items[idx..].split_at(n);
+                        let run_eol = match after_run.first() {
+                            None => end_of_line,
+                            Some(Inline::SoftBreak) => true,
+                            Some(_) => end_of_line && breaks_only(after_run, true),
+                        };
+                        let f = lead(after_run).unwrap_or(list_follow);
+                        let contents = || {
+                            run.iter().filter_map(|i| match i {
+                                Inline::Strikethrough(c) => Some(c.as_slice()),
+                                _ => None,
+                            })
+                        };
+                        let mut first = (None, false);
+                        for c in contents() {
+                            let (x, w) = core_lead(c);
+                            first.1 |= w;
+                            if x.is_some() {
+                                first.0 = x;
+                                break;
+                            }
+                        }
+                        let mut last = (None, false);
+                        for (k, c) in contents().rev().enumerate() {
+                            let (x, w) = core_trail(c, k == 0 && run_eol);
+                            last.1 |= w;
+                            if x.is_some() {
+                                last.0 = x;
+                                break;
+                            }
+                        }
+                        let at_start = self.at_mark_start();
+                        strike_keep = !self.ends_with_delim(b'~', self.out.len())
+                            && self.decide("~~", first, last, f, at_start);
+                        if strike_keep {
+                            strike_open = self.open("~~");
+                        }
+                    }
+                    if !strike_keep {
+                        // Left out: each one's content as it is.
+                        let rest = &items[idx + 1..];
+                        self.tilde_follows = next.is_none() && tilde_after_list;
+                        self.unmarked(c, rest, follow(), item_eol, Loss::Strikethrough);
+                        continue;
                     }
                     let last = !strike(next);
                     self.in_strike = true;
                     self.tilde_follows = last;
+                    // Within the run, the next one's content follows.
+                    let f = follow();
+                    let inner = if last { f.behind_closer() } else { f };
+                    let list_follow = std::mem::replace(&mut self.follow, inner);
+                    // Each content sees the run's opener as its `open_at`.
+                    self.open_at = strike_open.0.body;
+                    self.open_before = strike_open.0.before;
                     self.inlines(c, false);
+                    self.follow = list_follow;
                     self.in_strike = false;
                     if last {
-                        if self.out.len() == strike_open.0 {
-                            self.out.truncate(strike_open.0.saturating_sub(2));
-                            self.line_start = strike_open.1;
-                        } else {
-                            self.sink.push_str(&mut self.out, "~~");
-                        }
+                        strike_keep = false;
+                        let (open, outer) = strike_open;
+                        self.close(open, outer, "~~", f, item_eol, Loss::Strikethrough);
                     }
                 }
                 // Inside a written one, a strikethrough is its content.
                 Inline::Strikethrough(c) if self.gfm => {
                     self.tilde_follows = next.is_none() && tilde_after_list;
+                    let list_follow = std::mem::replace(&mut self.follow, follow());
                     self.inlines(c, end_of_line && next.is_none());
+                    self.follow = list_follow;
                 }
                 Inline::Strikethrough(c) => {
                     self.losses.insert(Loss::Strikethrough);
@@ -865,20 +1572,27 @@ impl<'a> InlineWriter<'a> {
                 } => {
                     self.line_start = false;
                     self.sink.push(&mut self.out, '[');
-                    self.inlines(content, false);
+                    self.link_text(content);
                     self.sink.push(&mut self.out, ']');
                     self.target(dest, title);
+                    // A line break in the text left a line start behind.
+                    self.line_start = false;
                 }
                 Inline::Image { dest, title, alt } => {
                     self.line_start = false;
                     self.sink.push_str(&mut self.out, "![");
-                    self.inlines(alt, false);
+                    self.link_text(alt);
                     self.sink.push(&mut self.out, ']');
                     self.target(dest, title);
+                    self.line_start = false;
                 }
                 Inline::SoftBreak => self.line_break("\n"),
                 Inline::HardBreak => {
-                    if next.is_some() || !end_of_line {
+                    // At the end of a line a break shows nothing, so it is
+                    // not written; nor is one followed by nothing but such
+                    // breaks (or what writes nothing), whose `\` would
+                    // be the last thing on the paragraph's last line.
+                    if !end_of_line || !breaks_only(&items[idx + 1..], self.gfm) {
                         self.line_break("\\\n");
                     }
                 }
@@ -1010,8 +1724,10 @@ impl<'a> InlineWriter<'a> {
     /// `tilde_after`: a `~~` delimiter follows `t` directly, so a tilde
     /// ending it is escaped (GFM).
     fn text(&mut self, t: &str, end_of_line: bool, tilde_after: bool) {
+        // Inside a mark, white space ending the text may be moved out past
+        // the closer, so the run may go on after it.
         let guards = if self.gfm {
-            autolink_guards(t, end_of_line)
+            autolink_guards(t, end_of_line, !self.open_marks.is_empty())
         } else {
             Vec::new()
         };
@@ -1092,6 +1808,10 @@ impl<'a> InlineWriter<'a> {
                             && self.out.ends_with('\n')
                             && delimiter_row(rest, end_of_line))
                         || (c == '~' && tilde_after && rest.len() == 1)
+                        // After a line start of 1-9 digits written by an
+                        // earlier node (a mark left out between them), a
+                        // `.`/`)` would make it a list marker.
+                        || (matches!(c, '.' | ')') && self.markers && self.after_line_digits())
                         // Two tildes make strikethrough for a GFM reader; every
                         // tilde of a run of two or more is escaped, so no pair
                         // is left whatever the reader's run rule. A lone tilde
@@ -1137,10 +1857,14 @@ fn delimiter_row(rest: &str, end_of_line: bool) -> bool {
 /// Over-approximates (any `www.`, a preceding character is not checked):
 /// an entity too many is harmless. Returns the sorted byte offsets of
 /// those `.`/`:`; one pass per white-space-delimited run, so linear.
-fn autolink_guards(t: &str, end_of_line: bool) -> Vec<usize> {
+fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool) -> Vec<usize> {
     let b = t.as_bytes();
     let mut out = Vec::new();
     let mut start = 0;
+    // The last white space stretch found: from where, and the first
+    // character after it; the runs move forward, so each byte is scanned
+    // once (a stretch of n spaces is n runs).
+    let mut stretch = (0, 0);
     while start < b.len() {
         let end = b[start..]
             .iter()
@@ -1156,7 +1880,25 @@ fn autolink_guards(t: &str, end_of_line: bool) -> Vec<usize> {
             )
         });
         // A `<` ends the run, but its escape is a backslash inside it.
-        let joins_next = (end == b.len() && !end_of_line) || b.get(end) == Some(&b'<');
+        // White space that ends the line (the run's own non-ASCII white
+        // space included) is written as entities (`&#32;`, `&#xA0;`),
+        // which are no white space to a reader: the run goes on. Inside a
+        // mark (`in_mark`), white space ending the text may be moved out
+        // to a line end.
+        let line_ws = |c: char| c.is_whitespace() && c != '\n';
+        let ws_from = start + t[start..end].trim_end_matches(line_ws).len();
+        let ws = if (stretch.0..stretch.1).contains(&ws_from) {
+            stretch.1
+        } else {
+            let e = t[ws_from..]
+                .find(|c: char| !line_ws(c))
+                .map_or(b.len(), |p| ws_from + p);
+            stretch = (ws_from, e);
+            e
+        };
+        let trailing = ws_from < ws
+            && ((ws == b.len() && (end_of_line || in_mark)) || b.get(ws) == Some(&b'\n'));
+        let joins_next = (end == b.len() && !end_of_line) || b.get(end) == Some(&b'<') || trailing;
         for k in 0..run.len() {
             let guard = if run[k..].starts_with(b"www.") {
                 Some(k + 3)
@@ -2072,6 +2814,215 @@ mod tests {
         assert_eq!(gfm(&d).0, "");
     }
 
+    /// The text of `c`, a line break as `\n`: what a reader shows, without
+    /// the formatting.
+    fn shown(c: &[Inline], out: &mut String) {
+        for i in c {
+            match i {
+                Inline::Text(x) | Inline::Code(x) => out.push_str(x),
+                Inline::SoftBreak | Inline::HardBreak => out.push('\n'),
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => shown(c, out),
+                Inline::Link { content, .. } => shown(content, out),
+                Inline::Image { alt, .. } => shown(alt, out),
+                Inline::Html(h) => out.push_str(h),
+            }
+        }
+    }
+
+    /// The one paragraph of `d`, shown.
+    fn shown_para(d: &Document) -> String {
+        let mut out = String::new();
+        if let [Block::Paragraph(c)] = d.blocks.as_slice() {
+            shown(c, &mut out);
+        }
+        out
+    }
+
+    /// How many `Emph`, `Strong` and `Strikethrough` nodes `c` holds.
+    fn marks(c: &[Inline]) -> usize {
+        c.iter()
+            .map(|i| match i {
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => 1 + marks(c),
+                Inline::Link { content: c, .. } => marks(c),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// A delimiter has to open and close by the flanking rules (GFM's
+    /// `~~` as `*`): white space at the edge of the content goes outside
+    /// it, and where it still cannot (punctuation inside next to a letter
+    /// outside, nothing left), the marks are left out and reported. A GFM
+    /// reader then shows the same text with no stray `~~` or `*`.
+    #[test]
+    fn gfm_marks_that_cannot_flank() {
+        let s = |c| Inline::Strikethrough(c);
+        for (body, want, kept, loss) in [
+            ("<p>a<del> x</del>b</p>", "a ~~x~~b\n", true, None),
+            ("<p>x <del>a </del>y</p>", "x ~~a~~ y\n", true, None),
+            ("<p>a <em>b </em>c</p>", "a *b* c\n", true, None),
+            ("<p>a<strong> b</strong>c</p>", "a **b**c\n", true, None),
+            (
+                "<p>He said <em>\"no\"</em>.</p>",
+                "He said *\"no\"*.\n",
+                true,
+                None,
+            ),
+            (
+                "<p>a<del>\"b\"</del>c</p>",
+                "a\"b\"c\n",
+                false,
+                Some(Loss::Strikethrough),
+            ),
+            (
+                "<p>a<del>(b)</del></p>",
+                "a(b)\n",
+                false,
+                Some(Loss::Strikethrough),
+            ),
+            (
+                "<p>word<del>.</del>x</p>",
+                "word.x\n",
+                false,
+                Some(Loss::Strikethrough),
+            ),
+            (
+                "<p>a<em>\"b\"</em>c</p>",
+                "a\"b\"c\n",
+                false,
+                Some(Loss::Emphasis),
+            ),
+            (
+                "<p>a<b>\"b\"</b>c</p>",
+                "a\"b\"c\n",
+                false,
+                Some(Loss::Emphasis),
+            ),
+            (
+                "<p>x<del> </del>y</p>",
+                "x y\n",
+                false,
+                Some(Loss::Strikethrough),
+            ),
+        ] {
+            let d = xhtml(body);
+            let (out, losses) = gfm(&d);
+            assert_eq!(out, want, "{body}");
+            assert_eq!(
+                losses.iter().copied().find(|l| *l != Loss::Styles),
+                loss,
+                "{body}"
+            );
+            let back = gfm_again(&d);
+            assert_eq!(shown_para(&back), shown_para(&d), "{body}: {out:?}");
+            let Block::Paragraph(c) = &back.blocks[0] else {
+                panic!("{body}")
+            };
+            assert_eq!(marks(c), usize::from(kept), "{body}: {back:?}");
+        }
+        for (c, want) in [
+            // Code inside, a letter outside: no delimiter.
+            (
+                vec![t("a"), s(vec![Inline::Code("x".into())]), t("b")],
+                "a`x`b\n",
+            ),
+            // A hard break inside: the break stays, the marks go.
+            (vec![t("a"), s(vec![Inline::HardBreak]), t("b")], "a\\\nb\n"),
+            // At a line start, what the marks kept from being a list
+            // marker is escaped.
+            (vec![s(vec![t("1.\"")]), t("b")], "1\\.\"b\n"),
+            (vec![Inline::Emph(vec![t("-\"")]), t("b")], "\\-\"b\n"),
+            // White space moved out next to a lone tilde: escaped, so the
+            // delimiter stays two tildes.
+            (vec![t("a"), s(vec![t(" ~b")])], "a ~~\\~b~~\n"),
+            (vec![t("a"), s(vec![t("b~ ")]), t("c")], "a~~b\\~~~ c\n"),
+            // Moved to a line edge: an entity, so it is not stripped.
+            (vec![s(vec![t(" a ")])], "&#32;~~a~~&#32;\n"),
+            // Nothing in it: nothing written, nothing lost.
+            (vec![t("a"), Inline::Emph(vec![]), t("b")], "ab\n"),
+        ] {
+            let d = doc(vec![Block::Paragraph(c.clone())]);
+            let (out, _) = gfm(&d);
+            assert_eq!(out, want, "{c:?}");
+            assert_eq!(shown_para(&gfm_again(&d)), shown_para(&d), "{c:?}: {out:?}");
+        }
+    }
+
+    /// A reader pairs delimiter runs, not marks: two runs of the same
+    /// character side by side are one, and an opener that can also close
+    /// closes an outer mark of the same delimiter. The GFM writer keeps
+    /// them apart (`_` for `*`) or leaves the mark out.
+    #[test]
+    fn gfm_marks_pair_as_written() {
+        let e = |c| Inline::Emph(c);
+        let st = |c| Inline::Strong(c);
+        let link = |c| Inline::Link {
+            dest: "u".into(),
+            title: String::new(),
+            content: c,
+            auto: false,
+        };
+        for (c, want) in [
+            // Side by side: the second takes `_`.
+            (vec![e(vec![t("a")]), e(vec![t("b")])], "*a*_b_\n"),
+            // At the end of one of the same character: `__`.
+            (
+                vec![t("a "), st(vec![t("x "), st(vec![t("y")])]), t(" b")],
+                "a **x __y__** b\n",
+            ),
+            // After white space an inner opener cannot close: kept.
+            (
+                vec![e(vec![t("a "), e(vec![t("\"b\"")]), t(" c")])],
+                "*a *\"b\"* c*\n",
+            ),
+            // A run of 1 and one of 2 do not pair (rule of 3): kept.
+            (
+                vec![e(vec![t("foo"), st(vec![t("bar")]), t("baz")])],
+                "*foo**bar**baz*\n",
+            ),
+            // Autolink text: an entity ending the line is no white space,
+            // so the link would run into it.
+            (vec![t("www.x.y\u{a0}")], "www&#46;x.y&#xA0;\n"),
+        ] {
+            let d = doc(vec![Block::Paragraph(c.clone())]);
+            assert_eq!(gfm(&d).0, want, "{c:?}");
+            assert_eq!(gfm_again(&d), d, "{c:?}");
+        }
+        for (c, want) in [
+            // At the edges of a `**`, inside a word: `*` would join its
+            // run and `_` cannot open or close there, so both are left out.
+            (vec![st(vec![e(vec![t("x")]), e(vec![t("y")])])], "**xy**\n"),
+            // An opener that could close the outer one of its delimiter
+            // (punctuation on both sides of it): left out.
+            (
+                vec![e(vec![t("a ("), e(vec![t("\"b\"")]), t(") c")])],
+                "*a (\"b\") c*\n",
+            ),
+            // Hard breaks that end the paragraph show nothing, inside a
+            // mark too, and leave no backslash behind.
+            (
+                vec![e(vec![t("b"), Inline::HardBreak]), Inline::HardBreak],
+                "*b*\n",
+            ),
+            (vec![t("a"), Inline::HardBreak, Inline::HardBreak], "a\n"),
+            // A number and its `.` from two nodes still make no list.
+            (vec![t("7"), e(vec![t(". x")])], "7\\. x\n"),
+            // After a link whose text ends in a line break, a space is no
+            // longer at a line start.
+            (
+                vec![link(vec![t("a"), Inline::HardBreak]), t(" b")],
+                "[a\\\n](u) b\n",
+            ),
+        ] {
+            let d = doc(vec![Block::Paragraph(c.clone())]);
+            let (out, _) = gfm(&d);
+            assert_eq!(out, want, "{c:?}");
+            // Breaks that end the paragraph are not written.
+            let shown = |d: &Document| shown_para(d).trim_end_matches('\n').to_string();
+            assert_eq!(shown(&gfm_again(&d)), shown(&d), "{c:?}: {out:?}");
+        }
+    }
+
     #[test]
     fn literal_tildes_still_escaped() {
         for (text, want) in [
@@ -2206,12 +3157,74 @@ mod tests {
         assert_eq!(write(&doc(vec![para("www.z_")])).0, "www.z\\_\n");
         // One pass per run: a run of candidates stays linear.
         let long = "www.".repeat(1 << 16) + "_";
-        assert_eq!(autolink_guards(&long, true).len(), 1 << 16);
+        assert_eq!(autolink_guards(&long, true, false).len(), 1 << 16);
     }
 
     /// The table writer is linear in the cells: four times the cells (as
     /// columns or as rows) take about four times as long, where a quadratic
     /// path would take sixteen. The output grows by the same factor.
+    /// Marks whose edge white space moves out, and marks left out, cost
+    /// linear time: four times the input, under eight times the time (a
+    /// bound loose enough for load, far below the sixteen of a quadratic
+    /// path, which a white space stretch rescanned per run once was).
+    #[test]
+    fn gfm_marks_are_linear() {
+        use std::time::{Duration, Instant};
+        // Nested as deep as the readers allow (256), alternating kinds.
+        let nest = |leaf: Vec<Inline>| {
+            let mut x = leaf;
+            for i in 0..255 {
+                x = vec![
+                    match i % 3 {
+                        0 => Inline::Emph(x),
+                        1 => Inline::Strong(x),
+                        _ => Inline::Strikethrough(x),
+                    },
+                    t(" "),
+                ];
+            }
+            doc(vec![Block::Paragraph(
+                [vec![t("a"), Inline::Emph(x), t("b")]].concat(),
+            )])
+        };
+        let shapes = |n: usize| {
+            [
+                // One nest around long edge white space.
+                nest(vec![t(&" ".repeat(n)), t("\"x\""), t(&" ".repeat(n))]),
+                // Many marks left out (punctuation inside, letters out).
+                doc(vec![Block::Paragraph(
+                    (0..n)
+                        .map(|i| {
+                            if i % 2 == 0 {
+                                Inline::Strikethrough(vec![t(" \"x\" ")])
+                            } else {
+                                t("a")
+                            }
+                        })
+                        .collect(),
+                )]),
+            ]
+        };
+        let time = |d: &Document| {
+            (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    let n = gfm(d).0.len();
+                    (t.elapsed(), n)
+                })
+                .min()
+                .unwrap()
+        };
+        for (small, big) in shapes(4_000).iter().zip(shapes(16_000).iter()) {
+            let ((t1, n1), (t4, n4)) = (time(small), time(big));
+            assert!(n4 <= 4 * n1 + 4096, "{n1} -> {n4} bytes");
+            assert!(
+                t4 < 8 * t1.max(Duration::from_millis(1)),
+                "{t1:?} -> {t4:?} for four times the input"
+            );
+        }
+    }
+
     #[test]
     fn table_output_is_linear() {
         use std::time::{Duration, Instant};

@@ -692,8 +692,9 @@ fn txt_trees_commonmark_output_unchanged() {
     assert_eq!((total, h), (780_144, 10_513_879_770_608_044_970));
 }
 
-/// Spec examples whose tree the GFM writer does not give back unchanged,
-/// each a flattening of the code it shares with the CommonMark mode. No
+/// Spec examples whose tree the GFM writer does not give back unchanged:
+/// flattenings of the code it shares with the CommonMark mode, and marks
+/// it leaves out because they could not be read back as written. No
 /// table, strikethrough or task list example is among them.
 const GFM_ROUNDTRIP_EXCEPTIONS: &[(u32, &str)] = &[
     (
@@ -718,6 +719,19 @@ const GFM_ROUNDTRIP_EXCEPTIONS: &[(u32, &str)] = &[
     (
         335,
         "a line feed inside text (`&#10;`) is written as a line break, so the paragraph splits",
+    ),
+    (
+        424,
+        "a mark inside a word at the edge of a mark of the same character is left out (see 425)",
+    ),
+    (
+        425,
+        "a mark inside a word at the edge of a mark of the same character is left out: `*` there \
+         would join the outer run, and `_` cannot open or close inside a word",
+    ),
+    (
+        426,
+        "a mark inside a word at the edge of a mark of the same character is left out (see 425)",
     ),
     (
         626,
