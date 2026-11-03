@@ -296,7 +296,7 @@ own for the heading index and the images:
 | output ceiling | `RLIMIT_FSIZE` | per file: the md is checked before each write (`Markdown would be larger than <N> MiB`, the book fails); an image larger than the ceiling keeps its alt text |
 | images | 1023 | the supervisor takes at most 1024 `done` lines from one process (the md is the last) and a join at most 1024 inputs, so the md and its images can be joined back; past it an image keeps its alt text |
 | one image | 64 MiB, 180 megapixels | the join's and the CBZ and PDF actions' image limits, so what this action writes the join takes; checked on the entry's declared size before anything is inflated, and on the bytes produced; past it that image keeps its alt text |
-| images in all | twice the book file | every image read (kept or not) is charged, and each read is capped at what is left, so a book cannot make more than twice its own size be inflated for images (real images barely compress in the ZIP, so a book's own fit); past it the further images keep their alt text and the book is made |
+| images in all | twice the book file | every image read is charged its entry's declared size before it is made (kept, refused or damaged: the ZIP reader inflates a damaged entry up to its declared size before it can tell), and an entry larger than what is left is not read, so a book cannot make more than twice its own size be inflated for images (real images barely compress in the ZIP, so a book's own fit); past it the further images keep their alt text and the book is made |
 
 Each image entry is read at most once, however often the chapters name
 it; the md holds one chapter's tree and one image's bytes at a time.

@@ -62,8 +62,9 @@ struct Images<'a> {
     /// removed unless the book finishes.
     written: Discard,
     /// Bytes still allowed to be read for images: twice the book file at
-    /// first. Every image read is charged, kept or not, so a book cannot
-    /// make more than twice its own size be inflated for its images.
+    /// first. Every image read is charged its entry's declared size
+    /// before it is made, kept, refused or failed, so a book cannot make
+    /// more than twice its own size be inflated for its images.
     budget: u64,
     /// The process's `RLIMIT_FSIZE`: an image larger is its alt text.
     cap: Option<u64>,
@@ -91,18 +92,26 @@ impl Images<'_> {
         if self.written.images.len() >= MAX_IMAGES {
             return Ok(None);
         }
-        let cap = IMAGE_BYTES.min(self.budget);
-        let placed = match book.resource(&path, cap, &mut self.buf) {
+        let placed = match book.resource_size(&path) {
             // No entry: nothing was read, nothing to remember.
             Err(ChapterError::Missing | ChapterError::OutsideTheBook) => return Ok(None),
             Err(_) => None,
-            Ok(()) => {
-                self.budget -= self.buf.len() as u64;
-                match image_ext(&self.buf) {
-                    Some(ext) if self.cap.is_none_or(|c| self.buf.len() as u64 <= c) => {
-                        Some(self.write(ext)?)
-                    }
-                    _ => None,
+            Ok(size) if size > IMAGE_BYTES.min(self.budget) => None,
+            Ok(size) => {
+                // Charged before the read, whatever it gives: the ZIP
+                // reader inflates the whole entry before it can tell its
+                // CRC or length is wrong, and never past its declared
+                // size, so a damaged image costs the budget what it cost
+                // to find out.
+                self.budget -= size;
+                match book.resource(&path, size, &mut self.buf) {
+                    Err(_) => None,
+                    Ok(()) => match image_ext(&self.buf) {
+                        Some(ext) if self.cap.is_none_or(|c| self.buf.len() as u64 <= c) => {
+                            Some(self.write(ext)?)
+                        }
+                        _ => None,
+                    },
                 }
             }
         };

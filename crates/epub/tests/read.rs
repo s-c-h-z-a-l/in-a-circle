@@ -1650,6 +1650,36 @@ fn resource_over_cap_is_too_large() {
 }
 
 #[test]
+fn resource_size_is_the_declared_size() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    assert_eq!(book.resource_size("OEBPS/Images/big.png"), Ok(4096));
+    assert_eq!(book.resource_size("OEBPS/Images/a b.jpg"), Ok(7));
+    assert_eq!(
+        book.resource_size("OEBPS/Images/none.jpg"),
+        Err(ChapterError::Missing)
+    );
+    assert_eq!(
+        book.resource_size("../x.jpg"),
+        Err(ChapterError::OutsideTheBook)
+    );
+    // What the entry claims, damaged or not: nothing is read.
+    let big = vec![0u8; 2 << 20];
+    let mut z = resource_book(None, &[("OEBPS/Images/huge.png", &big, Stored)]);
+    forge_size(&mut z, "OEBPS/Images/huge.png", 1 << 30);
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    assert_eq!(book.resource_size("OEBPS/Images/huge.png"), Ok(1 << 30));
+    let enc = encryption(&[(AES, "OEBPS/Images/a%20b.jpg")]);
+    let f = file_of(&resource_book(Some(&enc), &[]));
+    let book = open(&f).unwrap();
+    assert_eq!(
+        book.resource_size("OEBPS/Images/a b.jpg"),
+        Err(ChapterError::Encrypted)
+    );
+}
+
+#[test]
 fn resource_missing() {
     let f = file_of(&resource_book(None, &[]));
     let book = open(&f).unwrap();

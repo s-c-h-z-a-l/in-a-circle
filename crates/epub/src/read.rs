@@ -572,6 +572,23 @@ impl Book<'_> {
     /// [`Book::resolve`] gives). Nothing is kept.
     pub fn resource(&self, path: &str, cap: u64, out: &mut Vec<u8>) -> Result<(), ChapterError> {
         out.clear();
+        let at = self.resource_at(path)?;
+        read_capped(&self.archive, at, cap, out).map_err(chapter_error)
+    }
+
+    /// The declared size of the file entry [`Book::resource`] would read
+    /// for `path`, with nothing read: the most a read of it can produce,
+    /// whatever its data turns out to be (the ZIP reader stops at the
+    /// declared size), so a caller can charge a read before making it,
+    /// one that fails included. Its errors are `resource`'s that come
+    /// before any read: `OutsideTheBook`, `Missing`, `Encrypted`.
+    pub fn resource_size(&self, path: &str) -> Result<u64, ChapterError> {
+        let at = self.resource_at(path)?;
+        Ok(self.archive.entries()[at].size)
+    }
+
+    /// The index of the file entry named exactly `path`, if it may be read.
+    fn resource_at(&self, path: &str) -> Result<usize, ChapterError> {
         if escapes(path) {
             return Err(ChapterError::OutsideTheBook);
         }
@@ -582,7 +599,7 @@ impl Book<'_> {
         if self.archive.entries()[at].encrypted || self.locked.binary_search(&at).is_ok() {
             return Err(ChapterError::Encrypted);
         }
-        read_capped(&self.archive, at, cap, out).map_err(chapter_error)
+        Ok(at)
     }
 }
 

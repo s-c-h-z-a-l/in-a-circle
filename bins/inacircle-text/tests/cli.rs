@@ -2994,6 +2994,74 @@ mod epub_to_txt {
             assert_eq!(r.warns, ["1 image(s) replaced by alt text", STYLES]);
         }
 
+        /// A damaged image is charged its declared size too: the ZIP
+        /// reader inflates it whole before the CRC tells it is wrong.
+        /// Four damaged images of about 45% of the book each spend 180%
+        /// of the twice-the-book budget, so a valid fifth of the same size
+        /// no longer fits and keeps its alt text. Without the charge, such
+        /// a book inflates about a thousand times its size (the ZIP ratio
+        /// limit) for nothing; with it, never more than twice.
+        #[test]
+        fn damaged_images_charge_the_budget() {
+            let (root, work) = workdir("md-damaged-budget");
+            let build = |n: usize| {
+                let bad: Vec<Vec<u8>> = (1..=4u8).map(|k| vec![k; n]).collect();
+                let j = padded_jpeg(n.saturating_sub(jpeg().len()));
+                let names = ["OEBPS/1.png", "OEBPS/2.png", "OEBPS/3.png", "OEBPS/4.png"];
+                let mut extra: Vec<(&str, &[u8], testzip::Store)> = names
+                    .iter()
+                    .zip(&bad)
+                    .map(|(n, d)| (*n, &d[..], Deflated))
+                    .collect();
+                extra.push(("OEBPS/ok.jpg", &j, Deflated));
+                let mut z = book_zip(
+                    "3.0",
+                    "",
+                    &[ch(
+                        "c.xhtml",
+                        "<p>x <img src=\"1.png\" alt=\"A\"/> <img src=\"2.png\" alt=\"B\"/> \
+                         <img src=\"3.png\" alt=\"C\"/> <img src=\"4.png\" alt=\"D\"/> \
+                         <img src=\"ok.jpg\" alt=\"K\"/></p>",
+                    )],
+                    1,
+                    &extra,
+                );
+                // Each damaged entry's CRC, in its local and central
+                // header, made wrong.
+                for d in &bad {
+                    let crc = testzip::crc32(d).to_le_bytes();
+                    let at: Vec<usize> = z
+                        .windows(4)
+                        .enumerate()
+                        .filter(|(_, w)| *w == crc)
+                        .map(|(k, _)| k)
+                        .collect();
+                    assert_eq!(at.len(), 2);
+                    for k in at {
+                        z[k] ^= 1;
+                    }
+                }
+                let b = root.join("b.epub");
+                fs::write(&b, &z).unwrap();
+                (b, z.len() as u64, j.len() as u64)
+            };
+            let (_, size, _) = build(1000);
+            let n = (size * 45 / 100) as usize;
+            let (b, size, image) = build(n);
+            // The premise: the four damaged reads fit in twice the book,
+            // and the valid image would too on its own, not after them.
+            let n = n as u64;
+            assert!(
+                4 * n <= 2 * size && image <= 2 * size && 4 * n + image > 2 * size,
+                "{n} {image} {size}"
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b.md"]);
+            assert_eq!(r.text, "x A B C D K\n");
+            assert_eq!(r.warns, ["5 image(s) replaced by alt text", STYLES]);
+        }
+
         /// A damaged PNG (a CRC wrong), a truncated JPEG, a missing image
         /// and one outside the book keep their alt text; the book is made.
         #[test]
