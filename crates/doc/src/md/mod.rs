@@ -315,7 +315,11 @@ pub fn write_limited(
 ///   before it reads the cell's inlines. A cell is one line: a line break
 ///   in it becomes a space, and so does a line ending inside its code,
 ///   HTML or link title, reported as [`Loss::CellsFlattened`] only when
-///   that happened. A table with no column writes nothing.
+///   that happened. A table with no column writes nothing. In a tight
+///   list item a table follows a paragraph after one newline (its header
+///   row ends the paragraph), so the list stays tight; a block after a
+///   table needs a blank line (a paragraph line would be a body row), so
+///   an item with one reads back loose.
 /// - Strikethrough is `~~...~~`. Adjacent strikethroughs are written as
 ///   one (`~~~~` would be no delimiter), one inside another as the outer
 ///   one, and one with nothing to show is left out; a tilde of the text
@@ -365,7 +369,7 @@ fn blocks_to_string(
             continue;
         }
         if let Some(p) = prev {
-            let sep = if loose || needs_blank(p, b) {
+            let sep = if loose || needs_blank(p, b, dialect) {
                 "\n\n"
             } else {
                 "\n"
@@ -385,15 +389,19 @@ fn blocks_to_string(
 /// Whether a single newline between two blocks (tight list item) could
 /// change the meaning: lazy continuation, setext underline, HTML block
 /// continuation, or a list that cannot interrupt a paragraph.
-fn needs_blank(prev: &Block, next: &Block) -> bool {
+fn needs_blank(prev: &Block, next: &Block, dialect: Dialect) -> bool {
     match prev {
         Block::List { .. } | Block::BlockQuote(_) | Block::HtmlBlock(_) => true,
-        // A table is written as paragraph text, so it follows the same rules.
+        // A CommonMark-mode table is written as paragraph text, so it
+        // follows the same rules. A pipe table goes on with every line
+        // that is not a blank one or another block's start, so a
+        // paragraph or table after it needs the blank line too; its own
+        // header row ends a paragraph above it, so it needs none there.
         Block::Paragraph(_) | Block::Table { .. } => match next {
-            Block::Paragraph(_)
-            | Block::Table { .. }
-            | Block::HtmlBlock(_)
-            | Block::ThematicBreak => true,
+            Block::Table { .. } => {
+                !(dialect == Dialect::Gfm && matches!(prev, Block::Paragraph(_)))
+            }
+            Block::Paragraph(_) | Block::HtmlBlock(_) | Block::ThematicBreak => true,
             Block::List { start, items, .. } => {
                 !(matches!(start, None | Some(1))
                     && items.first().is_some_and(|i| !i.blocks.is_empty()))
@@ -1903,6 +1911,43 @@ mod tests {
         let d = doc(vec![table(vec![Align::None], vec![vec![t(" a ")]], vec![])]);
         assert_eq!(gfm(&d).0, "| &#32;a&#32; |\n| --- |\n");
         assert_eq!(gfm_again(&d), d);
+    }
+
+    /// A pipe table's header row ends the paragraph above it, so in a
+    /// tight item a table follows a paragraph after one newline and the
+    /// list stays tight. What follows a table still needs a blank line
+    /// (a paragraph line under it would be a body row), so such an item
+    /// is written loose, and reads back loose.
+    #[test]
+    fn gfm_table_in_tight_item_stays_tight() {
+        let table = table(
+            vec![Align::None],
+            vec![vec![t("h")]],
+            vec![vec![vec![t("c")]]],
+        );
+        let item = list(
+            None,
+            true,
+            vec![vec![para("p"), table.clone()], vec![para("r")]],
+        );
+        let d = doc(vec![item]);
+        let (out, losses) = gfm(&d);
+        assert_eq!(out, "- p\n  | h |\n  | --- |\n  | c |\n- r\n");
+        assert!(losses.is_empty(), "{losses:?}");
+        assert_eq!(gfm_again(&d), d);
+        // Through the XHTML reader: text, then a table, in a list item.
+        let d = xhtml("<ul><li>p<table><tr><th>h</th></tr><tr><td>c</td></tr></table></li></ul>");
+        assert!(gfm(&d).0.starts_with("- p\n  | h |\n"), "{:?}", gfm(&d).0);
+        assert_eq!(gfm_again(&d), d);
+        // A paragraph after the table: a blank line, so loose.
+        let item = list(None, true, vec![vec![para("p"), table, para("q")]]);
+        let (out, _) = gfm(&doc(vec![item]));
+        assert_eq!(out, "- p\n  | h |\n  | --- |\n  | c |\n\n  q\n");
+        let Block::List { tight, .. } = &read_with(out.as_bytes(), Dialect::Gfm).unwrap().blocks[0]
+        else {
+            panic!("{out:?}")
+        };
+        assert!(!tight);
     }
 
     #[test]

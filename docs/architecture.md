@@ -209,7 +209,9 @@ are in `CLAUDE.md`.
   writes everything else the same way and adds: a table as a pipe table
   (a header row, kept even when all its cells are empty, the delimiter
   row `---`, `:--`, `:-:` or `--:` per column, then the body rows, a row
-  short of cells padded with empty ones), every `|` in a cell written
+  short of cells padded with empty ones; in a tight list item it
+  follows a paragraph without a blank line, and a block after it needs
+  one, so such an item reads back loose), every `|` in a cell written
   `\|`, a line break in a cell (a block in a book's cell) written as a
   space and reported as cell line breaks that became spaces only when
   one was there;
