@@ -8,7 +8,10 @@
 //! the image limit; the image entries charged (read or tried) within twice
 //! the book file, and the images kept within what was charged; the md
 //! within the text output budget and valid UTF-8; the `warn` lines within
-//! the supervisor's cap. Every fifth input's store refuses every name as
+//! the supervisor's cap. The image-limit and md-budget checks are sanity
+//! bounds: at the fuzz input size (64 KiB) they cannot be reached, and the
+//! shipped tests pin the real limits; the charged-bytes check is the
+//! tight, reachable one. Every fifth input's store refuses every name as
 //! too long, so the alt-text path of a long stem runs too.
 //!
 //! The CRC-32 of every stored entry is fixed before the bytes are written
@@ -161,7 +164,9 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(done) = r {
             let lines = warnings(&done);
             assert!(lines.len() <= MAX_WARN, "{} warn lines", lines.len());
-            assert!(done.replaced == 0 || lines.iter().any(|l| l.ends_with("replaced by alt text")));
+            assert!(
+                done.replaced == 0 || lines.iter().any(|l| l.ends_with("replaced by alt text"))
+            );
         }
     });
 });
