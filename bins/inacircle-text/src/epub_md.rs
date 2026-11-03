@@ -529,7 +529,14 @@ fn convert(book: &Book<'_>, file: &mut File, images: &mut Images<'_>) -> Result<
         return Err("no chapter could be read".into());
     }
     if !text && images.written.images.is_empty() {
-        return Err("book has no text".into());
+        // A picture book whose image names did not fit: say so, not that
+        // it has no text.
+        return Err(if images.names_too_long {
+            "image names too long for this folder"
+        } else {
+            "book has no text"
+        }
+        .into());
     }
     Ok(Converted {
         unread,

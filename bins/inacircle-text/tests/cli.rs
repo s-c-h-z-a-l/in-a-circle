@@ -3377,6 +3377,21 @@ mod epub_to_txt {
             assert_eq!(r.text, "t A B\n");
             assert_eq!(r.warns, ["2 image(s) replaced by alt text", STYLES]);
             assert_eq!(snapshot(&work).len(), 1);
+            // A picture book under such a stem fails for its names, not
+            // for having no text, and leaves nothing.
+            let (root, work) = workdir("md-long-stem-pictures");
+            let b = book_with(
+                &root,
+                &format!("{stem}.epub"),
+                "",
+                &[ch("c.xhtml", "<p><img src=\"a.jpg\" alt=\"\"/></p>")],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            fails_alone(
+                &run_raw(MD, &work, &[&b]),
+                &work,
+                "image names too long for this folder",
+            );
         }
 
         /// A control character in the stem (a line feed) is percent-encoded

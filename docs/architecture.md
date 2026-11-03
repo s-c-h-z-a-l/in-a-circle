@@ -546,7 +546,10 @@ are in `CLAUDE.md`.
   before a digit (`#1984`, `#1984-1`), which the join still finds; a
   heading whose text gives no anchor (`!!!`) cannot be linked, and a
   heading text that is the prefix itself (`H 1` beside `1`) is numbered
-  by our rule, not GitHub's. Further, `http:`, `https:`, `mailto:` and
+  by our rule, not GitHub's; nor do decomposed accents (`e` + U+0301,
+  left out of ours) and white space other than a plain space (a no-break
+  space, `-` in ours) give GitHub's anchor, so such a heading's link may
+  miss in a viewer, while the join resolves it. Further, `http:`, `https:`, `mailto:` and
   `//host/...` links stay as they are, any other scheme keeps only its
   text (so the md never carries a `javascript:` or `file:` link); each
   dropped link is reported. An image is resolved in the book like a
@@ -564,9 +567,10 @@ are in `CLAUDE.md`.
   `#`, `?` and control characters percent-encoded). When the stem is so
   long that an image's name does not fit the file system (it is 6 bytes
   longer than the md's), the images keep their alt text and the md is
-  still made. A book with no text but at least one
-  image written is made (a picture book); with neither, `book has no
-  text`. Nothing is reported before the book is whole: then one `done`
+  still made when the book has text. A book with no text but at least
+  one image written is made (a picture book); with neither, it fails:
+  `image names too long for this folder` when an image could not be
+  written for its name, else `book has no text`. Nothing is reported before the book is whole: then one `done`
   per image in order, the md last, and the `warn` lines. On any failure
   every file written for the book (the md and the images) is cut back to
   empty and removed and the input fails with no `done`, so nothing of it

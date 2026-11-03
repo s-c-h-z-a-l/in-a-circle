@@ -232,7 +232,12 @@ pub fn slug(text: &str) -> String {
 /// the heading's text gives no anchor at all (`!!!`). The numbering is
 /// ours: where a heading's text is the prefix itself (`H 1` beside `1`)
 /// GitHub numbers the two apart (`h-1`, `1`) and ours share a base
-/// (`h-1`, `h-1-1`), a case left as it is.
+/// (`h-1`, `h-1-1`), a case left as it is. So are two where our slug
+/// and GitHub's differ: a combining mark (`e` + U+0301, a decomposed
+/// accent) is left out of ours and kept by GitHub's, and a white space
+/// other than U+0020 (a no-break space) is `-` in ours and left out of
+/// GitHub's, so such a heading's link may miss in a viewer; the join
+/// still finds it, as its rule is [`slug`].
 pub fn md_anchor<'a>(text: &str, id: &'a str) -> &'a str {
     if name_start(&bare_slug(text)) {
         id
