@@ -526,7 +526,10 @@ are in `CLAUDE.md`.
   with `# <title>`, the authors (joined by `, `) as a paragraph and a
   blank line, what the book lacks left out; then every spine item as in
   `text.epub-to-txt`, written by the GFM writer (tables as pipe tables,
-  strikethrough as `~~`), a blank line between chapters, and an
+  strikethrough as `~~`), a blank line between chapters (a chapter's
+  first list after a list of its kind takes the other marker, `*` or
+  `)`, so a reader keeps the two lists apart and an ordered one its
+  start), and an
   unreadable one as the paragraph `\[Chapter N could not be read:
   <reason>\]` (escaped, so it is never a link). The book is read twice:
   first every chapter for its headings only, which gives each heading

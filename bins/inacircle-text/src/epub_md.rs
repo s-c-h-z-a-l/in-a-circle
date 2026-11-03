@@ -17,6 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use action::{Events, Invocation};
+use doc::md::ListEnd;
 use doc::xhtml::{self, Slugs};
 use doc::xhtml_read::{self, Ids, XhtmlError};
 use doc::{Block, Dialect, Document, Inline, Limits, Loss};
@@ -460,6 +461,10 @@ fn convert(book: &Book<'_>, file: &mut File, images: &mut Images<'_>) -> Result<
     let (mut unread, mut read, mut replaced, mut text, mut any) =
         (0usize, 0usize, 0usize, false, false);
     let mut raw = Vec::new();
+    // The list the md written so far ends with: the next chapter's first
+    // list of the same kind takes the other marker, so a reader keeps the
+    // two apart (the header ends with no list).
+    let mut last: Option<ListEnd> = None;
     for c in &book.chapters {
         let part = match book.chapter(c.index, &mut raw) {
             Ok(()) if is_svg(book, c) => {
@@ -474,23 +479,25 @@ fn convert(book: &Book<'_>, file: &mut File, images: &mut Images<'_>) -> Result<
                     text |= xhtml_read::has_text(&d);
                     losses.extend(more);
                     replaced += rewrite(&mut d, book, c, &index, images, &mut losses)?;
-                    let (s, more) = chapter_md(&d, sink.written)?;
+                    let (s, more, end) = chapter_md(&d, sink.written, last)?;
                     losses.extend(more);
-                    s
+                    (s, end)
                 }
                 Err(why) => {
                     unread += 1;
-                    paragraph_md(&unreadable(c.index, &why))?
+                    (paragraph_md(&unreadable(c.index, &why))?, None)
                 }
             },
             Err(e) => {
                 unread += 1;
-                paragraph_md(&unreadable(c.index, &e.reason()))?
+                (paragraph_md(&unreadable(c.index, &e.reason()))?, None)
             }
         };
+        let (part, end) = part;
         if part.is_empty() {
             continue;
         }
+        last = end;
         if any {
             sink.write("\n")?;
         }
@@ -549,13 +556,18 @@ fn paragraph_md(line: &str) -> Result<String, String> {
 }
 
 /// One chapter's Markdown under what is left of the book's output budget
-/// after `written` bytes.
-fn chapter_md(d: &Document, written: usize) -> Result<(String, BTreeSet<Loss>), String> {
+/// after `written` bytes, after a part that ended with the list `after`;
+/// and the list it ends with.
+fn chapter_md(
+    d: &Document,
+    written: usize,
+    after: Option<ListEnd>,
+) -> Result<(String, BTreeSet<Loss>, Option<ListEnd>), String> {
     let left = Limits {
         output_bytes: LIMITS.output_bytes.saturating_sub(written),
         ..LIMITS
     };
-    doc::md::write_limited_with(d, left, Dialect::Gfm).map_err(book_limit)
+    doc::md::write_part(d, left, Dialect::Gfm, after).map_err(book_limit)
 }
 
 /// Whether a link keeps its destination as it is: `http:`, `https:`,

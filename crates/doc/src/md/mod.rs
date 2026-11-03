@@ -349,14 +349,42 @@ pub fn write_limited_with(
     limits: Limits,
     dialect: Dialect,
 ) -> Result<(String, BTreeSet<Loss>), LimitError> {
+    write_part(doc, limits, dialect, None).map(|(out, losses, _)| (out, losses))
+}
+
+/// The list a written part ends with at its top level: its kind and the
+/// marker it took. [`write_part`] gives it for one part and takes it for
+/// the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListEnd {
+    ordered: bool,
+    alt: bool,
+}
+
+/// [`write_limited_with`] for one part of a longer Markdown file (a
+/// book's chapter), written after a part that ended with the list `after`
+/// (what this returned for it) and a blank line: a first list of the same
+/// kind takes the other marker (`-` and `*`, `.` and `)`), as a list after
+/// a list in one document does, so a reader does not join it to the list
+/// above (an ordered one keeps its own start). Returns what this part
+/// ends with too: a list, or `None` for any other block. An empty part
+/// ends as the part before it did.
+pub fn write_part(
+    doc: &Document,
+    limits: Limits,
+    dialect: Dialect,
+    after: Option<ListEnd>,
+) -> Result<(String, BTreeSet<Loss>, Option<ListEnd>), LimitError> {
     let mut losses = BTreeSet::new();
     let mut sink = Sink::new(limits);
-    let mut out = blocks_to_string(&doc.blocks, true, dialect, &mut losses, &mut sink);
+    let start = after.map(|l| (l.ordered, l.alt));
+    let (mut out, end) = blocks_after(&doc.blocks, true, dialect, &mut losses, &mut sink, start);
     if !out.is_empty() {
         sink.push(&mut out, '\n');
     }
     sink.result()?;
-    Ok((out, losses))
+    let end = end.map(|(ordered, alt)| ListEnd { ordered, alt });
+    Ok((out, losses, end))
 }
 
 fn blocks_to_string(
@@ -366,10 +394,21 @@ fn blocks_to_string(
     losses: &mut BTreeSet<Loss>,
     sink: &mut Sink,
 ) -> String {
+    blocks_after(blocks, loose, dialect, losses, sink, None).0
+}
+
+/// [`blocks_to_string`] directly after the list `prev_list` (ordered,
+/// alternate delimiter), and the list it ends with, if it does.
+fn blocks_after(
+    blocks: &[Block],
+    loose: bool,
+    dialect: Dialect,
+    losses: &mut BTreeSet<Loss>,
+    sink: &mut Sink,
+    mut prev_list: Option<(bool, bool)>,
+) -> (String, Option<(bool, bool)>) {
     let mut out = String::new();
     let mut prev: Option<&Block> = None;
-    // (ordered, alternate delimiter) of the directly preceding list.
-    let mut prev_list: Option<(bool, bool)> = None;
     for b in blocks {
         if sink.failed() {
             break;
@@ -397,7 +436,7 @@ fn blocks_to_string(
         };
         prev = Some(b);
     }
-    out
+    (out, prev_list)
 }
 
 /// Whether a single newline between two blocks (tight list item) could
@@ -2682,6 +2721,65 @@ mod tests {
         assert!(matches!(p[0], Inline::Link { auto: true, .. }), "{p:?}");
         assert_eq!(write(&d).0, format!("{input}\n"));
         assert_eq!(read_with(input.as_bytes(), Dialect::Gfm).unwrap(), d);
+    }
+
+    /// A part's first list after a part that ended with a list of the
+    /// same kind takes the other marker, so the two parts joined by a
+    /// blank line read back as two lists, an ordered one with its start;
+    /// a list of the other kind, or none, changes nothing.
+    #[test]
+    fn write_part_keeps_lists_apart_across_parts() {
+        let part = |blocks, after| {
+            let (s, _, end) =
+                write_part(&doc(blocks), Limits::UNLIMITED, Dialect::Gfm, after).unwrap();
+            (s, end)
+        };
+        let item = |s: &str| vec![para(s)];
+        let (a, end) = part(vec![para("x"), list(None, true, vec![item("a")])], None);
+        assert_eq!(a, "x\n\n- a\n");
+        let (b, end) = part(vec![list(None, true, vec![item("b")])], end);
+        assert_eq!(b, "* b\n");
+        // An empty part ends as the one before it did.
+        let (e, end) = part(vec![], end);
+        assert_eq!(e, "");
+        let (c, end) = part(
+            vec![
+                list(None, true, vec![item("c")]),
+                list(Some(1), true, vec![item("d")]),
+            ],
+            end,
+        );
+        assert_eq!(c, "- c\n\n1. d\n");
+        let (f, end) = part(vec![list(Some(5), true, vec![item("five")])], end);
+        assert_eq!(f, "5) five\n");
+        let whole = [a, b, c, f].join("\n");
+        let d = read_with(whole.as_bytes(), Dialect::Gfm).unwrap();
+        let lists: Vec<Option<u64>> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::List { start, .. } => Some(*start),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lists, [None, None, None, Some(1), Some(5)], "{whole}");
+        // A paragraph last: no list to keep apart from.
+        let (_, end) = part(vec![list(None, true, vec![item("g")]), para("p")], end);
+        assert_eq!(end, None);
+        let (g, _) = part(vec![list(None, true, vec![item("h")])], end);
+        assert_eq!(g, "- h\n");
+        // The CommonMark mode takes the same state.
+        let (s, _, _) = write_part(
+            &doc(vec![list(None, true, vec![item("i")])]),
+            Limits::UNLIMITED,
+            Dialect::CommonMark,
+            end.or(Some(ListEnd {
+                ordered: false,
+                alt: false,
+            })),
+        )
+        .unwrap();
+        assert_eq!(s, "* i\n");
     }
 
     /// The GFM writer, unbudgeted.

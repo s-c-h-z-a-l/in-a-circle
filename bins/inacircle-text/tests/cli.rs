@@ -3154,6 +3154,46 @@ mod epub_to_txt {
             }
         }
 
+        /// A chapter that starts with a list of the kind the chapter before
+        /// ends with takes the other marker, so a reader keeps them two
+        /// lists, and an ordered one keeps its start.
+        #[test]
+        fn lists_across_chapters_stay_apart() {
+            let (root, work) = workdir("md-lists");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p>x</p><ul><li>end one</li></ul>"),
+                    ch("c2.xhtml", "<ul><li>start two</li></ul>"),
+                    ch("c3.xhtml", "<ul><li>three</li></ul><ol><li>one</li></ol>"),
+                    ch("c4.xhtml", "<ol start=\"5\"><li>five</li></ol>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "x\n\n- end one\n\n* start two\n\n- three\n\n1. one\n\n5) five\n"
+            );
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let lists: Vec<Option<u64>> = d
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    doc::Block::List { start, .. } => Some(*start),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lists, [None, None, None, Some(1), Some(5)]);
+        }
+
         /// A heading that starts with a digit is linked by GitHub's anchor,
         /// with no `h-` before it (`#1984`, then `#1984-1`), which the join
         /// still finds; a heading with no anchor text (`!!!`) has no
