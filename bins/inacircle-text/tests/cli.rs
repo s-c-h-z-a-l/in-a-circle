@@ -2436,6 +2436,62 @@ mod epub_to_txt {
         assert_eq!(left, [work.join(done[0][2])]);
     }
 
+    /// A 100 KB encoding name in the package document or in
+    /// `container.xml` fails that book with the name cut to 40 characters
+    /// plus `...`: its `fail` line stays far under the supervisor's 64 KiB
+    /// event-line limit (past it the whole batch would stop), and the next
+    /// book of the batch still converts.
+    #[test]
+    fn long_skeleton_encoding_name_is_cut() {
+        let (root, work) = workdir("epub-long-encoding");
+        let name = "a".repeat(100_000);
+        let decl = format!("<?xml version=\"1.0\" encoding=\"{name}\"?>");
+        let opf = format!("{decl}<package/>");
+        let opf_book = root.join("opf.epub");
+        fs::write(
+            &opf_book,
+            testzip::zip(&[
+                (b"mimetype", b"application/epub+zip", Stored),
+                (b"META-INF/container.xml", CONTAINER.as_bytes(), Stored),
+                (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+            ]),
+        )
+        .unwrap();
+        let container = format!("{decl}<container/>");
+        let container_book = root.join("container.epub");
+        fs::write(
+            &container_book,
+            testzip::zip(&[
+                (b"mimetype", b"application/epub+zip", Stored),
+                (b"META-INF/container.xml", container.as_bytes(), Stored),
+            ]),
+        )
+        .unwrap();
+        let good = book(&root, "good.epub", "", &[ch("c.xhtml", "<p>x</p>")]);
+        let o = run_raw(ID, &work, &[&opf_book, &container_book, &good]);
+        let out = stdout(&o);
+        let forty = "a".repeat(40);
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 2, "{}", &out[..out.len().min(2000)]);
+        assert_eq!(fails[0][1], opf_book.to_str().unwrap());
+        assert_eq!(
+            fails[0][2],
+            format!("not an EPUB (unsupported encoding {forty}... in OEBPS/content.opf)")
+        );
+        assert_eq!(fails[1][1], container_book.to_str().unwrap());
+        assert_eq!(
+            fails[1][2],
+            format!("not an EPUB (unsupported encoding {forty}... in META-INF/container.xml)")
+        );
+        for l in out.lines() {
+            assert!(l.len() < 1024, "line of {} bytes", l.len());
+        }
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{out}");
+        assert_eq!(done[0][1], good.to_str().unwrap());
+        assert_eq!(fs::read_to_string(work.join(done[0][2])).unwrap(), "x\n");
+    }
+
     /// A book of nothing but picture pages has no text, and it read: the
     /// failure is "no text", not "no chapter could be read".
     #[test]

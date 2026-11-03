@@ -45,6 +45,14 @@ use std::fmt;
 /// the document is `ErrorKind::TooDeep`.
 pub const MAX_DEPTH: u32 = 256;
 
+/// Longest declared encoding name an `ErrorKind::UnsupportedEncoding`
+/// keeps: 40 characters, the longest name the IANA charset registry
+/// allows (RFC 2978, section 2.3). A longer name is no registered charset;
+/// it is cut there, with `...`, so a hostile declaration (the syntax
+/// allows a name as long as the document) cannot make an error message,
+/// and every reason or protocol line built from it, as long as itself.
+pub const MAX_ENCODING_NAME: usize = 40;
+
 /// The namespace the `xml` prefix is bound to by definition.
 pub const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 /// The namespace of the `xmlns` attributes; it may never be declared.
@@ -109,7 +117,9 @@ pub enum ErrorKind {
     NotWellFormed(&'static str),
     /// More elements open at once than `Options::max_depth`.
     TooDeep,
-    /// The declared encoding is neither UTF-8 nor UTF-16.
+    /// The declared encoding is neither UTF-8 nor UTF-16. The name is the
+    /// declared one, cut to `MAX_ENCODING_NAME` characters plus `...`
+    /// when longer.
     UnsupportedEncoding(String),
     /// A reference to an entity that a DTD declares (or may declare):
     /// declarations are never expanded.
@@ -232,12 +242,24 @@ pub fn decode(bytes: &[u8]) -> Result<Cow<'_, str>, Error> {
             let kind = if unicode {
                 ErrorKind::NotWellFormed("the declared encoding does not match the bytes")
             } else {
-                ErrorKind::UnsupportedEncoding(enc.to_string())
+                ErrorKind::UnsupportedEncoding(cut_encoding_name(enc))
             };
             return Err(Error { kind, line: 1 });
         }
     }
     Ok(text)
+}
+
+/// `name` up to `MAX_ENCODING_NAME` bytes, at a character boundary, with
+/// `...` when cut. A well-formed name is ASCII, so bytes are characters;
+/// the boundary check keeps the cut safe for any caller.
+fn cut_encoding_name(name: &str) -> String {
+    let mut end = name.len().min(MAX_ENCODING_NAME);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let more = if end < name.len() { "..." } else { "" };
+    format!("{}{more}", &name[..end])
 }
 
 fn utf8(b: &[u8]) -> Result<&str, Error> {

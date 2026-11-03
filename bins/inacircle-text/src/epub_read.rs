@@ -24,12 +24,6 @@ use crate::{ConvertError, LIMITS, Outcome, output_cap, too_large};
 /// The spine item type that is a picture page (no text, an image loss).
 const SVG_TYPE: &str = "image/svg+xml";
 
-/// Longest encoding name a chapter's reason repeats: 40 characters, the
-/// longest name the IANA charset registry allows (RFC 2978, section 2.3).
-/// A longer declared name is no registered charset; it is cut, with
-/// `...`, so a hostile declaration cannot fill the book with its name.
-const MAX_ENCODING_NAME: usize = 40;
-
 /// Open the input as a regular file without ever waiting (`O_NONBLOCK`:
 /// a FIFO would block a plain open until a writer shows up).
 fn open_input(path: &Path) -> io::Result<File> {
@@ -303,14 +297,8 @@ fn xml_reason(e: &xml::Error) -> String {
     match &e.kind {
         ErrorKind::NotWellFormed(_) => format!("not well-formed XML (line {})", e.line),
         ErrorKind::TooDeep => "too large (nesting limit)".into(),
-        ErrorKind::UnsupportedEncoding(name) => {
-            let mut end = name.len().min(MAX_ENCODING_NAME);
-            while !name.is_char_boundary(end) {
-                end -= 1;
-            }
-            let more = if end < name.len() { "..." } else { "" };
-            format!("unsupported encoding {}{more}", &name[..end])
-        }
+        // Already cut to `xml::MAX_ENCODING_NAME` by the XML reader.
+        ErrorKind::UnsupportedEncoding(name) => format!("unsupported encoding {name}"),
         ErrorKind::EntityDeclarations => "entity declarations are not supported".into(),
     }
 }
@@ -534,23 +522,6 @@ mod tests {
         assert_eq!(limit_reason(LimitError::Allocation), "too large");
     }
 
-    #[test]
-    fn long_encoding_name_is_cut() {
-        let e = |name: &str| xml::Error {
-            kind: ErrorKind::UnsupportedEncoding(name.to_string()),
-            line: 1,
-        };
-        let forty = "a".repeat(MAX_ENCODING_NAME);
-        assert_eq!(
-            xml_reason(&e(&forty)),
-            format!("unsupported encoding {forty}")
-        );
-        assert_eq!(
-            xml_reason(&e(&format!("{forty}b"))),
-            format!("unsupported encoding {forty}...")
-        );
-    }
-
     /// Links nested in emphasis, lists, quotes and table cells are all
     /// reached; external ones keep their destination.
     #[test]
@@ -590,25 +561,6 @@ mod tests {
         assert_eq!(s, "> t\n\n- t\n\nt\n-------------\nt (https://x)\n");
         assert!(l.contains(&Loss::Links));
     }
-    /// A name cut inside a multi-byte character ends at the character
-    /// before it: 39 bytes and a two-byte `é` across byte 40.
-    #[test]
-    fn encoding_name_is_cut_at_a_character_boundary() {
-        let e = |name: &str| xml::Error {
-            kind: ErrorKind::UnsupportedEncoding(name.to_string()),
-            line: 1,
-        };
-        let name = format!("{}{}", "a".repeat(MAX_ENCODING_NAME - 1), "é".repeat(3));
-        assert!(!name.is_char_boundary(MAX_ENCODING_NAME));
-        assert_eq!(
-            xml_reason(&e(&name)),
-            format!(
-                "unsupported encoding {}...",
-                "a".repeat(MAX_ENCODING_NAME - 1)
-            )
-        );
-    }
-
     /// The input is opened without waiting: `O_NONBLOCK` is set on the
     /// descriptor (a FIFO would otherwise block the open until a writer
     /// shows up), and a FIFO is refused, not read.

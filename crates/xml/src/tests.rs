@@ -550,6 +550,36 @@ fn utf16_le_and_be_with_bom() {
     }
 }
 
+/// A declared name longer than the IANA maximum is cut to 40 characters
+/// plus `...` in the error itself, so no message built from it grows with
+/// the declaration; a name of exactly 40 is kept whole.
+#[test]
+fn long_encoding_name_is_cut() {
+    let forty = "a".repeat(MAX_ENCODING_NAME);
+    let doc = |name: &str| format!("<?xml version=\"1.0\" encoding=\"{name}\"?><a/>");
+    let e = decode(doc(&forty).as_bytes()).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::UnsupportedEncoding(forty.clone()));
+    let long = "a".repeat(100_000);
+    let e = decode(doc(&long).as_bytes()).unwrap_err();
+    assert_eq!(
+        e.kind,
+        ErrorKind::UnsupportedEncoding(format!("{forty}..."))
+    );
+    assert_eq!(e.to_string(), format!("unsupported encoding {forty}..."));
+}
+
+/// A cut inside a multi-byte character ends at the character before it:
+/// 39 bytes and a two-byte `é` across byte 40.
+#[test]
+fn encoding_name_is_cut_at_a_character_boundary() {
+    let name = format!("{}{}", "a".repeat(MAX_ENCODING_NAME - 1), "é".repeat(3));
+    assert!(!name.is_char_boundary(MAX_ENCODING_NAME));
+    assert_eq!(
+        cut_encoding_name(&name),
+        format!("{}...", "a".repeat(MAX_ENCODING_NAME - 1))
+    );
+}
+
 #[test]
 fn other_encoding_is_unsupported() {
     let e = decode(b"<?xml version=\"1.0\" encoding=\"windows-1250\"?><a/>").unwrap_err();
