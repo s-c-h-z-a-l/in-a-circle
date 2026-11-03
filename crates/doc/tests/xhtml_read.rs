@@ -1405,10 +1405,114 @@ fn heading_ids_kept_in_order() {
     assert_eq!(ids.others, vec!["d".to_string(), "e".to_string()]);
 }
 
+/// Appends random nested markup. Every heading with an id has its own id as
+/// text (`h<n>`); a heading without one has other text. Headings go only
+/// where they stay headings (not in a table cell, where they are inline).
+/// Returns nothing; `ids` collects the ids of the headings written.
+fn gen_markup(rng: &mut Rng, depth: u32, next: &mut u32, out: &mut String, ids: &mut Vec<String>) {
+    let count = 1 + rng.below(4);
+    for _ in 0..count {
+        let kind = if depth >= 5 {
+            rng.below(3)
+        } else {
+            rng.below(9)
+        };
+        match kind {
+            0 | 1 => {
+                // A heading, with an id three times out of four.
+                let n = *next;
+                *next += 1;
+                let tag = 1 + rng.below(6);
+                if rng.below(4) == 0 {
+                    out.push_str(&format!("<h{tag}>plain{n}</h{tag}>"));
+                } else {
+                    out.push_str(&format!(r#"<h{tag} id="h{n}">h{n}</h{tag}>"#));
+                    ids.push(format!("h{n}"));
+                }
+            }
+            2 => out.push_str("<p>text</p>"),
+            3 => {
+                out.push_str("<section>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</section>");
+            }
+            4 => {
+                out.push_str("<div>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</div>");
+            }
+            5 => {
+                out.push_str("<blockquote>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</blockquote>");
+            }
+            6 => {
+                let list = if rng.below(2) == 0 { "ul" } else { "ol" };
+                out.push_str(&format!("<{list}>"));
+                for _ in 0..1 + rng.below(3) {
+                    out.push_str("<li>");
+                    gen_markup(rng, depth + 1, next, out, ids);
+                    out.push_str("</li>");
+                }
+                out.push_str(&format!("</{list}>"));
+            }
+            7 => {
+                // A table: cells hold text only, so no heading is lost to it.
+                out.push_str("<table>");
+                for _ in 0..1 + rng.below(3) {
+                    out.push_str("<tr><td>a</td><td>b</td></tr>");
+                }
+                out.push_str("</table>");
+            }
+            _ => {
+                // A wrapper with an id of its own (`w`): a container id may
+                // pass to the heading that leads it, so it is not checked
+                // against the heading text below.
+                out.push_str(r#"<div id="w">"#);
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</div>");
+            }
+        }
+    }
+}
+
+#[test]
+fn heading_ordinals_map_to_own_ids_in_random_nesting() {
+    // Every heading's text is its own id, so the n-th pre-order heading's
+    // text must be the id paired with ordinal n. A wrong ordinal that stays
+    // in range (swapped, off by one) fails here.
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for case in 0..3000 {
+        let (mut body, mut expected, mut next) = (String::new(), Vec::new(), 0);
+        gen_markup(&mut rng, 0, &mut next, &mut body, &mut expected);
+        let (blocks, ids) = read_ids(&body);
+        let texts = heading_texts(&blocks);
+        assert_eq!(texts.len() as u32, next, "case {case}: {body}");
+        // Only own ids (`h<n>`) are checked; a wrapper's `w` may sit on a
+        // heading it leads.
+        let own: Vec<&(usize, String)> = ids.headings.iter().filter(|(_, id)| id != "w").collect();
+        for (n, id) in &own {
+            assert_eq!(&texts[*n], id, "case {case}: ordinal {n} in {body}");
+        }
+        let got: Vec<&String> = own.iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            got,
+            expected.iter().collect::<Vec<_>>(),
+            "case {case}: {body}"
+        );
+        // Ordinals never decrease (a heading may carry a wrapper id too).
+        assert!(
+            ids.headings.windows(2).all(|w| w[0].0 <= w[1].0),
+            "case {case}"
+        );
+    }
+}
+
 #[test]
 fn ids_on_non_heading_elements_listed() {
     // Footnote anchors, paragraphs, spans, a heading in a cell (inline
-    // there), elements in `pre` and in code: all others, in document order.
+    // there), elements in `pre` and in code: all others, in the order they
+    // are settled (document order here).
     // An empty id is no id; an element dropped with its content keeps none.
     let (_, ids) = read_ids(concat!(
         r#"<p id="p1">a<a id="n1"/><span id="s1">b</span><a id="r1" href="x.xhtml#n1">c</a></p>"#,
