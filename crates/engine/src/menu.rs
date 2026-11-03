@@ -1172,11 +1172,14 @@ mod tests {
         );
         // North (Markdown) fits an EPUB but no action is installed here, so
         // it is dim too; east (HTML) fits nothing.
-        for k in [0, 2] {
-            let s = o.slices[k].as_ref().unwrap();
-            assert!(s.disabled.is_some(), "slice {k} is dim");
-        }
-        assert_eq!(o.slices[2].as_ref().unwrap().applicable, 0);
+        let n = o.slices[0].as_ref().unwrap();
+        assert_eq!(
+            (n.preset, n.applicable, n.disabled.as_deref()),
+            ("markdown-epub", 1, Some("no action installed"))
+        );
+        let e = o.slices[2].as_ref().unwrap();
+        assert!(e.disabled.is_some(), "east is dim");
+        assert_eq!(e.applicable, 0);
         assert_eq!(o.slices.iter().flatten().count(), 3);
     }
 

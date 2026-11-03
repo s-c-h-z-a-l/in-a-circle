@@ -2584,12 +2584,20 @@ fn cli_epub_to_md() {
     assert!(trashed.join("a-0002.png").is_file(), "the images went too");
 
     // A failing book (no text, no image) places nothing; the good book of
-    // the same run still lands whole.
+    // the same run still lands whole. This is the early failure (nothing was
+    // ever created). A book that fails after its images were written is
+    // covered below the engine: `failure_leaves_no_images` in the text
+    // family's CLI tests (no `done`, nothing left) and the engine's done
+    // gate (nothing without `done` is placed).
     let e = Env::new("epub-md-fail");
     let good = e.file("good.epub", &tiny_epub("<p>Szöveg.</p>"));
     let empty = e.file("empty.epub", &tiny_epub(""));
     let o = e.run(&["run", "markdown-epub", "good.epub", "empty.epub"]);
     assert_eq!(o.summary(), (1, 0, 1), "{}", o.stdout);
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(fails[0].0.ends_with("empty.epub"), "{fails:?}");
+    assert!(fails[0].1.contains("book has no text"), "{fails:?}");
     assert!(e.files().join("good/good.md").is_file());
     assert!(
         !e.files().join("empty").exists(),
@@ -2648,6 +2656,14 @@ fn epub_md_images_back_to_epub() {
     let text = |s: &str| bytes.windows(s.len()).any(|w| w == s.as_bytes());
     assert!(text("Szöveg a könyvből."), "the text is in the new book");
     assert!(text("Kis könyv"), "the title is in the new book");
+    // The md's image names resolved: the images sit inline in the chapter,
+    // not appended as a separate "Images" chapter.
+    assert!(text("src=\"img/0001.jpg\""), "first image linked inline");
+    assert!(text("src=\"img/0002.png\""), "second image linked inline");
+    assert!(
+        !zip_names(&bytes, "OEBPS/ch0003"),
+        "an extra chapter (unlinked images?)"
+    );
     if have_book_tool("epubcheck") {
         let c = Command::new("epubcheck")
             .arg("--failonwarnings")
