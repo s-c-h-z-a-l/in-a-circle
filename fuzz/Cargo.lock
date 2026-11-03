@@ -91,11 +91,13 @@ dependencies = [
 name = "inacircle-fuzz"
 version = "0.0.0"
 dependencies = [
+ "action",
  "dbus",
  "doc",
  "engine",
  "epub",
  "flate",
+ "libc",
  "libfuzzer-sys",
  "manifest",
  "probe",

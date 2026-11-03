@@ -19,6 +19,9 @@ zip = { path = "../crates/zip" }
 probe = { path = "../crates/probe" }
 xml = { path = "../crates/xml" }
 epub = { path = "../crates/epub" }
+# The `epub_md` target includes the text family's sources, which name these.
+action = { path = "../crates/action" }
+libc = "0.2"
 
 # Not part of the root workspace (it is excluded there): the fuzz crate
 # builds on a pinned nightly and must not touch the shipped dependency tree.
@@ -109,6 +112,13 @@ bench = false
 [[bin]]
 name = "epub_reader"
 path = "fuzz_targets/epub_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epub_md"
+path = "fuzz_targets/epub_md.rs"
 test = false
 doc = false
 bench = false

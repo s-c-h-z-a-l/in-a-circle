@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -173,6 +173,18 @@ limits() {
         # ~1,400 records), so anything near 16 MB is a bug; 1024 MB RSS
         # ceiling.
         epub_reader) echo "65536 2 16 1024" ;;
+        # The EPUB reader's 64 KiB and scaled-down book limits (the
+        # target uses the same ones), now through the whole md
+        # conversion: every chapter is read twice (the heading index,
+        # then the tree), its images probed, its tree written as GFM. 4 s:
+        # twice epub_reader's 2 s for the two passes plus the writer, all
+        # linear; ms under ASan for the worst seed. 64 MB malloc limit
+        # (one allocation), the markdown target's: the largest legitimate
+        # ones are the md buffer (one book's GFM, at most a few times its
+        # 1 MiB of chapters as it doubles) and the writer's strings; an
+        # image read is at most twice the 64 KiB input; anything near
+        # 64 MB is a bug. 1024 MB RSS ceiling.
+        epub_md) echo "65536 4 64 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }
