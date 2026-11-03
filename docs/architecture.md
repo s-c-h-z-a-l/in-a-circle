@@ -197,7 +197,11 @@ are in `CLAUDE.md`.
   takes it as a lossless intermediate, and the notice says formatting was
   lost for a run whose output actually lost something.
 - `text.txt-to-md` escapes every tilde of a run of two or more, so that
-  plain text is never read back as strikethrough.
+  plain text is never read back as strikethrough, and the `:` of a line
+  made only of `:` and dashes (`:--`, `:-:`) under another line of its
+  paragraph, which a GFM reader would take for a one-column table's
+  delimiter row. CommonMark readers show neither escape. Every other
+  tree the txt reader builds is written byte for byte as before.
 - The Markdown writer (`doc::md`) has two modes. The CommonMark mode
   (`write`, `write_limited`) is what `text.txt-to-md` writes; a table in
   it is one line per row (reported) and strikethrough loses its marks

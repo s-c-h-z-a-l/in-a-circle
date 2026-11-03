@@ -277,7 +277,9 @@ fn char_ref(s: &[u8], i: usize, out: &mut String) -> Option<usize> {
 /// structure: the characters `\ ` * _ [ ] < > & | ! #` always get a
 /// backslash, line-start `- + = ~` and the `.`/`)` of a line-start `N.`/`N)`
 /// likewise, and any whitespace character at the start or end of a line becomes a
-/// numeric entity (`&#32;`, `&#9;`, `&#xA0;`, ...).
+/// numeric entity (`&#32;`, `&#9;`, `&#xA0;`, ...). A paragraph line made
+/// only of `:` and dashes (`:--`, `:-:`) under another line gets `\:`: a
+/// GFM reader would take it for a table's delimiter row.
 /// Runs of two or more interior spaces/tabs are kept but reported as
 /// `Loss::Whitespace` (a renderer may collapse them).
 ///
@@ -1062,6 +1064,12 @@ impl<'a> InlineWriter<'a> {
                         || (self.line_start
                             && self.markers
                             && (matches!(c, '-' | '+' | '=' | '~') || (self.gfm && c == ':')))
+                        // Both modes: under another line, a line `:-+:?`
+                        // is a one-column delimiter row for a GFM reader.
+                        || (c == ':'
+                            && self.markers
+                            && self.out.ends_with('\n')
+                            && delimiter_row(rest, end_of_line))
                         || (c == '~' && tilde_after && rest.len() == 1)
                         // Two tildes make strikethrough for a GFM reader; every
                         // tilde of a run of two or more is escaped, so no pair
@@ -1078,6 +1086,23 @@ impl<'a> InlineWriter<'a> {
             }
         }
     }
+}
+
+/// Whether `rest` (from a `:`) reads `:-+:?` to the end of its line: a
+/// GFM delimiter row of one column, which needs no pipe (cmark-gfm's
+/// `table_start`), so under a paragraph line it would make that line a
+/// table header. The line ends at a `\n` in `rest`, or at its end where
+/// that ends the line (`end_of_line`). White space after the dashes would
+/// be an entity there, which no delimiter row holds; `-` and `|` are
+/// escaped at a line start already.
+fn delimiter_row(rest: &str, end_of_line: bool) -> bool {
+    let (line, ends) = match rest.find('\n') {
+        Some(k) => (&rest[..k], true),
+        None => (rest, end_of_line),
+    };
+    let dashes = line.get(1..).unwrap_or("");
+    let dashes = dashes.strip_suffix(':').unwrap_or(dashes);
+    ends && !dashes.is_empty() && dashes.bytes().all(|b| b == b'-')
 }
 
 /// GFM: where text `t` must not give a GFM reader an extended autolink.
@@ -1992,6 +2017,41 @@ mod tests {
             Inline::HardBreak,
             t(":--"),
         ])]);
+        assert_eq!(gfm(&d).0, "a\\\n\\:--\n");
+        assert_eq!(gfm_again(&d), d);
+    }
+
+    /// A paragraph line made only of `:` and dashes (`:--`, `:-:`) under
+    /// another line is a one-column delimiter row for a GFM reader, which
+    /// makes the line above a table header: its `:` is escaped in both
+    /// modes, and only there (the CommonMark mode writes txt -> md, so
+    /// every other line keeps its bytes).
+    #[test]
+    fn delimiter_row_shape_escaped_in_both_modes() {
+        for (text, want) in [
+            ("a\n:--", "a\\\n\\:--\n"),
+            ("a\n:-:", "a\\\n\\:-:\n"),
+            ("x\ny\n:--:", "x\\\ny\\\n\\:--:\n"),
+            ("a\n:-\n\nb", "a\\\n\\:-\n\nb\n"),
+            // Not a delimiter row: unchanged in the CommonMark mode.
+            (":--", ":--\n"),
+            ("a\n:--\nb", "a\\\n:--\\\nb\n"),
+            ("a\n:-- x", "a\\\n:-- x\n"),
+            ("a\n:", "a\\\n:\n"),
+            ("a\n:x-", "a\\\n:x-\n"),
+            ("a\n :--", "a\\\n&#32;:--\n"),
+            ("a\n:-- ", "a\\\n:--&#32;\n"),
+        ] {
+            let (d, _) = crate::txt::read(text.as_bytes()).unwrap();
+            let (out, _) = write(&d);
+            assert_eq!(out, want, "{text:?}");
+            // No GFM reader finds a table in it, and it reads back as it was.
+            let back = read_with(out.as_bytes(), Dialect::Gfm).unwrap();
+            assert_eq!(back, d, "{text:?}: {out:?}");
+            assert_eq!(read(out.as_bytes()).unwrap(), d, "{text:?}");
+        }
+        // The GFM mode escapes every line-start `:` (as before).
+        let (d, _) = crate::txt::read(b"a\n:--").unwrap();
         assert_eq!(gfm(&d).0, "a\\\n\\:--\n");
         assert_eq!(gfm_again(&d), d);
     }

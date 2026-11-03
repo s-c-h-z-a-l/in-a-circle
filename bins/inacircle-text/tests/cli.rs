@@ -110,6 +110,24 @@ fn txt_to_md_writes_into_work_only() {
     assert_eq!(lines(&out, "progress")[1][1], "1");
 }
 
+/// A text line made only of `:` and dashes under another line would be
+/// a table's delimiter row for a GFM viewer (the line above its header):
+/// its `:` is escaped, which no CommonMark viewer shows.
+#[test]
+fn txt_to_md_never_writes_a_delimiter_row() {
+    let root = tmp("delimrow");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.txt");
+    fs::write(&a, "Name\n:--\n\nx\ny\n:-:\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let done = lines(&out, "done");
+    let produced = fs::read_to_string(work.join(done[0][2])).unwrap();
+    assert_eq!(produced, "Name\\\n\\:--\n\nx\\\ny\\\n\\:-:\n");
+}
+
 #[test]
 fn md_to_txt_warns() {
     let root = tmp("warns");

@@ -628,6 +628,64 @@ fn commonmark_mode_unchanged() {
     assert_eq!((total, h), (31_195, 4_507_573_369_675_658_427));
 }
 
+/// Pieces a delimiter row is made of, added to [`ALPHABET`] for
+/// [`txt_trees_commonmark_output_unchanged`] so its one change is hit.
+const DELIMITER_ROW_PIECES: &[&str] = &[":", ":--", "--:", ":-:", "\n:-", ":\n", "-:"];
+
+/// Whether `line` (no line ending) is what the CommonMark mode writes for
+/// a txt line `:-+:?` that it escapes: `\:`, dashes, an optional `:`.
+fn escaped_delimiter_row(line: &str) -> bool {
+    line.strip_prefix("\\:").is_some_and(|r| {
+        let r = r.strip_suffix(':').unwrap_or(r);
+        !r.is_empty() && r.bytes().all(|b| b == b'-')
+    })
+}
+
+/// The CommonMark mode is the shipped txt -> md writer, and every tree the
+/// txt reader can build (paragraphs of text lines joined by hard breaks)
+/// is written byte for byte as before the GFM mode, except one shape: a
+/// paragraph line made only of `:` and dashes (`:--`, `:-:`), which a GFM
+/// viewer would read as a table's delimiter row, gets its `:` escaped.
+/// The property runs over 20,000 seeded txt inputs from [`ALPHABET`] and
+/// [`DELIMITER_ROW_PIECES`]; the escape is taken back off those lines, and
+/// the result (output and losses) is pinned by a hash taken from the
+/// writer before any change.
+#[test]
+fn txt_trees_commonmark_output_unchanged() {
+    let pieces: Vec<&str> = ALPHABET
+        .iter()
+        .chain(DELIMITER_ROW_PIECES)
+        .copied()
+        .collect();
+    let mut rng = Rng(0x7E47_0C0D);
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let (mut total, mut escaped) = (0usize, 0usize);
+    for _ in 0..20_000 {
+        let len = 1 + rng.below(32);
+        let input: String = (0..len).map(|_| pieces[rng.below(pieces.len())]).collect();
+        let (d, _) = txt::read(input.as_bytes()).unwrap();
+        let (out, losses) = md::write(&d);
+        let mut base = String::with_capacity(out.len());
+        for line in out.split_inclusive('\n') {
+            if escaped_delimiter_row(line.trim_end_matches('\n')) {
+                escaped += 1;
+                base.push_str(&line[1..]);
+            } else {
+                base.push_str(line);
+            }
+        }
+        fnv1a(&mut h, base.as_bytes());
+        fnv1a(&mut h, format!("{losses:?}").as_bytes());
+        total += base.len();
+    }
+    assert!(
+        escaped >= 100,
+        "only {escaped} delimiter-row lines generated"
+    );
+    // Taken from the writer as it was before the GFM mode.
+    assert_eq!((total, h), (780_144, 10_513_879_770_608_044_970));
+}
+
 /// Spec examples whose tree the GFM writer does not give back unchanged,
 /// each a flattening of the code it shares with the CommonMark mode. No
 /// table, strikethrough or task list example is among them.
