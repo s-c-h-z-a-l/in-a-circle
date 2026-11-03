@@ -49,7 +49,9 @@ pub const GROUPS: &[Group] = &[
 /// `plain-text-epub` shares Document's south slot with `plain-text`: on a
 /// tie (one EPUB and one Markdown file) the earlier preset, `plain-text`,
 /// holds the slot and wins the flat offer; more EPUBs than Markdown files
-/// give it to `plain-text-epub`.
+/// give it to `plain-text-epub`. `markdown-epub` shares the north slot with
+/// `markdown` the same way: a tie (one EPUB and one plain-text file) goes to
+/// `markdown`, more EPUBs than plain-text files give it to `markdown-epub`.
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "markdown",
@@ -130,6 +132,15 @@ pub const PRESETS: &[Preset] = &[
         output: "text/plain",
         label: "Plain text",
         direction: 4,
+        group: "document",
+        join: &[],
+    },
+    Preset {
+        id: "markdown-epub",
+        input: Some("application/epub+zip"),
+        output: "text/markdown",
+        label: "Markdown",
+        direction: 0,
         group: "document",
         join: &[],
     },
@@ -1159,12 +1170,95 @@ mod tests {
             ),
             ("plain-text-epub", "Plain text", 1, None)
         );
+        // North (Markdown) fits an EPUB but no action is installed here, so
+        // it is dim too; east (HTML) fits nothing.
         for k in [0, 2] {
             let s = o.slices[k].as_ref().unwrap();
-            assert_eq!(s.applicable, 0, "slice {k} is dim");
-            assert!(s.disabled.is_some(), "slice {k}");
+            assert!(s.disabled.is_some(), "slice {k} is dim");
         }
+        assert_eq!(o.slices[2].as_ref().unwrap().applicable, 0);
         assert_eq!(o.slices.iter().flatten().count(), 3);
+    }
+
+    fn epub_to_md_and_txt() -> Catalog {
+        let mut md = act(
+            "text.epub-to-md",
+            "application/epub+zip",
+            "text/markdown",
+            10,
+            false,
+        );
+        md.group = "document".into();
+        let mut cat = epub_to_txt();
+        cat.actions.push(md);
+        cat
+    }
+
+    /// An EPUB lights Document with both text slices: Markdown north and
+    /// Plain text south, both lit; the east (HTML) slice stays dim.
+    #[test]
+    fn epub_offers_markdown_north() {
+        let cat = epub_to_md_and_txt();
+        let t = tally(&[("b.epub", "application/epub+zip")]);
+        assert!(groups(&cat, &t)[0].as_ref().unwrap().lit);
+        assert!(!groups(&cat, &t)[2].as_ref().unwrap().lit, "Book stays dim");
+        let o = offer_group(&cat, &t, "document");
+        let slot = |k: usize| {
+            let s = o.slices[k].as_ref().unwrap();
+            (s.preset, s.label.as_str(), s.applicable, s.disabled.clone())
+        };
+        assert_eq!(slot(0), ("markdown-epub", "Markdown", 1, None));
+        assert_eq!(slot(4), ("plain-text-epub", "Plain text", 1, None));
+        let east = o.slices[2].as_ref().unwrap();
+        assert!(east.applicable == 0 && east.disabled.is_some(), "east dim");
+        // The flat offer names both slices for the same file.
+        let flat = offer(&cat, &[file("b.epub", "application/epub+zip")]).into_first();
+        assert_eq!(flat.slices[0].as_ref().unwrap().preset, "markdown-epub");
+        assert_eq!(flat.slices[4].as_ref().unwrap().preset, "plain-text-epub");
+    }
+
+    /// EPUB and plain text share Document's north slot: a tie goes to the
+    /// earlier preset (plain text to Markdown), more EPUBs take it, at both
+    /// levels.
+    #[test]
+    fn epub_and_txt_share_the_north_slot_by_count_then_order() {
+        let cat = Catalog {
+            actions: vec![
+                act("txt-md", "text/plain", "text/markdown", 1, false),
+                act("epub-md", "application/epub+zip", "text/markdown", 1, false),
+            ],
+        };
+        let txt = file("a.txt", "text/plain");
+        let ep = |n: &str| file(n, "application/epub+zip");
+        for (files, want) in [
+            (vec![ep("a.epub"), txt.clone()], "markdown"),
+            (
+                vec![ep("a.epub"), ep("b.epub"), txt.clone()],
+                "markdown-epub",
+            ),
+        ] {
+            let mut t = Tally::default();
+            for (n, k) in &files {
+                t.add(n, k);
+            }
+            let wheel = offer_group(&cat, &t, "document").slices[0]
+                .as_ref()
+                .unwrap()
+                .preset;
+            let flat = offer(&cat, &files);
+            let flat_north = flat
+                .groups
+                .iter()
+                .find(|(g, _)| *g == "document")
+                .unwrap()
+                .1
+                .slices[0]
+                .as_ref()
+                .unwrap()
+                .preset;
+            assert_eq!(wheel, want);
+            assert_eq!(flat_north, want);
+        }
     }
 
     /// Nothing in Book applies to an EPUB: the group stays dim.

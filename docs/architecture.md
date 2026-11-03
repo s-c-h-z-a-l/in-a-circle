@@ -1159,9 +1159,10 @@ compositor.
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` (from Markdown) and `plain-text-epub` (from an EPUB)
-  south, so an EPUB lights only Document, with its other slices dim and
-  nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has
+  north (from plain text) and `markdown-epub` (from an EPUB) also north,
+  `plain-text` (from Markdown) and `plain-text-epub` (from an EPUB)
+  south, so an EPUB lights only Document (Markdown north, Plain text south,
+  HTML east dim) and nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has
   no one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
@@ -1170,7 +1171,8 @@ compositor.
   the table, plain text before Markdown, which is also the flat offer's tie
   order; so one EPUB and one Markdown file leave `plain-text` (from Markdown)
   in the south slot, and more EPUBs than Markdown files give it to
-  `plain-text-epub`): lit if
+  `plain-text-epub`; the same holds in the north slot between `markdown`
+  (from plain text) and `markdown-epub`): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
   takes (`n`, the count the run would take) is below the number dropped.
