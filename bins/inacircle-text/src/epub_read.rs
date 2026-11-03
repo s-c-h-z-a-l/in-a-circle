@@ -455,7 +455,8 @@ mod tests {
                 Loss::TableWidth => Some(Loss::ControlCharacters),
                 Loss::ControlCharacters => Some(Loss::Styles),
                 Loss::Styles => Some(Loss::MergedCells),
-                Loss::MergedCells => None,
+                Loss::MergedCells => Some(Loss::CellsFlattened),
+                Loss::CellsFlattened => None,
             };
             // A chain that loops back would never end.
             assert!(next.is_none_or(|n| !all.contains(&n)), "{next:?} twice");

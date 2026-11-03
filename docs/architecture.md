@@ -207,7 +207,8 @@ are in `CLAUDE.md`.
   row `---`, `:--`, `:-:` or `--:` per column, then the body rows, a row
   short of cells padded with empty ones), every `|` in a cell written
   `\|`, a line break in a cell (a block in a book's cell) written as a
-  space and reported as a table layout loss only when one was there;
+  space and reported as cell line breaks that became spaces only when
+  one was there;
   strikethrough as `~~...~~` (adjacent ones joined, a nested one written
   as its outer one, an empty one left out), with a tilde next to a
   delimiter escaped; a line-start `:` escaped, so a paragraph line never

@@ -312,8 +312,8 @@ pub fn write_limited(
 ///   and raw HTML included) is written `\|`, which a GFM reader takes off
 ///   before it reads the cell's inlines. A cell is one line: a line break
 ///   in it becomes a space, and so does a line ending inside its code,
-///   HTML or link title, reported as [`Loss::TableLayout`] only when that
-///   happened. A table with no column writes nothing.
+///   HTML or link title, reported as [`Loss::CellsFlattened`] only when
+///   that happened. A table with no column writes nothing.
 /// - Strikethrough is `~~...~~`. Adjacent strikethroughs are written as
 ///   one (`~~~~` would be no delimiter), one inside another as the outer
 ///   one, and one with nothing to show is left out; a tilde of the text
@@ -624,7 +624,7 @@ fn pipe_table(
         row(r, &mut out, sink);
     }
     if flattened {
-        losses.insert(Loss::TableLayout);
+        losses.insert(Loss::CellsFlattened);
     }
     out
 }
@@ -1847,7 +1847,7 @@ mod tests {
         let d = xhtml("<table><tr><td>a | b<br/>c</td></tr></table>");
         let (out, losses) = gfm(&d);
         assert_eq!(out, "|  |\n| --- |\n| a \\| b c |\n");
-        assert_eq!(losses, BTreeSet::from([Loss::TableLayout]));
+        assert_eq!(losses, BTreeSet::from([Loss::CellsFlattened]));
         let Block::Table { rows, .. } = &gfm_again(&d).blocks[0] else {
             panic!("{out:?}")
         };
@@ -1885,7 +1885,7 @@ mod tests {
         let d = xhtml("<table><tr><td><p>a</p><p>b</p><ul><li>c</li></ul></td></tr></table>");
         let (out, losses) = gfm(&d);
         assert_eq!(out, "|  |\n| --- |\n| a b c |\n");
-        assert_eq!(losses, BTreeSet::from([Loss::TableLayout]));
+        assert_eq!(losses, BTreeSet::from([Loss::CellsFlattened]));
         // A line ending inside code, HTML or a title is a space too.
         for inline in [
             Inline::Code("a\nb".into()),
@@ -1906,7 +1906,7 @@ mod tests {
             )]);
             let (out, losses) = gfm(&d);
             assert_eq!(out.lines().count(), 2, "{inline:?}: {out:?}");
-            assert_eq!(losses, BTreeSet::from([Loss::TableLayout]), "{inline:?}");
+            assert_eq!(losses, BTreeSet::from([Loss::CellsFlattened]), "{inline:?}");
         }
         // Nothing flattened, no loss; a trailing break shows nothing.
         let d = doc(vec![table(

@@ -133,6 +133,9 @@ pub enum Loss {
     /// A table cell spanning several columns or rows became one cell and
     /// empty ones.
     MergedCells,
+    /// A line break (or a line ending in code, HTML or a title) inside a
+    /// table cell became a space: a GFM table cell is one line.
+    CellsFlattened,
 }
 
 impl Loss {
@@ -153,6 +156,7 @@ impl Loss {
             Loss::ControlCharacters => "characters not allowed in XHTML removed",
             Loss::Styles => "book styles (fonts, colours, layout) not carried over",
             Loss::MergedCells => "merged table cells split",
+            Loss::CellsFlattened => "table cell line breaks became spaces",
         }
     }
 }
