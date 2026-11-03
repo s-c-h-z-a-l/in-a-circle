@@ -41,8 +41,11 @@
 //!   cells are `th`, else the header is empty; `tfoot` rows come last; a
 //!   cell spanning columns or rows (`colspan` up to 1000, `rowspan` up to
 //!   65534, as HTML clamps them) is kept once, the cells it covered are
-//!   empty ([`Loss::MergedCells`]); short rows are padded; a caption is a
-//!   paragraph before the table.
+//!   empty ([`Loss::MergedCells`]); short rows are padded; an element
+//!   between rows that holds no text (an anchor, white space) makes no
+//!   row, so it takes no row span; a caption is a paragraph before the
+//!   table.
+//! - Ids ([`read_with_ids`] only): see [`Ids`].
 //!
 //! Budgets: every element is a node, charged when it starts, and so is
 //! every node it builds besides its own (a text run, an implicit
@@ -135,6 +138,57 @@ pub fn read_limited(text: &str, limits: Limits) -> Result<(Document, BTreeSet<Lo
     read_steps(text, limits).0
 }
 
+/// The `id` attributes of a chapter, beside the tree [`read_with_ids`]
+/// builds (the tree itself is the one [`read_limited`] builds).
+///
+/// - An `id` on a heading the tree keeps is that heading's: `headings`
+///   holds `(ordinal, id)`, the ordinal counting from 0 every
+///   [`Block::Heading`] of the document in document order (a block, then
+///   the blocks inside it: quotes, list items), ascending.
+/// - An `id` on a block container (`div`, `section`, the other
+///   transparent block elements, `blockquote`, `li`) whose first block is
+///   a heading is that heading's too, so a link to a chapter's section
+///   lands on its title: outer containers first, the heading's own id
+///   last. Anything the tree keeps before the heading (text, a paragraph,
+///   a rule, a list, a quote or a table) makes it the container's own,
+///   and so does a container that ends with no heading.
+/// - Every other `id` is in `others`, in the order it is settled: a
+///   footnote anchor (`<a id>`), a paragraph, a span, an element in `pre`
+///   or code, a heading where only inline content fits (a cell), an empty
+///   heading (no heading in the tree), and the containers above.
+///
+/// An empty `id` is none; an element dropped with its content (`head`,
+/// `script`, inline SVG...) keeps none. Ids are kept as written (not
+/// decoded, not checked for uniqueness: the same id twice is listed
+/// twice). Each element has at most one id, so there are at most as many
+/// as nodes; their text is owned text, charged to `limits.text_bytes`
+/// before it is copied.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ids {
+    pub headings: Vec<(usize, String)>,
+    pub others: Vec<String>,
+}
+
+/// [`read_limited`] and the chapter's [`Ids`]. The ids are charged to the
+/// same budget, so a chapter near the text limit can fail here and still
+/// read without them; the tree is otherwise the same.
+pub fn read_with_ids(
+    text: &str,
+    limits: Limits,
+) -> Result<(Document, BTreeSet<Loss>, Ids), XhtmlError> {
+    read_with_ids_steps(text, limits).0
+}
+
+/// [`read_with_ids`] and the work it did, for the linearity tests and the
+/// fuzz targets (the bound of [`read_steps`]): each id costs one step when
+/// it is settled.
+#[doc(hidden)]
+pub fn read_with_ids_steps(text: &str, limits: Limits) -> (Result<ReadIds, XhtmlError>, u64) {
+    let (r, steps) = run(text, limits, true);
+    let r = r.map(|(d, l, ids)| (d, l, ids.unwrap_or_default()));
+    (r, steps)
+}
+
 /// [`read_limited`] and the work it did (the linearity tests and the fuzz
 /// targets bound it by [`STEPS_PER_BYTE`] and [`STEPS_PER_NODE`]). The
 /// XML reader's own work is `xml::Reader::steps`, bounded by the `xml`
@@ -144,10 +198,22 @@ pub fn read_steps(
     text: &str,
     limits: Limits,
 ) -> (Result<(Document, BTreeSet<Loss>), XhtmlError>, u64) {
+    let (r, steps) = run(text, limits, false);
+    (r.map(|(d, l, _)| (d, l)), steps)
+}
+
+type Read = (Document, BTreeSet<Loss>, Option<Ids>);
+type ReadIds = (Document, BTreeSet<Loss>, Ids);
+
+/// The reader; `with_ids`: the ids are collected (and charged).
+fn run(text: &str, limits: Limits, with_ids: bool) -> (Result<Read, XhtmlError>, u64) {
     if text.len() > limits.input_bytes {
         return (Err(LimitError::Exceeded("input").into()), 0);
     }
     let mut b = Builder::new(limits);
+    if with_ids {
+        b.ids = Some(IdState::default());
+    }
     let mut r = Reader::new(
         text,
         xml::Options {
@@ -162,7 +228,7 @@ pub fn read_steps(
             Err(e) => return (Err(XhtmlError::Xml(e)), b.steps),
         }
     }
-    let res = b.finish();
+    let res = b.finish().map(|(d, l)| (d, l, b.ids.take().map(|s| s.out)));
     (res, b.steps)
 }
 
@@ -504,6 +570,37 @@ struct Builder {
     /// starts a new line.
     pending_break: bool,
     steps: u64,
+    /// Blocks attached so far (by [`Builder::add_block`]): a container's
+    /// id waiting for a heading checks that none came first.
+    attached: usize,
+    /// `Some` when the ids are collected ([`read_with_ids`]).
+    ids: Option<IdState>,
+}
+
+/// An id on a block container, waiting to learn whether its first block
+/// is a heading.
+struct Pending {
+    id: String,
+    /// [`Builder::open`]'s length before the container's own entry: when
+    /// it ends, the open stack is back to this.
+    open_at: usize,
+    /// The frame stack's height inside the container: a heading starting
+    /// at another height is inside a block the container holds first.
+    height: usize,
+    /// [`Builder::attached`] when the container started.
+    attached: usize,
+}
+
+#[derive(Default)]
+struct IdState {
+    out: Ids,
+    /// Innermost last.
+    pending: Vec<Pending>,
+    /// Ids of the heading being built (at most one is open: a heading
+    /// inside one is inline content).
+    heading: Vec<String>,
+    /// Headings in the tree so far: the next one's ordinal.
+    count: usize,
 }
 
 impl Builder {
@@ -525,6 +622,8 @@ impl Builder {
             flow: false,
             pending_break: false,
             steps: 0,
+            attached: 0,
+            ids: None,
         }
     }
 
@@ -533,6 +632,9 @@ impl Builder {
         while self.stack.len() > 1 {
             self.close_top();
         }
+        // Every element has ended in a well-formed chapter; whatever still
+        // waits for a heading has none.
+        self.settle_pending(0);
         self.m.result()?;
         let blocks = match self.stack.pop() {
             Some(Frame::Blocks { blocks, .. }) => blocks,
@@ -580,8 +682,13 @@ impl Builder {
         if self.math_at == 0 && e.name.local.eq_ignore_ascii_case("math") {
             self.math_at = self.depth;
         }
+        let id = match self.ids {
+            Some(_) => e.attr(None, "id").filter(|id| !id.is_empty()),
+            None => None,
+        };
         if let Some(Frame::Flat { raw, .. }) = self.stack.last() {
             let raw = *raw;
+            self.other_id(id);
             self.flat_start(tag, e, raw);
             return;
         }
@@ -595,9 +702,103 @@ impl Builder {
             | Tag::Br
             | Tag::Rt
             | Tag::Rp
-            | Tag::Inline => self.inline_start(tag, e),
-            Tag::Quiet => self.push_open(End::Nothing),
-            _ => self.block_start(tag, e),
+            | Tag::Inline => {
+                self.other_id(id);
+                self.inline_start(tag, e);
+            }
+            Tag::Quiet => {
+                self.other_id(id);
+                self.push_open(End::Nothing);
+            }
+            _ => self.block_start(tag, e, id),
+        }
+    }
+
+    /// An id that belongs to no heading.
+    fn other_id(&mut self, id: Option<&str>) {
+        if let (Some(id), Some(_)) = (id, &self.ids) {
+            self.steps += 1;
+            let id = self.m.own(id);
+            if let Some(st) = &mut self.ids {
+                self.m.push(&mut st.out.others, id);
+            }
+        }
+    }
+
+    /// A block container's id: it waits for the container's first block
+    /// (the container's open entry is the last one pushed).
+    fn pending_id(&mut self, id: Option<&str>) {
+        if let (Some(id), Some(_)) = (id, &self.ids) {
+            let id = self.m.own(id);
+            let p = Pending {
+                id,
+                open_at: self.open.len().saturating_sub(1),
+                height: self.stack.len(),
+                attached: self.attached,
+            };
+            if let Some(st) = &mut self.ids {
+                self.m.push(&mut st.pending, p);
+            }
+        }
+    }
+
+    /// The ids waiting on containers that end here (the open stack back
+    /// to `open_at`) have no heading: they are others.
+    fn settle_pending(&mut self, open_at: usize) {
+        let Some(st) = &mut self.ids else {
+            return;
+        };
+        while st.pending.last().is_some_and(|p| p.open_at >= open_at) {
+            self.steps += 1;
+            if let Some(p) = st.pending.pop() {
+                self.m.push(&mut st.out.others, p.id);
+            }
+        }
+    }
+
+    /// A heading starts in a block container: the waiting ids whose
+    /// container holds nothing before it are its own (with `id`, its own
+    /// id, last); the others have something else first. Every waiting id
+    /// is settled here.
+    fn heading_ids(&mut self, id: Option<&str>) {
+        let Some(st) = &mut self.ids else {
+            return;
+        };
+        let (height, attached) = (self.stack.len(), self.attached);
+        for p in std::mem::take(&mut st.pending) {
+            self.steps += 1;
+            let first = p.height == height && p.attached == attached;
+            let to = if first {
+                &mut st.heading
+            } else {
+                &mut st.out.others
+            };
+            self.m.push(to, p.id);
+        }
+        if let Some(id) = id {
+            self.steps += 1;
+            let id = self.m.own(id);
+            self.m.push(&mut st.heading, id);
+        }
+    }
+
+    /// The heading being built closed: `kept`, it is the next heading of
+    /// the tree, else its ids are others.
+    fn heading_closed(&mut self, kept: bool) {
+        let Some(st) = &mut self.ids else {
+            return;
+        };
+        let n = st.count;
+        if kept {
+            st.count += 1;
+        }
+        for id in std::mem::take(&mut st.heading) {
+            self.steps += 1;
+            if kept {
+                self.m.push(&mut st.out.headings, (n, id));
+            } else {
+                self.m.push(&mut st.out.others, id);
+            }
         }
     }
 
@@ -614,6 +815,9 @@ impl Builder {
             return;
         };
         self.close_to(o.height);
+        if self.ids.is_some() {
+            self.settle_pending(self.open.len());
+        }
         match o.end {
             End::Nothing => {}
             End::Break => self.pending_break = true,
@@ -810,7 +1014,10 @@ impl Builder {
         });
     }
 
-    fn block_start(&mut self, tag: Tag, e: &Element<'_>) {
+    /// `id`: the element's id when the ids are collected; every arm that
+    /// does not make it a heading's or a waiting container's settles it
+    /// as another id.
+    fn block_start(&mut self, tag: Tag, e: &Element<'_>, id: Option<&str>) {
         self.close_implicit(tag);
         loop {
             self.steps += 1;
@@ -826,14 +1033,17 @@ impl Builder {
             };
             match (ctx, tag) {
                 (Ctx::Inline, Tag::Cell(_)) => {
+                    self.other_id(id);
                     self.text(" ");
                     self.push_open(End::Nothing);
                 }
                 (Ctx::Inline, _) => {
+                    self.other_id(id);
                     self.pending_break = true;
                     self.push_open(End::Break);
                 }
                 (Ctx::Table, Tag::Row) => {
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.push_frame(Frame::Row {
                         cells: Vec::new(),
@@ -850,6 +1060,7 @@ impl Builder {
                     continue;
                 }
                 (Ctx::Table, Tag::Group(s)) => {
+                    self.other_id(id);
                     if let Some(Frame::Table(g)) = self.stack.last_mut() {
                         g.section = s;
                         g.spans.clear();
@@ -858,11 +1069,13 @@ impl Builder {
                     self.push_open(End::Group);
                 }
                 (Ctx::Table, Tag::Caption) => {
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.open_run(Run::Caption, false);
                 }
                 (Ctx::Row, Tag::Cell(th)) => {
                     let (colspan, rowspan) = spans(e);
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.open_run(
                         Run::Cell {
@@ -884,6 +1097,7 @@ impl Builder {
                         blocks: Vec::new(),
                         implicit: false,
                     });
+                    self.pending_id(id);
                 }
                 (Ctx::List, _) => {
                     if self.m.node() {
@@ -909,10 +1123,12 @@ impl Builder {
                     {
                         *loose = true;
                     }
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.open_run(Run::Para, false);
                 }
                 (Ctx::Block, Tag::Heading(level)) => {
+                    self.heading_ids(id);
                     self.push_open(End::Nothing);
                     self.open_run(Run::Heading(level), false);
                 }
@@ -923,9 +1139,11 @@ impl Builder {
                         blocks: Vec::new(),
                         implicit: false,
                     });
+                    self.pending_id(id);
                 }
                 (Ctx::Block, Tag::List(ordered)) => {
                     let start = ordered.then(|| list_start(e));
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.push_frame(Frame::List {
                         start,
@@ -934,6 +1152,7 @@ impl Builder {
                     });
                 }
                 (Ctx::Block, Tag::Pre) => {
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.push_frame(Frame::Flat {
                         raw: true,
@@ -943,10 +1162,12 @@ impl Builder {
                     });
                 }
                 (Ctx::Block, Tag::Hr) => {
+                    self.other_id(id);
                     self.add_block(Block::ThematicBreak);
                     self.push_open(End::Nothing);
                 }
                 (Ctx::Block, Tag::Table) => {
+                    self.other_id(id);
                     self.push_open(End::Nothing);
                     self.push_frame(Frame::Table(Grid {
                         section: Section::Body,
@@ -958,7 +1179,14 @@ impl Builder {
                         caption: Vec::new(),
                     }));
                 }
-                (Ctx::Block, _) => self.push_open(End::Nothing),
+                (Ctx::Block, Tag::Block | Tag::Item) => {
+                    self.push_open(End::Nothing);
+                    self.pending_id(id);
+                }
+                (Ctx::Block, _) => {
+                    self.other_id(id);
+                    self.push_open(End::Nothing);
+                }
             }
             return;
         }
@@ -1101,6 +1329,13 @@ impl Builder {
                 }
             }
             Frame::Table(g) => self.finish_table(g),
+            // An implicit row that got no cell (an empty inline element,
+            // or one holding only white space, between rows) is no row: it
+            // takes no row span from the rows above.
+            Frame::Row {
+                cells,
+                implicit: true,
+            } if cells.is_empty() => {}
             Frame::Row { cells, .. } => {
                 if let Some(Frame::Table(g)) = self.stack.last_mut() {
                     place_row(g, cells, &mut self.m, &mut self.losses, &mut self.steps);
@@ -1121,11 +1356,13 @@ impl Builder {
                             self.add_block(Block::Paragraph(inlines));
                         }
                         Run::Heading(level) if !inlines.is_empty() => {
+                            self.heading_closed(true);
                             self.add_block(Block::Heading {
                                 level,
                                 content: inlines,
                             });
                         }
+                        Run::Heading(_) => self.heading_closed(false),
                         Run::Caption if !inlines.is_empty() => {
                             if let Some(Frame::Table(g)) = self.stack.last_mut() {
                                 self.m.push(&mut g.caption, Block::Paragraph(inlines));
@@ -1214,6 +1451,7 @@ impl Builder {
     /// Adds a block to the innermost block container (the top frame,
     /// where blocks are opened).
     fn add_block(&mut self, b: Block) {
+        self.attached += 1;
         for f in self.stack.iter_mut().rev() {
             self.steps += 1;
             if let Frame::Blocks { blocks, .. } = f {

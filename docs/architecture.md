@@ -418,7 +418,9 @@ are in `CLAUDE.md`.
   on lines of its own. A table's header is its `thead` row or a first row of
   `th` cells, else empty; `tfoot` rows come last; a cell spanning columns or
   rows (clamped as HTML does, 1000 and 65534) is kept once and the cells it
-  covered are empty (`merged table cells split`); a caption is a paragraph
+  covered are empty (`merged table cells split`); an element between rows
+  that holds no text (an anchor, white space) makes no row, so it takes no
+  row span; a caption is a paragraph
   before the table. Stylesheets and `style` attributes are never read: every
   chapter reports `book styles (fonts, colours, layout) not carried over`.
   Budgets: every element is a node, charged when it starts, and so is every
@@ -429,6 +431,19 @@ are in `CLAUDE.md`.
   charged (a step count the tests and the fuzz target bound), with the
   builder's own stacks, no recursion. `has_text` tells whether a document
   holds any text that is not white space (an image's alt text is not).
+  `read_with_ids` reads the same tree and, beside it, the chapter's `id`
+  attributes (`Ids`): an id on a heading the tree keeps is that heading's,
+  by its ordinal (the headings counted from 0 in document order, nested
+  ones included); so is the id of a block container (`div`, `section`
+  and the other transparent block elements, `blockquote`, `li`) whose
+  first block is that heading, so a link to a section lands on its title
+  (outer containers first). Every other id (a footnote anchor, a
+  paragraph, a span, a heading where only inline content fits, an empty
+  heading, a container with something before its heading or none) is in
+  `others`. Ids are kept as written, an empty one is none, an element
+  dropped with its content keeps none; their text is owned text, charged
+  before it is copied, so a chapter near the limit can fail with ids and
+  still read without them (the text actions read without).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
