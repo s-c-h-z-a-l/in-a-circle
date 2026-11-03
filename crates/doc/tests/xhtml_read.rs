@@ -1084,3 +1084,45 @@ fn no_text_is_lost_silently() {
         );
     }
 }
+
+/// The reader's own steps for a document (the XML reader's are not in it).
+fn steps(s: &str) -> u64 {
+    let (r, steps) = read_steps(s, Limits::DEFAULT);
+    r.unwrap_or_else(|e| panic!("{e:?} for {s}"));
+    steps
+}
+
+#[test]
+fn step_counts_per_construct() {
+    // The linearity tests bound the steps only from above, so a counter
+    // that stops counting would pass them: each count here is worked out
+    // from the builder. Per event 1; a block start 1 (closing implicit
+    // frames) + 1 (its loop) + 1 per frame pushed; text in a run 2 per
+    // byte; a closed frame 1, a paragraph's trim 1 per level walked, an
+    // attached block or inline 1 per frame searched.
+    //
+    // p: start 1+1+1+1; "abc" 1+6; end 1, close 1, trim 1, attach 1.
+    assert_eq!(steps("<p>abc</p>"), 15);
+    // div in a run: start 1+1+1 (a break); end 1. "bc" after the break:
+    // 1, 2 (white space test), trim 1 before the break, 4.
+    assert_eq!(steps("<p>a<div></div>bc</p>"), 4 + 3 + 3 + 1 + 8 + 4);
+    // code: start 1, ensure_inline 1, frame 1; "abc" flat 1+6; end 1,
+    // close 1, attach 1; p's end 1, close 1, trim 1 (code ends it), attach 1.
+    assert_eq!(steps("<p><code>abc</code></p>"), 4 + 3 + 7 + 3 + 4);
+    // img: start 1, ensure_inline 1, attach 1; end 1; " " 1+2; p's trim
+    // pops the emptied space and goes on to the image: 2.
+    assert_eq!(steps(r#"<p>a<img src="i"/> </p>"#), 4 + 3 + 3 + 1 + 3 + 5);
+    // A table: start 4; tr 4; a td 4 + its text 3 + its end 3 = 10.
+    // Row 1 (a, b, c over two rows): per cell a column added 1 and its
+    // span set 1, then 3 columns counted down: 9; its end 1 + close 1.
+    // Row 2 (d): d's span 1, column 1 free (an empty cell 1), column 2
+    // covered (a merged cell 1), 3 counted down: 6; end 1 + close 1.
+    // Table end 1 + close 1, the empty header padded to 3 columns 3,
+    // attach 1.
+    assert_eq!(
+        steps(
+            r#"<table><tr><td>a</td><td>b</td><td rowspan="2">c</td></tr><tr><td>d</td></tr></table>"#
+        ),
+        4 + (4 + 30 + 2 + 9) + (4 + 10 + 2 + 6) + (2 + 3 + 1)
+    );
+}
