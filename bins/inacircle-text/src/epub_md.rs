@@ -878,6 +878,84 @@ mod tests {
         );
     }
 
+    /// The heading index is refused past either limit and at neither: the
+    /// limits themselves are allowed, one more entry or byte is not, and
+    /// one limit alone is enough.
+    #[test]
+    fn index_charge_limits() {
+        let mut i = Index::default();
+        assert!(i.charge(INDEX_ENTRIES, INDEX_BYTES).is_ok());
+        assert_eq!(i.charge(1, 0).unwrap_err(), "book is too large");
+        let mut i = Index::default();
+        assert_eq!(
+            i.charge(INDEX_ENTRIES + 2, 0).unwrap_err(),
+            "book is too large"
+        );
+        let mut i = Index::default();
+        assert!(i.charge(INDEX_ENTRIES, 0).is_ok());
+        let mut i = Index::default();
+        assert_eq!(
+            i.charge(0, INDEX_BYTES + 1).unwrap_err(),
+            "book is too large"
+        );
+        let mut i = Index::default();
+        assert!(i.charge(0, INDEX_BYTES).is_ok());
+        // Charged over several calls.
+        let mut i = Index::default();
+        assert!(i.charge(1, INDEX_BYTES - 1).is_ok());
+        assert!(i.charge(1, 1).is_ok());
+        assert!(i.charge(0, 1).is_err());
+    }
+
+    /// A chapter is written under what is left of the book's output
+    /// budget after the bytes already written: with less left than the
+    /// chapter needs it is refused by the writer itself.
+    #[test]
+    fn chapter_is_written_under_what_is_left() {
+        let d = Document {
+            blocks: vec![Block::Paragraph(vec![Inline::Text("hello".into())])],
+        };
+        let (s, _, _) = chapter_md(&d, 0, None).unwrap();
+        assert_eq!(s, "hello\n");
+        let fits = LIMITS.output_bytes - s.len();
+        assert!(chapter_md(&d, fits, None).is_ok());
+        assert_eq!(
+            chapter_md(&d, fits + 1, None).unwrap_err(),
+            "book is too large"
+        );
+    }
+
+    /// An image is created new: one that exists is never overwritten (a
+    /// failure of the book, not a name too long), and a name past the file
+    /// system's limit is the one case that keeps the alt text.
+    #[test]
+    fn folder_never_overwrites_and_names_a_long_name() {
+        let dir = std::env::temp_dir().join(format!("inacircle-epub-md-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut f = Folder {
+            dir: &dir,
+            written: Discard {
+                md: None,
+                images: Vec::new(),
+            },
+        };
+        assert!(f.put("a-0001.jpg", b"one").is_ok());
+        match f.put("a-0001.jpg", b"two") {
+            Err(Put::Failed(why)) => assert!(why.starts_with("cannot create output: "), "{why}"),
+            Err(Put::NameTooLong) => panic!("an existing file is not a long name"),
+            Ok(()) => panic!("overwrote an image"),
+        }
+        assert_eq!(fs::read(dir.join("a-0001.jpg")).unwrap(), b"one");
+        assert!(matches!(
+            f.put(&format!("{}.jpg", "n".repeat(300)), b"x"),
+            Err(Put::NameTooLong)
+        ));
+        assert_eq!(f.written.images.len(), 1);
+        f.written.keep();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn only_web_and_mail_links_stay() {
         for d in ["http://x", "HTTPS://x", "mailto:a@b", "//host/x"] {

@@ -582,6 +582,30 @@ pub(crate) mod tests {
         assert_eq!(s, "> t\n\n- t\n\nt\n-------------\nt (https://x)\n");
         assert!(l.contains(&Loss::Links));
     }
+    /// SIGXFSZ is ignored after the call (so a write past the file size
+    /// ceiling fails with EFBIG instead of killing the process): read back
+    /// from the process's ignored-signal mask, after resetting the signal
+    /// to its default.
+    #[test]
+    fn sigxfsz_is_ignored_after_the_call() {
+        let ignored = || {
+            let status = fs::read_to_string("/proc/self/status").unwrap();
+            let mask = status
+                .lines()
+                .find_map(|l| l.strip_prefix("SigIgn:"))
+                .unwrap();
+            u64::from_str_radix(mask.trim(), 16).unwrap() & (1 << (libc::SIGXFSZ - 1)) != 0
+        };
+        // SAFETY: `signal` with SIG_DFL installs no handler code and
+        // touches no Rust state; SIGXFSZ is a valid signal number.
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
+        }
+        assert!(!ignored());
+        ignore_sigxfsz();
+        assert!(ignored());
+    }
+
     /// The input is opened without waiting: `O_NONBLOCK` is set on the
     /// descriptor (a FIFO would otherwise block the open until a writer
     /// shows up), and a FIFO is refused, not read.
