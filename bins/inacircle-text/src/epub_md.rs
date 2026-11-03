@@ -199,9 +199,10 @@ impl Index {
     }
 
     /// The md destination of the in-book link `dest` written in `chapter`:
-    /// `#<id>` of the heading it lands on (the heading its fragment names,
-    /// or without one the chapter's first heading); `None` for any other
-    /// place.
+    /// `#<anchor>` of the heading it lands on (the heading its fragment
+    /// names, or without one the chapter's first heading), as a viewer
+    /// names it ([`xhtml::md_anchor`]); `None` for any other place and for
+    /// a heading with no anchor.
     fn target(&self, book: &Book<'_>, chapter: &ChapterRef, dest: &str) -> Option<String> {
         let path = book.resolve(chapter, dest).ok()?;
         let t = self.chapters.get(&path)?;
@@ -215,13 +216,15 @@ impl Index {
             Some(f) => t.ids.get(&xhtml::percent_decode(f))?,
             None => t.first.as_ref()?,
         };
-        Some(format!("#{id}"))
+        // A heading with no anchor text (`!!!`) has no anchor to land on.
+        (!id.is_empty()).then(|| format!("#{id}"))
     }
 }
 
 /// The first pass: every chapter's headings, numbered over the whole book
 /// in spine order after the title heading, as a viewer or the join
-/// numbers the md's headings ([`Slugs`]). A chapter that cannot be read
+/// numbers the md's headings ([`Slugs`]), each kept as a viewer's anchor
+/// ([`xhtml::md_anchor`]: no `h-` before a digit). A chapter that cannot be read
 /// here cannot be read in the second pass either (the same bytes, the
 /// same reader) and has no heading there.
 fn index(book: &Book<'_>, title: Option<&str>) -> Result<Index, String> {
@@ -246,8 +249,9 @@ fn index(book: &Book<'_>, title: Option<&str>) -> Result<Index, String> {
         let mut own = Vec::with_capacity(texts.len());
         for t in &texts {
             let id = slugs.unique(t);
-            index.charge(1, id.len())?;
-            own.push(id);
+            let anchor = xhtml::md_anchor(t, &id).to_string();
+            index.charge(1, anchor.len())?;
+            own.push(anchor);
         }
         // `chapter` read it, so the item exists.
         let Some(item) = book.item(c) else { continue };

@@ -538,8 +538,12 @@ are in `CLAUDE.md`.
   heading's `id`, an `id` inside the heading such as a table of
   contents anchor `<h2><a id="c2"/>II.</h2>`, or that of a container
   the heading leads; or with no fragment the chapter has a first
-  heading),
-  else it keeps only its text; `http:`, `https:`, `mailto:` and
+  heading), else it keeps only its text. The `<id>` is the anchor a viewer
+  (GitHub) gives the heading: the slug without the `h-` an EPUB id needs
+  before a digit (`#1984`, `#1984-1`), which the join still finds; a
+  heading whose text gives no anchor (`!!!`) cannot be linked, and a
+  heading text that is the prefix itself (`H 1` beside `1`) is numbered
+  by our rule, not GitHub's. Further, `http:`, `https:`, `mailto:` and
   `//host/...` links stay as they are, any other scheme keeps only its
   text (so the md never carries a `javascript:` or `file:` link); each
   dropped link is reported. An image is resolved in the book like a

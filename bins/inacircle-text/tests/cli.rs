@@ -3154,6 +3154,60 @@ mod epub_to_txt {
             }
         }
 
+        /// A heading that starts with a digit is linked by GitHub's anchor,
+        /// with no `h-` before it (`#1984`, then `#1984-1`), which the join
+        /// still finds; a heading with no anchor text (`!!!`) has no
+        /// anchor, so its link keeps only its text.
+        #[test]
+        fn digit_led_headings_link_github_form() {
+            let (root, work) = workdir("md-digit-heading");
+            let b = book(
+                &root,
+                "b.epub",
+                "<dc:title>Book</dc:title>",
+                &[
+                    ch(
+                        "c0.xhtml",
+                        "<p><a href=\"c1.xhtml\">a</a> <a href=\"c2.xhtml#x\">b</a> \
+                         <a href=\"c3.xhtml#e\">c</a></p>",
+                    ),
+                    ch("c1.xhtml", "<h2>1984</h2><p>one</p>"),
+                    ch("c2.xhtml", "<h2 id=\"x\">1984</h2><p>two</p>"),
+                    ch("c3.xhtml", "<h2 id=\"e\">!!!</h2><p>three</p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "# Book\n\n[a](#1984) [b](#1984-1) c\n\n## 1984\n\none\n\n## 1984\n\ntwo\n\n\
+                 ## \\!\\!\\!\n\nthree\n"
+            );
+            assert_eq!(r.warns, [LINKS, STYLES]);
+            // Read back as the join does: the fragment through the slug
+            // rule finds the heading right above its note.
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let ch = doc::xhtml::Chapter {
+                blocks: &d.blocks,
+                file: "b.md".into(),
+            };
+            let a = doc::xhtml::Anchors::build(std::slice::from_ref(&ch));
+            let ids = a.top_level_ids(0, &d.blocks);
+            for (fragment, note) in [("1984", "one"), ("1984-1", "two")] {
+                let id = doc::xhtml::slug(fragment);
+                let (at, _) = ids.iter().find(|(_, i)| *i == id).unwrap();
+                let doc::Block::Paragraph(p) = &d.blocks[at + 1] else {
+                    panic!("{id}")
+                };
+                assert_eq!(p, &[doc::Inline::Text(note.into())]);
+            }
+        }
+
         /// A table of contents links to an anchor inside the heading
         /// (`<h2><a id="x"/>...</h2>`, as Project Gutenberg's books do) or
         /// to a span around its text: the link lands on that heading.

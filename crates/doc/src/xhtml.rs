@@ -219,6 +219,37 @@ fn name_start_range(c: char) -> bool {
 /// A link target goes through the same function, so `#2026-terv` and
 /// `#h-2026-terv` both find the heading.
 pub fn slug(text: &str) -> String {
+    let s = bare_slug(text);
+    if name_start(&s) { s } else { format!("h-{s}") }
+}
+
+/// The anchor a Markdown viewer (GitHub) gives the heading whose plain
+/// text ([`plain`]) is `text` and which [`Slugs::unique`] gave `id`: `id`
+/// without the `h-` that [`slug`] put before a text that is no XML name
+/// (`1984` -> `h-1984` -> `1984`, the second `1984` -> `h-1984-1` ->
+/// `1984-1`), since a Markdown anchor needs none. A link written with it
+/// still finds the heading through [`slug`] (the join's rule). Empty when
+/// the heading's text gives no anchor at all (`!!!`). The numbering is
+/// ours: where a heading's text is the prefix itself (`H 1` beside `1`)
+/// GitHub numbers the two apart (`h-1`, `1`) and ours share a base
+/// (`h-1`, `h-1-1`), a case left as it is.
+pub fn md_anchor<'a>(text: &str, id: &'a str) -> &'a str {
+    if name_start(&bare_slug(text)) {
+        id
+    } else {
+        id.strip_prefix("h-").unwrap_or(id)
+    }
+}
+
+/// Whether a slug starts as an XML name must (a letter or `_`).
+fn name_start(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_alphabetic())
+}
+
+/// [`slug`] without its `h-` prefix.
+fn bare_slug(text: &str) -> String {
     let mut s = String::new();
     for c in text.chars().flat_map(char::to_lowercase) {
         if c.is_whitespace() {
@@ -231,11 +262,7 @@ pub fn slug(text: &str) -> String {
             s.push(c);
         }
     }
-    let starts_ok = s
-        .chars()
-        .next()
-        .is_some_and(|c| c == '_' || c.is_alphabetic());
-    if starts_ok { s } else { format!("h-{s}") }
+    s
 }
 
 /// Stylesheet of [`Mode::Standalone`]: about 1 KB as asked of the page
@@ -1076,6 +1103,28 @@ mod tests {
             assert!(well_formed(bad).is_err(), "{bad:?} accepted");
         }
         assert!(well_formed("<p a=\"1\" b=\"&amp;\">x &lt; <br/>&#13;</p>").is_ok());
+    }
+
+    #[test]
+    fn md_anchor_drops_only_the_added_prefix() {
+        let mut slugs = Slugs::default();
+        let mut next = |t: &str| {
+            let id = slugs.unique(t);
+            let a = md_anchor(t, &id).to_string();
+            // The join's rule finds the heading from the anchor.
+            assert_eq!(slug(&a), id, "{t}");
+            a
+        };
+        assert_eq!(next("1984"), "1984");
+        assert_eq!(next("1984"), "1984-1");
+        assert_eq!(next("1. Loomings"), "1-loomings");
+        // A heading's own `h-` stays.
+        assert_eq!(next("H-2"), "h-2");
+        assert_eq!(next("Notes"), "notes");
+        assert_eq!(next("-x"), "-x");
+        // No anchor text at all.
+        assert_eq!(next("!!!"), "");
+        assert_eq!(next("!!!"), "-1");
     }
 
     #[test]
