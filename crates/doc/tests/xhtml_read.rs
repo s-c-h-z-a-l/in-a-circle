@@ -1126,3 +1126,157 @@ fn step_counts_per_construct() {
         4 + (4 + 30 + 2 + 9) + (4 + 10 + 2 + 6) + (2 + 3 + 1)
     );
 }
+
+#[test]
+fn error_display_is_the_cause() {
+    let limit = LimitError::Exceeded("nodes");
+    assert_eq!(XhtmlError::Limit(limit).to_string(), limit.to_string());
+    let e = read_limited("<p>", Limits::DEFAULT).unwrap_err();
+    let XhtmlError::Xml(x) = &e else {
+        panic!("an unclosed element is not well-formed: {e:?}");
+    };
+    let shown = e.to_string();
+    assert!(!shown.is_empty());
+    assert_eq!(shown, x.to_string());
+}
+
+#[test]
+fn svg_lower_headings_and_quiet_table_elements() {
+    // SVG in the XHTML namespace (written without its own) is dropped
+    // with its text, an image loss.
+    let (d, losses) = read(&page("<svg><desc>x</desc></svg>"));
+    assert_eq!(d.blocks, vec![]);
+    assert!(losses.contains(&Loss::Images), "{losses:?}");
+    let heading = |level, s: &str| Block::Heading {
+        level,
+        content: vec![t(s)],
+    };
+    assert_eq!(
+        blocks("<h4>a</h4><h5>b</h5><h6>c</h6>"),
+        vec![heading(4, "a"), heading(5, "b"), heading(6, "c")]
+    );
+    // A row group ends the row spans above it; `col` between rows holds
+    // nothing (no row of its own that a span would cover).
+    let table = |rows: Vec<Vec<Vec<Inline>>>| Block::Table {
+        align: vec![Align::None; rows[0].len()],
+        head: vec![vec![]; rows[0].len()],
+        rows,
+    };
+    assert_eq!(
+        blocks(
+            r#"<table><tr><td rowspan="2">a</td></tr><tbody><tr><td>b</td></tr></tbody></table>"#
+        ),
+        vec![table(vec![vec![vec![t("a")]], vec![vec![t("b")]]])]
+    );
+    assert_eq!(
+        blocks(r#"<table><tr><td rowspan="2">a</td></tr><col/><tr><td>b</td></tr></table>"#),
+        vec![table(vec![
+            vec![vec![t("a")], vec![]],
+            vec![vec![], vec![t("b")]]
+        ])]
+    );
+}
+
+#[test]
+fn link_in_pre_is_a_links_loss_only_with_href() {
+    let (d, losses) = read(&page(r#"<pre><a href="x">t</a></pre>"#));
+    assert_eq!(
+        d.blocks,
+        vec![Block::CodeBlock {
+            info: String::new(),
+            text: "t\n".into()
+        }]
+    );
+    assert_eq!(losses, BTreeSet::from([Loss::Links, Loss::Styles]));
+    let (_, losses) = read(&page(r#"<pre><a id="x">t</a></pre>"#));
+    assert_eq!(losses, BTreeSet::from([Loss::Styles]));
+}
+
+#[test]
+fn block_in_pre_after_a_space() {
+    let code = |s: &str| {
+        vec![Block::CodeBlock {
+            info: String::new(),
+            text: s.into(),
+        }]
+    };
+    // A trailing space is not a line end: the block still starts a line.
+    assert_eq!(blocks("<pre>a <div>b</div></pre>"), code("a \nb\n"));
+    // A cell after a space adds no second space.
+    assert_eq!(blocks("<pre>a <td>b</td></pre>"), code("a b\n"));
+}
+
+#[test]
+fn empty_implicit_cell_is_dropped() {
+    // Inline markup in a row opens a cell for its content; holding
+    // nothing, it is no cell.
+    assert_eq!(
+        blocks("<table><tr><span/><td>a</td></tr></table>"),
+        vec![Block::Table {
+            align: vec![Align::None],
+            head: vec![vec![]],
+            rows: vec![vec![vec![t("a")]]],
+        }]
+    );
+}
+
+#[test]
+fn inline_code_text_is_charged() {
+    let s = page("<p><code>abcd</code></p>");
+    let limits = |text_bytes| Limits {
+        text_bytes,
+        ..Limits::DEFAULT
+    };
+    assert!(read_limited(&s, limits(4)).is_ok());
+    assert_eq!(
+        read_limited(&s, limits(3)),
+        Err(XhtmlError::Limit(LimitError::Exceeded("owned text")))
+    );
+}
+
+#[test]
+fn row_span_at_the_end_of_a_row_and_empty_rows() {
+    // The covered column after the row's last cell is a merged cell.
+    let (d, losses) = read(&page(
+        r#"<table><tr><td>a</td><td rowspan="2">b</td></tr><tr><td>c</td></tr></table>"#,
+    ));
+    assert_eq!(
+        d.blocks,
+        vec![Block::Table {
+            align: vec![Align::None; 2],
+            head: vec![vec![], vec![]],
+            rows: vec![vec![vec![t("a")], vec![t("b")]], vec![vec![t("c")], vec![]]],
+        }]
+    );
+    assert_eq!(losses, BTreeSet::from([Loss::MergedCells, Loss::Styles]));
+    // A row with no cells, nothing spanning into it, is no row.
+    assert_eq!(
+        blocks("<table><tr><td>a</td><td>b</td></tr><tr></tr></table>"),
+        vec![Block::Table {
+            align: vec![Align::None; 2],
+            head: vec![vec![], vec![]],
+            rows: vec![vec![vec![t("a")], vec![t("b")]]],
+        }]
+    );
+}
+
+#[test]
+fn trailing_trim_edges() {
+    // A second break: the first is not trimmed away before it.
+    assert_eq!(
+        blocks("<p>a<br/><br/>b</p>"),
+        vec![para(vec![
+            t("a"),
+            Inline::HardBreak,
+            Inline::HardBreak,
+            t("b")
+        ])]
+    );
+    // Emphasis emptied by the trim before a break goes at the end.
+    assert_eq!(blocks("<p>x<b> </b><br/></p>"), vec![para(vec![t("x")])]);
+    // The trailing space inside emphasis goes.
+    assert_eq!(
+        blocks("<p><em>a </em></p>"),
+        vec![para(vec![Inline::Emph(vec![t("a")])])]
+    );
+}
