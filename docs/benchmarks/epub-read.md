@@ -19,7 +19,12 @@ rules: [acceptance.md](acceptance.md). Limits are in
   6.6 KB, 66,590,000 B of XHTML in all (limit 64 MiB = 67,108,864 B);
   (b) the densest chapter that still passes: 240,000 `<p>a</p>` inside 30
   nested `<blockquote>`; (c) 300,000 such paragraphs, past the node limit;
-  (d) three chapters of 8 MiB (the per-chapter limit), 25,165,410 B.
+  (d) three chapters of exactly 8 MiB (the per-chapter limit) of plain
+  paragraphs, 100 words each, 25,165,824 B; (e) one chapter of 262,000
+  `<b>x</b>` in one paragraph; (f) 200,000 `<p>a</p>` inside 250 nested
+  `<blockquote>`, whose text grows past the output budget; (g) the three
+  chapters of (d) followed by the chapter of (b), which gets only the
+  output budget the first three left.
 - **Time per byte.** The same harness on single chapters of hostile shape
   (the shapes the unit tests check for linearity with step counts), wall
   time of the whole run divided by the chapter bytes.
@@ -37,7 +42,10 @@ repository profile (fat LTO, `panic=abort`, strip).
 | (a) 10,000 chapters | 66,590,000 | 23,692 / 23,692 | 0.779 | book read |
 | (b) 240k `<p>` in 30 blockquotes | 1,920,881 | 179,716 / 180,016 | 0.441 | book read |
 | (c) 300k `<p>` in 30 blockquotes | 2,400,881 | 118,008 / 118,020 | 0.089 | chapter refused, no chapter could be read |
-| (d) three 8 MiB chapters | 25,165,410 | 67,820 / 67,860 | 0.229 | book read |
+| (d) three 8 MiB chapters | 25,165,824 | 33,212 / 33,364 | 0.133 | book read |
+| (e) 262k `<b>` | 2,096,138 | 125,872 / 126,000 | 0.093 | book read |
+| (f) 200k `<p>` in 250 blockquotes | 1,606,381 | 177,788 / 177,972 | 0.518 | `book is too large` |
+| (g) (d) then (b) | 27,086,705 | 137,576 / 137,656 | 0.281 | `book is too large` |
 
 Time per byte on hostile single chapters (7 runs, median):
 
