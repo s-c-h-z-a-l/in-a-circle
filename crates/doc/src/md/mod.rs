@@ -791,6 +791,18 @@ struct InlineWriter<'a> {
     /// GFM: the end of the list being written is the end of the
     /// innermost open mark's content (edge white space aside).
     at_end: bool,
+    /// GFM: the `.`/`:` (offsets in `out`) of `www.`/`://` candidates
+    /// written raw at the end of a text whose run goes on into what is
+    /// written next: whether they need an entity depends on that (see
+    /// [`autolink_guards`]). Only plain run text is written after them
+    /// until [`InlineWriter::settle`] or [`InlineWriter::pending_ends`]
+    /// decides, so no other offset into `out` lies past them.
+    pending: Vec<usize>,
+    /// GFM: the end of the list being written is not the end of what a
+    /// reader sees as one text there (a mark left out around it), so
+    /// [`InlineWriter::pending`] carries on to what follows. Taken (reset)
+    /// by every [`InlineWriter::inlines`] call as it starts.
+    carry: bool,
 }
 
 /// What a delimiter run's neighbour is for the flanking rules: Unicode
@@ -995,6 +1007,44 @@ fn writes_nothing(items: &[Inline]) -> bool {
     })
 }
 
+/// GFM: whether `items`, a mark's content, start with white space at
+/// which a reader ends a `www.` run: ASCII edge white space (moved out in
+/// front of the opener, or written in place where the mark is left out)
+/// with more of the content after it on the line, so it is no line-end
+/// entity. `None`: they write nothing. Other starts give `false` (the run
+/// is taken to go on: an entity too many is harmless). Walks to the first
+/// character past edge white space only.
+fn lead_ws_ends(items: &[Inline]) -> Option<bool> {
+    // `ws`: whether the edge white space so far starts with such a
+    // character (`None`: none written yet).
+    fn walk(items: &[Inline], ws: &mut Option<bool>) -> Option<bool> {
+        for i in items {
+            match i {
+                Inline::Text(t) => {
+                    if ws.is_none() && !t.is_empty() {
+                        *ws = Some(matches!(t.as_bytes()[0], b' ' | b'\t' | b'\x0c'));
+                    }
+                    if let Some(c) = t.trim_start_matches(edge_space).chars().next() {
+                        return Some(*ws == Some(true) && c != '\n' && c != '\r');
+                    }
+                }
+                Inline::Code(t) | Inline::Html(t) if t.is_empty() => {}
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+                    if let Some(r) = walk(c, ws) {
+                        return Some(r);
+                    }
+                }
+                Inline::Code(_) | Inline::Html(_) | Inline::Link { .. } | Inline::Image { .. } => {
+                    return Some(*ws == Some(true));
+                }
+                Inline::SoftBreak | Inline::HardBreak => return Some(false),
+            }
+        }
+        None
+    }
+    walk(items, &mut None)
+}
+
 /// The first character the GFM writer puts down for `items` past edge
 /// white space (`None`: there is none), at worst for an opener before
 /// it: a mark inside counts as the worse of its delimiter (punctuation)
@@ -1134,6 +1184,8 @@ impl<'a> InlineWriter<'a> {
             open_before: Class::Space,
             open_marks: Vec::new(),
             at_end: false,
+            pending: Vec::new(),
+            carry: false,
         }
     }
 
@@ -1194,6 +1246,13 @@ impl<'a> InlineWriter<'a> {
                     (false, _) => "_",
                 };
                 if self.decide(delim, core_lead(c), core_trail(c, eol), follow, at_start) {
+                    // Its leading white space moved out before the opener
+                    // ends a pending run; the opener joins it otherwise.
+                    if lead_ws_ends(c) == Some(true) {
+                        self.pending_ends();
+                    } else {
+                        self.settle();
+                    }
                     self.mark(delim, c, follow, eol);
                 } else {
                     self.unmarked(c, at_end, follow, eol, Loss::Emphasis);
@@ -1249,6 +1308,8 @@ impl<'a> InlineWriter<'a> {
         }
         let list_follow = std::mem::replace(&mut self.follow, follow);
         let at_end = std::mem::replace(&mut self.at_end, at_end);
+        // Its content and what follows are one text to a reader.
+        self.carry = true;
         self.inlines(c, eol);
         self.follow = list_follow;
         self.at_end = at_end;
@@ -1267,6 +1328,43 @@ impl<'a> InlineWriter<'a> {
         (1..=9).contains(&n) && (b.len() == n || b[b.len() - n - 1] == b'\n')
     }
 
+    /// GFM: what is written after the [`InlineWriter::pending`]
+    /// candidates joins their run with something that is not plain text
+    /// to a reader (an escape, a delimiter, a link): each becomes an
+    /// entity, as in one text. The bytes after the first are copied once;
+    /// they are the run's plain text, and a run is settled once.
+    fn settle(&mut self) {
+        let Some(&first) = self.pending.first() else {
+            return;
+        };
+        let pending = std::mem::take(&mut self.pending);
+        // A one-byte `.`/`:` becomes a five-byte entity.
+        let grow = ("&#46;".len() - 1).saturating_mul(pending.len());
+        if !self.sink.room(&mut self.out, grow) {
+            return;
+        }
+        let tail = self.out.split_off(first);
+        let mut from = 0;
+        for p in pending {
+            let k = p - first;
+            self.out.push_str(&tail[from..k]);
+            self.out.push_str(if tail.as_bytes()[k] == b'.' {
+                "&#46;"
+            } else {
+                "&#58;"
+            });
+            from = k + 1;
+        }
+        self.out.push_str(&tail[from..]);
+    }
+
+    /// GFM: the run of the [`InlineWriter::pending`] candidates ends at
+    /// white space or the line end with nothing but plain text: they
+    /// stay as written (a reader links the run as it reads).
+    fn pending_ends(&mut self) {
+        self.pending.clear();
+    }
+
     /// What precedes the next character written (see `open_at`).
     fn before(&self) -> Class {
         if self.out.len() == self.open_at {
@@ -1279,6 +1377,8 @@ impl<'a> InlineWriter<'a> {
     /// (written next) sees it as its `open_at`. Returns the mark and the
     /// state to give back to [`InlineWriter::close`].
     fn open(&mut self, delim: &'static str) -> (Open, (usize, Class)) {
+        // Settled or ended by the caller: no offset may lie past them.
+        debug_assert!(self.pending.is_empty());
         let mut open = Open {
             start: self.out.len(),
             body: 0,
@@ -1321,6 +1421,9 @@ impl<'a> InlineWriter<'a> {
         if self.sink.failed() {
             return;
         }
+        // The content's list settled what it left pending (see `inlines`):
+        // the content is copied below.
+        debug_assert!(self.pending.is_empty());
         // A hard break at the end of a line shows nothing (the paragraph
         // writer leaves it out), but its `\` would show once the break
         // is followed by nothing: at a line end, one ending the content
@@ -1484,6 +1587,7 @@ impl<'a> InlineWriter<'a> {
     /// `end_of_line`: the end of `items` is the end of a rendered line.
     fn inlines(&mut self, items: &[Inline], end_of_line: bool) {
         let tilde_after_list = std::mem::take(&mut self.tilde_follows);
+        let carry = std::mem::take(&mut self.carry);
         let list_follow = self.follow;
         // The `~~` opening the current run of strikethroughs, and the
         // marks open around it.
@@ -1647,6 +1751,11 @@ impl<'a> InlineWriter<'a> {
                         strike_keep = !self.ends_with_delim(b'~', self.out.len())
                             && self.decide("~~", first, last, f, at_start);
                         if strike_keep {
+                            if contents().find_map(lead_ws_ends) == Some(true) {
+                                self.pending_ends();
+                            } else {
+                                self.settle();
+                            }
                             strike_open = self.open("~~");
                         }
                     }
@@ -1666,6 +1775,8 @@ impl<'a> InlineWriter<'a> {
                     // Each content sees the run's opener as its `open_at`.
                     self.open_at = strike_open.0.body;
                     self.open_before = strike_open.0.before;
+                    // The next one's content follows with no delimiter.
+                    self.carry = !last;
                     self.inlines(c, false);
                     self.follow = list_follow;
                     self.in_strike = false;
@@ -1679,6 +1790,7 @@ impl<'a> InlineWriter<'a> {
                 Inline::Strikethrough(c) if self.gfm => {
                     self.tilde_follows = next.is_none() && tilde_after_list;
                     let list_follow = std::mem::replace(&mut self.follow, follow());
+                    self.carry = true;
                     self.inlines(c, end_of_line && next.is_none());
                     self.follow = list_follow;
                 }
@@ -1686,7 +1798,12 @@ impl<'a> InlineWriter<'a> {
                     self.losses.insert(Loss::Strikethrough);
                     self.inlines(c, end_of_line && next.is_none());
                 }
-                Inline::Code(t) => self.code_span(t),
+                Inline::Code(t) => {
+                    if !t.is_empty() {
+                        self.settle();
+                    }
+                    self.code_span(t);
+                }
                 // A GFM extended autolink is written as its text, as it
                 // came and unescaped: a GFM reader links it again, where a
                 // backslash (`www.a\_b.c`) would cut it.
@@ -1696,6 +1813,7 @@ impl<'a> InlineWriter<'a> {
                     auto: true,
                     ..
                 } => {
+                    self.settle();
                     self.line_start = false;
                     let email = dest.starts_with("mailto:");
                     for c in content {
@@ -1712,6 +1830,7 @@ impl<'a> InlineWriter<'a> {
                     content,
                     ..
                 } => {
+                    self.settle();
                     self.line_start = false;
                     self.sink.push(&mut self.out, '[');
                     self.link_text(content);
@@ -1721,6 +1840,7 @@ impl<'a> InlineWriter<'a> {
                     self.line_start = false;
                 }
                 Inline::Image { dest, title, alt } => {
+                    self.settle();
                     self.line_start = false;
                     self.sink.push_str(&mut self.out, "![");
                     self.link_text(alt);
@@ -1728,21 +1848,43 @@ impl<'a> InlineWriter<'a> {
                     self.target(dest, title);
                     self.line_start = false;
                 }
-                Inline::SoftBreak => self.line_break("\n"),
+                Inline::SoftBreak => {
+                    self.pending_ends();
+                    self.line_break("\n");
+                }
                 Inline::HardBreak => {
                     // At the end of a line a break shows nothing, so it is
                     // not written; nor is one followed by nothing but such
                     // breaks (or what writes nothing), whose `\` would
                     // be the last thing on the paragraph's last line.
                     if !end_of_line || !breaks_after() {
+                        // A `\` joins the run; a space (one line) ends it.
+                        if self.single_line {
+                            self.pending_ends();
+                        } else {
+                            self.settle();
+                        }
                         self.line_break("\\\n");
+                    } else {
+                        self.pending_ends();
                     }
                 }
                 Inline::Html(h) => {
+                    if !h.is_empty() {
+                        self.settle();
+                    }
                     self.line_start = false;
                     self.sink.push_str(&mut self.out, h);
                 }
             }
+        }
+        // The run of a candidate pending at the list's end ends with the
+        // line, goes on after a mark left out around the list (`carry`),
+        // or meets the closer of the mark around it.
+        if end_of_line {
+            self.pending_ends();
+        } else if !carry {
+            self.settle();
         }
     }
 
@@ -1770,9 +1912,18 @@ impl<'a> InlineWriter<'a> {
     /// takes the escape before it looks for the address, so the address
     /// comes back the same. In GFM mode the `.` of a `www.` in it is an
     /// entity: the reader would start a web link there (the address is
-    /// found later, in the decoded text), which runs past the address.
+    /// found later, in the decoded text), which runs past the address;
+    /// so is a `.` that completes a `www` written right before the text
+    /// (an address ending in `www`, then one starting with `.`).
     fn email_text(&mut self, t: &str) {
         let b = t.as_bytes();
+        let w_before = self
+            .out
+            .bytes()
+            .rev()
+            .take(3)
+            .take_while(|&c| c == b'w')
+            .count();
         let alnum = |i: Option<usize>| {
             i.and_then(|i| b.get(i))
                 .is_some_and(u8::is_ascii_alphanumeric)
@@ -1783,7 +1934,11 @@ impl<'a> InlineWriter<'a> {
                 self.sink.push_str(&mut self.out, &t[from..i]);
                 self.sink.push_str(&mut self.out, "\\_");
                 from = i + 1;
-            } else if self.gfm && c == b'.' && b[..i].ends_with(b"www") {
+            } else if self.gfm
+                && c == b'.'
+                && (b[..i].ends_with(b"www")
+                    || (i + w_before >= 3 && b[..i].iter().all(|&c| c == b'w')))
+            {
                 self.sink.push_str(&mut self.out, &t[from..i]);
                 self.sink.push_str(&mut self.out, "&#46;");
                 from = i + 1;
@@ -1868,23 +2023,47 @@ impl<'a> InlineWriter<'a> {
     fn text(&mut self, t: &str, end_of_line: bool, tilde_after: bool) {
         // Inside a mark, white space ending the text may be moved out past
         // the closer, so the run may go on after it.
-        let guards = if self.gfm {
-            autolink_guards(t, end_of_line, !self.open_marks.is_empty())
+        let (guards, tail) = if self.gfm {
+            // A `www.` begun before `t` (at most three `w` written raw).
+            let before = self
+                .out
+                .bytes()
+                .rev()
+                .take(3)
+                .take_while(|&c| c == b'w')
+                .count();
+            let lead = t.bytes().take_while(|&c| c == b'w').count();
+            let straddle = (before > 0 && lead < 3 && before + lead >= 3)
+                .then_some(lead)
+                .filter(|&k| t.as_bytes().get(k) == Some(&b'.'));
+            let g = autolink_guards(t, end_of_line, !self.open_marks.is_empty(), straddle);
+            if !self.pending.is_empty() {
+                match g.joined {
+                    Join::Ends => self.pending.clear(),
+                    Join::Escaped => self.settle(),
+                    Join::Open => {}
+                }
+            }
+            (g.now, g.tail)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let mut rest = t;
         while let Some(c) = rest.chars().next() {
             if self.sink.failed() {
                 return;
             }
-            if !guards.is_empty() && guards.binary_search(&(t.len() - rest.len())).is_ok() {
+            let off = t.len() - rest.len();
+            if !guards.is_empty() && guards.binary_search(&off).is_ok() {
                 self.sink
                     .push_str(&mut self.out, if c == '.' { "&#46;" } else { "&#58;" });
                 self.line_start = false;
                 rest = &rest[1..];
                 continue;
             }
+            // A candidate decided later: written as it is, its offset kept.
+            let tail_at =
+                (!tail.is_empty() && tail.binary_search(&off).is_ok()).then_some(self.out.len());
             match c {
                 c if c.is_whitespace() && c != '\n' => {
                     let n = rest
@@ -1967,6 +2146,22 @@ impl<'a> InlineWriter<'a> {
                     rest = &rest[c.len_utf8()..];
                 }
             }
+            if let Some(at) = tail_at {
+                if self.sink.failed() {
+                    return;
+                }
+                // An escape the writer put before it (a `:` at a line
+                // start) is in the run already: an entity now.
+                let escaped = self.out.len() != at + 1;
+                if escaped {
+                    self.out.truncate(at);
+                    self.out.push(c);
+                }
+                self.pending.push(at);
+                if escaped {
+                    self.settle();
+                }
+            }
         }
     }
 }
@@ -1988,6 +2183,36 @@ fn delimiter_row(rest: &str, end_of_line: bool) -> bool {
     ends && !dashes.is_empty() && dashes.bytes().all(|b| b == b'-')
 }
 
+/// How the `www.`/`://` run a text continues from what was written
+/// before it (see [`InlineWriter::pending`]) goes on in it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Join {
+    /// It ends at white space, or at the line end: no link would hold
+    /// anything but plain text.
+    Ends,
+    /// Something in its first run is no plain text to a reader (an
+    /// escape, an entity, a `<`): the candidates before need entities.
+    Escaped,
+    /// The whole text is plain run text and more of the line follows:
+    /// the decision moves on to what is written next.
+    Open,
+}
+
+/// What [`autolink_guards`] finds in a text.
+#[derive(Debug)]
+struct Guards {
+    /// The sorted byte offsets of the `.`/`:` that become entities.
+    now: Vec<usize>,
+    /// Those of candidates in the text's last run, which reaches its end
+    /// with nothing but plain text after them: they become entities only
+    /// if what is written next joins the run with something that is not
+    /// plain text (it cannot be known here: a mark after it may be left
+    /// out, or the text may end a left-out mark's content).
+    tail: Vec<usize>,
+    /// How a run from before the text goes on in it.
+    joined: Join,
+}
+
 /// GFM: where text `t` must not give a GFM reader an extended autolink.
 /// The reader finds one at a `www.` or a `://` and runs it to white space
 /// or `<`, the raw bytes, backslashes included; so where the writer
@@ -1996,12 +2221,21 @@ fn delimiter_row(rest: &str, end_of_line: bool) -> bool {
 /// the link would come back holding the escape, one more each round.
 /// There the `.` of the `www.` or the `:` of the `://` becomes an entity,
 /// and no link starts. Elsewhere the text is a link exactly as it reads.
+/// Where only the end of `t` decides, the writer decides once it sees
+/// what comes next ([`Guards::tail`], [`Guards::joined`]): it is decided
+/// as for the one text a reader joins it into. `straddle`: the offset of
+/// a `.` in `t`'s first run that completes a `www.` begun by what was
+/// written before (`a@b.c_www` linked, then `.b`): a candidate too.
 /// Over-approximates (any `www.`, a preceding character is not checked):
-/// an entity too many is harmless. Returns the sorted byte offsets of
-/// those `.`/`:`; one pass per white-space-delimited run, so linear.
-fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool) -> Vec<usize> {
+/// an entity too many is harmless. One pass per white-space-delimited
+/// run, so linear.
+fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool, straddle: Option<usize>) -> Guards {
     let b = t.as_bytes();
-    let mut out = Vec::new();
+    let mut g = Guards {
+        now: Vec::new(),
+        tail: Vec::new(),
+        joined: if end_of_line { Join::Ends } else { Join::Open },
+    };
     let mut start = 0;
     // The last white space stretch found: from where, and the first
     // character after it; the runs move forward, so each byte is scanned
@@ -2040,7 +2274,24 @@ fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool) -> Vec<usize> {
         };
         let trailing = ws_from < ws
             && ((ws == b.len() && (end_of_line || in_mark)) || b.get(ws) == Some(&b'\n'));
-        let joins_next = (end == b.len() && !end_of_line) || b.get(end) == Some(&b'<') || trailing;
+        let joins = b.get(end) == Some(&b'<') || trailing;
+        let open = end == b.len() && !end_of_line;
+        if start == 0 {
+            g.joined = if joins || last_escape.is_some() {
+                Join::Escaped
+            } else if open {
+                Join::Open
+            } else {
+                Join::Ends
+            };
+        }
+        if let Some(at) = straddle.filter(|_| start == 0) {
+            if joins || last_escape.is_some() {
+                g.now.push(at);
+            } else if open {
+                g.tail.push(at);
+            }
+        }
         for k in 0..run.len() {
             let guard = if run[k..].starts_with(b"www.") {
                 Some(k + 3)
@@ -2049,15 +2300,17 @@ fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool) -> Vec<usize> {
             } else {
                 None
             };
-            if let Some(g) = guard
-                && (joins_next || last_escape.is_some_and(|e| e >= k))
-            {
-                out.push(start + g);
+            if let Some(at) = guard {
+                if joins || last_escape.is_some_and(|e| e >= k) {
+                    g.now.push(start + at);
+                } else if open {
+                    g.tail.push(start + at);
+                }
             }
         }
         start = end + 1;
     }
-    out
+    g
 }
 
 #[cfg(test)]
@@ -3358,14 +3611,14 @@ mod tests {
         assert_eq!(write(&doc(vec![para("www.z_")])).0, "www.z\\_\n");
         // One pass per run: a run of candidates stays linear.
         let long = "www.".repeat(1 << 16) + "_";
-        assert_eq!(autolink_guards(&long, true, false).len(), 1 << 16);
+        assert_eq!(autolink_guards(&long, true, false, None).now.len(), 1 << 16);
     }
 
     /// The table writer is linear in the cells: four times the cells (as
     /// columns or as rows) take about four times as long, where a quadratic
     /// path would take sixteen. The output grows by the same factor.
-    /// Marks whose edge white space moves out, and marks left out, cost
-    /// linear time: four times the input, under eight times the time (a
+    /// Marks whose edge white space moves out, marks left out, and an
+    /// autolink candidate run through them, cost linear time: four times the input, under eight times the time (a
     /// bound loose enough for load, far below the sixteen of a quadratic
     /// path, which a white space stretch rescanned per run once was).
     #[test]
@@ -3402,6 +3655,15 @@ mod tests {
                                 t("a")
                             }
                         })
+                        .collect(),
+                )]),
+                // One `www.` run on through many marks left out (`~~`
+                // cannot close before `x`), its candidates pending to the
+                // escape that ends it: settled once.
+                doc(vec![Block::Paragraph(
+                    (0..n)
+                        .flat_map(|_| [Inline::Strikethrough(vec![t("www.")]), t("x")])
+                        .chain([t("_")])
                         .collect(),
                 )]),
             ]
@@ -3554,7 +3816,11 @@ mod tests {
     /// Writes `input`, read and flattened, three times in `dialect`, each
     /// time from the tree the last one reads back (flattened again).
     fn three_rounds(input: &str, dialect: Dialect) -> [String; 3] {
-        let mut d = read_with(input.as_bytes(), dialect).unwrap();
+        rounds_from(read_with(input.as_bytes(), dialect).unwrap(), dialect)
+    }
+
+    /// [`three_rounds`] from the tree `d`.
+    fn rounds_from(mut d: Document, dialect: Dialect) -> [String; 3] {
         let mut w: [String; 3] = Default::default();
         for out in &mut w {
             for b in &mut d.blocks {
@@ -3594,20 +3860,112 @@ mod tests {
         assert_eq!(write(&split).0, "://(www.b/\n");
     }
 
+    /// Regression (fuzz): a `www.` run reaching a text's end was guarded
+    /// as if the next inline's syntax joined it, where a reader reads one
+    /// plain text there, so the link came a round later and, with an
+    /// escape before it, the output changed (`&#58;//(www&#46;b`,
+    /// `\://(www.b`, `&#58;//(www.b`): across a mark the writer leaves
+    /// out (`~~www.~~_x_`: the `~~` cannot close before `x`), and up to
+    /// white space moved out in front of the next mark
+    /// (`www._x_~~&#32;:~~`). The first round is written as the one text
+    /// read back: the link is there at once.
+    #[test]
+    fn autolink_guard_sees_the_text_a_reader_joins() {
+        for (input, first) in [
+            ("~~www.~~_x_", "www.x\n"),
+            ("~~a www.~~_x_", "a www.x\n"),
+            ("**~~&#32;www.~~_x_", "\\*\\* www.x\n"),
+            ("~~\\_http://www.~~_x_", "\\_http://www.x\n"),
+            ("~~www.~~*b*&#58;", "www.b:\n"),
+            ("(![!_~~www.~~*b*", "(\\!\\[\\!\\_www.b\n"),
+            ("~~www..~~x~~. _x_a~~<", "~~www..x. \\_x\\_a~~\\<\n"),
+            ("www._x_~~&#32;:~~", "www.x ~~:~~\n"),
+            (":/_/(www.b_~~&#32;/~~", "&#58;//(www.b ~~/~~\n"),
+            ("www.~~xa&#32;<~~_x_~([", "www.xa \\<x~(\\[\n"),
+            (
+                "](u):_ www.&#46;b).~~&#32;a@b.c~~`",
+                "\\](u):\\_ www..b). ~~[a@b.c](mailto:a@b.c)~~\\`\n",
+            ),
+        ] {
+            let [w1, w2, w3] = three_rounds(input, Dialect::Gfm);
+            assert_eq!(w1, first, "{input:?}");
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        // Kept marks (an XHTML tree): white space moved out in front of
+        // the opener ends the run, as it does for the text read back.
+        for mark in [Inline::Emph, Inline::Strong, Inline::Strikethrough] {
+            let d = doc(vec![Block::Paragraph(vec![
+                t("www.x"),
+                mark(vec![t(" y")]),
+            ])]);
+            let moved = doc(vec![Block::Paragraph(vec![
+                t("www.x "),
+                mark(vec![t("y")]),
+            ])]);
+            assert_eq!(gfm(&d).0, gfm(&moved).0);
+            assert!(gfm(&d).0.starts_with("www.x "), "{:?}", gfm(&d));
+        }
+        // Stable only (the first rounds are long).
+        for input in [
+            "/_x_[://~~x`\\_~ www.~~_x_",
+            "www._x_~~&#46;.:~~&#58;",
+            "`~~/://\\)a!*http://www.~~_x_",
+            "~~www.~~x~~/http://&#32;b:b~~&#58;",
+            "(~~www.~~x~~ <&#46;http://&`a/~~",
+            "http://~~_x_**www.~~x~~(&#32;.~~",
+            "**www.~~a &b\n_a@b.c~~x~~",
+        ] {
+            let [w1, w2, w3] = three_rounds(input, Dialect::Gfm);
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        // An address ending in `www` before a text starting with `.` (a
+        // CommonMark tree written in the GFM mode, the addresses read
+        // back kept as links, as the fuzz target does): the reader
+        // started a web link at the `www.` once the address was linked,
+        // and an address again once it was text, every other round.
+        for input in ["***a@b.c_www..b](u)", "a@b.c_x_www..a@b.c/*b*(x"] {
+            let d = read_with(input.as_bytes(), Dialect::CommonMark).unwrap();
+            let w1 = gfm(&d).0;
+            let w2 = gfm(&gfm_again(&d)).0;
+            let w3 = gfm(&read_with(w2.as_bytes(), Dialect::Gfm).unwrap()).0;
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        let addr = |a: &str| Inline::Link {
+            dest: format!("mailto:{a}"),
+            title: String::new(),
+            content: vec![t(a)],
+            auto: true,
+        };
+        // As in one text: an escape after it in the run makes the entity;
+        // without one the run is a web link as it reads.
+        let d = doc(vec![Block::Paragraph(vec![addr("a@b.c_www"), t("..b]")])]);
+        assert_eq!(gfm(&d).0, "a@b.c_www&#46;.b\\]\n");
+        assert_eq!(gfm_again(&d), d);
+        let d = doc(vec![Block::Paragraph(vec![addr("a@b.c_www"), t("..b")])]);
+        assert_eq!(gfm(&d).0, "a@b.c_www..b\n");
+        let d = doc(vec![Block::Paragraph(vec![
+            addr("a@b.c_www"),
+            addr("..a@b.c"),
+        ])]);
+        assert_eq!(gfm(&d).0, "a@b.c_www&#46;.a@b.c\n");
+        assert_eq!(gfm_again(&d), d);
+    }
+
     /// The GFM fixed point over generated strings of the autolink family
-    /// (`www.`, schemes, `://`, emphasis delimiters, brackets, `.`/`/`
-    /// endings, entities for `.` and `:`): after one round the output
-    /// no longer changes, wherever the CommonMark mode (the code both
-    /// modes share) is stable itself, as the fuzz target checks.
+    /// (`www.`, schemes, `://`, emphasis and strikethrough delimiters and
+    /// emphasis around a word, brackets, `<`, an address, `.`/`/`
+    /// endings, entities for `.`, `:` and a space): after one round the
+    /// output no longer changes, wherever the CommonMark mode (the code
+    /// both modes share) is stable itself, as the fuzz target checks.
     #[test]
     fn autolink_family_reaches_a_fixed_point() {
-        const TOKENS: [&str; 16] = [
+        const TOKENS: [&str; 21] = [
             "www.", "http://", "://", "_", "*", "(", ")", ".", "/", "b", ":", " ", "&#46;",
-            "&#58;", "\\_", "~~",
+            "&#58;", "\\_", "~~", "_b_", "**", "&#32;", "a@b.c", "<",
         ];
-        // 20 000 strings of up to 10 tokens (the artifacts have 9): a few
-        // seconds in a debug build; a fixed seed keeps a failure
-        // reproducible.
+        // 20 000 strings of up to 10 tokens (the artifacts have 9, the
+        // shapes of a mark left out 4: `~~www.~~_b_`): about a second
+        // in a debug build; a fixed seed keeps a failure reproducible.
         const CASES: usize = 20_000;
         const MAX_TOKENS: u64 = 10;
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
