@@ -2,6 +2,7 @@
 //! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
 //! structure). Contract v0 (docs/architecture.md).
 
+mod base;
 mod epub_md;
 mod epub_read;
 mod join;
@@ -15,46 +16,10 @@ use std::time::UNIX_EPOCH;
 
 use action::{Command, Events, Invocation, parse_args};
 use doc::xhtml::{Anchors, Chapter, Mode};
-use doc::{Dialect, Document, LimitError, Limits, Loss, ReadError};
+use doc::{Dialect, Document, LimitError, Loss};
 
-/// The structure budgets of one conversion (`document_*` budgets, see
-/// [`Limits::DEFAULT`] for the values and their reasons). The input is read
-/// at most `input_bytes` (+1 to detect more); past any budget the input
-/// fails (`fail`, nothing staged) and the batch goes on. The sandbox's
-/// RLIMIT_DATA (>= 1 GiB) is the second net.
-const LIMITS: Limits = Limits::DEFAULT;
-
-/// Why a conversion stopped.
-enum ConvertError {
-    NotText,
-    Limit(LimitError),
-    /// Any other failure, as the `fail` reason.
-    Other(String),
-}
-
-impl From<epub::BookError> for ConvertError {
-    fn from(e: epub::BookError) -> Self {
-        match e {
-            epub::BookError::Limit(l) => ConvertError::Limit(l),
-            other => ConvertError::Other(other.to_string()),
-        }
-    }
-}
-
-impl From<ReadError> for ConvertError {
-    fn from(e: ReadError) -> Self {
-        match e {
-            ReadError::NotText => ConvertError::NotText,
-            ReadError::Limit(l) => ConvertError::Limit(l),
-        }
-    }
-}
-
-impl From<LimitError> for ConvertError {
-    fn from(e: LimitError) -> Self {
-        ConvertError::Limit(e)
-    }
-}
+// The shared items, named from the crate root as every module names them.
+use base::{ConvertError, IMAGE_BYTES, LIMITS, MAX_PIXELS, Outcome, output_cap, too_large};
 
 /// `n` with thousands separators (`524,288`), for the rejection copy.
 fn grouped(n: usize) -> String {
@@ -301,41 +266,6 @@ fn title(conv: Conversion, d: &Document, input: &Path) -> String {
     if t.is_empty() { "Untitled" } else { t }.to_string()
 }
 
-/// The soft `RLIMIT_FSIZE` of this process, the largest file it may write
-/// (the engine sets it to 16 x the input, 256 MiB to 16 GiB). `None` is
-/// unlimited. A failing `getrlimit` is an error, so the input fails closed
-/// instead of writing without a known ceiling. `getrlimit` on itself is
-/// allowed by the sandbox's seccomp policy.
-fn output_cap() -> Result<Option<u64>, ConvertError> {
-    let mut rl = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `rl` is a valid, writable `rlimit` for the whole call, and
-    // RLIMIT_FSIZE is a valid resource; the call only writes into `rl`.
-    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut rl) };
-    if rc != 0 {
-        return Err(ConvertError::Other(format!(
-            "cannot read the output size limit: {}",
-            io::Error::last_os_error()
-        )));
-    }
-    Ok((rl.rlim_cur != libc::RLIM_INFINITY).then_some(rl.rlim_cur))
-}
-
-/// The copy for an output past the ceiling (N rounded down, so it never
-/// overstates the limit; in KiB below 1 MiB, so it never reads "0 MiB").
-/// If the ceiling cannot be read now, the generic copy.
-fn too_large(what: &str) -> ConvertError {
-    match output_cap() {
-        Ok(Some(c)) if c >= 1 << 20 => {
-            ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20))
-        }
-        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} KiB", c >> 10)),
-        _ => ConvertError::Other(format!("{what} would be too large")),
-    }
-}
-
 /// Writes the EPUB or the HTML page of `d`, which `conv.read` made of
 /// `bytes` (and lost `losses` doing so), to `out`; what was lost in all.
 /// Whatever is left at `out` after an error is the caller's to remove.
@@ -433,12 +363,6 @@ fn publish(
 fn merge_losses(mut reader: BTreeSet<Loss>, writer: BTreeSet<Loss>) -> BTreeSet<Loss> {
     reader.extend(writer);
     reader
-}
-
-enum Outcome {
-    Done,
-    Unsupported,
-    Failed,
 }
 
 fn process(

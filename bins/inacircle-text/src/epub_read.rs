@@ -127,7 +127,7 @@ struct Converted {
 /// family's output budget for the whole book and to the process's
 /// `RLIMIT_FSIZE`, both checked before each write.
 pub(crate) struct Sink<'a> {
-    file: &'a mut File,
+    file: &'a mut dyn Write,
     pub(crate) written: usize,
     cap: Option<u64>,
     /// The output's name in the ceiling's copy (`Plain text`, `Markdown`).
@@ -135,7 +135,7 @@ pub(crate) struct Sink<'a> {
 }
 
 impl<'a> Sink<'a> {
-    pub(crate) fn new(file: &'a mut File, cap: Option<u64>, what: &'static str) -> Self {
+    pub(crate) fn new(file: &'a mut dyn Write, cap: Option<u64>, what: &'static str) -> Self {
         Sink {
             file,
             written: 0,

@@ -13,7 +13,7 @@
 //! publishes nothing of it even when the process dies first.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -28,14 +28,14 @@ use crate::epub_read::{
     MAX_WARN, SVG_TYPE, Sink, book_limit, chapter, chapter_with, external, ignore_sigxfsz,
     open_input, reason, unreadable,
 };
-use crate::join::{IMAGE_BYTES, MAX_PIXELS};
+use crate::{IMAGE_BYTES, MAX_PIXELS};
 use crate::{LIMITS, Outcome, output_cap};
 
 /// Most images written beside one book: 1023. The supervisor accepts at
 /// most 1024 `done` lines from one action process (the md is the last),
 /// and a join takes at most 1024 inputs, so the md and all its images
 /// make one book again. Past it an image is its alt text.
-const MAX_IMAGES: usize = 1023;
+pub(crate) const MAX_IMAGES: usize = 1023;
 
 /// Most entries the heading index holds: the text family's node budget
 /// (2^19), the most headings one document may have; a book's headings
@@ -49,10 +49,55 @@ const INDEX_ENTRIES: usize = LIMITS.nodes;
 /// lookup), so at most about 24 MiB. Past it: `book is too large`.
 const INDEX_BYTES: usize = LIMITS.input_bytes;
 
+/// Where the images of a book go: the md's folder ([`Folder`]), or memory
+/// in the fuzz target, which runs everything else as it is shipped.
+pub(crate) trait Store {
+    /// Creates the image `name` (never over an existing one) holding
+    /// `bytes`.
+    fn put(&mut self, name: &str, bytes: &[u8]) -> Result<(), Put>;
+}
+
+/// Why an image could not be stored.
+pub(crate) enum Put {
+    /// The name does not fit the file system: the image keeps its alt
+    /// text.
+    NameTooLong,
+    /// Any other failure: the book fails with it.
+    Failed(String),
+}
+
+/// The md's folder: each image a new file beside it, listed for removal
+/// unless the book finishes.
+struct Folder<'a> {
+    dir: &'a Path,
+    /// Every file created for the book, the md and the images in order:
+    /// removed unless the book finishes.
+    written: Discard,
+}
+
+impl Store for Folder<'_> {
+    fn put(&mut self, name: &str, bytes: &[u8]) -> Result<(), Put> {
+        let path = self.dir.join(name);
+        // Created new: an existing file is never overwritten.
+        let mut f = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                return Err(Put::NameTooLong);
+            }
+            Err(e) => return Err(Put::Failed(format!("cannot create output: {e}"))),
+        };
+        self.written.images.push(path);
+        f.write_all(bytes)
+            .map_err(|e| Put::Failed(format!("cannot write output: {e}")))
+    }
+}
+
 /// The images written for one book, and what each image entry turned out
 /// to be. Holds one image's bytes at a time.
-struct Images<'a> {
-    dir: &'a Path,
+pub(crate) struct Images<'a> {
+    store: &'a mut dyn Store,
+    /// Images stored so far.
+    count: usize,
     /// The input's stem: every image is named `<stem>-NNNN.<ext>`.
     stem: &'a str,
     /// Entry path -> its destination in the md (`None`: refused, its
@@ -60,9 +105,6 @@ struct Images<'a> {
     /// most the ZIP reader's 12,000 entries of at most 512 B: each entry
     /// is read (inflated) at most once, however often it is referenced.
     seen: HashMap<String, Option<String>>,
-    /// Every file created for the book, the md and the images in order:
-    /// removed unless the book finishes.
-    written: Discard,
     /// Bytes still allowed to be read for images: twice the book file at
     /// first. Every image read is charged its entry's declared size
     /// before it is made, kept, refused or failed, so a book cannot make
@@ -78,7 +120,36 @@ struct Images<'a> {
     buf: Vec<u8>,
 }
 
-impl Images<'_> {
+impl<'a> Images<'a> {
+    /// The images of a book file of `book_len` bytes named after `stem`,
+    /// into `store`.
+    pub(crate) fn new(store: &'a mut dyn Store, stem: &'a str, book_len: u64) -> Self {
+        // Twice the book file: real images barely compress in the ZIP, so
+        // a book's own images fit; a bomb stops here.
+        Images {
+            store,
+            count: 0,
+            stem,
+            seen: HashMap::new(),
+            budget: book_len.saturating_mul(2),
+            cap: None,
+            names_too_long: false,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Images stored so far (for the fuzz target's checks).
+    #[cfg(fuzzing)]
+    pub(crate) fn fuzz_count(&self) -> usize {
+        self.count
+    }
+
+    /// What is left of the image budget (for the fuzz target's checks).
+    #[cfg(fuzzing)]
+    pub(crate) fn fuzz_budget_left(&self) -> u64 {
+        self.budget
+    }
+
     /// The md destination of the image `dest` (as written in `chapter`),
     /// or `None` when its place keeps the alt text: outside the book,
     /// missing, encrypted, damaged, neither JPEG nor PNG, too large, past
@@ -96,7 +167,7 @@ impl Images<'_> {
         if let Some(known) = self.seen.get(&path) {
             return Ok(known.clone());
         }
-        if self.written.images.len() >= MAX_IMAGES || self.names_too_long {
+        if self.count >= MAX_IMAGES || self.names_too_long {
             return Ok(None);
         }
         let placed = match book.resource_size(&path) {
@@ -127,24 +198,21 @@ impl Images<'_> {
         Ok(placed)
     }
 
-    /// Writes the bytes read as the next image file; its md destination,
-    /// or `None` when its name is too long (the image keeps its alt text).
+    /// Stores the bytes read as the next image; its md destination, or
+    /// `None` when its name is too long (the image keeps its alt text).
     fn write(&mut self, ext: &str) -> Result<Option<String>, String> {
-        let name = format!("{}-{:04}.{ext}", self.stem, self.written.images.len() + 1);
-        let path = self.dir.join(&name);
-        // Created new: an existing file is never overwritten.
-        let mut f = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(f) => f,
-            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                self.names_too_long = true;
-                return Ok(None);
+        let name = format!("{}-{:04}.{ext}", self.stem, self.count + 1);
+        match self.store.put(&name, &self.buf) {
+            Ok(()) => {
+                self.count += 1;
+                Ok(Some(md_dest(&name)))
             }
-            Err(e) => return Err(format!("cannot create output: {e}")),
-        };
-        self.written.images.push(path);
-        f.write_all(&self.buf)
-            .map_err(|e| format!("cannot write output: {e}"))?;
-        Ok(Some(md_dest(&name)))
+            Err(Put::NameTooLong) => {
+                self.names_too_long = true;
+                Ok(None)
+            }
+            Err(Put::Failed(why)) => Err(why),
+        }
     }
 }
 
@@ -366,41 +434,36 @@ pub(crate) fn process(
             return Outcome::Failed;
         }
     };
-    let mut images = Images {
+    let mut folder = Folder {
         dir,
-        stem: &stem,
-        seen: HashMap::new(),
         written: Discard {
             md: Some(path.clone()),
             images: Vec::new(),
         },
-        // Twice the book file: real images barely compress in the ZIP, so
-        // a book's own images fit; a bomb stops here.
-        budget: book_len.saturating_mul(2),
-        cap: None,
-        names_too_long: false,
-        buf: Vec::new(),
     };
-    match convert(&book, &mut out, &mut images) {
+    let mut images = Images::new(&mut folder, &stem, book_len);
+    let r = convert(&book, &mut out, &mut images);
+    drop(images);
+    match r {
         Ok(done) => {
             // Images first, the md last; all only now that the book is
             // whole.
-            for p in &images.written.images {
+            for p in &folder.written.images {
                 ev.done(input, p.strip_prefix(&inv.work).unwrap_or(p));
             }
             ev.done(input, path.strip_prefix(&inv.work).unwrap_or(&path));
             for line in warnings(&done) {
                 ev.warn(input, &line);
             }
-            images.written.keep();
+            folder.written.keep();
             Outcome::Done
         }
         Err(reason) => {
             // Cut first: should the removal fail, an empty file is left,
-            // never a half book; the images go when `images` drops.
+            // never a half book; the images go when `folder` drops.
             let _ = out.set_len(0);
             drop(out);
-            drop(images);
+            drop(folder);
             ev.fail(input, &reason);
             Outcome::Failed
         }
@@ -438,11 +501,11 @@ impl Drop for Discard {
 }
 
 /// What a converted book reports.
-struct Converted {
-    unread: usize,
+pub(crate) struct Converted {
+    pub(crate) unread: usize,
     /// Image references whose place keeps the alt text.
-    replaced: usize,
-    losses: BTreeSet<Loss>,
+    pub(crate) replaced: usize,
+    pub(crate) losses: BTreeSet<Loss>,
 }
 
 /// One counted line for the chapters that could not be read, one for the
@@ -450,7 +513,7 @@ struct Converted {
 /// images says what the images loss would, so with it the images loss
 /// has no line of its own: at most 1 + 1 + (every kind but one), the
 /// supervisor's cap, held by a test over every kind.
-fn warnings(done: &Converted) -> Vec<String> {
+pub(crate) fn warnings(done: &Converted) -> Vec<String> {
     let mut lines = Vec::new();
     if done.unread > 0 {
         lines.push(format!("{} chapter(s) could not be read", done.unread));
@@ -470,7 +533,11 @@ fn warnings(done: &Converted) -> Vec<String> {
 
 /// Writes the header and every spine item of `book` to `file`, the images
 /// through `images`.
-fn convert(book: &Book<'_>, file: &mut File, images: &mut Images<'_>) -> Result<Converted, String> {
+pub(crate) fn convert(
+    book: &Book<'_>,
+    file: &mut dyn Write,
+    images: &mut Images<'_>,
+) -> Result<Converted, String> {
     let cap = output_cap().map_err(reason)?;
     images.cap = cap;
     ignore_sigxfsz();
@@ -528,7 +595,7 @@ fn convert(book: &Book<'_>, file: &mut File, images: &mut Images<'_>) -> Result<
     if read == 0 {
         return Err("no chapter could be read".into());
     }
-    if !text && images.written.images.is_empty() {
+    if !text && images.count == 0 {
         // A picture book whose image names did not fit: say so, not that
         // it has no text.
         return Err(if images.names_too_long {

@@ -20,17 +20,9 @@ use epub::{Image, ImageKind, ImageSource, Part};
 use probe::{Format, ProbeError};
 
 use crate::{
-    Conversion, ConvertError, LIMITS, input_too_large, lang, limit_reason, title, too_large,
+    Conversion, ConvertError, IMAGE_BYTES, LIMITS, MAX_PIXELS, input_too_large, lang, limit_reason,
+    title, too_large,
 };
-
-/// Largest image: 64 MiB, the same as the CBZ and PDF image limit, so an
-/// image one action takes, the others take too. Past it that image fails.
-pub(crate) const IMAGE_BYTES: u64 = 64 << 20;
-
-/// Most pixels of one image: 180 million, the PDF join's limit
-/// (`docs/resource-limits.md`; Pillow rejects above 179 MP). The header
-/// check refuses more before anything else is read.
-pub(crate) const MAX_PIXELS: u64 = 180_000_000;
 
 /// The `fail` reason of a book whose documents together pass the one
 /// document budget they share. Every document of the book is parsed and
