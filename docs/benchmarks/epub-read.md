@@ -47,17 +47,20 @@ repository profile (fat LTO, `panic=abort`, strip).
 | (f) 200k `<p>` in 250 blockquotes | 1,606,381 | 177,788 / 177,972 | 0.518 | `book is too large` |
 | (g) (d) then (b) | 27,086,705 | 137,576 / 137,656 | 0.281 | `book is too large` |
 
-Time per byte on hostile single chapters (7 runs, median):
+Time per byte on hostile single chapters (7 runs, median). The peak RSS
+column is `ru_maxrss` from `wait4` of each run's own process, forked by a
+small C parent (a Python parent's high-water mark carries over the `exec`);
+a trivial one-chapter book peaks at 3,176 KiB the same way:
 
 | Chapter shape | Bytes | ns per byte | Peak RSS (KiB) |
 |---|---|---|---|
-| a `<span>` around every word | 4,194,431 | 10.5 | 28,816 |
-| 150,000 attributes on one element | 1,689,029 | 12.3 | 34,188 |
-| 100,000 namespace declarations | 2,577,919 | 19.2 | 39,432 |
-| 1,200,000 entity references | 7,200,138 | 12.7 | 46,320 |
-| 200,000 nested `<rp>` | 2,200,144 | 19.0 | 46,320 |
-| 4 MiB namespace name | 4,194,454 | 3.4 | 46,320 |
-| 255 nested `<div>` (refused at the depth limit, tiny input) | 2,937 | not meaningful | 34,188 |
+| a `<span>` around every word | 4,194,431 | 10.5 | 9,452 |
+| 150,000 attributes on one element | 1,689,029 | 12.3 | 29,340 |
+| 100,000 namespace declarations | 2,577,919 | 19.2 | 39,480 |
+| 1,200,000 entity references | 7,200,138 | 12.7 | 19,500 |
+| 200,000 nested `<rp>` | 2,200,144 | 19.0 | 5,224 |
+| 4 MiB namespace name | 4,194,454 | 3.4 | 7,300 |
+| 255 nested `<div>` (refused at the depth limit, tiny input) | 2,937 | not meaningful | 3,144 |
 
 The dense chapter (b) is the memory worst case: many small nodes cost far
 more per input byte than text does, which is why the node limit exists next
