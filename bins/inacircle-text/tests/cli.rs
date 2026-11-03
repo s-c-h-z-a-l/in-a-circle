@@ -3535,6 +3535,207 @@ mod epub_to_txt {
             fails_alone(&o, &work, "Markdown would be larger than 8 KiB");
         }
 
+        /// An image of exactly the budget (twice the book file) is read and
+        /// written; one byte more keeps its alt text.
+        #[test]
+        fn image_of_exactly_the_budget_is_placed() {
+            // `pad` and `fill` (a byte of text) found so that the deflated
+            // book is half the image's size to the byte: the image is
+            // 3818 B, the book 1909 B (asserted below).
+            let build = |name: &str, pad: usize| {
+                let (root, work) = workdir(name);
+                let j = padded_jpeg(pad);
+                let b = book_with(
+                    &root,
+                    "b.epub",
+                    "",
+                    &[ch("c.xhtml", "<p>xy <img src=\"1.jpg\" alt=\"one\"/></p>")],
+                    &[("OEBPS/1.jpg", &j, Deflated)],
+                );
+                let size = fs::metadata(&b).unwrap().len();
+                (md(&b, &work), j.len() as u64, size, (root, work))
+            };
+            let (r, image, size, (_root, work)) = build("md-budget-exact", 3033);
+            assert_eq!(image, 2 * size, "{image} {size}");
+            ok(&r);
+            assert_eq!(r.done, ["0/b-0001.jpg", "0/b.md"]);
+            assert_eq!(r.text, "xy ![one](b-0001.jpg)\n");
+            assert_eq!(
+                fs::read(work.join("0/b-0001.jpg")).unwrap().len() as u64,
+                image
+            );
+            // One byte more than the budget.
+            let (r, image, size, _) = build("md-budget-over", 3034);
+            assert_eq!(image, 2 * size + 1, "{image} {size}");
+            ok(&r);
+            assert_eq!(r.done, ["0/b.md"]);
+            assert_eq!(r.text, "xy one\n");
+            assert_eq!(r.warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// An image larger than the process's `RLIMIT_FSIZE` keeps its alt
+        /// text (a write of it would fail); one of exactly the ceiling is
+        /// written.
+        #[test]
+        fn image_past_the_file_size_ceiling_is_alt_text() {
+            const CAP: usize = 4096;
+            let (root, work) = workdir("md-image-ceiling");
+            // Incompressible filler, so the budget (twice the book file)
+            // is far above two images of the ceiling's size.
+            let mut x = 1u32;
+            let filler: Vec<u8> = (0..20_000)
+                .map(|_| {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (x >> 24) as u8
+                })
+                .collect();
+            let (big, exact) = (
+                padded_jpeg(CAP + 1 - jpeg().len()),
+                padded_jpeg(CAP - jpeg().len()),
+            );
+            assert_eq!((big.len(), exact.len()), (CAP + 1, CAP));
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>x <img src=\"big.jpg\" alt=\"big\"/> <img src=\"exact.jpg\" alt=\"ok\"/></p>",
+                )],
+                &[
+                    ("OEBPS/big.jpg", &big, Deflated),
+                    ("OEBPS/exact.jpg", &exact, Deflated),
+                    ("OEBPS/filler.bin", &filler, Stored),
+                ],
+            );
+            let o = run_with_fsize_of(MD, &work, &[&b], CAP as u64);
+            let out = stdout(&o);
+            assert_eq!(o.status.code(), Some(0), "{out}");
+            assert!(lines(&out, "fail").is_empty(), "{out}");
+            let done: Vec<&str> = lines(&out, "done").iter().map(|d| d[2]).collect();
+            assert_eq!(done, ["0/b-0001.jpg", "0/b.md"], "{out}");
+            assert_eq!(fs::read(work.join("0/b-0001.jpg")).unwrap(), exact);
+            assert_eq!(
+                fs::read_to_string(work.join("0/b.md")).unwrap(),
+                "x big ![ok](b-0001.jpg)\n"
+            );
+            let warns: Vec<&str> = lines(&out, "warn").iter().map(|w| w[2]).collect();
+            assert_eq!(warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        fn svg_page(data: &[u8]) -> Ch {
+            Ch {
+                href: "p.svg".into(),
+                media: "image/svg+xml",
+                data: Some(data.to_vec()),
+                spine: true,
+                linear: true,
+            }
+        }
+
+        /// An SVG page is read and left out as an image loss (not parsed as
+        /// a chapter: no "could not be read" line, no text of its own); a
+        /// book of nothing else has no text, and is not a book with no
+        /// chapter read.
+        #[test]
+        fn svg_page_in_an_md_book() {
+            let raw = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+            let (root, work) = workdir("md-svg");
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[svg_page(raw), ch("c.xhtml", "<p>x</p>")],
+                &[],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.text, "x\n");
+            assert_eq!(r.warns, [IMAGES, STYLES]);
+            let (root, work) = workdir("md-svg-only");
+            let b = book_with(&root, "pics.epub", "", &[svg_page(raw)], &[]);
+            fails_alone(&run_raw(MD, &work, &[&b]), &work, "book has no text");
+        }
+
+        /// A spine item missing from the ZIP is a paragraph in its place
+        /// and is counted.
+        #[test]
+        fn missing_chapter_is_marked_and_counted() {
+            let (root, work) = workdir("md-missing");
+            let mut gone = ch("c2.xhtml", "<p>never</p>");
+            gone.data = None;
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p>one</p>"),
+                    gone,
+                    ch("c3.xhtml", "<p>three</p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "one\n\n\\[Chapter 2 could not be read: missing\\]\n\nthree\n"
+            );
+            assert_eq!(r.warns, ["1 chapter(s) could not be read", STYLES]);
+        }
+
+        /// The heading index charges a chapter's bytes as sums: the path
+        /// (300 B), the heading's anchor and its id (30,000 B each) are
+        /// about 90 KB, far under the 8 MiB of text it holds. Products of
+        /// these would be past it (path times anchor 9 MB, id times
+        /// anchor 900 MB) and refuse the book.
+        #[test]
+        fn long_heading_and_id_are_charged_as_sums() {
+            let (root, work) = workdir("md-index-bytes");
+            let name = "a".repeat(300);
+            let text = "b".repeat(30_000);
+            let id = "i".repeat(30_000);
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        &format!("{name}.xhtml"),
+                        &format!("<h1 id=\"{id}\">{text}</h1>"),
+                    ),
+                    ch(
+                        "c.xhtml",
+                        &format!("<p><a href=\"{name}.xhtml#{id}\">go</a></p>"),
+                    ),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.text, format!("# {text}\n\n[go](#{text})\n"));
+        }
+
+        /// The heading index holds at most 2^19 entries, and each chapter
+        /// with headings counts itself too: 1024 chapters of 256 headings,
+        /// each with an id, are 513 entries a chapter, 525,312 in all,
+        /// 1,024 past the limit. (Counting a chapter's `id`s alone,
+        /// without the chapter, would give exactly the limit.) Nothing is
+        /// left behind.
+        #[test]
+        fn index_entries_count_each_chapter() {
+            let (root, work) = workdir("md-index-entries");
+            let chs: Vec<Ch> = (0..1024)
+                .map(|c| {
+                    let body: String = (0..256)
+                        .map(|k| format!("<h2 id=\"i{c}-{k}\">h{c}-{k}</h2>"))
+                        .collect();
+                    ch(&format!("c{c}.xhtml"), &body)
+                })
+                .collect();
+            let b = book(&root, "b.epub", "", &chs);
+            let o = run_raw(MD, &work, &[&b]);
+            fails_alone(&o, &work, "book is too large");
+        }
+
         /// The same book gives the same md and images, byte for byte.
         #[test]
         fn deterministic_md_and_images() {
