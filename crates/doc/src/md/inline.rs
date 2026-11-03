@@ -272,7 +272,7 @@ fn scan_email(b: &[u8], i: usize) -> Option<usize> {
 
 /// Schemes of a GFM extended URL autolink (spec: "`http://`, `https://`,
 /// or `ftp://`"); matched without regard to case, as URI schemes are.
-const SCHEMES: [&[u8]; 3] = [b"http", b"https", b"ftp"];
+pub(super) const SCHEMES: [&[u8]; 3] = [b"http", b"https", b"ftp"];
 
 /// Whitespace as the GFM spec (and cmark-gfm's `cmark_isspace`) means it:
 /// space, tab, LF, VT, FF, CR. It ends an extended autolink's path.

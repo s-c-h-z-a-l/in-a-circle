@@ -803,6 +803,20 @@ struct InlineWriter<'a> {
     /// [`InlineWriter::pending`] carries on to what follows. Taken (reset)
     /// by every [`InlineWriter::inlines`] call as it starts.
     carry: bool,
+    /// GFM: where in `out` a web autolink written bare ends (`usize::MAX`:
+    /// none, or a mark opened or closed since, which may move bytes). A
+    /// reader is inside that link to the next white space: a `www` ending
+    /// it begins no link of its own.
+    web_end: usize,
+    /// GFM: nothing written follows the list being written before the
+    /// innermost written mark's closer (at worst: `true` may be wrong,
+    /// `false` may not), so white space ending its last text may be
+    /// moved out past that closer, to a line end.
+    to_end: bool,
+    /// GFM: [`InlineWriter::to_end`] for the content of a mark left out
+    /// that is written next (set by the list, taken by
+    /// [`InlineWriter::unmarked`]).
+    child_to_end: bool,
 }
 
 /// What a delimiter run's neighbour is for the flanking rules: Unicode
@@ -1186,6 +1200,9 @@ impl<'a> InlineWriter<'a> {
             at_end: false,
             pending: Vec::new(),
             carry: false,
+            web_end: usize::MAX,
+            to_end: false,
+            child_to_end: false,
         }
     }
 
@@ -1310,9 +1327,12 @@ impl<'a> InlineWriter<'a> {
         let at_end = std::mem::replace(&mut self.at_end, at_end);
         // Its content and what follows are one text to a reader.
         self.carry = true;
+        let child = std::mem::take(&mut self.child_to_end);
+        let to_end = std::mem::replace(&mut self.to_end, child);
         self.inlines(c, eol);
         self.follow = list_follow;
         self.at_end = at_end;
+        self.to_end = to_end;
     }
 
     /// Whether the current line of `out` is 1-9 ASCII digits so far (an
@@ -1365,6 +1385,21 @@ impl<'a> InlineWriter<'a> {
         self.pending.clear();
     }
 
+    /// GFM: how many `w` (at most three, the length of `www`) end `out`
+    /// that may begin a `www.` with what is written next: none at the end
+    /// of a web autolink written bare (see `web_end`).
+    fn w_before(&self) -> usize {
+        if self.out.len() == self.web_end {
+            return 0;
+        }
+        self.out
+            .bytes()
+            .rev()
+            .take(3)
+            .take_while(|&c| c == b'w')
+            .count()
+    }
+
     /// What precedes the next character written (see `open_at`).
     fn before(&self) -> Class {
         if self.out.len() == self.open_at {
@@ -1379,6 +1414,7 @@ impl<'a> InlineWriter<'a> {
     fn open(&mut self, delim: &'static str) -> (Open, (usize, Class)) {
         // Settled or ended by the caller: no offset may lie past them.
         debug_assert!(self.pending.is_empty());
+        self.web_end = usize::MAX;
         let mut open = Open {
             start: self.out.len(),
             body: 0,
@@ -1418,6 +1454,7 @@ impl<'a> InlineWriter<'a> {
     ) {
         (self.open_at, self.open_before) = outer;
         self.open_marks.pop();
+        self.web_end = usize::MAX;
         if self.sink.failed() {
             return;
         }
@@ -1566,9 +1603,16 @@ impl<'a> InlineWriter<'a> {
             std::mem::take(&mut self.open_marks),
             std::mem::replace(&mut self.open_at, usize::MAX),
             std::mem::replace(&mut self.at_end, false),
+            std::mem::replace(&mut self.to_end, false),
         );
         self.inlines(c, false);
-        (self.follow, self.open_marks, self.open_at, self.at_end) = saved;
+        (
+            self.follow,
+            self.open_marks,
+            self.open_at,
+            self.at_end,
+            self.to_end,
+        ) = saved;
     }
 
     /// A GFM `Emph` or `Strong` that [`InlineWriter::decide`] keeps (see
@@ -1577,10 +1621,12 @@ impl<'a> InlineWriter<'a> {
         let (open, outer) = self.open(delim);
         let list_follow = std::mem::replace(&mut self.follow, follow.behind_closer());
         let at_end = std::mem::replace(&mut self.at_end, true);
+        let to_end = std::mem::replace(&mut self.to_end, true);
         self.tilde_follows = false;
         self.inlines(c, false);
         self.follow = list_follow;
         self.at_end = at_end;
+        self.to_end = to_end;
         self.close(open, outer, delim, follow, eol, Loss::Emphasis);
     }
 
@@ -1611,6 +1657,7 @@ impl<'a> InlineWriter<'a> {
         let mut lead_ahead = Ahead::new();
         let mut run_breaks = Ahead::new();
         let mut run_lead = Ahead::new();
+        let mut text_ends = Ahead::new();
         // GFM: adjacent texts are written as one, as every reader reads
         // them back: the autolink guards look at one text, and split, a
         // `www.` run reaching a text's end is guarded (more follows)
@@ -1663,7 +1710,14 @@ impl<'a> InlineWriter<'a> {
                             None => tilde_after_list,
                             Some(n) => strike(Some(n)) && !self.in_strike,
                         };
-                    self.text(t, eol, tilde_after);
+                    // White space ending it can reach a closer (and be
+                    // moved out past it, to a line end) only if nothing
+                    // written follows it up to the innermost one.
+                    let to_closer = gfm
+                        && !self.open_marks.is_empty()
+                        && self.to_end
+                        && text_ends.find(items, idx + 1, not_end).is_none();
+                    self.text(t, eol, tilde_after, to_closer);
                     joined.clear();
                 }
                 Inline::Emph(c) | Inline::Strong(c) if self.gfm => {
@@ -1671,6 +1725,8 @@ impl<'a> InlineWriter<'a> {
                     // this list's end (a `~~` may follow).
                     self.tilde_follows = next.is_none() && tilde_after_list;
                     let two = matches!(item, Inline::Strong(_));
+                    self.child_to_end =
+                        self.to_end && text_ends.find(items, idx + 1, not_end).is_none();
                     self.gfm_mark(two, c, ends_after(), follow(), item_eol);
                 }
                 Inline::Emph(c) => {
@@ -1762,6 +1818,8 @@ impl<'a> InlineWriter<'a> {
                     if !strike_keep {
                         // Left out: each one's content as it is.
                         self.tilde_follows = next.is_none() && tilde_after_list;
+                        self.child_to_end =
+                            self.to_end && text_ends.find(items, idx + 1, not_end).is_none();
                         self.unmarked(c, ends_after(), follow(), item_eol, Loss::Strikethrough);
                         continue;
                     }
@@ -1777,7 +1835,10 @@ impl<'a> InlineWriter<'a> {
                     self.open_before = strike_open.0.before;
                     // The next one's content follows with no delimiter.
                     self.carry = !last;
+                    // At worst its content ends the run's.
+                    let to_end = std::mem::replace(&mut self.to_end, true);
                     self.inlines(c, false);
+                    self.to_end = to_end;
                     self.follow = list_follow;
                     self.in_strike = false;
                     if last {
@@ -1791,7 +1852,10 @@ impl<'a> InlineWriter<'a> {
                     self.tilde_follows = next.is_none() && tilde_after_list;
                     let list_follow = std::mem::replace(&mut self.follow, follow());
                     self.carry = true;
+                    let inner = self.to_end && text_ends.find(items, idx + 1, not_end).is_none();
+                    let to_end = std::mem::replace(&mut self.to_end, inner);
                     self.inlines(c, end_of_line && next.is_none());
+                    self.to_end = to_end;
                     self.follow = list_follow;
                 }
                 Inline::Strikethrough(c) => {
@@ -1822,6 +1886,9 @@ impl<'a> InlineWriter<'a> {
                             Inline::Text(t) => self.sink.push_str(&mut self.out, t),
                             other => self.inlines(std::slice::from_ref(other), false),
                         }
+                    }
+                    if !email {
+                        self.web_end = self.out.len();
                     }
                 }
                 Inline::Link {
@@ -1917,13 +1984,7 @@ impl<'a> InlineWriter<'a> {
     /// (an address ending in `www`, then one starting with `.`).
     fn email_text(&mut self, t: &str) {
         let b = t.as_bytes();
-        let w_before = self
-            .out
-            .bytes()
-            .rev()
-            .take(3)
-            .take_while(|&c| c == b'w')
-            .count();
+        let w_before = self.w_before();
         let alnum = |i: Option<usize>| {
             i.and_then(|i| b.get(i))
                 .is_some_and(u8::is_ascii_alphanumeric)
@@ -2020,23 +2081,20 @@ impl<'a> InlineWriter<'a> {
 
     /// `tilde_after`: a `~~` delimiter follows `t` directly, so a tilde
     /// ending it is escaped (GFM).
-    fn text(&mut self, t: &str, end_of_line: bool, tilde_after: bool) {
-        // Inside a mark, white space ending the text may be moved out past
-        // the closer, so the run may go on after it.
+    /// `to_closer`: white space ending `t` may be moved out past a mark's
+    /// closer (GFM), to a line end: the run may go on after it.
+    fn text(&mut self, t: &str, end_of_line: bool, tilde_after: bool, to_closer: bool) {
         let (guards, tail) = if self.gfm {
             // A `www.` begun before `t` (at most three `w` written raw).
-            let before = self
-                .out
-                .bytes()
-                .rev()
-                .take(3)
-                .take_while(|&c| c == b'w')
-                .count();
+            let before = self.w_before();
             let lead = t.bytes().take_while(|&c| c == b'w').count();
             let straddle = (before > 0 && lead < 3 && before + lead >= 3)
                 .then_some(lead)
                 .filter(|&k| t.as_bytes().get(k) == Some(&b'.'));
-            let g = autolink_guards(t, end_of_line, !self.open_marks.is_empty(), straddle);
+            // A scheme the text's first run may end (`ht` + `tp://`).
+            let longest = inline::SCHEMES.iter().map(|s| s.len()).max().unwrap_or(0);
+            let prev = &self.out.as_bytes()[self.out.len().saturating_sub(longest)..];
+            let g = autolink_guards(t, end_of_line, to_closer, straddle, prev);
             if !self.pending.is_empty() {
                 match g.joined {
                     Join::Ends => self.pending.clear(),
@@ -2183,6 +2241,20 @@ fn delimiter_row(rest: &str, end_of_line: bool) -> bool {
     ends && !dashes.is_empty() && dashes.bytes().all(|b| b == b'-')
 }
 
+/// Whether a `://` after `before` (its run so far) can be a URL autolink:
+/// `before` ends with a scheme the reader links (any case), or, where the
+/// run is the text's first (`prev`: the bytes written right before the
+/// text, else empty), `prev` and `before` end with one together.
+fn after_scheme(before: &[u8], prev: &[u8]) -> bool {
+    inline::SCHEMES.iter().any(|sch| {
+        let n = before.len().min(sch.len());
+        let (head, tail) = sch.split_at(sch.len() - n);
+        before[before.len() - n..].eq_ignore_ascii_case(tail)
+            && prev.len() >= head.len()
+            && prev[prev.len() - head.len()..].eq_ignore_ascii_case(head)
+    })
+}
+
 /// How the `www.`/`://` run a text continues from what was written
 /// before it (see [`InlineWriter::pending`]) goes on in it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2225,11 +2297,19 @@ struct Guards {
 /// what comes next ([`Guards::tail`], [`Guards::joined`]): it is decided
 /// as for the one text a reader joins it into. `straddle`: the offset of
 /// a `.` in `t`'s first run that completes a `www.` begun by what was
-/// written before (`a@b.c_www` linked, then `.b`): a candidate too.
+/// written before (`a@b.c_www` linked, then `.b`): a candidate too; a
+/// `://` is one only after a scheme the reader links, which may begin in
+/// `prev` (see [`after_scheme`]).
 /// Over-approximates (any `www.`, a preceding character is not checked):
 /// an entity too many is harmless. One pass per white-space-delimited
 /// run, so linear.
-fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool, straddle: Option<usize>) -> Guards {
+fn autolink_guards(
+    t: &str,
+    end_of_line: bool,
+    in_mark: bool,
+    straddle: Option<usize>,
+    prev: &[u8],
+) -> Guards {
     let b = t.as_bytes();
     let mut g = Guards {
         now: Vec::new(),
@@ -2295,7 +2375,9 @@ fn autolink_guards(t: &str, end_of_line: bool, in_mark: bool, straddle: Option<u
         for k in 0..run.len() {
             let guard = if run[k..].starts_with(b"www.") {
                 Some(k + 3)
-            } else if run[k..].starts_with(b"://") {
+            } else if run[k..].starts_with(b"://")
+                && after_scheme(&run[..k], if start == 0 { prev } else { b"" })
+            {
                 Some(k)
             } else {
                 None
@@ -3611,16 +3693,20 @@ mod tests {
         assert_eq!(write(&doc(vec![para("www.z_")])).0, "www.z\\_\n");
         // One pass per run: a run of candidates stays linear.
         let long = "www.".repeat(1 << 16) + "_";
-        assert_eq!(autolink_guards(&long, true, false, None).now.len(), 1 << 16);
+        assert_eq!(
+            autolink_guards(&long, true, false, None, b"").now.len(),
+            1 << 16
+        );
     }
 
     /// The table writer is linear in the cells: four times the cells (as
     /// columns or as rows) take about four times as long, where a quadratic
     /// path would take sixteen. The output grows by the same factor.
     /// Marks whose edge white space moves out, marks left out, and an
-    /// autolink candidate run through them, cost linear time: four times the input, under eight times the time (a
-    /// bound loose enough for load, far below the sixteen of a quadratic
-    /// path, which a white space stretch rescanned per run once was).
+    /// autolink candidate run through them, cost linear time: four times
+    /// the input, under eight times the time (a bound loose enough for
+    /// load, far below the sixteen of a quadratic path, which a white
+    /// space stretch rescanned per run once was).
     #[test]
     fn gfm_marks_are_linear() {
         use std::time::{Duration, Instant};
@@ -3844,7 +3930,7 @@ mod tests {
     fn adjacent_texts_autolink_guard_is_stable() {
         for (input, first) in [
             (":/_/(www.b_/", "\\://(www.b/\n"),
-            (":/_/(www.b_.", "&#58;//([www&#46;b](http://www.b).\n"),
+            (":/_/(www.b_.", "\\://([www&#46;b](http://www.b).\n"),
         ] {
             let [w1, w2, w3] = three_rounds(input, Dialect::Gfm);
             assert_eq!(w1, first, "{input:?}");
@@ -3880,7 +3966,7 @@ mod tests {
             ("(![!_~~www.~~*b*", "(\\!\\[\\!\\_www.b\n"),
             ("~~www..~~x~~. _x_a~~<", "~~www..x. \\_x\\_a~~\\<\n"),
             ("www._x_~~&#32;:~~", "www.x ~~:~~\n"),
-            (":/_/(www.b_~~&#32;/~~", "&#58;//(www.b ~~/~~\n"),
+            (":/_/(www.b_~~&#32;/~~", "\\://(www.b ~~/~~\n"),
             ("www.~~xa&#32;<~~_x_~([", "www.xa \\<x~(\\[\n"),
             (
                 "](u):_ www.&#46;b).~~&#32;a@b.c~~`",
@@ -3949,6 +4035,92 @@ mod tests {
         ])]);
         assert_eq!(gfm(&d).0, "a@b.c_www&#46;.a@b.c\n");
         assert_eq!(gfm_again(&d), d);
+    }
+
+    /// Regression (review): a web autolink written bare that ends in
+    /// `www`, then a `.`: the `www` began no link of its own (the reader
+    /// is inside the link already), but the `.` became an entity inside
+    /// the link (`www.www&#46;~`). And a `://` with no scheme before it
+    /// starts no link, so it gets no entity: guarded, it flipped between
+    /// `:` and `&#58;` from round to round before a bare web link. Nor
+    /// does white space ending a text reach a mark's closer when more of
+    /// the mark is written after it.
+    #[test]
+    fn autolink_end_and_schemeless_colon_slashes() {
+        let web = |a: &str| Inline::Link {
+            dest: format!("http://{a}"),
+            title: String::new(),
+            content: vec![t(a)],
+            auto: true,
+        };
+        let d = doc(vec![Block::Paragraph(vec![web("www.www"), t(".~")])]);
+        assert_eq!(gfm(&d).0, "www.www.~\n");
+        assert_eq!(gfm_again(&d), d);
+        let d = doc(vec![Block::Paragraph(vec![
+            web("www.ww"),
+            Inline::Link {
+                dest: "mailto:w.a@b.c".to_string(),
+                title: String::new(),
+                content: vec![t("w.a@b.c")],
+                auto: true,
+            },
+        ])]);
+        assert_eq!(gfm(&d).0, "www.www.a@b.c\n");
+        // The GFM reader's trees, autolinks kept, as the fuzz target does.
+        for (input, first) in [
+            ("www.www.~", "www.www.~\n"),
+            ("~~www.www.~~", "~~www.www.~~\n"),
+            ("w.**www.b.www.**", "w.**www.b.www.**\n"),
+            (")_x_www.www._", ")*x\\_www.www.*\n"),
+            (
+                "~~< ~~://(www.*b*b&#58;&#32;~~_x_`&#32;~~",
+                "~~\\< ://(www&#46;*b*b: *x*\\`~~&#32;\n",
+            ),
+        ] {
+            let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            let w1 = gfm(&d).0;
+            let w2 = gfm(&gfm_again(&d)).0;
+            let w3 = gfm(&read_with(w2.as_bytes(), Dialect::Gfm).unwrap()).0;
+            assert_eq!(w1, first, "{input:?}");
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        // As the fuzz target checks: flattened once, then as read back.
+        // The second: white space ending a text in a mark was taken to
+        // reach the closer (and a line end) with a link after it.
+        for input in [
+            "~~< ~~://(www.*b*b&#58;&#32;~~_x_`&#32;~~",
+            "~~__*.www.:&#32;~~www.www._x_&#32;~~_&#32;~~",
+            "![ ~~*b* !www.www. ~~www.www.&#32;~~&(\n_~~x~~&#32;~~",
+        ] {
+            let mut d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            for b in &mut d.blocks {
+                if let Block::Paragraph(c) = b {
+                    flatten(c);
+                }
+            }
+            let w1 = gfm(&d).0;
+            let w2 = gfm(&read_with(w1.as_bytes(), Dialect::Gfm).unwrap()).0;
+            let w3 = gfm(&read_with(w2.as_bytes(), Dialect::Gfm).unwrap()).0;
+            assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
+        }
+        // A `://` is a candidate after a scheme (any case), also one
+        // that what was written before the text begins.
+        assert_eq!(gfm(&doc(vec![para("a x://b_")])).0, "a x://b\\_\n");
+        assert_eq!(
+            gfm(&doc(vec![para("a HTTP://b_")])).0,
+            "a HTTP&#58;//b\\_\n"
+        );
+        assert_eq!(gfm(&doc(vec![para("a ftp://b_")])).0, "a ftp&#58;//b\\_\n");
+        let split = doc(vec![Block::Paragraph(vec![
+            Inline::Html("<i>ht".to_string()),
+            t("tp://b_"),
+        ])]);
+        assert_eq!(gfm(&split).0, "<i>http&#58;//b\\_\n");
+        let split = doc(vec![Block::Paragraph(vec![
+            Inline::Code("x".to_string()),
+            t("tp://b_"),
+        ])]);
+        assert_eq!(gfm(&split).0, "`x`tp://b\\_\n");
     }
 
     /// The GFM fixed point over generated strings of the autolink family
