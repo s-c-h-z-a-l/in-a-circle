@@ -106,3 +106,38 @@ fn punct(data: &str) -> Result<String, String> {
     s.push_str("];\n");
     Ok(s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only names that end with `;` are kept (without `&` and `;`), sorted
+    /// for binary search, each with its characters; a missing `characters`
+    /// or a non-object is an error.
+    #[test]
+    fn entities_table_is_sorted_and_semicolon_only() {
+        let json = r#"{
+            "&eacute;": {"codepoints": [233], "characters": "é"},
+            "&amp": {"codepoints": [38], "characters": "&"},
+            "&amp;": {"codepoints": [38], "characters": "&"},
+            "&AMP;": {"codepoints": [38], "characters": "&"}
+        }"#;
+        let out = entities(json).unwrap();
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("    (")).collect();
+        assert_eq!(
+            rows,
+            [
+                "    (\"AMP\", \"&\"),",
+                "    (\"amp\", \"&\"),",
+                "    (\"eacute\", \"é\"),"
+            ]
+        );
+        assert!(out.contains("pub(super) static ENTITIES: &[(&str, &str)] = &[\n"));
+        assert!(out.ends_with("];\n"));
+        assert_eq!(
+            entities(r#"{"&x;": {"codepoints": []}}"#).unwrap_err(),
+            "&x;: no characters"
+        );
+        assert_eq!(entities("[]").unwrap_err(), "entities.json: not an object");
+    }
+}
