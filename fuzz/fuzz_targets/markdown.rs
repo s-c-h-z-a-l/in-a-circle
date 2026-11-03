@@ -4,7 +4,10 @@
 //! md->txt) plus `html::write` and the strict `xhtml::write_chapter` (both
 //! modes) and `xhtml::write_book_chapter` (every image packaged, links to
 //! another document resolved), so the tree walks run too. The GFM
-//! Markdown writer must also reach a fixed point: see [`gfm_stable`].
+//! Markdown writer must also reach a fixed point ([`gfm_stable`]), give
+//! a txt tree back as it was ([`txt_round_trip`]), and write the marks of
+//! an XHTML-shaped tree so that a reader shows its text and nothing more
+//! ([`marks_read_back`]).
 
 use libfuzzer_sys::fuzz_target;
 
@@ -139,7 +142,168 @@ fn gfm_stable(d: &doc::Document) {
     assert_eq!(w2, w3, "GFM output not stable; first round {w1:?}");
 }
 
+/// Adjacent texts as one, as every reader builds them.
+fn merge_texts(c: &mut Vec<doc::Inline>) {
+    let mut out: Vec<doc::Inline> = Vec::with_capacity(c.len());
+    for i in std::mem::take(c) {
+        if let (Some(doc::Inline::Text(a)), doc::Inline::Text(b)) = (out.last_mut(), &i) {
+            a.push_str(b);
+        } else {
+            out.push(i);
+        }
+    }
+    *c = out;
+}
+
+/// A tree of the txt reader (paragraphs of text lines and hard breaks)
+/// written in the GFM mode and read back by the GFM reader is the same
+/// tree. Stated difference: text that a GFM reader links (`www.x.y`, a
+/// URL, an address) comes back as an extended autolink, which is turned
+/// back into its text here; the writer leaves such text as it is, so
+/// that it links, and guards only the links that would hold an escape.
+fn txt_round_trip(d: &doc::Document) {
+    let (w, _) = doc::md::write_limited_with(d, doc::Limits::UNLIMITED, doc::Dialect::Gfm).unwrap();
+    let mut back = doc::md::read_with(w.as_bytes(), doc::Dialect::Gfm).unwrap();
+    for b in &mut back.blocks {
+        if let doc::Block::Paragraph(c) = b {
+            let mut out = Vec::with_capacity(c.len());
+            for i in std::mem::take(c) {
+                match i {
+                    doc::Inline::Link {
+                        auto: true,
+                        content,
+                        ..
+                    } => out.extend(content),
+                    i => out.push(i),
+                }
+            }
+            merge_texts(&mut out);
+            *c = out;
+        }
+    }
+    assert_eq!(&back, d, "txt tree not read back from {w:?}");
+}
+
+/// The text a reader shows for `blocks`, line breaks left out (a break
+/// at an edge of a paragraph is not written).
+fn shown(blocks: &[doc::Block], out: &mut String) {
+    fn inlines(c: &[doc::Inline], out: &mut String) {
+        for i in c {
+            match i {
+                doc::Inline::Text(t) | doc::Inline::Code(t) | doc::Inline::Html(t) => {
+                    out.push_str(t)
+                }
+                doc::Inline::Emph(c) | doc::Inline::Strong(c) | doc::Inline::Strikethrough(c) => {
+                    inlines(c, out)
+                }
+                doc::Inline::Link { content: c, .. } | doc::Inline::Image { alt: c, .. } => {
+                    inlines(c, out)
+                }
+                doc::Inline::SoftBreak | doc::Inline::HardBreak => {}
+            }
+        }
+    }
+    for b in blocks {
+        match b {
+            doc::Block::Paragraph(c) | doc::Block::Heading { content: c, .. } => inlines(c, out),
+            doc::Block::BlockQuote(bs) => shown(bs, out),
+            doc::Block::List { items, .. } => {
+                for i in items {
+                    shown(&i.blocks, out);
+                }
+            }
+            doc::Block::Table { head, rows, .. } => {
+                for c in head.iter().chain(rows.iter().flatten()) {
+                    inlines(c, out);
+                }
+            }
+            doc::Block::CodeBlock { text, .. } => out.push_str(text),
+            doc::Block::HtmlBlock(h) => out.push_str(h),
+            doc::Block::ThematicBreak => out.push_str("<hr>"),
+        }
+    }
+}
+
+/// An inline tree shaped like the XHTML reader's, from `data`: text with
+/// white space and punctuation (the characters next to which a delimiter
+/// cannot open or close) at the edges of emphasis, strong emphasis,
+/// strikethrough and links, nested, and hard line breaks. As the reader
+/// builds them: no mark or link is empty, and no link holds a link (HTML
+/// forbids it). Code spans are left out: two written side by side join
+/// (a limit of the shared writer the XHTML reader does not hit, as it
+/// never puts them there).
+fn xhtml_shaped(data: &[u8]) -> Vec<doc::Inline> {
+    const PIECES: &[&str] = &[
+        "a", "b", "7", " ", "  ", "\u{a0}", ".", ",", "\"", "(", ")", "'", "-", ":", "!", "?", "~",
+        "*", "_", "\\", "1.", "www.x.y", "#", "\u{e9}", "\u{2014}", "\u{3000}", "+",
+    ];
+    // Deeper than any real book's inline nesting needs, short of the
+    // readers' depth bound (256), so the walk stays cheap.
+    const MAX_NESTING: usize = 16;
+    let mut stack: Vec<(u8, Vec<doc::Inline>)> = vec![(0, Vec::new())];
+    let close = |stack: &mut Vec<(u8, Vec<doc::Inline>)>| {
+        let (kind, mut c) = stack.pop().expect("an open frame");
+        merge_texts(&mut c);
+        if c.is_empty() {
+            return;
+        }
+        let node = match kind {
+            0 => doc::Inline::Emph(c),
+            1 => doc::Inline::Strong(c),
+            2 => doc::Inline::Strikethrough(c),
+            _ => doc::Inline::Link {
+                dest: "u".to_string(),
+                title: String::new(),
+                content: c,
+                auto: false,
+            },
+        };
+        stack.last_mut().expect("the paragraph").1.push(node);
+    };
+    for &b in data {
+        let depth = stack.len();
+        let top = &mut stack.last_mut().expect("the paragraph").1;
+        match b % 8 {
+            0..=3 => top.push(doc::Inline::Text(
+                PIECES[usize::from(b / 8) % PIECES.len()].to_string(),
+            )),
+            7 => top.push(doc::Inline::HardBreak),
+            4 | 5 if depth <= MAX_NESTING => {
+                let kind = b / 8 % 4;
+                if kind < 3 || stack.iter().all(|&(k, _)| k < 3) {
+                    stack.push((kind, Vec::new()));
+                }
+            }
+            6 if depth > 1 => close(&mut stack),
+            _ => {}
+        }
+    }
+    while stack.len() > 1 {
+        close(&mut stack);
+    }
+    let mut c = stack.pop().expect("the paragraph").1;
+    merge_texts(&mut c);
+    c
+}
+
+/// The GFM writer on an XHTML-shaped paragraph: a GFM reader shows the
+/// same text, so no delimiter is left as text and no text is lost (a
+/// mark that cannot open or close is left out, with its loss).
+fn marks_read_back(data: &[u8]) {
+    let d = doc::Document {
+        blocks: vec![doc::Block::Paragraph(xhtml_shaped(data))],
+    };
+    let (w, _) =
+        doc::md::write_limited_with(&d, doc::Limits::UNLIMITED, doc::Dialect::Gfm).unwrap();
+    let back = doc::md::read_with(w.as_bytes(), doc::Dialect::Gfm).unwrap();
+    let (mut want, mut got) = (String::new(), String::new());
+    shown(&d.blocks, &mut want);
+    shown(&back.blocks, &mut got);
+    assert_eq!(got, want, "{w:?} from {:?}", d.blocks);
+}
+
 fuzz_target!(|data: &[u8]| {
+    marks_read_back(data);
     for dialect in [doc::Dialect::CommonMark, doc::Dialect::Gfm] {
         if let Ok(d) = doc::md::read_with(data, dialect) {
             let _ = doc::html::write(&d);
@@ -155,6 +319,7 @@ fuzz_target!(|data: &[u8]| {
         xhtml(&d, doc::Limits::UNLIMITED);
         let _ = doc::md::write(&d);
         gfm_stable(&d);
+        txt_round_trip(&d);
     }
     // The shipped, budgeted path under budgets small enough to be hit by
     // short inputs: it must stop with an error, never panic or hang. The
