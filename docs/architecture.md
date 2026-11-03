@@ -225,9 +225,10 @@ are in `CLAUDE.md`.
   `_`, and a mark whose delimiters still could not open or close by the
   flanking rules (`a<del>"b"</del>c`), or whose opener could close an
   enclosing mark, left out and reported as lost emphasis or
-  strikethrough, so a GFM reader never shows a stray `~~` or `*`; a line-start `:` escaped, so a paragraph line never
-  becomes a delimiter row. Task list items and extended autolinks are
-  written as in the CommonMark mode. A `www.` or `://` in text whose run
+  strikethrough, so a GFM reader never shows a stray `~~` or `*`; a
+  line-start `:` escaped, so a paragraph line never becomes a delimiter
+  row. Task list items and extended autolinks are written as in the
+  CommonMark mode. A `www.` or `://` in text whose run
   (to white space or `<`) would hold one of the writer's escapes, or
   runs into the next inline, gets its `.` or `:` as an entity, so a GFM
   reader does not make a link that holds the backslash; elsewhere a
