@@ -517,6 +517,50 @@ are in `CLAUDE.md`.
   (`book is too large`) or the output ceiling (`Plain text would be
   larger than <N> MiB`), the file is cut back to empty and removed and
   the input fails.
+- `text.epub-to-md` (`in=application/epub+zip`, `group=document`,
+  `lossy=yes`, `batch=no`) writes one GitHub Flavored Markdown file per
+  book, `<stem>.md`, and beside it the JPEG and PNG images its chapters
+  show, `<stem>-0001.jpg`, `<stem>-0002.png`... (four digits from 1, in
+  the order of their first reference; the names come only from the
+  input's stem and the counter, never from the book). The file starts
+  with `# <title>`, the authors (joined by `, `) as a paragraph and a
+  blank line, what the book lacks left out; then every spine item as in
+  `text.epub-to-txt`, written by the GFM writer (tables as pipe tables,
+  strikethrough as `~~`), a blank line between chapters, and an
+  unreadable one as the paragraph `\[Chapter N could not be read:
+  <reason>\]` (escaped, so it is never a link). The book is read twice:
+  first every chapter for its headings only, which gives each heading
+  its id as a viewer and the join number them over the whole md
+  (`doc::xhtml::slug`, the title heading first, repeats `-1`, `-2`... in
+  order) and records where each heading `id` attribute lands; then one
+  chapter at a time to write it. A link into the book (no URL scheme)
+  becomes `#<id>` when it lands on a heading (its fragment names a
+  heading's `id`, or with no fragment the chapter has a first heading),
+  else it keeps only its text; `http:`, `https:`, `mailto:` and
+  `//host/...` links stay as they are, any other scheme keeps only its
+  text (so the md never carries a `javascript:` or `file:` link); each
+  dropped link is reported. An image is resolved in the book like a
+  link; the entry is read once however often it is named (two paths to
+  one entry are one file) and written byte for byte when the image probe
+  finds a valid JPEG or PNG of at most 180 megapixels (one the PDF
+  writer cannot pass, such as a PNG with alpha, is still valid and is
+  kept). Every other image (GIF, WebP, SVG, damaged, missing, outside the
+  book, encrypted, over the limits in `docs/resource-limits.md`) keeps
+  its alt text in its place, and one `warn`, `N image(s) replaced by alt
+  text`, counts those places; it stands for the images loss, which then
+  has no line of its own, so the `warn` lines stay within the
+  supervisor's 16. The md links to an image by its file name
+  (`![alt](<stem>-0001.jpg)`, in `<...>` when the name has a space; `%`,
+  `#` and `?` percent-encoded). A book with no text but at least one
+  image written is made (a picture book); with neither, `book has no
+  text`. Nothing is reported before the book is whole: then one `done`
+  per image in order, the md last, and the `warn` lines. On any failure
+  every file written for the book (the md and the images) is cut back to
+  empty and removed and the input fails with no `done`, so nothing of it
+  is published. The md and its images, joined again by
+  `text.md-join-epub`, make a book again when it is within the EPUB
+  writer's limits (1024 chapters, one document's budgets); a larger
+  book's md is still written but cannot be joined back in one piece.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -536,6 +580,7 @@ action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label
 action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
+action	text.epub-to-md	family=text	in=application/epub+zip	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=no
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1

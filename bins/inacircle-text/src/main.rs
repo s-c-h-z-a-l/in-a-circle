@@ -2,6 +2,7 @@
 //! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
 //! structure). Contract v0 (docs/architecture.md).
 
+mod epub_md;
 mod epub_read;
 mod join;
 
@@ -183,6 +184,22 @@ fn manifest_text() -> String {
         "Plain text",
         "document",
     ));
+    // A book to Markdown and its images: one book per process (`batch=no`),
+    // since the supervisor takes at most 1024 `done` lines from one
+    // process and one book may need them all (1023 images and the md).
+    s.push_str(&manifest::write_line(
+        &manifest::Line::new("action")
+            .bare("text.epub-to-md")
+            .pair("family", "text")
+            .pair("in", "application/epub+zip")
+            .pair("out", "text/markdown")
+            .pair("ext", "md")
+            .pair("label", "Markdown")
+            .pair("group", "document")
+            .pair("cost", "10")
+            .pair("lossy", "yes")
+            .pair("batch", "no"),
+    ));
     s
 }
 
@@ -195,6 +212,7 @@ enum Conversion {
     MdToHtml,
     TxtToHtml,
     EpubToTxt,
+    EpubToMd,
 }
 
 impl Conversion {
@@ -207,13 +225,14 @@ impl Conversion {
             "text.md-to-html" => Some(Conversion::MdToHtml),
             "text.txt-to-html" => Some(Conversion::TxtToHtml),
             "text.epub-to-txt" => Some(Conversion::EpubToTxt),
+            "text.epub-to-md" => Some(Conversion::EpubToMd),
             _ => None,
         }
     }
 
     fn ext(self) -> &'static str {
         match self {
-            Conversion::TxtToMd => "md",
+            Conversion::TxtToMd | Conversion::EpubToMd => "md",
             Conversion::MdToTxt | Conversion::EpubToTxt => "txt",
             Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
             Conversion::MdToHtml | Conversion::TxtToHtml => "html",
@@ -241,7 +260,9 @@ impl Conversion {
             | Conversion::TxtToEpub
             | Conversion::MdToHtml
             | Conversion::TxtToHtml => unreachable!("books and pages go through `publish`"),
-            Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
+            Conversion::EpubToTxt | Conversion::EpubToMd => {
+                unreachable!("an EPUB goes through `epub_read` or `epub_md`")
+            }
         }
     }
 
@@ -399,7 +420,9 @@ fn publish(
         Conversion::TxtToMd | Conversion::MdToTxt => {
             unreachable!("text goes through `convert`")
         }
-        Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
+        Conversion::EpubToTxt | Conversion::EpubToMd => {
+            unreachable!("an EPUB goes through `epub_read` or `epub_md`")
+        }
     };
     losses.extend(more);
     Ok(losses)
@@ -431,8 +454,10 @@ fn process(
     }
     // A book is read from the file entry by entry, never whole: it is not
     // held to the text input budget.
-    if let Conversion::EpubToTxt = conv {
-        return epub_read::process(inv, i, input, ev);
+    match conv {
+        Conversion::EpubToTxt => return epub_read::process(inv, i, input, ev),
+        Conversion::EpubToMd => return epub_md::process(inv, i, input, ev),
+        _ => {}
     }
     let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
         Ok(b) => b,

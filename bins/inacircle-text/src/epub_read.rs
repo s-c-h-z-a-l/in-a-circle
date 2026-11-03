@@ -22,11 +22,11 @@ use xml::ErrorKind;
 use crate::{ConvertError, LIMITS, Outcome, output_cap, too_large};
 
 /// The spine item type that is a picture page (no text, an image loss).
-const SVG_TYPE: &str = "image/svg+xml";
+pub(crate) const SVG_TYPE: &str = "image/svg+xml";
 
 /// Open the input as a regular file without ever waiting (`O_NONBLOCK`:
 /// a FIFO would block a plain open until a writer shows up).
-fn open_input(path: &Path) -> io::Result<File> {
+pub(crate) fn open_input(path: &Path) -> io::Result<File> {
     let f = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -101,7 +101,7 @@ pub(crate) fn process(
 
 /// The `warn` lines the supervisor accepts per input (16, see
 /// `docs/architecture.md`); one past it would be dropped.
-const MAX_WARN: usize = 16;
+pub(crate) const MAX_WARN: usize = 16;
 
 /// One counted line for every chapter that could not be read, then each
 /// loss once: at most 1 + one per `Loss` kind, held to [`MAX_WARN`] by a
@@ -126,14 +126,25 @@ struct Converted {
 /// The output file and what has been written to it, held to the text
 /// family's output budget for the whole book and to the process's
 /// `RLIMIT_FSIZE`, both checked before each write.
-struct Sink<'a> {
+pub(crate) struct Sink<'a> {
     file: &'a mut File,
-    written: usize,
+    pub(crate) written: usize,
     cap: Option<u64>,
+    /// The output's name in the ceiling's copy (`Plain text`, `Markdown`).
+    what: &'static str,
 }
 
-impl Sink<'_> {
-    fn write(&mut self, s: &str) -> Result<(), String> {
+impl<'a> Sink<'a> {
+    pub(crate) fn new(file: &'a mut File, cap: Option<u64>, what: &'static str) -> Self {
+        Sink {
+            file,
+            written: 0,
+            cap,
+            what,
+        }
+    }
+
+    pub(crate) fn write(&mut self, s: &str) -> Result<(), String> {
         let next = self.written.saturating_add(s.len());
         // The book's text is held to the output budget of one text file
         // (32 MiB): the whole book is one output.
@@ -141,11 +152,11 @@ impl Sink<'_> {
             return Err("book is too large".into());
         }
         if self.cap.is_some_and(|c| next as u64 > c) {
-            return Err(reason(too_large("Plain text")));
+            return Err(reason(too_large(self.what)));
         }
         self.file.write_all(s.as_bytes()).map_err(|e| {
             if e.raw_os_error() == Some(libc::EFBIG) {
-                reason(too_large("Plain text"))
+                reason(too_large(self.what))
             } else {
                 format!("cannot write output: {e}")
             }
@@ -156,7 +167,7 @@ impl Sink<'_> {
 }
 
 /// A [`ConvertError`] from the shared helpers as a `fail` reason.
-fn reason(e: ConvertError) -> String {
+pub(crate) fn reason(e: ConvertError) -> String {
     match e {
         ConvertError::Other(r) => r,
         ConvertError::Limit(l) => l.to_string(),
@@ -167,20 +178,8 @@ fn reason(e: ConvertError) -> String {
 /// Writes the header and every spine item of `book` to `file`.
 fn convert(book: &Book<'_>, file: &mut File) -> Result<Converted, String> {
     let cap = output_cap().map_err(reason)?;
-    // The size of the text is known only chapter by chapter, so SIGXFSZ is
-    // ignored as a net under the check in `Sink::write`: a write past
-    // `RLIMIT_FSIZE` then fails with EFBIG instead of killing the process
-    // (and the batch).
-    // SAFETY: `signal` with SIG_IGN installs no handler code and touches
-    // no Rust state; SIGXFSZ is a valid signal number.
-    unsafe {
-        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
-    }
-    let mut sink = Sink {
-        file,
-        written: 0,
-        cap,
-    };
+    ignore_sigxfsz();
+    let mut sink = Sink::new(file, cap, "Plain text");
     sink.write(&header(book))?;
     // Every book has styles, and none is read.
     let mut losses = BTreeSet::from([Loss::Styles]);
@@ -237,6 +236,18 @@ fn convert(book: &Book<'_>, file: &mut File) -> Result<Converted, String> {
     Ok(Converted { unread, losses })
 }
 
+/// The size of a book's output is known only chapter by chapter, so
+/// SIGXFSZ is ignored as a net under the checks before each write: a write
+/// past `RLIMIT_FSIZE` then fails with EFBIG instead of killing the
+/// process (and the batch).
+pub(crate) fn ignore_sigxfsz() {
+    // SAFETY: `signal` with SIG_IGN installs no handler code and touches
+    // no Rust state; SIGXFSZ is a valid signal number.
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
+}
+
 /// `<title>\n<author, author>\n\n`: what the book lacks is left out, and
 /// with neither, the header and its blank line.
 fn header(book: &Book<'_>) -> String {
@@ -256,7 +267,7 @@ fn header(book: &Book<'_>) -> String {
 }
 
 /// The line that stands in place of spine item `n`.
-fn unreadable(n: usize, why: &str) -> String {
+pub(crate) fn unreadable(n: usize, why: &str) -> String {
     format!("[Chapter {n} could not be read: {why}]\n")
 }
 
@@ -273,7 +284,7 @@ fn chapter_text(d: &Document, written: usize) -> Result<(String, BTreeSet<Loss>)
 
 /// The writer's budget error for one chapter: its text alone is past the
 /// book's output budget, so the book is.
-fn book_limit(e: LimitError) -> String {
+pub(crate) fn book_limit(e: LimitError) -> String {
     match e {
         LimitError::Exceeded(_) => "book is too large".into(),
         LimitError::Allocation => "not enough memory to convert this book".into(),
@@ -282,9 +293,18 @@ fn book_limit(e: LimitError) -> String {
 
 /// One chapter's bytes as a document, with the reader's losses; or why
 /// it cannot be read.
-fn chapter(raw: &[u8]) -> Result<(Document, BTreeSet<Loss>), String> {
+pub(crate) fn chapter(raw: &[u8]) -> Result<(Document, BTreeSet<Loss>), String> {
+    chapter_with(raw, |text| xhtml_read::read_limited(text, LIMITS))
+}
+
+/// One chapter's bytes decoded and given to `read`, its errors as the
+/// reason the chapter cannot be read.
+pub(crate) fn chapter_with<T>(
+    raw: &[u8],
+    read: impl FnOnce(&str) -> Result<T, XhtmlError>,
+) -> Result<T, String> {
     let text = xml::decode(raw).map_err(|e| xml_reason(&e))?;
-    xhtml_read::read_limited(&text, LIMITS).map_err(|e| match e {
+    read(&text).map_err(|e| match e {
         XhtmlError::Xml(e) => xml_reason(&e),
         XhtmlError::Limit(l) => limit_reason(l),
     })
@@ -318,7 +338,7 @@ fn limit_reason(e: LimitError) -> String {
 /// a network-path reference (`//host/...`, RFC 3986, section 4.2), which
 /// names another host. A bare `//` names none: more than its two
 /// slashes are needed.
-fn external(dest: &str) -> bool {
+pub(crate) fn external(dest: &str) -> bool {
     has_scheme(dest) || (dest.len() > 2 && dest.starts_with("//"))
 }
 
@@ -384,7 +404,7 @@ fn unlink_internal(d: &mut Document) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -436,7 +456,7 @@ mod tests {
     /// Every `Loss` kind, in order, produced by one wildcard-free match:
     /// each kind names the next, so a new kind does not compile until it
     /// has its place in the chain (the only list of kinds here).
-    fn every_loss() -> Vec<Loss> {
+    pub(crate) fn every_loss() -> Vec<Loss> {
         let mut all = Vec::new();
         let mut next = Some(Loss::Emphasis);
         while let Some(l) = next {
@@ -595,11 +615,7 @@ mod tests {
     #[test]
     fn a_failed_write_is_reported_as_such() {
         let mut full = OpenOptions::new().write(true).open("/dev/full").unwrap();
-        let mut sink = Sink {
-            file: &mut full,
-            written: 0,
-            cap: None,
-        };
+        let mut sink = Sink::new(&mut full, None, "Plain text");
         let e = sink.write("x").unwrap_err();
         assert!(e.starts_with("cannot write output: "), "{e}");
         assert_eq!(sink.written, 0);

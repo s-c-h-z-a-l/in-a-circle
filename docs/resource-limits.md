@@ -286,6 +286,23 @@ chapters) are on the benchmark page,
 | text output | 32 MiB | the text family's output budget, for the whole book (header, chapters and their reason lines), checked before each write; each chapter's writer gets only what is left of it, so a late chapter cannot build more text than can still be written; what is left also pays the writer's working memory (a table's cell grid, 24 B per cell), so a book just under 32 MiB whose late chapter holds a large table can fail although its text would fit; `book is too large`, the file is cut back to empty and removed |
 | output ceiling | `RLIMIT_FSIZE` | checked before each write (and `SIGXFSZ` ignored, so a write past it fails with `EFBIG`, not the process); `Plain text would be larger than <N> MiB` (N rounded down, KiB below 1 MiB), the file is cut back to empty and removed, the rest of the batch still converts |
 
+`text.epub-to-md` reads the book under the same limits and adds its
+own for the heading index and the images:
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| heading index | 524,288 entries, 8 MiB of text | the first pass keeps every heading's id and where each heading `id` attribute and chapter lands, for the links of the second; the text family's node and input budgets, so a book's headings are held to what one document holds (each id about three times: the numbering and the lookup, so about 24 MiB at most); `book is too large`, nothing is written |
+| Markdown output | 32 MiB | the text output budget, for the whole md, as for plain text; `book is too large` |
+| output ceiling | `RLIMIT_FSIZE` | per file: the md is checked before each write (`Markdown would be larger than <N> MiB`, the book fails); an image larger than the ceiling keeps its alt text |
+| images | 1023 | the supervisor takes at most 1024 `done` lines from one process (the md is the last) and a join at most 1024 inputs, so the md and its images can be joined back; past it an image keeps its alt text |
+| one image | 64 MiB, 180 megapixels | the join's and the CBZ and PDF actions' image limits, so what this action writes the join takes; checked on the entry's declared size before anything is inflated, and on the bytes produced; past it that image keeps its alt text |
+| images in all | twice the book file | every image read (kept or not) is charged, and each read is capped at what is left, so a book cannot make more than twice its own size be inflated for images (real images barely compress in the ZIP, so a book's own fit); past it the further images keep their alt text and the book is made |
+
+Each image entry is read at most once, however often the chapters name
+it; the md holds one chapter's tree and one image's bytes at a time.
+When the book fails, every file written for it is cut back to empty and
+removed.
+
 A chapter fails alone, in its place, with one of: `too large`, `too large
 (nodes limit)`, `too large (text limit)`, `too large (nesting limit)`,
 `not well-formed XML (line L)`, `unsupported encoding <name>`, `entity
