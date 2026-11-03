@@ -71,29 +71,14 @@ impl Anchors {
     /// headings by file name).
     pub fn build(chapters: &[Chapter]) -> Anchors {
         let mut a = Anchors::default();
-        let mut used: HashSet<String> = HashSet::new();
-        // Next suffix to try per base slug, so n equal headings cost O(n)
-        // rather than O(n^2) probes.
-        let mut next: HashMap<String, usize> = HashMap::new();
+        let mut slugs = Slugs::default();
         for (ci, ch) in chapters.iter().enumerate() {
             a.files.push(ch.file.clone());
             let mut ids = Vec::new();
             let mut texts = Vec::new();
             headings(ch.blocks, &mut texts);
             for text in texts {
-                let base = slug(&text);
-                let mut id = base.clone();
-                if used.contains(&id) {
-                    let n = next.entry(base.clone()).or_insert(0);
-                    loop {
-                        *n += 1;
-                        id = format!("{base}-{n}");
-                        if !used.contains(&id) {
-                            break;
-                        }
-                    }
-                }
-                used.insert(id.clone());
+                let id = slugs.unique(&text);
                 a.owner.insert(id.clone(), ci);
                 ids.push(id);
             }
@@ -128,6 +113,44 @@ impl Anchors {
     }
 }
 
+/// The unique heading ids of one document, given heading by heading in
+/// document order: each is the [`slug`] of the heading's text, and a
+/// collision is numbered over everything given before, as GitHub does
+/// (the second `intro` is `intro-1`, the third `intro-2`, and an `a-1`
+/// that is already taken makes the next `a` `a-2`). [`Anchors::build`]
+/// numbers a whole document with it; a reader that meets a document's
+/// headings one part at a time (a book read chapter by chapter) numbers
+/// them the same way by feeding the same texts in the same order. Memory
+/// is every id given (held twice: the used set and the per-base counter's
+/// key).
+#[derive(Debug, Clone, Default)]
+pub struct Slugs {
+    used: HashSet<String>,
+    /// Next suffix to try per base slug, so n equal headings cost O(n)
+    /// rather than O(n^2) probes.
+    next: HashMap<String, usize>,
+}
+
+impl Slugs {
+    /// The id of the next heading, whose plain text ([`plain`]) is `text`.
+    pub fn unique(&mut self, text: &str) -> String {
+        let base = slug(text);
+        let mut id = base.clone();
+        if self.used.contains(&id) {
+            let n = self.next.entry(base.clone()).or_insert(0);
+            loop {
+                *n += 1;
+                id = format!("{base}-{n}");
+                if !self.used.contains(&id) {
+                    break;
+                }
+            }
+        }
+        self.used.insert(id.clone());
+        id
+    }
+}
+
 /// How many headings [`headings`] finds in `bs` (the same walk).
 fn count_headings(bs: &[Block]) -> usize {
     bs.iter()
@@ -141,8 +164,10 @@ fn count_headings(bs: &[Block]) -> usize {
 }
 
 /// Plain texts of the headings in `bs`, depth first in document order (the
-/// order [`Writer::block`] meets them in).
-fn headings(bs: &[Block], out: &mut Vec<String>) {
+/// order [`Writer::block`] meets them in): a block, then the blocks inside
+/// it (quotes, list items). The recursion is as deep as the tree, which
+/// the readers' depth limits bound.
+pub fn headings(bs: &[Block], out: &mut Vec<String>) {
     for b in bs {
         match b {
             Block::Heading { content, .. } => {
@@ -1094,6 +1119,28 @@ mod tests {
             out.contains("<h1 id=\"a-2\">") && out.contains("<h1 id=\"a-3\">"),
             "{out}"
         );
+    }
+
+    /// Fed heading by heading, [`Slugs`] numbers as [`Anchors::build`]
+    /// does over the whole document (a book read one chapter at a time
+    /// gets the ids a join of its chapters would give).
+    #[test]
+    fn slugs_one_at_a_time_equal_anchors() {
+        let d1 = doc("# A\n\n# A\n\n# A-1\n\n# 2026\n");
+        let d2 = doc("# A\n\n> # A\n\n- # 2026\n");
+        let chapters = [
+            chapter(&d1.blocks, "c1.xhtml"),
+            chapter(&d2.blocks, "c2.xhtml"),
+        ];
+        let a = Anchors::build(&chapters);
+        let mut s = Slugs::default();
+        for (k, ch) in chapters.iter().enumerate() {
+            let mut texts = Vec::new();
+            headings(ch.blocks, &mut texts);
+            let ids: Vec<String> = texts.iter().map(|t| s.unique(t)).collect();
+            assert_eq!(ids, a.headings[k]);
+        }
+        assert_eq!(a.headings[1], ["a-2", "a-3", "h-2026-1"]);
     }
 
     #[test]
