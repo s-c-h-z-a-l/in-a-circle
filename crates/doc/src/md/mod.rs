@@ -4161,4 +4161,295 @@ mod tests {
             assert_eq!(w2, w3, "{input:?}: first round {w1:?}");
         }
     }
+
+    /// Each paragraph written in the GFM mode gives exactly `want` and
+    /// `losses`, and what it reads back as is written the same way.
+    fn gfm_cases(cases: Vec<(Vec<Inline>, &str, &[Loss])>) {
+        for (c, want, losses) in cases {
+            let d = doc(vec![Block::Paragraph(c.clone())]);
+            let (out, got) = gfm(&d);
+            assert_eq!(out, want, "{c:?}");
+            assert_eq!(got, losses.iter().copied().collect(), "{c:?}: {out:?}");
+            assert_eq!(gfm(&gfm_again(&d)).0, out, "{c:?}");
+        }
+    }
+
+    /// What an item looks ahead at to place a mark: the first character
+    /// written after it (an empty code span writes none), whether only
+    /// breaks or only edge white space follow it to its enclosing mark's
+    /// end (each kind of item: text, code, HTML, a mark), whether a mark
+    /// writes nothing (no loss for it), where its content's edge white
+    /// space starts and ends (inside an autolink, a nested mark), and
+    /// whether the opener sits at the start of an enclosing mark of its
+    /// character (`_` then).
+    #[test]
+    fn gfm_marks_look_ahead_at_what_is_written() {
+        use Inline::{Code, Emph as E, HardBreak as Hb, Html, Strikethrough as S, Strong as St};
+        let web = |a: &str| Inline::Link {
+            dest: format!("http://{a}"),
+            title: String::new(),
+            content: vec![t(a)],
+            auto: true,
+        };
+        gfm_cases(vec![
+            // The letter after an empty code span follows the `**`, which
+            // cannot close after `.` there.
+            (
+                vec![St(vec![t(".")]), Code(String::new()), t("ww")],
+                ".ww\n",
+                &[Loss::Emphasis],
+            ),
+            // A code span after it is punctuation: the `*` closes.
+            (
+                vec![E(vec![t("+_")]), Code("x".into()), t("a")],
+                "*+\\_*`x`a\n",
+                &[],
+            ),
+            // Only an empty mark follows the break: neither is written.
+            (vec![Hb, E(vec![])], "", &[]),
+            // Only an empty HTML, a hard break, edge white space or an
+            // empty mark follows the inner mark: it ends where the outer one
+            // does, so it takes the other character (`__`).
+            (
+                vec![E(vec![t(":"), St(vec![t(")")]), Html(String::new())])],
+                "*:__)__*\n",
+                &[],
+            ),
+            (
+                vec![E(vec![t(")~"), St(vec![Code("x".into())]), Hb])],
+                "*)~__`x`__*\n",
+                &[],
+            ),
+            (
+                vec![St(vec![t("://"), St(vec![St(vec![t("1")])]), t("\t")])],
+                "**://__**1**__**&#9;\n",
+                &[],
+            ),
+            (
+                vec![St(vec![t("x ~"), E(vec![t("http")]), E(vec![])])],
+                "**x ~_http_**\n",
+                &[],
+            ),
+            // A mark that writes nothing loses nothing.
+            (vec![t("a"), E(vec![]), t("b")], "ab\n", &[]),
+            (vec![t("a"), E(vec![E(vec![])]), t("b")], "ab\n", &[]),
+            // Past an empty code span the content starts with white space,
+            // moved out in front of the `~~`: it ends the `www.` run, so no
+            // entity.
+            (
+                vec![t("www."), S(vec![Code(String::new()), t(" y")])],
+                "www. ~~y~~\n",
+                &[],
+            ),
+            // A code span opens a mark's content.
+            (vec![E(vec![Code("x".into())])], "*`x`*\n", &[]),
+            // At worst: a hard break inside an inner mark counts as written
+            // (`\`), so the `*` is not risked.
+            (
+                vec![E(vec![t("a"), E(vec![Hb])]), Hb],
+                "a\n",
+                &[Loss::Emphasis],
+            ),
+            // White space after an autolink, and inside a nested mark, is
+            // moved out past the closer.
+            (
+                vec![E(vec![t("x")]), E(vec![web("www.a.b"), t(" ")]), t("y")],
+                "*x*_www.a.b_ y\n",
+                &[],
+            ),
+            (vec![E(vec![E(vec![t("x ")])]), t("x")], "*_x_* x\n", &[]),
+            // Edge white space only since the `*`: the `**` would join it.
+            (
+                vec![E(vec![t("\t"), St(vec![t(":")]), t("*-")])],
+                "&#9;*__:__\\*-*\n",
+                &[],
+            ),
+        ]);
+    }
+
+    /// What `close` checks on the content as written, where the decision
+    /// made before it was too hopeful: a heading writes a hard break as a
+    /// space; white space of a mark left out became an entity inside; a
+    /// raw HTML ending in `\` turns a hard break into an escaped `\` and a
+    /// line end. The marks are left out (with the loss) and what they kept
+    /// apart is escaped (a list marker at the line start). And what it does
+    /// to marks it keeps: hard breaks at the line end taken off, a lone
+    /// tilde only next to `~~`, the line state after it.
+    #[test]
+    fn gfm_closer_checks_what_was_written() {
+        use Inline::{
+            Emph as E, HardBreak as Hb, Html, SoftBreak, Strikethrough as S, Strong as St,
+        };
+        // An inner `*` at the start of an `_` in a `*`, after a tab and
+        // before an `_`, could close the outer one.
+        let d = doc(vec![Block::Heading {
+            level: 1,
+            content: vec![E(vec![E(vec![E(vec![t("\t_")])])])],
+        }]);
+        assert_eq!(
+            gfm(&d),
+            ("# &#9;*_\\__*\n".into(), BTreeSet::from([Loss::Emphasis]))
+        );
+        assert_eq!(gfm(&gfm_again(&d)).0, gfm(&d).0);
+        gfm_cases(vec![
+            // The hard break at the line end is taken off whatever the
+            // content's length.
+            (vec![E(vec![t("ab"), Hb]), Hb], "*ab*\n", &[]),
+            // The `~~` would follow `x` and precede `&`: it cannot open.
+            (
+                vec![t("x"), S(vec![St(vec![t(" "), Hb]), SoftBreak, t("y")])],
+                "x&#32;\ny\n",
+                &[Loss::Emphasis, Loss::Strikethrough],
+            ),
+            // An inner `*` after white space cannot close the outer one.
+            (
+                vec![E(vec![St(vec![t("7"), E(vec![t(" y=")])])])],
+                "*__7 *y=*__*\n",
+                &[],
+            ),
+            // A lone tilde escaped only at the edge of a `~~`.
+            (vec![E(vec![t("~")])], "*~*\n", &[]),
+            (vec![S(vec![t("a~"), S(vec![])])], "~~a\\~~~\n", &[]),
+            // A kept mark at the line start: its content is no marker.
+            (vec![E(vec![t("- ")]), t("ww")], "*-* ww\n", &[]),
+            // After it the line has started: no entity for the space.
+            (vec![E(vec![t(") ")]), t(" y")], "*)*  y\n", &[]),
+        ]);
+        // A raw HTML `\` before a hard break at the line end: the break's
+        // `\` is the second half of an escape, so it stays, the marks go,
+        // and a list marker the marks kept apart is escaped (1-9 digits
+        // then `.`/`)`, or `-`). The text reads back as it was.
+        for (html, want) in [
+            ("x\\", "x\\\\\n\n"),
+            ("ab\\", "ab\\\\\n\n"),
+            ("-\\", "\\-\\\\\n\n"),
+            ("1.\\", "1\\.\\\\\n\n"),
+            ("1234567890.\\", "1234567890.\\\\\n\n"),
+            ("1-\\", "1-\\\\\n\n"),
+        ] {
+            let d = doc(vec![Block::Paragraph(vec![E(vec![Html(html.into()), Hb])])]);
+            assert_eq!(
+                gfm(&d),
+                (want.into(), BTreeSet::from([Loss::Emphasis])),
+                "{html:?}"
+            );
+            assert_eq!(shown_para(&gfm_again(&d)), html, "{html:?}");
+        }
+    }
+
+    /// How a list's items are walked: adjacent texts as one, a tilde
+    /// escaped only before a `~~` that follows, what follows an item and
+    /// a run of strikethroughs (the next item, not the item itself),
+    /// whether its white space reaches the innermost closer, and which
+    /// items settle or end a pending `www.`/`://` run (an empty code span
+    /// or HTML does neither). The autolink guards: a `www.` begun before a
+    /// text, white space before a line break, an escape later in the run.
+    /// Settling counts the entities' bytes against the output budget, to
+    /// the byte.
+    #[test]
+    fn gfm_list_walk_and_autolink_joins() {
+        use Inline::{Code, Emph as E, HardBreak as Hb, Html, Strikethrough as S};
+        gfm_cases(vec![
+            // One text: its space before the line break is an entity.
+            (vec![t("a "), t("\nb")], "a&#32;\nb\n", &[]),
+            // No `~~` follows: the tilde stays.
+            (vec![t("b~"), Hb], "b~\n", &[]),
+            (
+                vec![t("a"), E(vec![t("\"b~")])],
+                "a\"b~\n",
+                &[Loss::Emphasis],
+            ),
+            (
+                vec![t("a"), S(vec![t("~")])],
+                "a~\n",
+                &[Loss::Strikethrough],
+            ),
+            // The white space ending the text reaches the closer and a
+            // line end, so the `www.` run goes on: an entity.
+            (vec![E(vec![t("www. ")])], "*www&#46;*&#32;\n", &[]),
+            (
+                vec![t("!"), E(vec![E(vec![E(vec![t("://www.\t")])])])],
+                "\\!*_://www&#46;_*&#9;\n",
+                &[Loss::Emphasis],
+            ),
+            (
+                vec![E(vec![t("a"), S(vec![E(vec![t("www. ")])])])],
+                "*awww&#46;*&#32;\n",
+                &[Loss::Emphasis, Loss::Strikethrough],
+            ),
+            (
+                vec![S(vec![Code("x".into()), S(vec![t("www. ")])])],
+                "~~`x`www&#46;~~&#32;\n",
+                &[],
+            ),
+            (
+                vec![S(vec![t("&"), S(vec![t("~~www.x ")]), t(")")])],
+                "~~\\&\\~\\~www.x )~~\n",
+                &[],
+            ),
+            (
+                vec![S(vec![S(vec![t("7 "), E(vec![])])])],
+                "~~7~~&#32;\n",
+                &[],
+            ),
+            // A strikethrough run is followed by what is after the run,
+            // its last break at the line end only if the run's end is.
+            (
+                vec![S(vec![S(vec![t("~~")]), Hb]), t("+-")],
+                "~~\\~\\~~~\\\n\\+-\n",
+                &[Loss::Strikethrough],
+            ),
+            (vec![S(vec![t("a"), Hb]), Hb], "~~a~~\n", &[]),
+            // A strikethrough left out as the first item of a mark.
+            (
+                vec![E(vec![S(vec![t("\"b\"")]), t("x")])],
+                "*\"b\"x*\n",
+                &[Loss::Strikethrough],
+            ),
+            // An empty code span or HTML neither settles nor ends a run.
+            (
+                vec![t("www."), Code(String::new()), t(" x")],
+                "www. x\n",
+                &[],
+            ),
+            (
+                vec![t("www."), Html(String::new()), t(".+")],
+                "www..+\n",
+                &[],
+            ),
+            (
+                vec![t("www."), Code(String::new()), t("~")],
+                "www&#46;~\n",
+                &[],
+            ),
+            // One `w` is no `www`: the `.` after it is no candidate.
+            (vec![t("w"), Code(String::new()), t(".x_")], "w.x\\_\n", &[]),
+            // White space before a line break is an entity: the run goes on.
+            (vec![t("www.a \nb")], "www&#46;a&#32;\nb\n", &[]),
+        ]);
+        // Eight pending `.` settled into entities (four bytes more each)
+        // before the `*`: the output fits a budget of its length exactly.
+        let d = doc(vec![Block::Paragraph(vec![
+            t(&("www.".repeat(8) + "z")),
+            E(vec![t("x")]),
+        ])]);
+        let out = gfm(&d).0;
+        assert_eq!(out, "www&#46;".repeat(8) + "z*x*\n");
+        let budget = |output_bytes| Limits {
+            output_bytes,
+            ..Limits::UNLIMITED
+        };
+        let w = |n| write_limited_with(&d, budget(n), Dialect::Gfm).map(|(o, _)| o);
+        assert_eq!(w(out.len()), Ok(out.clone()));
+        assert_eq!(w(out.len() - 1), Err(LimitError::Exceeded("output")));
+        // Both modes: a `)` after a line of digits written by an earlier
+        // node is escaped (the line is counted from its own start).
+        let d = doc(vec![Block::Paragraph(vec![
+            t("1"),
+            Inline::SoftBreak,
+            t("7"),
+            t(")"),
+        ])]);
+        assert_eq!(write(&d).0, "1\n7\\)\n");
+    }
 }
