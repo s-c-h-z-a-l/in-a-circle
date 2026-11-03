@@ -823,7 +823,9 @@ fn can_close(ch: u8, last: Class, after: Class) -> bool {
 /// `items` (`None`: they write nothing), at worst: a mark whose content
 /// starts with a letter may be left out, so it counts as that letter.
 /// Stops at the first item that writes something, so a walk over a list
-/// costs the items it passes, and its depth at most the nesting depth.
+/// costs the items it passes, each down to its first written character.
+/// A list's items look ahead through [`Ahead`], not by calling this on
+/// the rest of the list per item.
 fn lead(items: &[Inline]) -> Option<Class> {
     for i in items {
         let c = match i {
@@ -883,6 +885,67 @@ fn ends_here(items: &[Inline]) -> bool {
     })
 }
 
+/// A look ahead over a list that is read front to back: the first item
+/// at or after an index where `stop` finds something, and what. A scan
+/// goes on from where the last one stopped while the index has not
+/// passed that item, so the whole list costs each item one `stop`
+/// (which walks into that item's content); scanning the rest of the
+/// list again per item would cost the square of a long run (hard breaks,
+/// empty marks), minutes for one chapter.
+struct Ahead<T> {
+    /// Where the last scan started (`usize::MAX`: none yet), the item it
+    /// stopped at (the list's length: none), and what `stop` found there.
+    from: usize,
+    at: usize,
+    found: Option<T>,
+}
+
+impl<T: Copy> Ahead<T> {
+    fn new() -> Self {
+        Ahead {
+            from: usize::MAX,
+            at: 0,
+            found: None,
+        }
+    }
+
+    /// The first item of `items[from..]` for which `stop` gives
+    /// something, as that (`None`: no such item). Indices passed in
+    /// must not go down, or a call scans again.
+    fn find(
+        &mut self,
+        items: &[Inline],
+        from: usize,
+        stop: impl Fn(&Inline) -> Option<T>,
+    ) -> Option<T> {
+        if !(self.from <= from && from <= self.at) {
+            self.from = from;
+            self.at = from;
+            self.found = None;
+            while let Some(i) = items.get(self.at) {
+                self.found = stop(i);
+                if self.found.is_some() {
+                    break;
+                }
+                self.at += 1;
+            }
+        }
+        self.found
+    }
+}
+
+/// [`Ahead`] stops for [`breaks_only`] and [`ends_here`] (an item that
+/// is not such), and for [`lead`] (an item that writes something).
+fn not_break(gfm: bool) -> impl Fn(&Inline) -> Option<()> {
+    move |i| (!breaks_only(std::slice::from_ref(i), gfm)).then_some(())
+}
+fn not_end(i: &Inline) -> Option<()> {
+    (!ends_here(std::slice::from_ref(i))).then_some(())
+}
+fn item_lead(i: &Inline) -> Option<Class> {
+    lead(std::slice::from_ref(i))
+}
+
 /// Whether `items` write nothing at all (the GFM mode writes no mark
 /// around nothing).
 fn writes_nothing(items: &[Inline]) -> bool {
@@ -898,8 +961,9 @@ fn writes_nothing(items: &[Inline]) -> bool {
 /// it: a mark inside counts as the worse of its delimiter (punctuation)
 /// and its content's first character, as it may be left out. And whether edge white space
 /// comes first (it is moved out in front of the mark). Walks to the
-/// first character only, so its cost is that of the edge white space and
-/// the nesting depth.
+/// first character only: its cost is the items before it that write
+/// nothing (edge white space, empty marks) and the nesting depth. It runs
+/// once per mark, on that mark's content.
 fn core_lead(items: &[Inline]) -> (Option<Class>, bool) {
     let mut ws = false;
     for i in items {
@@ -1072,11 +1136,11 @@ impl<'a> InlineWriter<'a> {
     /// emphasis character (`_`) is used; where both would, or where
     /// [`InlineWriter::decide`] finds that it cannot open or close, the
     /// mark is left out: its content is written as it is, with `loss`.
-    /// `rest`: the items after it; `follow` and `eol` as for
+    /// `at_end`: it ends where its enclosing mark does (the items after
+    /// it only [`ends_here`]); `follow` and `eol` as for
     /// [`InlineWriter::close`].
-    fn gfm_mark(&mut self, two: bool, c: &[Inline], rest: &[Inline], follow: Class, eol: bool) {
+    fn gfm_mark(&mut self, two: bool, c: &[Inline], at_end: bool, follow: Class, eol: bool) {
         let at_start = self.at_mark_start();
-        let at_end = self.at_end && ends_here(rest);
         let parent = self.open_marks.last().map(|&(d, _)| d.as_bytes()[0]);
         let len = self.out.len();
         let free = |w: &Self, ch: u8| {
@@ -1093,10 +1157,10 @@ impl<'a> InlineWriter<'a> {
                 if self.decide(delim, core_lead(c), core_trail(c, eol), follow, at_start) {
                     self.mark(delim, c, follow, eol);
                 } else {
-                    self.unmarked(c, rest, follow, eol, Loss::Emphasis);
+                    self.unmarked(c, at_end, follow, eol, Loss::Emphasis);
                 }
             }
-            _ => self.unmarked(c, rest, follow, eol, Loss::Emphasis),
+            _ => self.unmarked(c, at_end, follow, eol, Loss::Emphasis),
         }
     }
 
@@ -1138,14 +1202,14 @@ impl<'a> InlineWriter<'a> {
     }
 
     /// The content of a mark that is left out, written as it is (`loss`
-    /// reported if it shows anything).
-    fn unmarked(&mut self, c: &[Inline], rest: &[Inline], follow: Class, eol: bool, loss: Loss) {
+    /// reported if it shows anything). `at_end` as for
+    /// [`InlineWriter::gfm_mark`].
+    fn unmarked(&mut self, c: &[Inline], at_end: bool, follow: Class, eol: bool, loss: Loss) {
         if !writes_nothing(c) {
             self.losses.insert(loss);
         }
         let list_follow = std::mem::replace(&mut self.follow, follow);
-        let inner_end = self.at_end && ends_here(rest);
-        let at_end = std::mem::replace(&mut self.at_end, inner_end);
+        let at_end = std::mem::replace(&mut self.at_end, at_end);
         self.inlines(c, eol);
         self.follow = list_follow;
         self.at_end = at_end;
@@ -1396,6 +1460,14 @@ impl<'a> InlineWriter<'a> {
         );
         // Whether the current run of strikethroughs is written as one.
         let mut strike_keep = false;
+        // What follows an item, and what follows a run of strikethroughs:
+        // each looked up from an index that only goes up.
+        let gfm = self.gfm;
+        let mut breaks_ahead = Ahead::new();
+        let mut ends_ahead = Ahead::new();
+        let mut lead_ahead = Ahead::new();
+        let mut run_breaks = Ahead::new();
+        let mut run_lead = Ahead::new();
         for (idx, item) in items.iter().enumerate() {
             if self.sink.failed() {
                 return;
@@ -1405,13 +1477,23 @@ impl<'a> InlineWriter<'a> {
             let strike = |i: Option<&Inline>| matches!(i, Some(Inline::Strikethrough(_)));
             // What comes after this item, for a GFM mark's closer, and
             // whether that ends the line.
-            let follow = || lead(&items[idx + 1..]).unwrap_or(list_follow);
+            let mut follow = || {
+                lead_ahead
+                    .find(items, idx + 1, item_lead)
+                    .unwrap_or(list_follow)
+            };
+            // Whether only breaks follow it (in the GFM mode marks holding
+            // only those too).
+            let mut breaks_after = || breaks_ahead.find(items, idx + 1, not_break(gfm)).is_none();
+            // Whether it ends where its enclosing GFM mark does.
+            let at_end = self.at_end;
+            let mut ends_after = || at_end && ends_ahead.find(items, idx + 1, not_end).is_none();
             // GFM: breaks after it that are not written (only breaks up to
             // the end of the line) leave it at the line end.
             let item_eol = match next {
                 None => end_of_line,
                 Some(Inline::SoftBreak) => true,
-                Some(_) => self.gfm && end_of_line && breaks_only(&items[idx + 1..], true),
+                Some(_) => gfm && end_of_line && breaks_after(),
             };
             match item {
                 Inline::Text(t) => {
@@ -1424,12 +1506,11 @@ impl<'a> InlineWriter<'a> {
                     self.text(t, eol, tilde_after);
                 }
                 Inline::Emph(c) | Inline::Strong(c) if self.gfm => {
-                    let rest = &items[idx + 1..];
                     // Written without its marks, its content's end is
                     // this list's end (a `~~` may follow).
                     self.tilde_follows = next.is_none() && tilde_after_list;
                     let two = matches!(item, Inline::Strong(_));
-                    self.gfm_mark(two, c, rest, follow(), item_eol);
+                    self.gfm_mark(two, c, ends_after(), follow(), item_eol);
                 }
                 Inline::Emph(c) => {
                     // An `Emph` at the edge of an `Emph` would put two
@@ -1473,9 +1554,14 @@ impl<'a> InlineWriter<'a> {
                         let run_eol = match after_run.first() {
                             None => end_of_line,
                             Some(Inline::SoftBreak) => true,
-                            Some(_) => end_of_line && breaks_only(after_run, true),
+                            Some(_) => {
+                                end_of_line
+                                    && run_breaks.find(items, idx + n, not_break(true)).is_none()
+                            }
                         };
-                        let f = lead(after_run).unwrap_or(list_follow);
+                        let f = run_lead
+                            .find(items, idx + n, item_lead)
+                            .unwrap_or(list_follow);
                         let contents = || {
                             run.iter().filter_map(|i| match i {
                                 Inline::Strikethrough(c) => Some(c.as_slice()),
@@ -1509,9 +1595,8 @@ impl<'a> InlineWriter<'a> {
                     }
                     if !strike_keep {
                         // Left out: each one's content as it is.
-                        let rest = &items[idx + 1..];
                         self.tilde_follows = next.is_none() && tilde_after_list;
-                        self.unmarked(c, rest, follow(), item_eol, Loss::Strikethrough);
+                        self.unmarked(c, ends_after(), follow(), item_eol, Loss::Strikethrough);
                         continue;
                     }
                     let last = !strike(next);
@@ -1592,7 +1677,7 @@ impl<'a> InlineWriter<'a> {
                     // not written; nor is one followed by nothing but such
                     // breaks (or what writes nothing), whose `\` would
                     // be the last thing on the paragraph's last line.
-                    if !end_of_line || !breaks_only(&items[idx + 1..], self.gfm) {
+                    if !end_of_line || !breaks_after() {
                         self.line_break("\\\n");
                     }
                 }
@@ -3221,6 +3306,72 @@ mod tests {
             assert!(
                 t4 < 8 * t1.max(Duration::from_millis(1)),
                 "{t1:?} -> {t4:?} for four times the input"
+            );
+        }
+    }
+
+    /// What an item needs to know about the items after it (only hard
+    /// breaks follow, only edge white space or breaks follow, the next
+    /// character written) costs linear time over a list: four times the
+    /// items, under eight times the time (loose enough for load, far
+    /// below the sixteen of a list rescanned per item). The shapes are
+    /// the long runs such a rescan walks: hard breaks in both modes (a
+    /// reader builds them from `a\` and lines holding only `\`), marks
+    /// holding only a break inside a mark (`<em>a<b><br/></b>…</em>`),
+    /// and empty marks before one that writes something.
+    #[test]
+    fn suffix_checks_are_linear() {
+        use std::time::{Duration, Instant};
+        let para = |items: Vec<Inline>| doc(vec![Block::Paragraph(items)]);
+        let breaks = |n: usize| [vec![t("a")], vec![Inline::HardBreak; n], vec![t("b")]].concat();
+        let shapes = |n: usize| {
+            [
+                (para(breaks(n)), Dialect::Gfm),
+                (para(breaks(n)), Dialect::CommonMark),
+                (
+                    para(vec![Inline::Emph(
+                        [
+                            vec![t("a")],
+                            vec![Inline::Strong(vec![Inline::HardBreak]); n],
+                        ]
+                        .concat(),
+                    )]),
+                    Dialect::Gfm,
+                ),
+                (
+                    para(
+                        [
+                            vec![t("a")],
+                            vec![Inline::Emph(vec![]); n],
+                            vec![Inline::Emph(vec![t("b")]), t("c")],
+                        ]
+                        .concat(),
+                    ),
+                    Dialect::Gfm,
+                ),
+            ]
+        };
+        // The fastest of a few runs: the least disturbed by other load.
+        let time = |(d, dialect): &(Document, Dialect)| {
+            (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    let n = write_limited_with(d, Limits::UNLIMITED, *dialect)
+                        .unwrap()
+                        .0
+                        .len();
+                    (t.elapsed(), n)
+                })
+                .min()
+                .unwrap()
+        };
+        for (small, big) in shapes(4_000).iter().zip(shapes(16_000).iter()) {
+            let ((t1, n1), (t4, n4)) = (time(small), time(big));
+            assert!(n4 <= 4 * n1 + 4096, "{n1} -> {n4} bytes");
+            assert!(
+                t4 < 8 * t1.max(Duration::from_millis(1)),
+                "{:?}: {t1:?} -> {t4:?} for four times the items",
+                small.1
             );
         }
     }
