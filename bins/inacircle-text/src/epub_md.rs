@@ -8,8 +8,9 @@
 //! appends it; a chapter's tree is dropped before the next. A spine item
 //! that cannot be read is a paragraph in its place, as in the plain-text
 //! reading. Nothing is reported `done` before the whole book is written:
-//! on any failure every file written for it is cut back to empty and
-//! removed, so no half folder is left for the engine to publish.
+//! on a failure every file written for it is cut back to empty and
+//! removed, so no half folder is left; and as no `done` came, the engine
+//! publishes nothing of it even when the process dies first.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -69,6 +70,11 @@ struct Images<'a> {
     budget: u64,
     /// The process's `RLIMIT_FSIZE`: an image larger is its alt text.
     cap: Option<u64>,
+    /// An image's name was too long for the file system (`ENAMETOOLONG`:
+    /// a long input stem, which the md's own shorter name still fits):
+    /// every image's is as long, so none is read any more and each keeps
+    /// its alt text; the book is still made.
+    names_too_long: bool,
     buf: Vec<u8>,
 }
 
@@ -90,7 +96,7 @@ impl Images<'_> {
         if let Some(known) = self.seen.get(&path) {
             return Ok(known.clone());
         }
-        if self.written.images.len() >= MAX_IMAGES {
+        if self.written.images.len() >= MAX_IMAGES || self.names_too_long {
             return Ok(None);
         }
         let placed = match book.resource_size(&path) {
@@ -109,7 +115,7 @@ impl Images<'_> {
                     Err(_) => None,
                     Ok(()) => match image_ext(&self.buf) {
                         Some(ext) if self.cap.is_none_or(|c| self.buf.len() as u64 <= c) => {
-                            Some(self.write(ext)?)
+                            self.write(ext)?
                         }
                         _ => None,
                     },
@@ -121,20 +127,24 @@ impl Images<'_> {
         Ok(placed)
     }
 
-    /// Writes the bytes read as the next image file; its md destination.
-    fn write(&mut self, ext: &str) -> Result<String, String> {
+    /// Writes the bytes read as the next image file; its md destination,
+    /// or `None` when its name is too long (the image keeps its alt text).
+    fn write(&mut self, ext: &str) -> Result<Option<String>, String> {
         let name = format!("{}-{:04}.{ext}", self.stem, self.written.images.len() + 1);
         let path = self.dir.join(&name);
         // Created new: an existing file is never overwritten.
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| format!("cannot create output: {e}"))?;
+        let mut f = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                self.names_too_long = true;
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("cannot create output: {e}")),
+        };
         self.written.images.push(path);
         f.write_all(&self.buf)
             .map_err(|e| format!("cannot write output: {e}"))?;
-        Ok(md_dest(&name))
+        Ok(Some(md_dest(&name)))
     }
 }
 
@@ -155,8 +165,10 @@ fn image_ext(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// A file name as a link destination: `%`, `#` and `?` percent-encoded,
-/// so a viewer does not take them for an escape, a fragment or a query
-/// and the join (which decodes `%XX`) finds the file. Everything else is
+/// so a viewer does not take them for an escape, a fragment or a query,
+/// and so is every control character (each of its UTF-8 bytes), which the
+/// md writer would turn into a space (a line feed) or a link could not
+/// hold; the join (which decodes `%XX`) finds the file. Everything else is
 /// written as it is (the md writer puts a name with a space in `<...>`).
 fn md_dest(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -165,6 +177,11 @@ fn md_dest(name: &str) -> String {
             '%' => out.push_str("%25"),
             '#' => out.push_str("%23"),
             '?' => out.push_str("%3F"),
+            c if c.is_control() => {
+                for b in c.encode_utf8(&mut [0; 4]).bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
             c => out.push(c),
         }
     }
@@ -361,6 +378,7 @@ pub(crate) fn process(
         // a book's own images fit; a bomb stops here.
         budget: book_len.saturating_mul(2),
         cap: None,
+        names_too_long: false,
         buf: Vec::new(),
     };
     match convert(&book, &mut out, &mut images) {
@@ -390,8 +408,11 @@ pub(crate) fn process(
 }
 
 /// Removes what was written for a book that did not finish, on every way
-/// out (an error or a panic) but success: each file is cut back to empty
-/// first, so a removal that fails leaves no content.
+/// out of `process` but success (an error; an unwinding panic in a test
+/// build): each file is cut back to empty first, so a removal that fails
+/// leaves no content. A shipped build aborts on a panic (`panic =
+/// "abort"`), so nothing is removed then; no `done` was sent, so the
+/// engine publishes nothing of the book either way.
 struct Discard {
     md: Option<PathBuf>,
     images: Vec<PathBuf>,
@@ -777,6 +798,10 @@ mod tests {
         assert_eq!(md_dest("a b-0001.jpg"), "a b-0001.jpg");
         assert_eq!(md_dest("100%#1?-0001.png"), "100%25%231%3F-0001.png");
         assert_eq!(md_dest("Árvíztűrő-0001.jpg"), "Árvíztűrő-0001.jpg");
+        assert_eq!(
+            md_dest("new\nline\r\ttab\u{7f}\u{85}-0001.png"),
+            "new%0Aline%0D%09tab%7F%C2%85-0001.png"
+        );
     }
 
     #[test]

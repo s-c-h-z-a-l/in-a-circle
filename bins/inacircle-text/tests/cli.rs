@@ -3351,6 +3351,71 @@ mod epub_to_txt {
             assert_eq!(fs::read(work.join("0").join(dest)).unwrap(), j);
         }
 
+        /// A stem so long that the md's name fits the file system but an
+        /// image's (6 bytes longer) does not: the images keep their alt
+        /// text and the book is made.
+        #[test]
+        fn long_stem_images_keep_alt_text() {
+            let (root, work) = workdir("md-long-stem");
+            let j = jpeg();
+            // 250 + `.epub` is the longest file name (255 bytes); the md's
+            // is 253, an image's 259.
+            let stem = "s".repeat(250);
+            let b = book_with(
+                &root,
+                &format!("{stem}.epub"),
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>t <img src=\"a.jpg\" alt=\"A\"/> <img src=\"b.jpg\" alt=\"B\"/></p>",
+                )],
+                &[("OEBPS/a.jpg", &j, Stored), ("OEBPS/b.jpg", &j, Stored)],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, [format!("0/{stem}.md")]);
+            assert_eq!(r.text, "t A B\n");
+            assert_eq!(r.warns, ["2 image(s) replaced by alt text", STYLES]);
+            assert_eq!(snapshot(&work).len(), 1);
+        }
+
+        /// A control character in the stem (a line feed) is percent-encoded
+        /// in the image's link, so the link read back and decoded is the
+        /// file's name.
+        #[test]
+        fn control_character_in_stem_links_the_image() {
+            let (root, work) = workdir("md-newline-stem");
+            let j = jpeg();
+            let b = book_with(
+                &root,
+                "new\nline.epub",
+                "",
+                &[ch("c.xhtml", "<p>K <img src=\"a.jpg\" alt=\"x\"/></p>")],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            // The `done` lines carry the name escaped: read the md itself.
+            let o = run_raw(MD, &work, &[&b]);
+            assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+            assert_eq!(lines(&stdout(&o), "done").len(), 2, "{}", stdout(&o));
+            let text = fs::read_to_string(work.join("0/new\nline.md")).unwrap();
+            assert_eq!(text, "K ![x](new%0Aline-0001.jpg)\n");
+            let d = doc::md::read_limited_with(
+                text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let doc::Block::Paragraph(p) = &d.blocks[0] else {
+                panic!()
+            };
+            let doc::Inline::Image { dest, .. } = &p[1] else {
+                panic!("{p:?}")
+            };
+            let name = doc::xhtml::percent_decode(dest);
+            assert_eq!(name, "new\nline-0001.jpg");
+            assert_eq!(fs::read(work.join("0").join(&name)).unwrap(), j);
+        }
+
         /// A picture book (each chapter one image, no text) is an md of its
         /// images; with no image written either, there is no book.
         #[test]

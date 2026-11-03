@@ -561,7 +561,10 @@ are in `CLAUDE.md`.
   has no line of its own, so the `warn` lines stay within the
   supervisor's 16. The md links to an image by its file name
   (`![alt](<stem>-0001.jpg)`, in `<...>` when the name has a space; `%`,
-  `#` and `?` percent-encoded). A book with no text but at least one
+  `#`, `?` and control characters percent-encoded). When the stem is so
+  long that an image's name does not fit the file system (it is 6 bytes
+  longer than the md's), the images keep their alt text and the md is
+  still made. A book with no text but at least one
   image written is made (a picture book); with neither, `book has no
   text`. Nothing is reported before the book is whole: then one `done`
   per image in order, the md last, and the `warn` lines. On any failure
