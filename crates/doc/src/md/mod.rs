@@ -642,9 +642,22 @@ fn pipe_table(
 /// Fenced code block. The fence is longer than any run of the fence
 /// character in the text; an info string containing a backtick forces a
 /// tilde fence (a backtick fence's info string may not contain backticks).
+/// The reader takes backslash escapes and entities off an info string, so
+/// every `\` and `&` in it gets a backslash and reads back as it was.
 fn code_block(info: &str, text: &str, sink: &mut Sink) -> String {
     let info = info.replace(['\n', '\r'], " ");
     let info = info.trim();
+    let mut escaped = String::new();
+    for c in info.chars() {
+        if matches!(c, '\\' | '&') {
+            sink.push(&mut escaped, '\\');
+        }
+        sink.push(&mut escaped, c);
+    }
+    if sink.failed() {
+        return String::new();
+    }
+    let info = escaped.as_str();
     let ch = if info.contains('`') { '~' } else { '`' };
     let (mut longest, mut run) = (0usize, 0usize);
     for c in text.chars() {
@@ -1498,6 +1511,34 @@ mod tests {
             text: "~~~\n".into(),
         };
         assert_eq!(write(&doc(vec![tilde])).0, "~~~~a`b\n~~~\n~~~~\n");
+    }
+
+    /// The reader takes backslash escapes and entities off an info
+    /// string, so the writer escapes every `\\` and `&` in it.
+    #[test]
+    fn info_string_reads_back_unchanged() {
+        for info in ["a\\b", "c\\*", "x&amp;y", "&", "\\", "r`s\\&t", "\\\\"] {
+            let d = doc(vec![Block::CodeBlock {
+                info: info.into(),
+                text: "x\n".into(),
+            }]);
+            for dialect in [Dialect::CommonMark, Dialect::Gfm] {
+                let (out, _) = write_limited_with(&d, Limits::UNLIMITED, dialect).unwrap();
+                assert_eq!(
+                    read_with(out.as_bytes(), dialect).unwrap(),
+                    d,
+                    "{info:?}: {out:?}"
+                );
+            }
+        }
+        let info = |i: &str| {
+            write(&doc(vec![Block::CodeBlock {
+                info: i.into(),
+                text: String::new(),
+            }]))
+            .0
+        };
+        assert_eq!(info("a\\b&c"), "```a\\\\b\\&c\n```\n");
     }
 
     #[test]

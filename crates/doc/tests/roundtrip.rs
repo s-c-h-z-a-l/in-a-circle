@@ -608,7 +608,13 @@ fn fnv1a(h: &mut u64, bytes: &[u8]) {
 /// spec example's tree, read in both dialects (so tables and strikethrough
 /// take the CommonMark-mode flattening), are pinned by a hash taken from
 /// the writer before the change. The txt -> md outputs of the CLI tests
-/// and the writer's own unit tests pin the rest.
+/// and the writer's own unit tests pin the rest. Two fixes of the shared
+/// writer came later and change no spec example's output (checked against
+/// the earlier writer, example by example): the escaped `\` and `&` of a
+/// code block's info string (no spec tree holds one after reading) and the
+/// escaped `:` of a delimiter-row line (no spec paragraph has one). The
+/// guarantee for what txt -> md ships is
+/// [`txt_trees_commonmark_output_unchanged`].
 #[test]
 fn commonmark_mode_unchanged() {
     let mut h = 0xcbf2_9ce4_8422_2325_u64;

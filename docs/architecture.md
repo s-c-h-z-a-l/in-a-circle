@@ -205,7 +205,9 @@ are in `CLAUDE.md`.
 - The Markdown writer (`doc::md`) has two modes. The CommonMark mode
   (`write`, `write_limited`) is what `text.txt-to-md` writes; a table in
   it is one line per row (reported) and strikethrough loses its marks
-  (reported). The GFM mode (`write_limited_with(.., Dialect::Gfm)`)
+  (reported). A code block's info string gets a backslash before every
+  `\` and `&`, since readers take escapes and entities off it. The GFM
+  mode (`write_limited_with(.., Dialect::Gfm)`)
   writes everything else the same way and adds: a table as a pipe table
   (a header row, kept even when all its cells are empty, the delimiter
   row `---`, `:--`, `:-:` or `--:` per column, then the body rows, a row
