@@ -1,0 +1,62 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopar?d ANY>
+<!ELEMENTmls la EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tige->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopar?d ANY>
+<!ELEMENTmls la EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)r (#PCDATA)>
+<!ELEMENT leol EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- AboY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger colo€€€€€€€€ color CD#ATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopardr CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mivage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE ="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   l’š‘t animal -->
+

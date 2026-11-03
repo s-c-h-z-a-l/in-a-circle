@@ -1,0 +1,46 @@
+<?xÿşml version="1.0" encoding="utf-8" stan!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiçer (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<oding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!şÿÿÿÿÿÿÿcat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEM
+<ENT big EMPTY>
+<!ATT-->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger !-- Above is DTD -->
+<?music "Here is grt color CDATA #REQ†UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">Thhis is a wh?xC""x/>ite tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <small/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element animal --?
+dalone="yeY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<oding="utf-9" standalone=LDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger 

@@ -1,0 +1,4 @@
+<!DOCTYPE c [
+<!ELEMENT doc (#PCDATA)>
+]>
+<doc>&#74;doc><?xml 6>

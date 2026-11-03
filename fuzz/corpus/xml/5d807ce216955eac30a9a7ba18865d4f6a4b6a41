@@ -1,0 +1,11 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc (#PCDATA|a|c|d)*>
+<!ELEMENT a EMPTY>
+<!ELEMENT b EMPTEMPTY>
+<!ATTLIST a>
+<!ATTLIST b >
+<!ATTLIST c att CDATA #IMPLIED>
+<!ATTLIST d>
+]>
+<c att2="test"/></doc>

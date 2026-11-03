@@ -1,0 +1,11 @@
+<?xmlv  ersion="1.0"?>
+
+<!DOCTYPE root
+ [
+ <!ELEMENT root (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT>
+ <!ATTLIST  ANY>
+ <!ELEMENT ED>
+ <!ATTLIST t>

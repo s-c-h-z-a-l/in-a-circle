@@ -1,0 +1,15 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nametoken namevalue NMTOKEN "hello">
+  ]>
+<test>
+The def<i>>
+straints o">
+  ]>
+<test>
+Thevalue specified ÿÿÿ=ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xRmlns:p=""/>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿalone='ye' ?>
+raints of the declared atctioOKEN

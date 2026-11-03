@@ -1,0 +1,32 @@
+<!DOCTYPE lolz [<!ENTITY lo	l "lol"><!ENTITY lol2 "&lol;
+
+
+?xmlA
+
+
+
+
+
+
+
+
+
+
+
+
+¥ <<![CDATA[/stu&lol (#PCDATA)> 
+]>
+DATA[/stu&lol;&lol;"><!ENTITY lol3 "&NT student (ÄCDATA)> 
+]>
+
+<?MyInstruct ?>
+<student>My Name
+
+
+
+
+
+
+
+
+lolz>&lol3;</lolz>

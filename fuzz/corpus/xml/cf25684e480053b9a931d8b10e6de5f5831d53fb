@@ -1,0 +1,13 @@
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT anl (cTA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+Ye!!</tiger>
+   <cat/>
+   lemen a<!-- Above is DTD -->
+Ye!!</tigl

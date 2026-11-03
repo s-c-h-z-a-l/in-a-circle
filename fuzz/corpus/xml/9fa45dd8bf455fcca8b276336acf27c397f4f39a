@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root (a,b)>
+  <!ELEMENT a EMPTY>
+  <!ELEMENT b (#PCDATA|c)* >
+  <!ELEMENT c ANY>
+]>
+<root><a/><b>
+   <c></c > :<a>&Lt;
+<!--* Tests emp<a>&#0;&nbsp;¸¸¸¸¸¸à¸¸¸¸¸¸¸;<ty comment *-->
+<!---->
+<student>My Name is SnowMan.LEMENT student (#PCDmment *---* Tests emp<a>&#0;&nbs p;¸¸¸¸¸¸à¸¸¸¸>
+<!--udent/a>>My Nam;
+&nt>
+
+</a>

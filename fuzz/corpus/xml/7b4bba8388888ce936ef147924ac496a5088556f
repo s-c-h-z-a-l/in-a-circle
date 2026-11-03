@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT rook (a,b)>
+  <!ELEMENT aCDATA>
+]>
+<root><a/><b>t<?xml!ve-rsi

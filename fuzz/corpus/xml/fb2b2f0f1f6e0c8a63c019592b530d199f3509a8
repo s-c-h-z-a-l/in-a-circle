@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCi></b>DATA)>
+<!ELEMENT leopard ANY>
+<!ELE" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leo;ard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCa></b>DAT>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->e iÿÿÿÿÿÿÿÐÿÿÿÿÿÿÿÿÿÿÿÿÿ coloAbove

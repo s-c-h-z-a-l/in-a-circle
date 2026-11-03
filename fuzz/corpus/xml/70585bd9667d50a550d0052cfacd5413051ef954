@@ -1,0 +1,12 @@
+<?xmlÛ version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT root (x|y#PCD>
+ <!ATTLIST x attr ED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #IMPLIED>
+ ]>
+<root>
+<x a,tr= 'Madame'></y>
+</r=ot>

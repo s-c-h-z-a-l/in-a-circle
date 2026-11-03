@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+<!ELEMENT ST root attr1 CPLI--\>
+<!--* Wrong ÿ9osing sequence in EmptyEelemTag *-->
+
+
+
+
+<!ELEMENT

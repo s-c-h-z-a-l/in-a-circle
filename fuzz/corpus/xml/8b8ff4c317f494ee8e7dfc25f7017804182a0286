@@ -1,0 +1,19 @@
+<?xml version="1. Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard AN
+<!ELEMENT small EMPTY>
+@!ELEMENT big EMPTY>
+<!ATTLIST MLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT
+<!ELEME>
+<!ELEMENT big OMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is   am

@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT student (£PCDATA)> 
+]>
+<!--* Tests e0m-->
+<h1><p>a<a xmlns:p=a38="19"ÿÿÿÿÿÿÿÿ
+

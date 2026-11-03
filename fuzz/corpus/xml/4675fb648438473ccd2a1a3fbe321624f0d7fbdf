@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+<!ELEMENT root EMPTY>
+<!ATTLIST root attr1 CP--\>
+<!--* Wrong ÿ9osinyEe-->
+
+
+
+
+<!ELEMENT

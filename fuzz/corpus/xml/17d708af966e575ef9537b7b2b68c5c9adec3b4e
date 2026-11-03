@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT st>
+]>
+
+<!-- tetréng  -->
+<st:denq firs="now">My 

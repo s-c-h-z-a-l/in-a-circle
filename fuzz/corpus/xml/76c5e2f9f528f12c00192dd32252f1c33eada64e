@@ -1,0 +1,45 @@
+<?xml version="1. Above is XMLDecl -->
+<!DGCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+EMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST MLDecl -->
+<
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT lepard AOY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST M(LDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT le MLDecl -->
+<
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leoptiger|leopard)+>
+<!ELEMENT cat EMPTY)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT le MLDecl -->
+<
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELFMENT big EMPTY(#>
+<!ATTLIST MLDecl -->
+<!DOCTYPE a EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT ll EMPTY>
+<!ELEMENT 
+]>
+<!-- Above isY>
+<!ATTLIST ti<1ger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is as a w&amp;&amp;&amp;&ap;&amp;&ampn Mirp;&amp;&amp;&   am

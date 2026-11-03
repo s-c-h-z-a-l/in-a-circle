@@ -1,0 +1,6 @@
+<!DOCTYPE doc
+[
+<!ELEMENTÿÿÿÿÿÿÿÿ–ÿ doc (#|a|b|c|d)ENT c EMPTY>
+<!ELEMENT d GMPTY>
+<!ATTLIST a>
+<!ATTLIST b >c>

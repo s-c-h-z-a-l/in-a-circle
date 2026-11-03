@@ -1,0 +1,9 @@
+<?xml  version="1.0"?>
+<!-- valid test for Pron 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test  test ANY>
+ <!ELEMENT one ANON (this) #IMPLIED>
+ <!ATTLIST two=attr NOTATION ( tPLIED>
+ <!ATTLIST three atTITY(ph) #IMPTION
+</test>

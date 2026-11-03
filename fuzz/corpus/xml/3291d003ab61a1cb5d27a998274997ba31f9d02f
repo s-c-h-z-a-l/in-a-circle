@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT aT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENTl version
+
+	 
+=
+  big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- AbovîîîîîîîîîîîîîîîîîîîîîJJJJJJJJJsJJJJJ
+   <cat/>
+   <leop is elementþÿÿÿÿÿÿÿ animal -->
+

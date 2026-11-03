@@ -1,0 +1,14 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nameten namevalue NMTOKEN "hello">
+  ]>
+<test>
+T
+The default value specified for an a[trhello">
+  ]>
+<test>
+Thevalue specified ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<i>aÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xmlns:p=""/>ÿ

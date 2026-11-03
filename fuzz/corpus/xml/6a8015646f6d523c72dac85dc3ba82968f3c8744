@@ -1,0 +1,75 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT root (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST  ANY>
+ <!ELEMENT zTA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMAOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT PA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST  ANY>
+ <!ELEMENT zTA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMAOKENS #IMPLIEDMENT zTA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMAOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT IST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr 2x|y) #(#PCDATA)>
+ <!ELEMENT PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (T x attr CDATA #IMPLIED>
+ <!ATTLIST y at>

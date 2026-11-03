@@ -1,0 +1,35 @@
+ <?xll v"1.<!CYDOTPE aniNT small EMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE ani-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿNT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal mal (ga>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- obÿAvÿs>
+<studunt firLIST studu;><?env first CDATA #REQUIRED
+]]]]]]ÿ.]]\]]]]]]]]]] PITagret ?>
+

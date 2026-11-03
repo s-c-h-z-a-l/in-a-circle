@@ -1,0 +1,21 @@
+<?xml version="1. Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST MLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>ENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard A-NY>
+<a>#<a>6T small EMPTY>
+<!ELEMENT big ED>
+]>
+<!-- Above is DTD -->
+<?music "Here is as a >&amp;&amp;&p;&amp<html xmlns="http

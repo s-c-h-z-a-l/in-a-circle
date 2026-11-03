@@ -1,0 +1,50 @@
+<?ENT tiger (#PCDATA)ED>
+]>
+<!-- Above is`DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELETFNM tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIREDÌ>
+]>
+<!-- Above is DPD -->
+<?muÿÿc ”Here is a PI" ?> 
+<animam>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT l:x="urn:1" CDATA #REQUIRED>
+]>
+<!-- Above is DTDTY>
+<!ELEMENT tiger (#…JCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!><x:b xmlns:VVVVVVVVVVVVVVVVVVELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiRED>
+]>
+<!-- Above Nis DTD -->
+<?musiÙŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸp://purl.org/dcÑš“š’‘Œs/1.1/ÃÁÃ"><dc:titM "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger iôôôôôôôôôôôôôôôôôôôôôôôôôôôôn Mirage!!</tiger>
+   <cat/>V
+   l’VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVx=‘t animal -->
+"urn:0
+šššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššÃŞÌ-*a v= v="&#20`;& v d Tests empty commentÿÿÿÿÿÿÿ±!---->
+<stu"/><x:c/></x:ade
+></a>

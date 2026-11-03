@@ -1,0 +1,36 @@
+<?xml  version="1.0"?><!DOCTYPE root
+ [
+ <!ELEMENT root (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST yKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST  ANY>
+ <!ELEMENT zTA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y attr NMTOKENS #IMPLIED>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT yoot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ <!ATTLIST x attr CDATA #IMPLIED>
+ <!ATTLIST y at>
+ <!ATTLIST z attr (x|y) #(#PCDATA)>
+ <!ELEMENT y ANY>
+ <!ELEMENT z EMPTY>
+ MENT root (x|y|TA #IMPLIED>
+ <!ATTLIST t>
