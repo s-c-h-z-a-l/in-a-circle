@@ -286,20 +286,103 @@ fn xhtml_shaped(data: &[u8]) -> Vec<doc::Inline> {
     c
 }
 
-/// The GFM writer on an XHTML-shaped paragraph: a GFM reader shows the
-/// same text, so no delimiter is left as text and no text is lost (a
-/// mark that cannot open or close is left out, with its loss).
+/// What applies to a character a reader shows (bits): emphasis, strong
+/// emphasis and strikethrough may be lost (with their loss), code and a
+/// link or image must stay. An extended autolink counts as no link: a GFM
+/// reader links `www.` text as it reads it.
+const EMPH: u8 = 1;
+const STRONG: u8 = 2;
+const STRIKE: u8 = 4;
+const CODE: u8 = 8;
+const LINK: u8 = 16;
+const IMAGE: u8 = 32;
+
+/// The characters [`shown`] gives, each with what applies to it.
+fn styled(blocks: &[doc::Block], out: &mut Vec<(char, u8)>) {
+    fn inlines(c: &[doc::Inline], on: u8, out: &mut Vec<(char, u8)>) {
+        let text = |t: &str, on: u8, out: &mut Vec<(char, u8)>| {
+            out.extend(t.chars().map(|ch| (ch, on)));
+        };
+        for i in c {
+            match i {
+                doc::Inline::Text(t) | doc::Inline::Html(t) => text(t, on, out),
+                doc::Inline::Code(t) => text(t, on | CODE, out),
+                doc::Inline::Emph(c) => inlines(c, on | EMPH, out),
+                doc::Inline::Strong(c) => inlines(c, on | STRONG, out),
+                doc::Inline::Strikethrough(c) => inlines(c, on | STRIKE, out),
+                doc::Inline::Link {
+                    content: c, auto, ..
+                } => inlines(c, if *auto { on } else { on | LINK }, out),
+                doc::Inline::Image { alt: c, .. } => inlines(c, on | IMAGE, out),
+                doc::Inline::SoftBreak | doc::Inline::HardBreak => {}
+            }
+        }
+    }
+    for b in blocks {
+        match b {
+            doc::Block::Paragraph(c) | doc::Block::Heading { content: c, .. } => inlines(c, 0, out),
+            doc::Block::BlockQuote(bs) => styled(bs, out),
+            doc::Block::List { items, .. } => {
+                for i in items {
+                    styled(&i.blocks, out);
+                }
+            }
+            doc::Block::Table { head, rows, .. } => {
+                for c in head.iter().chain(rows.iter().flatten()) {
+                    inlines(c, 0, out);
+                }
+            }
+            other => {
+                let mut s = String::new();
+                shown(std::slice::from_ref(other), &mut s);
+                out.extend(s.chars().map(|ch| (ch, 0)));
+            }
+        }
+    }
+}
+
+/// The GFM writer on an XHTML-shaped paragraph, read back by a GFM
+/// reader, character by character: the same text (no delimiter left as
+/// text, no text lost), the same code and links, no formatting the tree
+/// did not have (`Emph` in `Emph` written as `Strong`), and a mark lost
+/// from a character that is not white space (white space at a mark's
+/// edges moves out) only with its loss (a mark that cannot open or close
+/// is left out, and says so).
 fn marks_read_back(data: &[u8]) {
     let d = doc::Document {
         blocks: vec![doc::Block::Paragraph(xhtml_shaped(data))],
     };
-    let (w, _) =
+    let (w, losses) =
         doc::md::write_limited_with(&d, doc::Limits::UNLIMITED, doc::Dialect::Gfm).unwrap();
     let back = doc::md::read_with(w.as_bytes(), doc::Dialect::Gfm).unwrap();
-    let (mut want, mut got) = (String::new(), String::new());
-    shown(&d.blocks, &mut want);
-    shown(&back.blocks, &mut got);
-    assert_eq!(got, want, "{w:?} from {:?}", d.blocks);
+    let (mut want, mut got) = (Vec::new(), Vec::new());
+    styled(&d.blocks, &mut want);
+    styled(&back.blocks, &mut got);
+    let text = |v: &[(char, u8)]| v.iter().map(|&(c, _)| c).collect::<String>();
+    assert_eq!(text(&got), text(&want), "{w:?} from {:?}", d.blocks);
+    for (k, (&(ch, was), &(_, is))) in want.iter().zip(&got).enumerate() {
+        let at = || format!("char {k} {ch:?} in {w:?} from {:?}", d.blocks);
+        assert_eq!(
+            is & (CODE | LINK | IMAGE),
+            was & (CODE | LINK | IMAGE),
+            "{}",
+            at()
+        );
+        assert_eq!(is & !was, 0, "new formatting: {}", at());
+        let lost = was & !is;
+        if !ch.is_whitespace() {
+            if lost & (EMPH | STRONG) != 0 {
+                assert!(losses.contains(&doc::Loss::Emphasis), "silent: {}", at());
+            }
+            if lost & STRIKE != 0 {
+                assert!(
+                    losses.contains(&doc::Loss::Strikethrough),
+                    "silent: {}",
+                    at()
+                );
+            }
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
