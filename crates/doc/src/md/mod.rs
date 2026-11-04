@@ -817,6 +817,13 @@ struct InlineWriter<'a> {
     /// that is written next (set by the list, taken by
     /// [`InlineWriter::unmarked`]).
     child_to_end: bool,
+    /// GFM: where in `out` the code span written last starts and ends
+    /// (`usize::MAX`: none, or a mark closed since, which may move bytes);
+    /// it is current while it ends `out`. A code span written right after it would
+    /// touch it (`` `a``b` ``), which a reader takes for one span holding
+    /// the backticks between: the two are joined into one span instead
+    /// ([`InlineWriter::join_code`]).
+    code: (usize, usize),
 }
 
 /// What a delimiter run's neighbour is for the flanking rules: Unicode
@@ -1152,6 +1159,9 @@ struct Open {
     /// and as written now.
     before: Class,
     before_now: Class,
+    /// GFM: the code span ending right at its opener (see
+    /// [`InlineWriter::code`]), if one does.
+    code: (usize, usize),
 }
 
 /// White space that goes outside a mark (a line ending stays in it).
@@ -1170,6 +1180,62 @@ fn lone_tilde(s: &str, front: bool) -> Option<usize> {
         let before = &b[..n];
         let slashes = before.iter().rev().take_while(|&&c| c == b'\\').count();
         (b[n] == b'~' && before.last() != Some(&b'~') && slashes % 2 == 0).then_some(n)
+    }
+}
+
+/// The runs of backticks in `t`: where each starts and how long it is.
+fn tick_runs(t: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let b = t.as_bytes();
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while i < b.len() && b[i] != b'`' {
+            i += 1;
+        }
+        if i == b.len() {
+            return None;
+        }
+        let at = i;
+        while i < b.len() && b[i] == b'`' {
+            i += 1;
+        }
+        Some((at, i - at))
+    })
+}
+
+/// The shortest fence of at least `min` backticks that `t` does not hold
+/// as a run (a reader ends a span at the first run as long as its fence).
+fn span_fence(t: &str, min: usize) -> usize {
+    let runs: BTreeSet<usize> = tick_runs(t).map(|(_, n)| n).collect();
+    (min.max(1)..).find(|n| !runs.contains(n)).unwrap_or(min)
+}
+
+/// Whether `t` is padded with a space in its span: a backtick at an edge
+/// would join the fence, and a reader takes one space off each edge of
+/// content that starts and ends with one (and is not all spaces).
+fn span_pad(t: &str) -> bool {
+    t.starts_with('`')
+        || t.ends_with('`')
+        || (t.starts_with(' ') && t.ends_with(' ') && t.chars().any(|c| c != ' '))
+}
+
+/// [`span_pad`] for `a` followed by `b`, `a` not empty.
+fn span_pad_joined(a: &str, b: &str) -> bool {
+    let last = b.chars().next_back().or_else(|| a.chars().next_back());
+    a.starts_with('`')
+        || last == Some('`')
+        || (a.starts_with(' ')
+            && last == Some(' ')
+            && (a.chars().any(|c| c != ' ') || b.chars().any(|c| c != ' ')))
+}
+
+/// The text of a code span's content as a reader takes it: one space off
+/// each edge when both are spaces and it is not all spaces (what
+/// [`span_pad`] added).
+fn span_text(c: &str) -> &str {
+    if c.len() >= 2 && c.starts_with(' ') && c.ends_with(' ') && c.bytes().any(|b| b != b' ') {
+        &c[1..c.len() - 1]
+    } else {
+        c
     }
 }
 
@@ -1203,6 +1269,7 @@ impl<'a> InlineWriter<'a> {
             web_end: usize::MAX,
             to_end: false,
             child_to_end: false,
+            code: (usize::MAX, usize::MAX),
         }
     }
 
@@ -1421,6 +1488,11 @@ impl<'a> InlineWriter<'a> {
             line_start: self.line_start,
             before: self.before(),
             before_now: self.out.chars().next_back().map_or(Class::Space, Class::of),
+            code: if self.code.1 == self.out.len() {
+                self.code
+            } else {
+                (usize::MAX, usize::MAX)
+            },
         };
         self.line_start = false;
         self.sink.push_str(&mut self.out, delim);
@@ -1455,6 +1527,13 @@ impl<'a> InlineWriter<'a> {
         (self.open_at, self.open_before) = outer;
         self.open_marks.pop();
         self.web_end = usize::MAX;
+        // A span in the content no longer ends `out` once a closer is
+        // written, and the content may move below. (A mark left out here,
+        // by this backstop, after its content is written, would put a span
+        // at its core's edge next to one outside it unjoined; `decide`
+        // leaves such a mark out before its content is written, where a
+        // span written next is joined.)
+        self.code = (usize::MAX, usize::MAX);
         if self.sink.failed() {
             return;
         }
@@ -1483,6 +1562,8 @@ impl<'a> InlineWriter<'a> {
         if content.is_empty() {
             self.out.truncate(open.start);
             self.line_start = open.line_start;
+            // The span before the opener ends `out` again.
+            self.code = open.code;
             return;
         }
         let core_start = content.len() - content.trim_start_matches(edge_space).len();
@@ -1644,6 +1725,7 @@ impl<'a> InlineWriter<'a> {
                 line_start: false,
                 before: Class::Space,
                 before_now: Class::Space,
+                code: (usize::MAX, usize::MAX),
             },
             (usize::MAX, Class::Space),
         );
@@ -1666,6 +1748,7 @@ impl<'a> InlineWriter<'a> {
         // gather here; one buffer per list, so it holds no more than the
         // list's own text.
         let mut joined = String::new();
+        let mut code = String::new();
         for (idx, item) in items.iter().enumerate() {
             if self.sink.failed() {
                 return;
@@ -1862,11 +1945,26 @@ impl<'a> InlineWriter<'a> {
                     self.losses.insert(Loss::Strikethrough);
                     self.inlines(c, end_of_line && next.is_none());
                 }
+                // GFM: adjacent code spans are written as one span of
+                // their joined text. Written apart they touch (`` `a``b` ``)
+                // and a reader takes the backticks between them for text
+                // inside one span. A run gathers in `code`, one buffer per
+                // list like `joined`, so the run is written once.
+                Inline::Code(t) if gfm && matches!(next, Some(Inline::Code(_))) => {
+                    code.push_str(t);
+                }
                 Inline::Code(t) => {
+                    let t = if code.is_empty() {
+                        t.as_str()
+                    } else {
+                        code.push_str(t);
+                        code.as_str()
+                    };
                     if !t.is_empty() {
                         self.settle();
                     }
                     self.code_span(t);
+                    code.clear();
                 }
                 // A GFM extended autolink is written as its text, as it
                 // came and unescaped: a GFM reader links it again, where a
@@ -2013,24 +2111,26 @@ impl<'a> InlineWriter<'a> {
             return;
         }
         self.line_start = false;
-        let mut runs = BTreeSet::new();
-        let mut run = 0usize;
-        for c in t.chars() {
-            if c == '`' {
-                run += 1;
-            } else if run > 0 {
-                runs.insert(run);
-                run = 0;
-            }
+        let start = self.out.len();
+        let joins = self.gfm && self.code.1 == start;
+        self.span(t, span_fence(t, 1));
+        if !self.gfm {
+            return;
         }
-        if run > 0 {
-            runs.insert(run);
-        }
-        let n = (1..).find(|n| !runs.contains(n)).unwrap_or(1);
+        let end = self.out.len();
+        self.code = if joins {
+            (self.code.0, self.join_code(self.code.0, start, end))
+        } else {
+            (start, end)
+        };
+    }
+
+    /// `t` as a code span fenced by `n` backticks (a run length `t` does
+    /// not hold), padded with a space where `t` would otherwise touch the
+    /// fence or lose its edge spaces.
+    fn span(&mut self, t: &str, n: usize) {
         let ticks: String = std::iter::repeat_n('`', n).collect();
-        let pad = t.starts_with('`')
-            || t.ends_with('`')
-            || (t.starts_with(' ') && t.ends_with(' ') && t.chars().any(|c| c != ' '));
+        let pad = span_pad(t);
         self.sink.push_str(&mut self.out, &ticks);
         if pad {
             self.sink.push(&mut self.out, ' ');
@@ -2040,6 +2140,82 @@ impl<'a> InlineWriter<'a> {
             self.sink.push(&mut self.out, ' ');
         }
         self.sink.push_str(&mut self.out, &ticks);
+    }
+
+    /// Joins the code spans `out[s1..e1]` and `out[e1..e2]`, written side
+    /// by side, into one span of their joined text; what follows `e2` is
+    /// kept. Returns where the joined span ends. The first span's fence
+    /// and front pad stay where they still fit, so a span grown by many
+    /// joins costs each joined text once; otherwise it is written again,
+    /// its new fence at least twice the old one, so that happens a
+    /// logarithmic number of times per span (a fence `n` is outgrown
+    /// only by a backtick run of `n` in the text).
+    fn join_code(&mut self, s1: usize, e1: usize, e2: usize) -> usize {
+        if self.sink.failed() {
+            return e2;
+        }
+        let fence = |s: &str| s.bytes().take_while(|&c| c == b'`').count();
+        let n1 = fence(&self.out[s1..e1]);
+        let n2 = fence(&self.out[e1..e2]);
+        let c1 = &self.out[s1 + n1..e1 - n1];
+        let a = span_text(c1);
+        let pad1 = a.len() != c1.len();
+        let b_at = {
+            let c2 = &self.out[e1 + n2..e2 - n2];
+            let b = span_text(c2);
+            let at = e1 + n2 + usize::from(b.len() != c2.len());
+            at..at + b.len()
+        };
+        let b = &self.out[b_at.clone()];
+        // The backticks ending `a` (counted up to `n1 + 1`: only whether
+        // the run is `n1` matters) join those starting `b`.
+        let a_ticks = a
+            .bytes()
+            .rev()
+            .take(n1 + 1)
+            .take_while(|&c| c == b'`')
+            .count();
+        let clash = tick_runs(b).any(|(at, len)| {
+            if at == 0 && a_ticks > 0 {
+                a_ticks + len == n1
+            } else {
+                len == n1
+            }
+        });
+        let pad = span_pad_joined(a, b);
+        if !clash && (pad1 || !pad) {
+            // A padded front stays right: the joined text is not all
+            // spaces, as `a` is not.
+            let cut = e1 - n1 - usize::from(pad1);
+            let tail = self.out.split_off(cut);
+            let off = |x: usize| x - cut;
+            self.sink
+                .push_str(&mut self.out, &tail[off(b_at.start)..off(b_at.end)]);
+            if pad1 {
+                self.sink.push(&mut self.out, ' ');
+            }
+            let ticks: String = std::iter::repeat_n('`', n1).collect();
+            self.sink.push_str(&mut self.out, &ticks);
+            let end = self.out.len();
+            self.sink.push_str(&mut self.out, &tail[off(e2)..]);
+            return end;
+        }
+        let mut t = String::new();
+        if !self.sink.charge(a.len() + b.len()) || t.try_reserve(a.len() + b.len()).is_err() {
+            return e2;
+        }
+        t.push_str(a);
+        t.push_str(b);
+        let n = if clash {
+            span_fence(&t, n1.saturating_mul(2))
+        } else {
+            n1
+        };
+        let tail = self.out.split_off(s1);
+        self.span(&t, n);
+        let end = self.out.len();
+        self.sink.push_str(&mut self.out, &tail[e2 - s1..]);
+        end
     }
 
     /// `(dest "title")`.
@@ -4451,5 +4627,177 @@ mod tests {
             t(")"),
         ])]);
         assert_eq!(write(&d).0, "1\n7\\)\n");
+    }
+
+    /// Joining code spans costs linear time: a span grown by many joins
+    /// keeps its fence and copies each joined text once, and a fence
+    /// outgrown is at least doubled, so the span is written again a
+    /// logarithmic number of times. Four times the input, under eight
+    /// times the time (loose enough for load, far below the sixteen of a
+    /// span copied per join).
+    #[test]
+    fn code_joins_are_linear() {
+        use std::time::{Duration, Instant};
+        let code = |s: String| Inline::Code(s);
+        let shapes = |n: usize| {
+            [
+                // A run of strikethroughs, a code in each: one span.
+                doc(vec![Block::Paragraph(
+                    (0..n)
+                        .map(|_| Inline::Strikethrough(vec![code("ab".into())]))
+                        .collect(),
+                )]),
+                // Inner marks left out, each joining its code to the span.
+                doc(vec![Block::Paragraph(vec![Inline::Emph(
+                    std::iter::once(code("a".into()))
+                        .chain((0..n).map(|_| Inline::Emph(vec![code("b".into())])))
+                        .collect(),
+                )])]),
+                // Backtick runs of every length up to 64 in the texts: the
+                // fence is outgrown again and again.
+                doc(vec![Block::Paragraph(
+                    (0..n)
+                        .map(|i| {
+                            Inline::Strikethrough(vec![code(format!(
+                                "x{}x",
+                                "`".repeat(i % 64 + 1)
+                            ))])
+                        })
+                        .collect(),
+                )]),
+            ]
+        };
+        let time = |d: &Document| {
+            (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    let n = gfm(d).0.len();
+                    (t.elapsed(), n)
+                })
+                .min()
+                .unwrap()
+        };
+        for (small, big) in shapes(4_000).iter().zip(shapes(16_000).iter()) {
+            let ((t1, n1), (t4, n4)) = (time(small), time(big));
+            assert!(n4 <= 4 * n1 + 4096, "{n1} -> {n4} bytes");
+            assert!(
+                t4 < 8 * t1.max(Duration::from_millis(1)),
+                "{t1:?} -> {t4:?} for four times the input"
+            );
+        }
+        // The inner marks left out join; the last, at the outer one's
+        // end, takes `_` and is kept.
+        assert_eq!(gfm(&shapes(3)[1]).0, "*`abb`_`b`_*\n");
+    }
+
+    /// What a reader shows of `blocks`' inlines, each character with
+    /// whether it is code: the text a round trip must keep.
+    fn shown_code(blocks: &[Block]) -> Vec<(char, bool)> {
+        fn walk(c: &[Inline], out: &mut Vec<(char, bool)>) {
+            for i in c {
+                match i {
+                    Inline::Text(x) | Inline::Html(x) => out.extend(x.chars().map(|c| (c, false))),
+                    Inline::Code(x) => out.extend(x.chars().map(|c| (c, true))),
+                    Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => walk(c, out),
+                    Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => walk(c, out),
+                    Inline::SoftBreak | Inline::HardBreak => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for b in blocks {
+            if let Block::Paragraph(c) = b {
+                walk(c, &mut out);
+            }
+        }
+        out
+    }
+
+    /// GFM: code spans side by side (`<kbd>Ctrl</kbd><kbd>C</kbd>`) are
+    /// written as one span of their joined text. Written apart they
+    /// touched (`` `Ctrl``C` ``), and a reader took that for one span
+    /// holding two literal backticks.
+    #[test]
+    fn adjacent_code_spans_join() {
+        let d = xhtml(
+            "<p>Press <kbd>Ctrl</kbd><kbd>C</kbd>, call <code>foo</code><code>()</code>.</p>\
+             <p><kbd><kbd>Ctrl</kbd><kbd>C</kbd></kbd></p>",
+        );
+        let (out, losses) = gfm(&d);
+        assert_eq!(out, "Press `CtrlC`, call `foo()`.\n\n`CtrlC`\n");
+        assert!(losses.is_empty(), "{losses:?}");
+        assert_eq!(
+            gfm_again(&d).blocks,
+            vec![
+                Block::Paragraph(vec![
+                    t("Press "),
+                    Inline::Code("CtrlC".into()),
+                    t(", call "),
+                    Inline::Code("foo()".into()),
+                    t("."),
+                ]),
+                Block::Paragraph(vec![Inline::Code("CtrlC".into())]),
+            ]
+        );
+        let code = |s: &str| Inline::Code(s.into());
+        let s = Inline::Strikethrough;
+        let e = Inline::Emph;
+        for (inlines, want) in [
+            // The fence and the pad fit the joined text.
+            (vec![code("a`"), code("`b")], "`a``b`\n"),
+            (vec![code("a"), code("`")], "`` a` ``\n"),
+            (vec![code(" "), code("x ")], "`  x  `\n"),
+            (vec![code(" "), code(" ")], "`  `\n"),
+            // A run of strikethroughs is one mark: their codes touch.
+            (vec![s(vec![code("a")]), s(vec![code("b")])], "~~`ab`~~\n"),
+            // A mark left out (`~~` cannot open after `a`) puts its code
+            // next to the one after it.
+            (vec![t("a"), s(vec![code("b")]), code("c")], "a`bc`\n"),
+            // An inner `*` that could close the outer one is left out: its
+            // code joins the one before it.
+            (
+                vec![e(vec![code("a"), e(vec![code("b")]), e(vec![code("c")])])],
+                "*`ab`_`c`_*\n",
+            ),
+            // A mark that writes nothing leaves the codes side by side.
+            (vec![code("a"), e(vec![]), code("b")], "`ab`\n"),
+            // The joined text holds the first span's fence: a new one, at
+            // least twice as long.
+            (
+                vec![s(vec![code("a")]), s(vec![code("`b")])],
+                "~~``a`b``~~\n",
+            ),
+            (
+                vec![s(vec![code("a``")]), s(vec![code("`b")])],
+                "~~` a```b `~~\n",
+            ),
+            (
+                vec![s(vec![code("x``")]), s(vec![code("a")])],
+                "~~` x``a `~~\n",
+            ),
+            // The first span unpadded, the joined text needs a pad.
+            (
+                vec![s(vec![code("a")]), s(vec![code("b`")])],
+                "~~`` ab` ``~~\n",
+            ),
+            (
+                vec![s(vec![code(" a")]), s(vec![code("b ")])],
+                "~~`  ab  `~~\n",
+            ),
+            // Padded first, the pad stays.
+            (
+                vec![s(vec![code("`a")]), s(vec![code("b")])],
+                "~~`` `ab ``~~\n",
+            ),
+        ] {
+            let d = doc(vec![Block::Paragraph(inlines)]);
+            let out = gfm(&d).0;
+            assert_eq!(out, want, "{d:?}");
+            assert_eq!(
+                shown_code(&gfm_again(&d).blocks),
+                shown_code(&d.blocks),
+                "{out:?} from {d:?}"
+            );
+        }
     }
 }

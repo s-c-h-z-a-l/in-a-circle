@@ -227,16 +227,16 @@ fn shown(blocks: &[doc::Block], out: &mut String) {
 /// An inline tree shaped like the XHTML reader's, from `data`: text with
 /// white space and punctuation (the characters next to which a delimiter
 /// cannot open or close) at the edges of emphasis, strong emphasis,
-/// strikethrough and links, nested, and hard line breaks. As the reader
-/// builds them: no mark or link is empty, and no link holds a link (HTML
-/// forbids it). Code spans are left out: two written side by side join
-/// (a limit of the shared writer the XHTML reader does not hit, as it
-/// never puts them there).
+/// strikethrough and links, nested, code spans (side by side too, as the
+/// reader builds `<kbd>Ctrl</kbd><kbd>C</kbd>`, backticks and edge spaces
+/// in them), and hard line breaks. As the reader builds them: no mark or
+/// link is empty, and no link holds a link (HTML forbids it).
 fn xhtml_shaped(data: &[u8]) -> Vec<doc::Inline> {
     const PIECES: &[&str] = &[
         "a", "b", "7", " ", "  ", "\u{a0}", ".", ",", "\"", "(", ")", "'", "-", ":", "!", "?", "~",
         "*", "_", "\\", "1.", "www.x.y", "#", "\u{e9}", "\u{2014}", "\u{3000}", "+",
     ];
+    const CODES: &[&str] = &["Ctrl", "C", "`", "``", " ", " a ", "x`", "`y", "~", "*"];
     // Deeper than any real book's inline nesting needs, short of the
     // readers' depth bound (256), so the walk stays cheap.
     const MAX_NESTING: usize = 16;
@@ -264,8 +264,11 @@ fn xhtml_shaped(data: &[u8]) -> Vec<doc::Inline> {
         let depth = stack.len();
         let top = &mut stack.last_mut().expect("the paragraph").1;
         match b % 8 {
-            0..=3 => top.push(doc::Inline::Text(
+            0..=2 => top.push(doc::Inline::Text(
                 PIECES[usize::from(b / 8) % PIECES.len()].to_string(),
+            )),
+            3 => top.push(doc::Inline::Code(
+                CODES[usize::from(b / 8) % CODES.len()].to_string(),
             )),
             7 => top.push(doc::Inline::HardBreak),
             4 | 5 if depth <= MAX_NESTING => {
