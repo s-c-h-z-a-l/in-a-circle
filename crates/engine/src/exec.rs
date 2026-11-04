@@ -3684,6 +3684,48 @@ pub(crate) mod tests {
         assert_eq!(got, [docs.join("Film.hu/Film.hu.srt")]);
     }
 
+    /// The contract has no 8-bit output type: an action that declares
+    /// `out=text/x-8bit` (an encoder from UTF-8 to a code page) is checked
+    /// as text like any `text/*`, so its 8-bit bytes are refused and
+    /// nothing is published. Control: its pure ASCII output is UTF-8.
+    #[test]
+    fn an_8bit_output_type_is_refused() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_8bit_output_type_is_refused", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-out");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let encoder = |name: &str, bytes: &str| {
+            let body = format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; printf '{bytes}' > \"$4/0/out\"; \
+                 printf 'done\\t%s\\t0/out\\n' \"$in\""
+            );
+            let mut a = script_action(&t, name, &body, crate::catalog::EXT_SAME);
+            a.output = crate::classify::X8BIT_MIME.into();
+            a
+        };
+        let input = docs.join("Film.srt");
+        fs::write(&input, "k\u{e9}s\n").unwrap();
+        // `kés` in Windows-1250: 0xE9 alone is not UTF-8.
+        let cp1250 = encoder("cp1250", "k\\351s\\n");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&cp1250], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output is not UTF-8".to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        let ascii = encoder("ascii", "kes\\n");
+        let got = done_paths(&[&ascii], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film/Film.srt")]);
+    }
+
     /// An 8-bit decoder's output may be three times the bytes the engine
     /// handed it plus a byte order mark (a 3-byte input: 12), not one
     /// more; any other text action keeps the 32 MiB budget for the same

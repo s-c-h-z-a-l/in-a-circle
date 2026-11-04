@@ -1067,7 +1067,11 @@ In the engine, in one place:
    mark, taken from the input's size when the action starts, never from
    anything the action reports. Past its cap, or not UTF-8, the input
    fails ("text output is not UTF-8", "text output larger than ...") and
-   nothing of it is published.
+   nothing of it is published. The engine publishes text only as UTF-8:
+   the contract has no 8-bit output type. `text/x-8bit` is an input type
+   the classifier gives; an action that declares it as its `out=` (an
+   encoder from UTF-8 to a code page) is checked like any `text/*`, so
+   every output byte past ASCII fails its input as not UTF-8.
 5. Extraction: the extracted files go, flattened, into one folder named
    after the archive; a single top-level folder inside the archive is not
    kept as such. (Every input gets its wrapper folder, also a single
