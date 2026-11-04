@@ -201,6 +201,10 @@ are in `CLAUDE.md`.
   rejects the line. A line without `assets=` means what it did before,
   and the catalog cache (stored lines, checked again on load) keeps its
   format and version.
+- 8-bit text (`text/x-8bit`) is decoded one file to one copy, its output
+  capped by that one file (see the Output policy), so like `ext=same` it
+  is valid only on a one-to-one action: a join with it among its `in=`
+  or `assets=` types rejects the line.
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
   the action reports it (blank lines at the start or end of the text and

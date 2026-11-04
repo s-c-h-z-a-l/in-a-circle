@@ -654,7 +654,6 @@ fn join_group(
         }
         return None;
     }
-    let handed: u64 = handed_sizes(action, &step_in).iter().sum();
     // `None`: cancelled, every unsettled input failed.
     let outputs = run_step(
         action, &step_in, None, &dir, &list, &work.path, cancel, sink,
@@ -668,7 +667,9 @@ fn join_group(
         .map(|(j, _)| step_in.origin[j])
         .collect();
     let rel = outputs.into_iter().find(|o| !o.is_empty())?;
-    let text = text_rule(action, handed);
+    // A join never reads 8-bit text (the catalog refuses it), so its
+    // text cap is the budget and needs no size.
+    let text = text_rule(action, 0);
     let p = publish(
         &dir,
         &rel,
@@ -1102,15 +1103,11 @@ fn place_outputs(
 /// output only (the others would be published unchecked).
 const X8BIT_ONE_OUTPUT: &str = "8-bit text action made more than one output";
 
-/// Whether `action` reads 8-bit text (`text/x-8bit` among its input
-/// types), whose output [`output::TextCap::ThreeTimes`] caps.
+/// Whether `action` reads 8-bit text (`in=text/x-8bit`), whose output
+/// [`output::TextCap::ThreeTimes`] caps. Only a one-to-one action can:
+/// the catalog refuses a join with that type.
 fn reads_8bit(action: &Action) -> bool {
-    let x8 = |t: &String| t == crate::classify::X8BIT_MIME;
     action.input == crate::classify::X8BIT_MIME
-        || action
-            .join
-            .as_ref()
-            .is_some_and(|j| j.types.iter().chain(&j.assets).any(x8))
 }
 
 /// The sizes of the files `step_in` hands `action`, in its order, taken

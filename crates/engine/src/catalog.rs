@@ -714,6 +714,12 @@ fn parse_action(l: &Line) -> Option<Action> {
         if assets.iter().any(|a| types.contains(a)) {
             return None;
         }
+        // 8-bit text is decoded one file to one copy, capped by that one
+        // file's size: a join's one output has no single input to cap it.
+        let x8 = |t: &String| t == crate::classify::X8BIT_MIME;
+        if types.iter().chain(&assets).any(x8) {
+            return None;
+        }
         Some(Join { types, min, assets })
     } else if l.get("min").is_some() || l.get("assets").is_some() || input.contains(',') {
         // `min`, `assets` and a MIME set are meaningful only for a join
@@ -1362,6 +1368,13 @@ fn fuzz_check_action(a: &Action, line: Option<&Line>) {
             assert!(!j.assets.iter().any(|t| j.types.contains(t)));
             assert!(j.min >= 1 && j.min as usize <= action::INPUT_COUNT);
             assert!(!a.keeps_ext(), "ext=same on a join");
+            assert!(
+                !j.types
+                    .iter()
+                    .chain(&j.assets)
+                    .any(|t| t == crate::classify::X8BIT_MIME),
+                "8-bit text on a join"
+            );
             if let Some(l) = line {
                 assert_eq!(l.get("join"), Some("yes"));
                 assert_eq!(j.assets.is_empty(), l.get("assets").is_none());
@@ -3431,6 +3444,30 @@ pub(crate) mod tests {
         // Control: the same lines with their own extension are taken.
         assert!(parsed(PDF_LINE).is_some() && parsed(EPUB_LINE).is_some());
         let text = format!("{CACHE_OK}{join}\n{SAME_LINE}\n");
+        let c = Catalog::of(&parse_cache(text.as_bytes()).unwrap());
+        let ids: Vec<&str> = c.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["text.cp1250-to-utf8"]);
+    }
+
+    /// 8-bit text is read one file to one copy, like `ext=same`: a join
+    /// with `text/x-8bit` among its document or asset types is refused
+    /// whole, from a manifest and from the cache.
+    #[test]
+    fn x8bit_rejected_on_a_join() {
+        let first = PDF_LINE.replace("in=image/jpeg,", "in=text/x-8bit,");
+        let later = PDF_LINE.replace(",image/png", ",text/x-8bit");
+        let asset = EPUB_LINE.replace("assets=image/jpeg,", "assets=text/x-8bit,");
+        for l in [&first, &later, &asset] {
+            assert_ne!(l.as_str(), PDF_LINE);
+            assert_ne!(l.as_str(), EPUB_LINE);
+            assert!(parsed(l).is_none(), "{l}");
+        }
+        // Control: the same lines with another type are taken.
+        for l in [&first, &later] {
+            assert!(parsed(&l.replace("text/x-8bit", "text/plain")).is_some());
+        }
+        assert!(parsed(&asset.replace("text/x-8bit", "text/plain")).is_some());
+        let text = format!("{CACHE_OK}{later}\n{SAME_LINE}\n");
         let c = Catalog::of(&parse_cache(text.as_bytes()).unwrap());
         let ids: Vec<&str> = c.actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["text.cp1250-to-utf8"]);
