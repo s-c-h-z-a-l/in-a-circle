@@ -1040,8 +1040,9 @@ In the engine, in one place:
    Never overwrite: `name (1)/`, `name (2)/`, without asking.
 4. Per input, all or nothing: the outputs are copied into fresh files in a
    private 0700 staging folder on the target's filesystem (`.inacircle-
-   <random>/`), checked (regular files, unchanged while copied, TXT/MD
-   valid UTF-8 up to 32 MiB, validated on the stream that is written),
+   <random>/`), checked (regular files, unchanged while copied, text
+   valid UTF-8 within its cap, validated on the stream that is written:
+   see the text outputs below),
    given their final modes as `cp` would (0666 and 0777 minus the umask,
    but the owner always keeps rw on files and rwx on the folder, and a
    setgid target's S_ISGID is kept) while still inside the private folder,
@@ -1055,6 +1056,18 @@ In the engine, in one place:
    ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
    changed since the baseline (`BaselineChanged`, "files changed while
    saved"). Other inputs' published results are never taken back.
+   Text outputs: an action whose `out=` is `text/*` has every output
+   named with its extension checked as UTF-8 on the whole stream,
+   whatever that extension is (`.srt`, `.html`, none with `ext=same`),
+   and so its single output always; its other outputs (a Markdown
+   file's images) stay bytes. An output named `.txt` or `.md` is checked
+   for any action, as before. A text output may be 32 MiB (the text
+   output budget), except an 8-bit text decoder's (`in=text/x-8bit`):
+   three times the bytes the engine handed it, plus 3 for a byte order
+   mark, taken from the input's size when the action starts, never from
+   anything the action reports. Past its cap, or not UTF-8, the input
+   fails ("text output is not UTF-8", "text output larger than ...") and
+   nothing of it is published.
 5. Extraction: the extracted files go, flattened, into one folder named
    after the archive; a single top-level folder inside the archive is not
    kept as such. (Every input gets its wrapper folder, also a single

@@ -654,6 +654,7 @@ fn join_group(
         }
         return None;
     }
+    let handed: u64 = handed_sizes(action, &step_in).iter().sum();
     // `None`: cancelled, every unsettled input failed.
     let outputs = run_step(
         action, &step_in, None, &dir, &list, &work.path, cancel, sink,
@@ -667,7 +668,18 @@ fn join_group(
         .map(|(j, _)| step_in.origin[j])
         .collect();
     let rel = outputs.into_iter().find(|o| !o.is_empty())?;
-    let p = publish(&dir, &rel, target, stem, &action.ext, &taken, cancel, sink)?;
+    let text = text_rule(action, handed);
+    let p = publish(
+        &dir,
+        &rel,
+        target,
+        stem,
+        &action.ext,
+        text,
+        &taken,
+        cancel,
+        sink,
+    )?;
     // `work` is dropped on return: the work dir is removed through its fd.
     Some((taken.len(), p))
 }
@@ -931,6 +943,13 @@ fn run_group(
         let dir = work.path.join(format!("step{}", s + 1));
         let list = work.path.join(format!("step{}.inputs", s + 1));
         let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
+        // Taken before the action starts: what the last step was handed
+        // caps its text outputs (an empty list when nothing needs it).
+        let handed = if last {
+            handed_sizes(action, &step_in)
+        } else {
+            Vec::new()
+        };
         let result = match ran {
             Ok(()) => run_step(
                 action,
@@ -953,7 +972,9 @@ fn run_group(
             return; // cancelled
         };
         if last {
-            place_outputs(action, &step_in, outputs, &dir, target, cancel, sink);
+            place_outputs(
+                action, &step_in, outputs, &handed, &dir, target, cancel, sink,
+            );
             return;
         }
         // Each output was checked when its `done` arrived, but the action
@@ -1025,10 +1046,12 @@ fn run_group(
 /// whose place the postcheck proved; a committed group that cannot be
 /// proved is `PublishedUnknown`, never removed. A cancel is honoured up to
 /// each input's commit.
+#[allow(clippy::too_many_arguments)]
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
     outputs: Vec<Vec<PathBuf>>,
+    handed: &[u64],
     dir: &Path,
     target: &Path,
     cancel: &CancelToken,
@@ -1053,7 +1076,59 @@ fn place_outputs(
     for (o, rels) in per {
         let stem = stem_of(&sink.inputs[o]);
         let ext = ext_for(action, &sink.inputs[o]);
-        publish(dir, &rels, target, &stem, &ext, &[o], cancel, sink);
+        // The largest file this input handed the step (one, but for an
+        // intermediate input that step 1 made into several).
+        let bytes = step_in
+            .origin
+            .iter()
+            .zip(handed)
+            .filter(|&(&x, _)| x == o)
+            .map(|(_, &n)| n)
+            .max()
+            .unwrap_or(0);
+        let text = text_rule(action, bytes);
+        publish(dir, &rels, target, &stem, &ext, text, &[o], cancel, sink);
+    }
+}
+
+/// Whether `action` reads 8-bit text (`text/x-8bit` among its input
+/// types), whose output [`output::TextCap::ThreeTimes`] caps.
+fn reads_8bit(action: &Action) -> bool {
+    let x8 = |t: &String| t == crate::classify::X8BIT_MIME;
+    action.input == crate::classify::X8BIT_MIME
+        || action
+            .join
+            .as_ref()
+            .is_some_and(|j| j.types.iter().chain(&j.assets).any(x8))
+}
+
+/// The sizes of the files `step_in` hands `action`, in its order, taken
+/// before the action starts: only for an action that reads 8-bit text
+/// (else empty, no `stat` at all). A file that cannot be read counts 0,
+/// so the cap fails closed.
+fn handed_sizes(action: &Action, step_in: &StepIn) -> Vec<u64> {
+    if !reads_8bit(action) {
+        return Vec::new();
+    }
+    step_in
+        .paths
+        .iter()
+        .map(|p| fs::metadata(p).map_or(0, |m| m.len()))
+        .collect()
+}
+
+/// How `action`'s outputs are checked as text: every output named with
+/// its extension is when its `out=` is `text/*`; the cap is three times
+/// `handed` (the bytes the engine handed it) for an 8-bit text decoder,
+/// else the text output budget.
+fn text_rule(action: &Action, handed: u64) -> output::TextRule {
+    output::TextRule {
+        declared: action.output.starts_with("text/"),
+        cap: if reads_8bit(action) {
+            output::TextCap::ThreeTimes(handed)
+        } else {
+            output::TextCap::Document
+        },
     }
 }
 
@@ -1084,6 +1159,7 @@ fn publish(
     target: &Path,
     stem: &str,
     ext: &str,
+    text: output::TextRule,
     settle: &[usize],
     cancel: &CancelToken,
     sink: &mut Sink,
@@ -1120,7 +1196,7 @@ fn publish(
             }
             Ok(())
         };
-        output::publish_beneath(dir, rels, target, stem, ext, &mut before)
+        output::publish_text_beneath(dir, rels, target, stem, ext, text, &mut before)
     };
     let p = match published {
         Ok(p) => p,
@@ -3573,6 +3649,91 @@ pub(crate) mod tests {
         };
         assert_eq!(list(&docs), ["Film.hu", "Film.hu.srt"]);
         assert_eq!(list(&docs.join("Film.hu")), ["Film.hu.srt"]);
+    }
+
+    /// A text action's output is checked as UTF-8 whatever its extension:
+    /// a `.srt` output with a byte that is not UTF-8 fails its input and
+    /// nothing is published. Control: the same bytes from an action whose
+    /// output is not text are published.
+    #[test]
+    fn every_text_output_is_checked_as_utf8() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("every_text_output_is_checked_as_utf8", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("utf8-srt");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.srt");
+        fs::write(&input, b"1\n00:00:01,000 --> 00:00:02,000\nk\xe9s\n").unwrap();
+        let a = same_action(&t);
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&a], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output is not UTF-8".to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        let mut bytes = same_action(&t);
+        bytes.output = "application/x-subrip".into();
+        let got = done_paths(&[&bytes], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film.hu/Film.hu.srt")]);
+    }
+
+    /// An 8-bit decoder's output may be three times the bytes the engine
+    /// handed it plus a byte order mark (a 3-byte input: 12), not one
+    /// more; any other text action keeps the 32 MiB budget for the same
+    /// output.
+    #[test]
+    fn x8bit_output_cap_is_three_times_the_input() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("x8bit_output_cap_is_three_times_the_input", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-cap");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        // Three copies of the input and `more` (3 bytes: exactly the cap).
+        let triple = |more: &str| {
+            format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; cat \"$in\" \"$in\" \"$in\" > \"$4/0/out\"; \
+                 printf '{more}' >> \"$4/0/out\"; printf 'done\\t%s\\t0/out\\n' \"$in\""
+            )
+        };
+        let decoder = |name: &str, more: &str| {
+            let mut a = script_action(&t, name, &triple(more), crate::catalog::EXT_SAME);
+            a.input = crate::classify::X8BIT_MIME.into();
+            a.output = "text/plain".into();
+            a
+        };
+        let at = decoder("at", "xyz");
+        let got = done_paths(&[&at], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 12);
+        let over = decoder("over", "xyzw");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&over], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output larger than three times its \
+                         input (12 bytes)"
+                    .to_owned()
+            }]
+        );
+        let mut plain = decoder("plain", "xyzw");
+        plain.input = "text/plain".into();
+        let got = done_paths(&[&plain], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a (1)/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 13);
     }
 
     /// The group is killed before its members are counted, so even when

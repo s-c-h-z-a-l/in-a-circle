@@ -777,12 +777,74 @@ pub(crate) fn open_regular_beneath(root: &Path, rel: &Path) -> io::Result<OwnedF
 /// of several MB, and one small heap buffer (well inside the 5 MB PSS
 /// budget). Any value works; this one only sets the syscall count.
 const COPY_CHUNK: usize = 64 * 1024;
-/// The largest TXT/Markdown output published (which must also be valid
-/// UTF-8): `document_output_bytes` (32 MiB, see
-/// `docs/resource-limits.md`). A text
-/// output past it is refused before it is copied, so a runaway converter
-/// cannot fill the user's folder with a text nobody can open.
+/// The largest text output published (which must also be valid UTF-8),
+/// unless [`TextCap::ThreeTimes`] sets it: `document_output_bytes` (32 MiB,
+/// see `docs/resource-limits.md`). A text output past it is refused before
+/// it is copied, so a runaway converter cannot fill the user's folder with
+/// a text nobody can open.
 const TEXT_OUTPUT_MAX: u64 = 32 << 20;
+/// The most UTF-8 bytes one byte of a single-byte code page can become:
+/// each such byte maps to one character of the Basic Multilingual Plane
+/// (at most U+FFFF), which UTF-8 writes in at most 3 bytes.
+const UTF8_PER_8BIT_BYTE: u64 = 3;
+/// The UTF-8 byte order mark (EF BB BF) a converted `.srt` starts with,
+/// so players that guess the encoding read it as UTF-8.
+const UTF8_BOM_LEN: u64 = 3;
+
+/// How large a group's text output may be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCap {
+    /// `TEXT_OUTPUT_MAX`, the text output budget.
+    Document,
+    /// An 8-bit text decoder's (`in=text/x-8bit`): three times the bytes
+    /// the engine handed it (their size when the action started, never
+    /// what the action reports), plus a byte order mark. A decoder cannot
+    /// make more from a correct table, so more is a fault, and the input
+    /// itself has no size limit.
+    ThreeTimes(u64),
+}
+
+impl TextCap {
+    fn max(self) -> u64 {
+        match self {
+            TextCap::Document => TEXT_OUTPUT_MAX,
+            TextCap::ThreeTimes(n) => n
+                .saturating_mul(UTF8_PER_8BIT_BYTE)
+                .saturating_add(UTF8_BOM_LEN),
+        }
+    }
+
+    fn too_large(self) -> io::Error {
+        let why = match self {
+            TextCap::Document => "text output larger than 32 MiB".to_owned(),
+            TextCap::ThreeTimes(_) => format!(
+                "text output larger than three times its input ({} bytes)",
+                self.max()
+            ),
+        };
+        io::Error::new(io::ErrorKind::InvalidData, why)
+    }
+}
+
+/// Which of a group's outputs are text (copied only as valid UTF-8, and
+/// within `cap`). An output named `.txt` or `.md` always is; with
+/// `declared` (the action's `out=` is `text/*`) so is every output named
+/// with the group's extension, whatever it is (`.srt`, `.html`, none),
+/// which takes in a single output (always named so). The other outputs of
+/// a text action (a Markdown file's images) stay bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextRule {
+    pub declared: bool,
+    pub cap: TextCap,
+}
+
+impl TextRule {
+    /// No declared text: only `.txt` and `.md` outputs, up to 32 MiB.
+    pub const BY_NAME: TextRule = TextRule {
+        declared: false,
+        cap: TextCap::Document,
+    };
+}
 /// The wrapper's name inside its private staging folder.
 const WRAPPER: &CStr = c"w";
 
@@ -1079,15 +1141,15 @@ fn changed() -> io::Error {
 /// Copies the open regular file `src` into the fresh `dst`, exactly the
 /// size it had when it was opened (a change during the copy refuses it),
 /// checking text as UTF-8. Returns the bytes copied.
-fn copy_checked(src: RawFd, dst: RawFd, text: bool, buf: &mut [u8]) -> io::Result<u64> {
+fn copy_checked(src: RawFd, dst: RawFd, text: Option<TextCap>, buf: &mut [u8]) -> io::Result<u64> {
     let before = fstat(src)?;
     let size = before.st_size as u64;
-    if text && size > TEXT_OUTPUT_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "text output larger than 32 MiB",
-        ));
+    if let Some(cap) = text
+        && size > cap.max()
+    {
+        return Err(cap.too_large());
     }
+    let text = text.is_some();
     let mut utf8 = Utf8::default();
     let mut copied: u64 = 0;
     loop {
@@ -1150,6 +1212,7 @@ fn copy_one(
     root: &Path,
     rel: &Path,
     name: (&[u8], &[u8]),
+    text: Option<TextCap>,
     buf: &mut [u8],
 ) -> io::Result<ChildBaseline> {
     let (parent, leaf) = resolve_beneath(root, rel)?;
@@ -1186,7 +1249,7 @@ fn copy_one(
     if unsafe { libc::fchmod(dst.0, 0o600) } != 0 {
         return last_err();
     }
-    let copied = copy_checked(src.0, dst.0, is_text(ext), buf)?;
+    let copied = copy_checked(src.0, dst.0, text, buf)?;
     // The final mode, as `cp` would make it, before the sync (so it is
     // durable) and before the baseline (so it records it). Still private:
     // the 0700 staging folder above keeps everyone else out.
@@ -1261,7 +1324,7 @@ fn locate(target: &Path, parent: &Fd, leaf: &CStr, object: (u64, u64)) -> Option
 /// folder on the target's filesystem (a producer's old fd cannot reach
 /// them), validated on the stream that is written (the source is regular
 /// and unchanged during the copy, the bytes written to the private file are
-/// UTF-8 for TXT/MD, up to 32 MiB; the finished copy is checked only for
+/// UTF-8 for text, up to its cap, see [`TextRule`]; the finished copy is checked only for
 /// type, owner, link count and size, not read again, which is equivalent
 /// for a dead producer, a fresh inode and a 0700 staging folder), given their final umask modes (still private: the
 /// staging folder is 0700), synced, and their baseline taken; then the
@@ -1282,6 +1345,27 @@ pub fn publish_beneath(
     target: &Path,
     stem: &str,
     ext: &str,
+    before_commit: &mut dyn FnMut(&OutputGroup, &Path) -> io::Result<()>,
+) -> io::Result<Publication> {
+    publish_text_beneath(
+        root,
+        rels,
+        target,
+        stem,
+        ext,
+        TextRule::BY_NAME,
+        before_commit,
+    )
+}
+
+/// [`publish_beneath`], its text outputs told and capped by `text`.
+pub fn publish_text_beneath(
+    root: &Path,
+    rels: &[PathBuf],
+    target: &Path,
+    stem: &str,
+    ext: &str,
+    text: TextRule,
     before_commit: &mut dyn FnMut(&OutputGroup, &Path) -> io::Result<()>,
 ) -> io::Result<Publication> {
     if rels.is_empty() {
@@ -1309,7 +1393,10 @@ pub fn publish_beneath(
         } else {
             split_name(leaf.as_bytes())
         };
-        children.push(copy_one(&mut staging, root, rel, name, &mut buf)?);
+        let is_text =
+            is_text(name.1) || (text.declared && name.1.eq_ignore_ascii_case(ext.as_bytes()));
+        let cap = is_text.then_some(text.cap);
+        children.push(copy_one(&mut staging, root, rel, name, cap, &mut buf)?);
     }
     drop(buf);
     let (wrapper, wid) = staging.wrapper();
@@ -3028,6 +3115,109 @@ pub(crate) mod tests {
         // Only text is checked as text.
         assert!(publish(&root, &["3/a.png"], &target, "c", "png").is_ok());
         assert_eq!(names(&target), ["a", "c"]);
+    }
+
+    /// `publish_text_beneath` with a `before_commit` that accepts.
+    fn publish_text(
+        root: &Path,
+        r: &[&str],
+        target: &Path,
+        (stem, ext): (&str, &str),
+        text: TextRule,
+    ) -> io::Result<Publication> {
+        publish_text_beneath(root, &rels(r), target, stem, ext, text, &mut |_, _| Ok(()))
+    }
+
+    const DECLARED: TextRule = TextRule {
+        declared: true,
+        cap: TextCap::Document,
+    };
+
+    /// A text action's outputs named with its extension are text whatever
+    /// the extension is (or without one); its other outputs (a Markdown
+    /// file's images) are not. Without a declared text, only the name
+    /// tells, as before.
+    #[test]
+    fn declared_text_checks_outputs_named_with_its_extension() {
+        let (_t, root, target) = pub_fixture("pub-declared");
+        produced(&root, "0/a.srt", b"caf\xe9\n");
+        produced(&root, "1/a", b"caf\xe9\n");
+        produced(&root, "2/a.md", b"ok");
+        produced(&root, "2/a-0001.png", b"\x89PNG\xff");
+        produced(&root, "3/a.md", b"ok");
+        produced(&root, "3/b.MD", b"\xff");
+        for (rel, ext) in [("0/a.srt", "srt"), ("1/a", "")] {
+            let e = publish_text(&root, &[rel], &target, ("x", ext), DECLARED).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{rel}: {e:?}");
+            assert_eq!(e.to_string(), "text output is not UTF-8");
+        }
+        assert_eq!(names(&target), Vec::<String>::new());
+        // Not declared: a `.srt` is bytes, as before.
+        assert!(
+            publish_text(
+                &root,
+                &["0/a.srt"],
+                &target,
+                ("s", "srt"),
+                TextRule::BY_NAME
+            )
+            .is_ok()
+        );
+        // Several outputs: the image beside the text stays bytes.
+        let two = ["2/a.md", "2/a-0001.png"];
+        assert!(publish_text(&root, &two, &target, ("m", "md"), DECLARED).is_ok());
+        // ...but one named with the extension, its case aside, is text.
+        let e = publish_text(&root, &["3/a.md", "3/b.MD"], &target, ("n", "md"), DECLARED);
+        assert_eq!(e.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(names(&target), ["m", "s"]);
+    }
+
+    /// A sparse file of `len` bytes at `rel` (no disk taken until copied).
+    fn sparse(root: &Path, rel: &str, len: u64) {
+        let p = produced(root, rel, b"");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+    }
+
+    /// Every text output but an 8-bit decoder's keeps the 32 MiB budget,
+    /// a declared one (`.srt`) as one by name (`.txt`): at it, published;
+    /// one byte past it, refused before the copy.
+    #[test]
+    fn other_text_outputs_keep_32_mib() {
+        let (_t, root, target) = pub_fixture("pub-32mib");
+        sparse(&root, "0/a.srt", TEXT_OUTPUT_MAX);
+        sparse(&root, "1/a.srt", TEXT_OUTPUT_MAX + 1);
+        sparse(&root, "2/a.txt", TEXT_OUTPUT_MAX + 1);
+        assert!(publish_text(&root, &["0/a.srt"], &target, ("a", "srt"), DECLARED).is_ok());
+        let over = [
+            ("1/a.srt", "srt", DECLARED),
+            ("2/a.txt", "txt", TextRule::BY_NAME),
+        ];
+        for (rel, ext, rule) in over {
+            let e = publish_text(&root, &[rel], &target, ("b", ext), rule).unwrap_err();
+            assert_eq!(e.to_string(), "text output larger than 32 MiB", "{rel}");
+        }
+        assert_eq!(names(&target), ["a"]);
+        // Control: an 8-bit decoder's cap is its own.
+        let big = TextRule {
+            declared: true,
+            cap: TextCap::ThreeTimes(TEXT_OUTPUT_MAX),
+        };
+        assert!(publish_text(&root, &["1/a.srt"], &target, ("c", "srt"), big).is_ok());
+    }
+
+    /// Three times the input plus a byte order mark, and no further; the
+    /// arithmetic saturates rather than wraps.
+    #[test]
+    fn three_times_cap_counts_the_bom() {
+        assert_eq!(TextCap::ThreeTimes(0).max(), 3);
+        assert_eq!(TextCap::ThreeTimes(100).max(), 303);
+        assert_eq!(TextCap::ThreeTimes(u64::MAX).max(), u64::MAX);
+        assert_eq!(TextCap::Document.max(), 32 << 20);
     }
 
     #[test]
