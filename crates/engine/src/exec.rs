@@ -654,9 +654,10 @@ fn join_group(
         }
         return None;
     }
+    let sizes = handed_sizes(&step_in);
     // `None`: cancelled, every unsettled input failed.
     let outputs = run_step(
-        action, &step_in, None, &dir, &list, &work.path, cancel, sink,
+        action, &step_in, &sizes, None, &dir, &list, &work.path, cancel, sink,
     )?;
     // The supervisor hands back the one result under each input it took,
     // and only when every condition held (see `Supervisor::settle_join`).
@@ -944,17 +945,14 @@ fn run_group(
         let dir = work.path.join(format!("step{}", s + 1));
         let list = work.path.join(format!("step{}.inputs", s + 1));
         let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
-        // Taken before the action starts: what the last step was handed
-        // caps its text outputs (an empty list when nothing needs it).
-        let handed = if last {
-            handed_sizes(action, &step_in)
-        } else {
-            Vec::new()
-        };
+        // Taken once, before the action starts: they size its limits, and
+        // on the last step cap an 8-bit text action's outputs.
+        let handed = handed_sizes(&step_in);
         let result = match ran {
             Ok(()) => run_step(
                 action,
                 &step_in,
+                &handed,
                 pre.take(),
                 &dir,
                 &list,
@@ -1085,7 +1083,7 @@ fn place_outputs(
         let ext = ext_for(action, &sink.inputs[o]);
         // An 8-bit text action's one output is capped by the file that
         // made it (an intermediate one on a two-step route, never a
-        // sibling part of the same input); `handed` is empty otherwise.
+        // sibling part of the same input).
         let bytes = made
             .first()
             .and_then(|&(j, _)| handed.get(j))
@@ -1110,14 +1108,11 @@ fn reads_8bit(action: &Action) -> bool {
     action.input == crate::classify::X8BIT_MIME
 }
 
-/// The sizes of the files `step_in` hands `action`, in its order, taken
-/// before the action starts: only for an action that reads 8-bit text
-/// (else empty, no `stat` at all). A file that cannot be read counts 0,
-/// so the cap fails closed.
-fn handed_sizes(action: &Action, step_in: &StepIn) -> Vec<u64> {
-    if !reads_8bit(action) {
-        return Vec::new();
-    }
+/// The sizes of the files `step_in` hands its action, in its order,
+/// taken once before the action starts, so its `RLIMIT_FSIZE` and an
+/// 8-bit text action's output cap see the same snapshot. A file that
+/// cannot be read counts 0, so the cap fails closed.
+fn handed_sizes(step_in: &StepIn) -> Vec<u64> {
     step_in
         .paths
         .iter()
@@ -1553,11 +1548,13 @@ fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
 /// unfinished input is then failed as cancelled). An intermediate step's
-/// ruleset comes as `pre`, already granting its inputs.
+/// ruleset comes as `pre`, already granting its inputs; `sizes` are the
+/// inputs' sizes ([`handed_sizes`]).
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
     step_in: &StepIn,
+    sizes: &[u64],
     pre: Option<sandbox::Ruleset>,
     dir: &Path,
     list: &Path,
@@ -1612,12 +1609,7 @@ fn run_step(
         Ok(r) => r,
         Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
     };
-    let total: u64 = step_in
-        .paths
-        .iter()
-        .filter_map(|p| fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
+    let total: u64 = sizes.iter().sum();
     let limits = sandbox::limits_for(total);
     let tmp = match sandbox::make_child_tmp(dir) {
         Ok(t) => t,

@@ -7,7 +7,8 @@ net `RLIMIT_DATA`. Every number has its reason here and in the code
 ## RLIMIT_FSIZE
 
 16 x the total input size, at least 256 MiB, at most 16 GiB. Per file, not
-the sum.
+the sum. The input sizes are taken once, before the action starts; an
+8-bit text decoder's output cap (below) uses the same sizes.
 
 ## RLIMIT_DATA: the memory net
 
