@@ -217,11 +217,12 @@ impl<'a> Images<'a> {
 }
 
 /// The file extension of an image that may go beside the md: a JPEG or a
-/// PNG the probe checks in full (valid structure, at most
-/// [`MAX_PIXELS`]). A valid image the PDF writer cannot pass through
-/// (alpha, interlace, 16 bits...) is still a valid JPEG or PNG for a
-/// Markdown viewer and for the join, which takes any (`probe::sniff`), so
-/// it is kept too; its format is the header's.
+/// PNG by its header (type, size, at most [`MAX_PIXELS`] pixels), the
+/// bytes copied as they are; damaged image data is not detected (a viewer
+/// shows such an image broken). One the PDF writer cannot pass through
+/// (alpha, interlace, 16 bits...) is still a JPEG or PNG for a Markdown
+/// viewer and for the join, which takes any (`probe::sniff`), so it is
+/// kept too; its format is the header's.
 fn image_ext(bytes: &[u8]) -> Option<&'static str> {
     match probe::probe(bytes, MAX_PIXELS) {
         Ok(_) | Err(probe::ProbeError::Unsupported(_)) => {}
