@@ -4032,6 +4032,53 @@ pub(crate) mod tests {
             ));
             assert!(b_out.iter().all(|f| fs::symlink_metadata(f).is_err()));
             assert!(a.is_file() && b.is_file(), "an input was moved");
+
+            // Step 2 skips one part (the other converts): one Skipped for
+            // the input, nothing of it placed.
+            let c = docs.join("c.txt");
+            fs::write(&c, "ef\n").unwrap();
+            let skipper = script_action(
+                &t,
+                "skipper",
+                "i=0; while IFS= read -r in; do if [ \"$(cat \"$in\")\" = ef ]; then \
+                 printf 'skip\\t%s\\tnot for me\\n' \"$in\"; else mkdir \"$4/$i\"; \
+                 cp \"$in\" \"$4/$i/out\"; printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; fi; \
+                 i=$((i+1)); done < \"$6\"",
+                "md",
+            );
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(&[&split, &skipper], vec![c.clone()], &mut seen, &tok);
+            assert_eq!(
+                seen.0,
+                [Outcome::Skipped {
+                    input: c.clone(),
+                    reason: "not for me".to_owned()
+                }]
+            );
+            assert!(!docs.join("c").exists(), "a part of c.txt was placed");
+
+            // Step 2 converts one part and then exits without a word on
+            // the other: the input fails once, nothing of it is placed.
+            let d = docs.join("d.txt");
+            fs::write(&d, "gh\n").unwrap();
+            let quitter = script_action(
+                &t,
+                "quitter",
+                "read -r in < \"$6\"; mkdir \"$4/0\"; cp \"$in\" \"$4/0/out\"; \
+                 printf 'done\\t%s\\t0/out\\n' \"$in\"; exit 0",
+                "md",
+            );
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(&[&split, &quitter], vec![d.clone()], &mut seen, &tok);
+            assert_eq!(seen.0.len(), 1, "{:?}", seen.0);
+            assert!(
+                matches!(&seen.0[0], Outcome::Failed { input, .. } if *input == d),
+                "{:?}",
+                seen.0
+            );
+            assert!(!docs.join("d").exists(), "a part of d.txt was placed");
         });
     }
 
