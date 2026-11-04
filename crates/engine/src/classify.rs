@@ -491,6 +491,32 @@ mod tests {
         assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
     }
 
+    /// A valid multi-byte character cut by the end of a read-on chunk is
+    /// carried into the next read: `€` and an emoji ending 1, 2 or 3 bytes
+    /// past the first and the second chunk boundary of the read-on are
+    /// UTF-8 text; the same with a bad last byte is a candidate.
+    #[test]
+    fn multibyte_across_read_on_chunks_is_utf8() {
+        let d = Dir::new("chunks");
+        let euro = "€".as_bytes();
+        let emoji = "😀".as_bytes();
+        for seq in [euro, emoji] {
+            for edge in [HEAD + CHUNK, HEAD + 2 * CHUNK] {
+                for before in 1..=3 {
+                    let at = edge - before;
+                    let mut b = late(100 * 1024, None, 0);
+                    b[at..at + seq.len()].copy_from_slice(seq);
+                    let p = d.file("ok.srt", &b);
+                    let what = format!("{} B at {at} (edge {edge})", seq.len());
+                    assert_eq!(kind(&p), is(None, ".srt text"), "{what}");
+                    b[at + seq.len() - 1] = b'A';
+                    let p = d.file("bad.srt", &b);
+                    assert_eq!(kind(&p), x8bit(), "bad {what}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn late_accent_within_and_beyond_the_reread() {
         let d = Dir::new("late");
