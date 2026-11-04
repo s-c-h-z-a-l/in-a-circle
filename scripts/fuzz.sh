@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md codepage"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -185,6 +185,18 @@ limits() {
         # image read is at most twice the 64 KiB input; anything near
         # 64 MB is a bug. 1024 MB RSS ceiling.
         epub_md) echo "65536 4 64 1024" ;;
+        # The code page decoders have no input limit (they stream), so the
+        # length is chosen for reach: 128 KiB is two of the decoder's
+        # 64 KiB reads, so a file crosses a read boundary in the whole
+        # read too (the target also reads every input in reads of 1-253
+        # bytes). Larger only slows the run; the 200 MiB case is pinned by
+        # large_input_streams_in_constant_memory. 1 s: two linear passes
+        # and a re-encode of 128 KiB take ms under ASan. 16 MB malloc
+        # limit: the decoder allocates a 64 KiB read buffer and a 192 KiB
+        # output buffer whatever the input, the target at most 3 x the
+        # input plus 3 B of output twice; anything near 16 MB is a bug;
+        # 1024 MB RSS ceiling.
+        codepage) echo "131072 1 16 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

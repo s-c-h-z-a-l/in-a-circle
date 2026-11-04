@@ -122,3 +122,10 @@ path = "fuzz_targets/epub_md.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "codepage"
+path = "fuzz_targets/codepage.rs"
+test = false
+doc = false
+bench = false
