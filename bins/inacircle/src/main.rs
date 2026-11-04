@@ -1122,8 +1122,20 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 /// level 2: no action binary runs while the overlay is up (the cache is
 /// refreshed once the wheel is gone).
 fn group_menu(list: Vec<u8>) -> wheel::GroupMenu {
-    let paths = dedup(uri::parse_uri_list_owned(list));
-    group_menu_for(paths, Catalog::load_cached())
+    group_menu_for(drop_paths(list), Catalog::load_cached())
+}
+
+/// The paths of a dropped `text/uri-list` in the shape `files_of` gives
+/// the run (`.` components and trailing slashes dropped), each file once:
+/// the wheel then classifies, and spends the shared read-on budget on, the
+/// same files in the same order as the run it starts. A `file://` path is
+/// absolute, so none is lost for want of a current directory.
+fn drop_paths(list: Vec<u8>) -> Vec<PathBuf> {
+    let paths = uri::parse_uri_list_owned(list)
+        .into_iter()
+        .filter_map(|p| absolute(&p, None))
+        .collect();
+    dedup(paths)
 }
 
 /// Level 1 for `paths` (absolute, each once) with catalog `cat` (`None`:
@@ -1337,10 +1349,7 @@ mod tests {
 
     /// Level 1 for a URI list, with `md_catalog`.
     fn groups_of(list: &str) -> wheel::GroupMenu {
-        group_menu_for(
-            dedup(uri::parse_uri_list(list.as_bytes())),
-            Some(md_catalog()),
-        )
+        group_menu_for(drop_paths(list.as_bytes().to_vec()), Some(md_catalog()))
     }
 
     /// A private dir with one plain-text file named `name`.
@@ -1442,6 +1451,61 @@ mod tests {
         let g = group_menu_for(vec![file], None);
         assert!(g.paths.is_empty() && g.slices.iter().all(Option::is_none));
         assert_eq!(g.hub, wheel::NO_ACTIONS);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The wheel classifies a drop in the shape the run is given it
+    /// (`files_of`): `file:///d/a.srt/` is the file `/d/a.srt` in both, so
+    /// both spend the shared read-on budget on the same files and agree on
+    /// every type. Four all-ASCII subtitles spend the budget; the fifth,
+    /// accented past its head, is then plain text in the wheel as in the
+    /// run, not an 8-bit candidate the run would skip.
+    #[test]
+    fn drop_paths_are_the_runs_paths() {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-norm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = b"00:01:02,345 --> 00:01:04,000\r\nSome words here.\r\n\r\n";
+        let ascii: Vec<u8> = line.iter().copied().cycle().take(300 * 1024).collect();
+        let mut list = String::new();
+        let mut want = Vec::new();
+        for n in ["a1.srt", "a2.srt", "a3.srt", "a4.srt"] {
+            std::fs::write(dir.join(n), &ascii).unwrap();
+            list += &format!("file://{}/{n}/\n", dir.display());
+            want.push(dir.join(n));
+        }
+        let mut late = ascii.clone();
+        late[200 * 1024] = 0xf5; // ő in Windows-1250 and ISO-8859-2
+        std::fs::write(dir.join("late.srt"), &late).unwrap();
+        list += &format!("file://{}/late.srt\n", dir.display());
+        want.push(dir.join("late.srt"));
+
+        let paths = drop_paths(list.into_bytes());
+        // `PathBuf` equality ignores a trailing slash; the bytes do not.
+        assert!(
+            paths
+                .iter()
+                .all(|p| !p.as_os_str().as_encoded_bytes().ends_with(b"/")),
+            "{paths:?}"
+        );
+        assert_eq!(paths, want);
+        let args = paths.iter().map(|p| p.clone().into_os_string()).collect();
+        assert_eq!(files_of(args).unwrap(), paths, "the run's paths");
+        let g = group_menu_for(paths, Some(md_catalog()));
+        assert!(
+            !g.tally
+                .types
+                .iter()
+                .any(|(m, ..)| m == engine::classify::X8BIT_MIME),
+            "{:?}",
+            g.tally.types
+        );
+        let mut reread = Reread::per_drop();
+        let run: Vec<_> = g
+            .paths
+            .iter()
+            .map(|p| named_kind(p, &mut reread).1.label)
+            .collect();
+        assert_eq!(run, [".srt text"; 5]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

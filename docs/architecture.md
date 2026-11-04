@@ -1253,8 +1253,9 @@ compositor.
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`
   decodes to bytes; a non-`file` URI, another host, a bad escape or a
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
-  Paths are kept as given (`..` and non-UTF-8 bytes stay, as on the
-  command line). CRLF and LF both end a line; lines starting with `#` are
+  Paths are made what the command line makes them (`.` components and
+  trailing slashes dropped; `..` and non-UTF-8 bytes stay), so the wheel
+  classifies the same files the run it starts is given. CRLF and LF both end a line; lines starting with `#` are
   comments. If nothing is left, the hub says `Nothing to do`.
 - Choosing: only an applicable target is clickable (left button); that
   is the choice. The URI bytes are freed before classification, and the
