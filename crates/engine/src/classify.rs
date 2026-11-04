@@ -26,10 +26,13 @@ const HEAD: usize = 4096;
 /// which check the whole file themselves. No other preset takes it.
 pub const X8BIT_MIME: &str = "text/x-8bit";
 
-/// How far a text-named file with an all-ASCII head is read to find its
-/// first non-ASCII byte: a whole film subtitle (a feature-length `.srt` is
-/// 50-150 KiB). A file whose first accent lies past it stays what its
-/// UTF-8 prefix says; its action then reports the byte.
+/// How far a text-named file with an all-ASCII head is read on, the head
+/// included: a whole film subtitle (a feature-length `.srt` is 50-150 KiB).
+/// Valid UTF-8 accents do not stop the read-on; it stops after the chunk
+/// that holds the first byte that is not valid UTF-8, or a control byte,
+/// at the file's end, or when the window or the drop's budget runs out. A
+/// file with no such byte within it stays what its UTF-8 prefix says; its
+/// action then reports a later byte.
 const WINDOW: usize = 256 * 1024;
 
 /// The read-on budget of one wheel invocation, shared by every file it

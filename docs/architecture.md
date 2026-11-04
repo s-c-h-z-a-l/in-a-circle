@@ -833,10 +833,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   C0 control byte other than TAB, LF, CR and FF (one Ctrl-Z, `0x1A`, as the
   file's very last byte is allowed), and it is not valid UTF-8. A file with
   a listed extension whose 4 KiB head is all ASCII is read on, on the same
-  handle, up to its first 256 KiB, stopping at the read that finds a
-  non-UTF-8 byte; one wheel invocation reads on at most 1 MiB for all its
-  files together, after which the head alone decides (`text/plain` for an
-  ASCII head). A head that is valid UTF-8 with any non-ASCII byte, or a
+  handle, up to its first 256 KiB, stopping at the read that finds the
+  first byte that is not valid UTF-8, or a control byte (valid UTF-8
+  accents do not stop it); one wheel invocation reads on at most 1 MiB
+  for all its files together, after which the head alone decides
+  (`text/plain` for an ASCII head). A head that is valid UTF-8 with any non-ASCII byte, or a
   file without an extension, is decided by the head. Every valid UTF-8 file
   keeps the plain text and Markdown rule above. The classifier only
   proposes: the action checks the whole file, and a non-UTF-8 byte past
