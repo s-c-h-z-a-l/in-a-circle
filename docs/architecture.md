@@ -172,7 +172,9 @@ are in `CLAUDE.md`.
 - `ext=same` names no extension: the output keeps its input's, exactly
   as it is (the last one, its case kept: `Film.hu.srt` gives
   `Film.hu/Film.hu.srt`, `a.SRT` gives `a/a.SRT`, `a.tar.gz` gives
-  `a.tar/a.tar.gz`; an input without one gives an output without one).
+  `a.tar/a.tar.gz`; an input without one gives an output without one,
+  and so does a trailing dot, an empty extension: `Film.` gives
+  `Film/Film`).
   It is valid on every one-to-one action, `batch=yes` and `batch=no`; a
   join's one output has no single input to take it from, so `join=yes`
   with `ext=same` rejects the line. Any other value is still the
@@ -1036,7 +1038,8 @@ In the engine, in one place:
    suffix, English and Latin-only by default (`-small`, `-compressed`),
    configurable. The exception is an `ext=same` action (a re-encoding,
    such as a subtitle to UTF-8): its output keeps the input's name
-   exactly, with no suffix (`Film.hu.srt` gives `Film.hu/Film.hu.srt`),
+   exactly, with no suffix (`Film.hu.srt` gives `Film.hu/Film.hu.srt`;
+   only a trailing dot is dropped, `Film.` gives `Film/Film`),
    because the wrapper folder already tells the two apart and players
    pair a subtitle with its film by the name.
 3. Every input gets its own folder, a single output too (`a.txt` gives

@@ -3574,7 +3574,8 @@ pub(crate) mod tests {
 
     /// `ext=same`: the output is named `<stem>.<the input's extension>`,
     /// its case kept, only the last extension counted, none for an input
-    /// without one; the wrapper folder alone tells it from its input.
+    /// without one (or with an empty one, after a trailing dot); the
+    /// wrapper folder alone tells it from its input.
     #[test]
     fn ext_same_keeps_the_input_extension() {
         use crate::sandbox::tests::abi_or_skip;
@@ -3584,7 +3585,7 @@ pub(crate) mod tests {
         let t = Tmp::new("ext-same");
         let docs = t.0.join("docs");
         fs::create_dir(&docs).unwrap();
-        let names = ["Film.hu.srt", "B.SRT", "notes", "a.tar.gz"];
+        let names = ["Film.hu.srt", "B.SRT", "notes", "a.tar.gz", "Film."];
         let inputs: Vec<PathBuf> = names.iter().map(|n| docs.join(n)).collect();
         for p in &inputs {
             fs::write(p, "x\n").unwrap();
@@ -3597,6 +3598,8 @@ pub(crate) mod tests {
             "B/B.SRT",
             "notes (1)/notes",
             "a.tar/a.tar.gz",
+            // A trailing dot is an empty extension: none is kept.
+            "Film/Film",
         ]
         .map(|r| docs.join(r));
         assert_eq!(got, want);
