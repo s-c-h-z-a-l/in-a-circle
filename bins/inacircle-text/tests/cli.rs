@@ -13,7 +13,9 @@ action\ttext.md-to-html\tfamily=text\tin=text/markdown\tout=text/html\text=html\
 action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n\
 action\ttext.epub-to-txt\tfamily=text\tin=application/epub+zip\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
-action\ttext.epub-to-md\tfamily=text\tin=application/epub+zip\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes\tbatch=no\n";
+action\ttext.epub-to-md\tfamily=text\tin=application/epub+zip\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes\tbatch=no\n\
+action\ttext.cp1250-to-utf8\tfamily=text\tin=text/x-8bit\tout=text/plain\text=same\tlabel=Windows-1250\tgroup=encoding\tcost=10\tlossy=no\tbatch=yes\n\
+action\ttext.iso88592-to-utf8\tfamily=text\tin=text/x-8bit\tout=text/plain\text=same\tlabel=ISO-8859-2\tgroup=encoding\tcost=10\tlossy=no\tbatch=yes\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);

@@ -603,6 +603,41 @@ are in `CLAUDE.md`.
   `text.md-join-epub`, make a book again when it is within the EPUB
   writer's limits (1024 chapters, one document's budgets); a larger
   book's md is still written but cannot be joined back in one piece.
+- `text.cp1250-to-utf8` and `text.iso88592-to-utf8` (`in=text/x-8bit`,
+  `out=text/plain`, `ext=same`, `group=encoding`, `lossy=no`) decode a
+  Windows-1250 or ISO-8859-2 file to a UTF-8 copy under the input's own
+  name; the label is the code page the file is read as, the target is
+  always UTF-8. The upper 128 bytes map by the Unicode Consortium's
+  mapping files (`VENDORS/MICSFT/WINDOWS/CP1250.TXT`,
+  `ISO8859/8859-2.TXT`), built into the binary and checked byte for byte
+  against copies of the files and against glibc's `iconv` by the tests.
+  The file is streamed in 64 KiB reads, so it has no size limit of its
+  own (the engine's 3 x cap bounds the output). Strict, never `U+FFFD`:
+  each error gives no output, with the byte's offset from 0. A byte
+  Windows-1250 leaves undefined (`0x81 0x83 0x88 0x90 0x98`) is `byte
+  0x81 at N is not Windows-1250`. ISO-8859-2 `0x80-0x9F` are C1 controls
+  (in the mapping file and in glibc, but never in a text file), so they
+  are refused: one Windows-1250 assigns (its quotes, dashes, `Š`...) is
+  `byte 0x84 at N: this looks like Windows-1250`, one it does not is
+  `byte 0x81 at N is not ISO-8859-2`. NUL or a C0 control other than
+  TAB, LF, FF and CR is `not text: control byte at N`; one Ctrl-Z
+  (`0x1A`) as the very last byte is allowed and kept. Line ends are kept
+  byte for byte and no byte order mark is written, except for a `.srt`
+  input (any case), whose copy starts with one (players on old TVs and
+  Windows read a subtitle without it as the local code page). A file
+  that is already UTF-8 (valid, with at least one multi-byte character)
+  is skipped, `already UTF-8`; one that is mostly UTF-8, with as many
+  valid multi-byte sequences as bytes outside valid UTF-8 or more over
+  the whole file, fails with `looks like UTF-8 with damaged bytes (first
+  at N)` instead of turning every `é` into `Ă©`: real 8-bit text almost
+  never forms a valid sequence, since its accented letter is followed by
+  ASCII. These two verdicts win over a refused byte (`Á` in UTF-8 is
+  `C3 81`) and need the whole file: the copy is written as the input
+  streams and, on any failure, cut back to empty and removed. A pure
+  ASCII file converts to itself. A converted input gets one `warn`,
+  `converted from Windows-1250 to UTF-8` (or `ISO-8859-2`): the contract
+  has no other line for a note on a converted input; a route without a
+  lossy action does not count it as a loss.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -623,6 +658,8 @@ action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=H
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	text.epub-to-md	family=text	in=application/epub+zip	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=no
+action	text.cp1250-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=Windows-1250	group=encoding	cost=10	lossy=no	batch=yes
+action	text.iso88592-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=ISO-8859-2	group=encoding	cost=10	lossy=no	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1

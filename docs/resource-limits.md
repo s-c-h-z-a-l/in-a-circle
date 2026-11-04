@@ -200,6 +200,21 @@ Entries under `__MACOSX/` and files whose name starts with `.` (Finder
 resource forks such as `._1.jpg`) are not pages; they count in the
 `non-image entries left out` warning.
 
+The code page decoders (Windows-1250 and ISO-8859-2 to UTF-8) have no
+input limit: they stream the file in 64 KiB reads and hold that buffer
+and an output buffer of three times it (one byte is at most three UTF-8
+bytes), about 256 KiB whatever the size. The output is bounded by the
+engine's cap on an 8-bit text decoder (3 x the input + 3 B, below) and
+by `RLIMIT_FSIZE`; SIGXFSZ is ignored, so a write past the ceiling fails
+only that input (`The text would be larger than <N> MiB`), and the copy
+is cut back to empty and removed. Measured peak (`VmHWM`, release
+`inacircle-text`, no sandbox, 2026-11-04): 3,020-3,068 KiB for a 16 MiB
+file, 3,020-3,036 KiB for 200 MiB of Hungarian text (281 MiB out),
+3,212-3,288 KiB for 64 MiB of `0x84` only (`„`, the densest output,
+192 MiB); the debug test build measures 4.3-4.4 MiB and the test's
+ceiling is 8 MiB. Time is linear: each byte is looked at once (200 MiB
+in 0.82 s).
+
 The text family (txt <-> md) is held by structure budgets charged while it
 builds, not after: 8 MiB input, 524,288 nodes, 32 MiB of owned text, 32 MiB
 of output. The node budget was 131,072 at first; the densest real text
