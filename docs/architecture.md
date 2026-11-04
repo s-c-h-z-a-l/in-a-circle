@@ -557,10 +557,13 @@ are in `CLAUDE.md`.
   link; the entry is read once however often it is named (two paths to
   one entry are one file) and written byte for byte when the image probe
   finds a JPEG or PNG of at most 180 megapixels (one the PDF writer
-  cannot pass, such as a PNG with alpha, is kept too). The image header
-  is checked (type, size, pixel count) and the bytes are copied as they
-  are; damaged image data is not detected (a viewer shows such an image
-  broken). Every other image (GIF, WebP, SVG, a damaged header, missing,
+  cannot pass, such as a PNG with alpha, is kept too). The bytes are
+  copied as they are. An image with a feature the PDF writer lacks is
+  checked by its header only (type, size, pixel count); a PNG the PDF
+  writer supports is also checked in structure (chunk CRCs, chunk order,
+  the IDAT run), so a damaged one keeps its alt text. Compressed pixel
+  data is never decoded, so damage inside it is not detected (a viewer
+  shows such an image broken). Every other image (GIF, WebP, SVG, a damaged header, missing,
   outside the book, encrypted, over the limits in
   `docs/resource-limits.md`) keeps
   its alt text in its place, and one `warn`, `N image(s) replaced by alt
