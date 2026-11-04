@@ -1024,7 +1024,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   same text is the CLI's stderr warning. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. An output whose lossy action reported a
   loss (a `warn` for an input that has an output) starts the body with
-  `Formatting was lost.`; a run that lost nothing does not say it. A join
+  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  of an Encoding-group action that has an output adds the body line
+  `converted from <code page> to UTF-8` (the action's label, for one input
+  and for several; no line for a run without output or a cancelled one);
+  it comes from the action's group, not from an event. A join
   run that published its result: the result's file name, then `<taken> /
   <total> files` (the inputs in the result, of every file of the run) and
   the same problem lines, plus the Downloads line when its anchor folder
@@ -1283,7 +1287,8 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not
+  `Document`, `book` = east, labelled `Book`, and `encoding` = west,
+  labelled `Encoding`; an unknown `group` is not
   shown, one stderr line per run). A category is **lit** when any dragged
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
@@ -1291,7 +1296,10 @@ compositor.
   (from plain text) and `markdown-epub` (from an EPUB) north, `plain-text`
   (from Markdown) and `plain-text-epub` (from an EPUB) south, so an EPUB
   lights only Document (Markdown north, Plain text south, HTML east dim)
-  and nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has no
+  and nothing in Book; a file that is not valid UTF-8 text (`text/x-8bit`)
+  lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
+  `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
+  leaves Encoding dim; `pdf` north and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped

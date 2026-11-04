@@ -530,11 +530,17 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
         let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(
+        let n = Notifier::new(
             label,
             steps.iter().any(|a| a.lossy),
             inputs.len() + assets.len(),
-        )
+        );
+        // An Encoding-group action's label is the code page it reads; the
+        // final notice says so (no event of its own).
+        match steps.last().filter(|a| a.group == "encoding") {
+            Some(a) => n.converting_from(&a.label),
+            None => n,
+        }
     });
 
     mark("classify");
@@ -1408,9 +1414,11 @@ mod tests {
             (doc.label.as_str(), doc.group.as_str(), doc.lit),
             ("Document", "document", true)
         );
-        // Book is on the wheel too, dim: no dragged file is a comic book.
-        assert_eq!(g.slices.iter().flatten().count(), 2);
+        // Book and Encoding are on the wheel too, dim: no dragged file is a
+        // comic book, and a UTF-8 text has no code page to convert.
+        assert_eq!(g.slices.iter().flatten().count(), 3);
         assert!(!g.slices[2].as_ref().expect("books point east").lit);
+        assert!(!g.slices[6].as_ref().expect("encodings point west").lit);
 
         let none = groups_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
@@ -1692,6 +1700,54 @@ mod tests {
         for k in [0, 2] {
             assert!(!m.slices[k].as_ref().unwrap().applicable, "slice {k} dim");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the drawn wheels are built from for a Windows-1250 subtitle:
+    /// Encoding lights in the west and nothing else does; its wheel has
+    /// Windows-1250 west and ISO-8859-2 east, both lit. A UTF-8 subtitle
+    /// leaves Encoding dim.
+    #[test]
+    fn encoding_menus_offer_the_two_code_pages() {
+        let base = md_catalog().actions.remove(0);
+        let act = |id: &str, label: &str| Action {
+            id: id.into(),
+            input: "text/x-8bit".into(),
+            output: "text/plain".into(),
+            ext: engine::catalog::EXT_SAME.into(),
+            label: label.into(),
+            group: "encoding".into(),
+            lossy: false,
+            ..base.clone()
+        };
+        let cat = Catalog {
+            actions: vec![
+                act("text.cp1250-to-utf8", "Windows-1250"),
+                act("text.iso88592-to-utf8", "ISO-8859-2"),
+            ],
+        };
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Film.srt");
+        std::fs::write(&file, b"1\r\nP\xf8\xedli\x9a\r\n").unwrap();
+        let g = group_menu_for(vec![file], Some(cat.clone()));
+        let lit = |k: usize| g.slices[k].as_ref().unwrap().lit;
+        assert_eq!(g.slices[6].as_ref().unwrap().group, "encoding");
+        assert!(lit(6), "Encoding lights, west");
+        assert!(!lit(0) && !lit(2), "Document and Book stay dim");
+        let m = target_menu(&g, "encoding");
+        assert_eq!(m.hub, "Encoding");
+        let slot = |k: usize| {
+            let s = m.slices[k].as_ref().unwrap();
+            (s.label.as_str(), s.preset.as_str(), s.applicable)
+        };
+        assert_eq!(slot(6), ("Windows-1250", "cp1250", true));
+        assert_eq!(slot(2), ("ISO-8859-2", "iso88592", true));
+        // Valid UTF-8 is not a candidate: Encoding is on the wheel, dim.
+        let utf8 = dir.join("Utf.srt");
+        std::fs::write(&utf8, "1\r\nP\u{159}\u{ed}li\u{161}\r\n").unwrap();
+        let g = group_menu_for(vec![utf8], Some(cat));
+        assert!(!g.slices[6].as_ref().unwrap().lit, "Encoding stays dim");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

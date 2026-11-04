@@ -45,6 +45,13 @@ pub const GROUPS: &[Group] = &[
         label: "Book",
         direction: 2,
     },
+    // West: the one free direction in the muscle-memory layout (north
+    // Document, east Book); an 8-bit text file lights only this group.
+    Group {
+        id: "encoding",
+        label: "Encoding",
+        direction: 6,
+    },
 ];
 
 /// The order is the tie-break of both wheel levels: when two presets of
@@ -160,6 +167,28 @@ pub const PRESETS: &[Preset] = &[
         group: "document",
         join: &[],
         action: None,
+    },
+    // Two code pages share the input and output types, so each names its
+    // action; west and east are the two slices of the group's wheel.
+    Preset {
+        id: "cp1250",
+        input: Some("text/x-8bit"),
+        output: "text/plain",
+        label: "Windows-1250",
+        direction: 6,
+        group: "encoding",
+        join: &[],
+        action: Some("text.cp1250-to-utf8"),
+    },
+    Preset {
+        id: "iso88592",
+        input: Some("text/x-8bit"),
+        output: "text/plain",
+        label: "ISO-8859-2",
+        direction: 2,
+        group: "encoding",
+        join: &[],
+        action: Some("text.iso88592-to-utf8"),
     },
 ];
 
@@ -1049,7 +1078,7 @@ mod tests {
         let s = g[0].as_ref().unwrap();
         assert_eq!((s.group, s.label, s.lit), ("document", "Document", true));
         // Book is on the wheel too, dim: nothing here is a comic book.
-        assert_eq!(g.iter().flatten().count(), 2);
+        assert_eq!(g.iter().flatten().count(), 3);
         assert!(!g[2].as_ref().unwrap().lit);
     }
 
@@ -1075,6 +1104,61 @@ mod tests {
                 act("cp.b", "text/x-8bit", "text/plain", 10, false),
             ],
         }
+    }
+
+    fn encoding_catalog() -> Catalog {
+        let mut cat = Catalog { actions: vec![] };
+        for id in ["text.cp1250-to-utf8", "text.iso88592-to-utf8"] {
+            let mut a = act(id, "text/x-8bit", "text/plain", 10, false);
+            a.group = "encoding".into();
+            cat.actions.push(a);
+        }
+        cat
+    }
+
+    /// An 8-bit text file lights Encoding on the west of the first level;
+    /// its wheel has Windows-1250 west and ISO-8859-2 east, both lit.
+    #[test]
+    fn encoding_group_west_with_two_slices() {
+        let cat = encoding_catalog();
+        let t = tally(&[("Film.srt", "text/x-8bit")]);
+        let g = groups(&cat, &t);
+        let enc = g[6].as_ref().unwrap();
+        assert_eq!(
+            (enc.group, enc.label, enc.lit),
+            ("encoding", "Encoding", true)
+        );
+        let o = offer_group(&cat, &t, "encoding");
+        assert_eq!(o.hub, "Encoding");
+        let slot = |k: usize| {
+            let s = o.slices[k].as_ref().unwrap();
+            (s.preset, s.label.as_str(), s.applicable, s.disabled.clone())
+        };
+        assert_eq!(slot(6), ("cp1250", "Windows-1250", 1, None));
+        assert_eq!(slot(2), ("iso88592", "ISO-8859-2", 1, None));
+        assert_eq!(o.slices.iter().flatten().count(), 2);
+    }
+
+    /// Valid UTF-8 text has nothing to convert: Encoding stays on the wheel
+    /// but dim, and neither slice is lit.
+    #[test]
+    fn utf8_files_offer_no_encoding() {
+        let cat = encoding_catalog();
+        for (n, m) in [("a.srt", "text/plain"), ("a.txt", "text/markdown")] {
+            let t = tally(&[(n, m)]);
+            assert!(!groups(&cat, &t)[6].as_ref().unwrap().lit, "{n}");
+            let o = offer_group(&cat, &t, "encoding");
+            assert!(
+                o.slices
+                    .iter()
+                    .flatten()
+                    .all(|s| s.applicable == 0 && s.disabled.is_some()),
+                "{n}"
+            );
+        }
+        // And an 8-bit file lights no other group.
+        let g = groups(&encoding_catalog(), &tally(&[("a.srt", "text/x-8bit")]));
+        assert!(!g[0].as_ref().unwrap().lit && !g[2].as_ref().unwrap().lit);
     }
 
     const fn named(id: &'static str, action: &'static str, direction: u8) -> Preset {

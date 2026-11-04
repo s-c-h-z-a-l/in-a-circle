@@ -105,6 +105,10 @@ pub struct Summary {
     /// The run's recording warning (no Undo, and why), from
     /// `journal::Recorded`.
     pub warning: Option<String>,
+    /// The run is an Encoding-group action's: the code page it reads (the
+    /// action's label). A run with an output then says what it converted
+    /// from; no event of its own carries this.
+    pub converted_from: Option<String>,
     /// The run was a join action's: its one result's counts.
     pub join: Option<JoinNote>,
 }
@@ -234,6 +238,14 @@ pub fn final_text(s: &Summary, markup: bool) -> (String, String) {
     let mut body = Vec::new();
     if s.lossy && s.lost_done {
         body.push("Formatting was lost.".to_owned());
+    }
+    // Which code page was read matters because the wrong guess is easy;
+    // a cancelled run says only its counts, a run without output nothing.
+    if let Some(from) = &s.converted_from
+        && s.done_count > 0
+        && !s.cancelled
+    {
+        body.push(format!("converted from {from} to UTF-8"));
     }
     let summary = if s.cancelled {
         let rest = s.skipped + s.failed;
@@ -609,6 +621,13 @@ impl Notifier {
             spent: 0,
             ending: false,
         }
+    }
+
+    /// Marks the run as an Encoding-group action's, reading `from`: a
+    /// success then says `converted from <from> to UTF-8`.
+    pub fn converting_from(mut self, from: &str) -> Notifier {
+        self.summary.converted_from = Some(from.to_owned());
+        self
     }
 
     /// Connects if not tried yet, or (at the end) once more after the
@@ -1375,6 +1394,43 @@ mod tests {
             final_text(&s, false),
             ("Nothing converted".into(), "b.txt: cancelled".into())
         );
+    }
+
+    /// An Encoding-group run names the code page it read, once, for one
+    /// input and for several; a run without an output, a cancelled one
+    /// and every other run keep their text.
+    #[test]
+    fn encoding_run_names_the_code_page() {
+        let mut s = summary(&[done("/d/a.srt", "/d/a/a.srt")]);
+        s.set_counts((1, 0, 0, 0));
+        s.converted_from = Some("Windows-1250".into());
+        assert_eq!(
+            final_text(&s, false),
+            (
+                "a.srt".into(),
+                "converted from Windows-1250 to UTF-8".into()
+            )
+        );
+        let mut s = summary(&[
+            done("/d/a.srt", "/d/a/a.srt"),
+            done("/d/b.srt", "/d/b/b.srt"),
+            fail("/d/c.srt", "bad"),
+        ]);
+        s.set_counts((2, 0, 1, 0));
+        s.converted_from = Some("ISO-8859-2".into());
+        let (summary_text, body) = final_text(&s, false);
+        assert_eq!(summary_text, "2 done, 1 failed");
+        assert_eq!(
+            lines(&body),
+            ["converted from ISO-8859-2 to UTF-8", "c.srt: bad"]
+        );
+        // Nothing converted: no claim.
+        let mut s = summary(&[fail("/d/c.srt", "bad")]);
+        s.converted_from = Some("ISO-8859-2".into());
+        assert_eq!(lines(&final_text(&s, false).1), ["c.srt: bad"]);
+        // The same run without the mark is byte-identical to today.
+        s.converted_from = None;
+        assert_eq!(lines(&final_text(&s, false).1), ["c.srt: bad"]);
     }
 
     #[test]

@@ -505,6 +505,67 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// A Windows-1250 subtitle (accents in the first lines) converts to
+/// UTF-8 with the `.srt` byte order mark, in its own folder; the history
+/// records the action, and Undo moves the folder to the Trash.
+#[test]
+fn cli_cp1250_srt_to_utf8() {
+    let e = Env::new("cp1250");
+    // "Příliš žluťoučký kůň" in Windows-1250, then the quotes „…” (0x84,
+    // 0x94), so the file is not valid UTF-8 and has no control byte.
+    let cp1250: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nP\xf8\xedli\x9a \x9eslu\x9d\
+        ou\xe8k\xfd k\xf9\xf2 \x84ok\x94\r\n";
+    let src = e.file("Film.hu.srt", cp1250);
+    let o = e.run(&["run", "cp1250", "Film.hu.srt"]);
+    if skip_unsandboxed("cli_cp1250_srt_to_utf8", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film.hu/Film.hu.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nP\u{159}\u{ed}li\u{161} \
+        \u{17e}slu\u{165}ou\u{10d}k\u{fd} k\u{16f}\u{148} \u{201e}ok\u{201d}\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), cp1250, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("text.cp1250-to-utf8")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film.hu").exists());
+    assert!(src.exists());
+}
+
+/// A Windows-1250 file run as ISO-8859-2 fails (its `„` byte is a control
+/// code there) and the message points to the right code page; nothing is
+/// published, so there is nothing to undo.
+#[test]
+fn cli_iso_on_cp1250_fails_with_the_hint() {
+    let e = Env::new("iso-on-cp1250");
+    let src = e.file("Film.srt", b"1\r\n\x84ok\x94 \xe8\r\n");
+    let o = e.run(&["run", "iso88592", "Film.srt"]);
+    if skip_unsandboxed("cli_iso_on_cp1250_fails_with_the_hint", &o) {
+        return;
+    }
+    assert_eq!(o.summary(), (0, 0, 1), "{}", o.stdout);
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{}", o.stdout);
+    assert_eq!(fails[0].0, src);
+    assert_eq!(fails[0].1, "byte 0x84 at 3: this looks like Windows-1250");
+    assert!(!e.files().join("Film").exists());
+    assert_eq!(fs::read(&src).unwrap(), b"1\r\n\x84ok\x94 \xe8\r\n");
+}
+
 /// A preset that matches no input still names its run after the 1:1 route
 /// it would have taken (the history's `action=`), not after the preset.
 #[test]
@@ -1827,18 +1888,18 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\tx.bin\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\tx.bin\n"
     );
     // The plain offer output is unchanged and `--groups` needs files.
     let o = e.run(&["offer", "--groups"]);
