@@ -537,7 +537,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         );
         // An Encoding-group action's label is the code page it reads; the
         // final notice says so (no event of its own).
-        match steps.last().filter(|a| a.group == "encoding") {
+        match steps.last().filter(|a| a.group == menu::ENCODING_GROUP) {
             Some(a) => n.converting_from(&a.label),
             None => n,
         }

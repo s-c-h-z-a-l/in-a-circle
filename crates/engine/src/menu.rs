@@ -34,6 +34,10 @@ pub struct Group {
     pub direction: u8,
 }
 
+/// The id of the Encoding group. The final notice names the code page
+/// of an action in this group, so the engine's caller shares the id.
+pub const ENCODING_GROUP: &str = "encoding";
+
 pub const GROUPS: &[Group] = &[
     Group {
         id: "document",
@@ -48,7 +52,7 @@ pub const GROUPS: &[Group] = &[
     // West: the one free direction in the muscle-memory layout (north
     // Document, east Book); an 8-bit text file lights only this group.
     Group {
-        id: "encoding",
+        id: ENCODING_GROUP,
         label: "Encoding",
         direction: 6,
     },
@@ -176,7 +180,7 @@ pub const PRESETS: &[Preset] = &[
         output: "text/plain",
         label: "Windows-1250",
         direction: 6,
-        group: "encoding",
+        group: ENCODING_GROUP,
         join: &[],
         action: Some("text.cp1250-to-utf8"),
     },
@@ -186,7 +190,7 @@ pub const PRESETS: &[Preset] = &[
         output: "text/plain",
         label: "ISO-8859-2",
         direction: 2,
-        group: "encoding",
+        group: ENCODING_GROUP,
         join: &[],
         action: Some("text.iso88592-to-utf8"),
     },

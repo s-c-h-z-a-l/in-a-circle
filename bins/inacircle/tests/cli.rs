@@ -546,6 +546,43 @@ fn cli_cp1250_srt_to_utf8() {
     assert!(src.exists());
 }
 
+/// An ISO-8859-2 subtitle converts to UTF-8 with the `.srt` byte order
+/// mark; the history records the ISO action, and Undo moves the folder.
+#[test]
+fn cli_iso88592_to_utf8() {
+    let e = Env::new("iso88592");
+    // "šaž čaša" in ISO-8859-2 (0xb9 š, 0xbe ž, 0xe8 č): not valid UTF-8.
+    let iso: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\n\xb9a\xbe \xe8a\xb9a\r\n";
+    let src = e.file("Film.srt", iso);
+    let o = e.run(&["run", "iso88592", "Film.srt"]);
+    if skip_unsandboxed("cli_iso88592_to_utf8", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\n\u{161}a\u{17e} \u{10d}a\u{161}a\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), iso, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("text.iso88592-to-utf8")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
+}
+
 /// A Windows-1250 file run as ISO-8859-2 fails (its `„` byte is a control
 /// code there) and the message points to the right code page; nothing is
 /// published, so there is nothing to undo.

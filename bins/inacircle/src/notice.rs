@@ -1433,6 +1433,18 @@ mod tests {
         assert_eq!(lines(&final_text(&s, false).1), ["c.srt: bad"]);
     }
 
+    /// A cancelled Encoding run says only "Cancelled" and its counts.
+    #[test]
+    fn cancelled_encoding_run_names_no_code_page() {
+        let mut s = summary(&[done("/d/a.srt", "/d/a/a.srt"), fail("/d/c.srt", "bad")]);
+        s.set_counts((1, 0, 1, 0));
+        s.cancelled = true;
+        s.converted_from = Some("Windows-1250".into());
+        let (summary_text, body) = final_text(&s, false);
+        assert_eq!(summary_text, "Cancelled");
+        assert_eq!(lines(&body), ["1 done, 1 not converted"]);
+    }
+
     #[test]
     fn lossy_first_line() {
         let mut s = summary(&[
