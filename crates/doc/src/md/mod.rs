@@ -823,7 +823,47 @@ struct InlineWriter<'a> {
     /// touch it (`` `a``b` ``), which a reader takes for one span holding
     /// the backticks between: the two are joined into one span instead
     /// ([`InlineWriter::join_code`]).
-    code: (usize, usize),
+    code: CodeAt,
+}
+
+/// A code span written in `out` (see [`InlineWriter::code`]), with what a
+/// join needs to know of it, kept so that a join costs only the text it
+/// adds (a long span is not scanned again).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct CodeAt {
+    start: usize,
+    end: usize,
+    /// Its fence's length.
+    fence: usize,
+    /// A space pads its text at both edges.
+    pad: bool,
+    /// Its text is all spaces.
+    blank: bool,
+    /// The backticks ending its text.
+    ticks: usize,
+}
+
+impl CodeAt {
+    const NONE: CodeAt = CodeAt {
+        start: usize::MAX,
+        end: usize::MAX,
+        fence: 0,
+        pad: false,
+        blank: false,
+        ticks: 0,
+    };
+
+    /// The span of `t` written at `start..end` with a fence of `fence`.
+    fn of(t: &str, start: usize, end: usize, fence: usize) -> CodeAt {
+        CodeAt {
+            start,
+            end,
+            fence,
+            pad: span_pad(t),
+            blank: t.bytes().all(|c| c == b' '),
+            ticks: t.bytes().rev().take_while(|&c| c == b'`').count(),
+        }
+    }
 }
 
 /// What a delimiter run's neighbour is for the flanking rules: Unicode
@@ -1161,7 +1201,7 @@ struct Open {
     before_now: Class,
     /// GFM: the code span ending right at its opener (see
     /// [`InlineWriter::code`]), if one does.
-    code: (usize, usize),
+    code: CodeAt,
 }
 
 /// White space that goes outside a mark (a line ending stays in it).
@@ -1218,27 +1258,6 @@ fn span_pad(t: &str) -> bool {
         || (t.starts_with(' ') && t.ends_with(' ') && t.chars().any(|c| c != ' '))
 }
 
-/// [`span_pad`] for `a` followed by `b`, `a` not empty.
-fn span_pad_joined(a: &str, b: &str) -> bool {
-    let last = b.chars().next_back().or_else(|| a.chars().next_back());
-    a.starts_with('`')
-        || last == Some('`')
-        || (a.starts_with(' ')
-            && last == Some(' ')
-            && (a.chars().any(|c| c != ' ') || b.chars().any(|c| c != ' ')))
-}
-
-/// The text of a code span's content as a reader takes it: one space off
-/// each edge when both are spaces and it is not all spaces (what
-/// [`span_pad`] added).
-fn span_text(c: &str) -> &str {
-    if c.len() >= 2 && c.starts_with(' ') && c.ends_with(' ') && c.bytes().any(|b| b != b' ') {
-        &c[1..c.len() - 1]
-    } else {
-        c
-    }
-}
-
 impl<'a> InlineWriter<'a> {
     fn new(
         markers: bool,
@@ -1269,7 +1288,7 @@ impl<'a> InlineWriter<'a> {
             web_end: usize::MAX,
             to_end: false,
             child_to_end: false,
-            code: (usize::MAX, usize::MAX),
+            code: CodeAt::NONE,
         }
     }
 
@@ -1488,10 +1507,10 @@ impl<'a> InlineWriter<'a> {
             line_start: self.line_start,
             before: self.before(),
             before_now: self.out.chars().next_back().map_or(Class::Space, Class::of),
-            code: if self.code.1 == self.out.len() {
+            code: if self.code.end == self.out.len() {
                 self.code
             } else {
-                (usize::MAX, usize::MAX)
+                CodeAt::NONE
             },
         };
         self.line_start = false;
@@ -1533,7 +1552,7 @@ impl<'a> InlineWriter<'a> {
         // at its core's edge next to one outside it unjoined; `decide`
         // leaves such a mark out before its content is written, where a
         // span written next is joined.)
-        self.code = (usize::MAX, usize::MAX);
+        self.code = CodeAt::NONE;
         if self.sink.failed() {
             return;
         }
@@ -1725,7 +1744,7 @@ impl<'a> InlineWriter<'a> {
                 line_start: false,
                 before: Class::Space,
                 before_now: Class::Space,
-                code: (usize::MAX, usize::MAX),
+                code: CodeAt::NONE,
             },
             (usize::MAX, Class::Space),
         );
@@ -2112,16 +2131,17 @@ impl<'a> InlineWriter<'a> {
         }
         self.line_start = false;
         let start = self.out.len();
-        let joins = self.gfm && self.code.1 == start;
-        self.span(t, span_fence(t, 1));
+        let joins = self.gfm && self.code.end == start;
+        let fence = span_fence(t, 1);
+        self.span(t, fence);
         if !self.gfm {
             return;
         }
-        let end = self.out.len();
+        let new = CodeAt::of(t, start, self.out.len(), fence);
         self.code = if joins {
-            (self.code.0, self.join_code(self.code.0, start, end))
+            self.join_code(self.code, new)
         } else {
-            (start, end)
+            new
         };
     }
 
@@ -2142,80 +2162,84 @@ impl<'a> InlineWriter<'a> {
         self.sink.push_str(&mut self.out, &ticks);
     }
 
-    /// Joins the code spans `out[s1..e1]` and `out[e1..e2]`, written side
-    /// by side, into one span of their joined text; what follows `e2` is
-    /// kept. Returns where the joined span ends. The first span's fence
-    /// and front pad stay where they still fit, so a span grown by many
-    /// joins costs each joined text once; otherwise it is written again,
-    /// its new fence at least twice the old one, so that happens a
-    /// logarithmic number of times per span (a fence `n` is outgrown
-    /// only by a backtick run of `n` in the text).
-    fn join_code(&mut self, s1: usize, e1: usize, e2: usize) -> usize {
+    /// Joins the code spans `x` and `y`, written side by side (`y` just
+    /// written, ending `out`), into one span of their joined text, and
+    /// returns it. The first span's fence and front pad stay where they
+    /// still fit, and what a join needs of the first span is kept in its
+    /// [`CodeAt`], so a span grown by many joins costs each joined text
+    /// once; otherwise it is written again, its new fence at least twice
+    /// the old one, so that happens a logarithmic number of times per
+    /// span (a fence `n` is outgrown only by a backtick run of `n`).
+    fn join_code(&mut self, x: CodeAt, y: CodeAt) -> CodeAt {
         if self.sink.failed() {
-            return e2;
+            return y;
         }
-        let fence = |s: &str| s.bytes().take_while(|&c| c == b'`').count();
-        let n1 = fence(&self.out[s1..e1]);
-        let n2 = fence(&self.out[e1..e2]);
-        let c1 = &self.out[s1 + n1..e1 - n1];
-        let a = span_text(c1);
-        let pad1 = a.len() != c1.len();
-        let b_at = {
-            let c2 = &self.out[e1 + n2..e2 - n2];
-            let b = span_text(c2);
-            let at = e1 + n2 + usize::from(b.len() != c2.len());
-            at..at + b.len()
-        };
+        let n1 = x.fence;
+        // The first span's text `a`, past its fence and pad.
+        let a_at = x.start + n1 + usize::from(x.pad)..x.end - n1 - usize::from(x.pad);
+        let a_first = self.out.as_bytes()[a_at.start];
+        let b_at = y.start + y.fence + usize::from(y.pad)..y.end - y.fence - usize::from(y.pad);
         let b = &self.out[b_at.clone()];
-        // The backticks ending `a` (counted up to `n1 + 1`: only whether
-        // the run is `n1` matters) join those starting `b`.
-        let a_ticks = a
-            .bytes()
-            .rev()
-            .take(n1 + 1)
-            .take_while(|&c| c == b'`')
-            .count();
+        // The backticks ending `a` join those starting `b`.
         let clash = tick_runs(b).any(|(at, len)| {
-            if at == 0 && a_ticks > 0 {
-                a_ticks + len == n1
+            if at == 0 {
+                x.ticks + len == n1
             } else {
                 len == n1
             }
         });
-        let pad = span_pad_joined(a, b);
-        if !clash && (pad1 || !pad) {
+        let blank = x.blank && y.blank;
+        let last = b.as_bytes()[b.len() - 1];
+        // `span_pad` of the joined text.
+        let pad = a_first == b'`' || last == b'`' || (a_first == b' ' && last == b' ' && !blank);
+        let ticks = if b.len() == y.ticks {
+            x.ticks + y.ticks
+        } else {
+            y.ticks
+        };
+        if !clash && (x.pad || !pad) {
             // A padded front stays right: the joined text is not all
             // spaces, as `a` is not.
-            let cut = e1 - n1 - usize::from(pad1);
-            let tail = self.out.split_off(cut);
-            let off = |x: usize| x - cut;
+            let tail = self.out.split_off(a_at.end);
+            let off = |v: usize| v - a_at.end;
             self.sink
                 .push_str(&mut self.out, &tail[off(b_at.start)..off(b_at.end)]);
-            if pad1 {
+            if x.pad {
                 self.sink.push(&mut self.out, ' ');
             }
-            let ticks: String = std::iter::repeat_n('`', n1).collect();
-            self.sink.push_str(&mut self.out, &ticks);
-            let end = self.out.len();
-            self.sink.push_str(&mut self.out, &tail[off(e2)..]);
-            return end;
+            let fence: String = std::iter::repeat_n('`', n1).collect();
+            self.sink.push_str(&mut self.out, &fence);
+            return CodeAt {
+                start: x.start,
+                end: self.out.len(),
+                fence: n1,
+                pad: x.pad,
+                blank,
+                ticks,
+            };
         }
+        let len = a_at.len() + b.len();
         let mut t = String::new();
-        if !self.sink.charge(a.len() + b.len()) || t.try_reserve(a.len() + b.len()).is_err() {
-            return e2;
+        if !self.sink.charge(len) || t.try_reserve(len).is_err() {
+            return y;
         }
-        t.push_str(a);
+        t.push_str(&self.out[a_at]);
         t.push_str(b);
         let n = if clash {
             span_fence(&t, n1.saturating_mul(2))
         } else {
             n1
         };
-        let tail = self.out.split_off(s1);
+        self.out.truncate(x.start);
         self.span(&t, n);
-        let end = self.out.len();
-        self.sink.push_str(&mut self.out, &tail[e2 - s1..]);
-        end
+        CodeAt {
+            start: x.start,
+            end: self.out.len(),
+            fence: n,
+            pad: span_pad(&t),
+            blank,
+            ticks,
+        }
     }
 
     /// `(dest "title")`.
@@ -4653,6 +4677,12 @@ mod tests {
                         .chain((0..n).map(|_| Inline::Emph(vec![code("b".into())])))
                         .collect(),
                 )])]),
+                // Texts all spaces: the span's state is kept, not rescanned.
+                doc(vec![Block::Paragraph(
+                    (0..n)
+                        .map(|_| Inline::Strikethrough(vec![code(" ".into())]))
+                        .collect(),
+                )]),
                 // Backtick runs of every length up to 64 in the texts: the
                 // fence is outgrown again and again.
                 doc(vec![Block::Paragraph(
