@@ -10,13 +10,13 @@
 //! one multi-byte character is `AlreadyUtf8` (decoding it would turn `é`
 //! into `Ă©`), and so is a file that is mostly UTF-8 with a few damaged
 //! bytes (`DamagedUtf8`): over the whole input, as many valid UTF-8
-//! sequences of Latin letters or general punctuation ([`is_evidence`]) as
-//! bytes outside valid UTF-8, or more; or a UTF-8 byte order mark first
-//! and any byte outside valid UTF-8 after it. Real 8-bit text almost never
-//! forms such a sequence: a lower-case accent is followed by ASCII, which
-//! is never a UTF-8 continuation byte, and the pairs capitals do form
-//! (`ÓŻ` = `D3 AF`, U+04EF) decode to Cyrillic, Hebrew, Arabic or Armenian
-//! letters, not counted. That verdict needs the whole input, so the output
+//! sequences of Latin letters, punctuation or symbols ([`is_evidence`])
+//! as bytes outside valid UTF-8, or more; or a UTF-8 byte order mark
+//! first and any byte outside valid UTF-8 after it. Real 8-bit text
+//! almost never forms such a sequence: a lower-case accent is followed by
+//! ASCII, which is never a UTF-8 continuation byte, and most pairs
+//! capitals form (`ÓŻ` = `D3 AF`, U+04EF) decode to Cyrillic, Hebrew,
+//! Arabic or Armenian letters, not counted. That verdict needs the whole input, so the output
 //! is written as the input streams and the caller throws it away on any
 //! error.
 
@@ -129,17 +129,21 @@ fn is_control(b: u8) -> bool {
 }
 
 /// A decoded UTF-8 character that counts as evidence of a UTF-8 file:
-/// Latin-1 Supplement to Latin Extended-B (U+0080-U+024F) and General
-/// Punctuation (U+2000-U+206F), the characters UTF-8 Hungarian, Polish,
-/// Czech and other Latin-script text is made of (`é ő ł č`, `„ ” – …`).
-/// The pairs Windows-1250 or ISO-8859-2 capitals form by accident land
-/// past U+024F: a capital's byte is `0xC2-0xDE`, so a pair is U+0080-
-/// U+07BF, and only `0xC2-0xC9` reach this range (`Â Ă Ä Ĺ Ć Ç Č É`
-/// before a byte `0x80-0xBF`; `É„`, `É…` still count). An exhaustive list
-/// of scripts is not needed: anything outside the range is simply not
+/// Latin-1 Supplement to Latin Extended-B (U+0080-U+024F), General
+/// Punctuation (U+2000-U+206F) and Currency Symbols to Letterlike Symbols
+/// (U+20A0-U+214F), the characters UTF-8 Hungarian, Polish, Czech and
+/// other Latin-script text is made of (`é ő ł č`, `„ ” – …`, `€ ™ №`).
+/// The pairs Windows-1250 or ISO-8859-2 capitals form by accident are two
+/// bytes: a capital's byte is `0xC2-0xDE`, so a pair is U+0080-U+07BF,
+/// never in the three-byte ranges, and mostly past U+024F. The residue: a
+/// capital `Â Ă Ä Ĺ Ć Ç Č` (`0xC2-0xC8`) before any byte `0x80-0xBF`, or
+/// `É` (`0xC9`) before `0x80-0x8F`, does count, so one-line all-caps
+/// Slovak or Czech such as `DĹŽKA`, `PÄŤ`, `ČŠ` is refused (already or
+/// damaged UTF-8); a file with lower-case text or more lines outweighs
+/// it with bytes outside UTF-8. Anything outside the ranges is simply not
 /// counted, which can only let a file convert, losslessly.
 fn is_evidence(c: u32) -> bool {
-    matches!(c, 0x0080..=0x024F | 0x2000..=0x206F)
+    matches!(c, 0x0080..=0x024F | 0x2000..=0x206F | 0x20A0..=0x214F)
 }
 
 /// U+FEFF, the byte order mark, when it is the file's first character.

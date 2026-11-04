@@ -203,9 +203,10 @@ resource forks such as `._1.jpg`) are not pages; they count in the
 The code page decoders (Windows-1250 and ISO-8859-2 to UTF-8) have no
 input limit: they stream the file in 64 KiB reads and hold that buffer
 and an output buffer of three times it (one byte is at most three UTF-8
-bytes), about 256 KiB whatever the size; the UTF-8 verdict (`docs/architecture.md`)
-is a handful of counters kept as the bytes pass. The output is bounded by the
-engine's cap on an 8-bit text decoder (3 x the input + 3 B, below) and
+bytes), about 256 KiB whatever the size; the UTF-8 verdict
+(`docs/architecture.md`) is a handful of counters kept as the bytes
+pass. The output is bounded by the engine's cap on an 8-bit text
+decoder (3 x the input + 3 B, below) and
 by `RLIMIT_FSIZE`; SIGXFSZ is ignored, so a write past the ceiling fails
 only that input (`The text would be larger than <N> MiB`), and the copy
 is cut back to empty and removed. Measured peak (`VmHWM`, release

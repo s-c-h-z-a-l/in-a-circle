@@ -48,8 +48,9 @@ fn is_control(b: u8) -> bool {
 /// then the UTF-8 verdicts from `utf8_chunks()` (all valid with a
 /// multi-byte character: already UTF-8; bytes outside valid UTF-8 and
 /// either a leading byte order mark or at least as many Latin letters
-/// U+0080-U+024F and general punctuation U+2000-U+206F: damaged, at the
-/// first such byte); then the first byte the code page refuses.
+/// U+0080-U+024F, general punctuation U+2000-U+206F and currency and
+/// letterlike symbols U+20A0-U+214F: damaged, at the first such byte);
+/// then the first byte the code page refuses.
 fn expected(cp: Codepage, input: &[u8]) -> Result<(), CodepageError> {
     let last = input.len().saturating_sub(1);
     if let Some(at) = input
@@ -64,7 +65,10 @@ fn expected(cp: Codepage, input: &[u8]) -> Result<(), CodepageError> {
     for chunk in input.utf8_chunks() {
         for c in chunk.valid().chars() {
             multi += u64::from(c.len_utf8() > 1);
-            latin += u64::from(matches!(c, '\u{80}'..='\u{24F}' | '\u{2000}'..='\u{206F}'));
+            latin += u64::from(matches!(
+                c,
+                '\u{80}'..='\u{24F}' | '\u{2000}'..='\u{206F}' | '\u{20A0}'..='\u{214F}'
+            ));
         }
         pos += chunk.valid().len();
         if !chunk.invalid().is_empty() {

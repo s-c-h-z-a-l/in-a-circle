@@ -388,13 +388,26 @@ fn mostly_utf8_with_damaged_bytes_fails() {
             format!("looks like UTF-8 with damaged bytes (first at {at})")
         );
     }
+    // Currency and letterlike symbols count too: two `€` against one
+    // stray byte.
+    let input = b"5 \xE2\x82\xAC 10 \xE2\x82\xAC\xE9\n";
+    for cp in BOTH {
+        assert_eq!(
+            err(cp, input),
+            "looks like UTF-8 with damaged bytes (first at 12)"
+        );
+    }
 }
 
 /// All-caps Central European text holds valid UTF-8 pairs by accident (a
-/// capital's byte followed by a capital or punctuation in `0x80-0xBF`),
-/// but they decode to Cyrillic, Hebrew, Arabic or Armenian letters, never
-/// to the Latin letters and punctuation UTF-8 Hungarian, Polish or Czech
+/// capital's byte followed by a capital or punctuation in `0x80-0xBF`);
+/// most decode to Cyrillic, Hebrew, Arabic or Armenian letters, not to
+/// the Latin letters and punctuation UTF-8 Hungarian, Polish or Czech
 /// text is made of: they are no evidence of UTF-8, and the text converts.
+/// The residue is not tested as a conversion: `Â Ă Ä Ĺ Ć Ç Č` before any
+/// byte `0x80-0xBF` (and `É` before `0x80-0x8F`) decode into the Latin
+/// range and count, so one-line all-caps Slovak or Czech such as `DĹŽKA`,
+/// `PÄŤ`, `ČŠ` is refused.
 #[test]
 fn capitals_that_look_like_utf8_convert() {
     // Polish `ŁÓŻKO`: `D3 AF` is U+04EF.

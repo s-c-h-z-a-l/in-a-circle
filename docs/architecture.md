@@ -629,19 +629,24 @@ are in `CLAUDE.md`.
   is skipped, `already UTF-8`; one that is mostly UTF-8 fails with
   `looks like UTF-8 with damaged bytes (first at N)` instead of turning
   every `é` into `Ă©`. Mostly UTF-8 is: over the whole file, as many
-  valid UTF-8 sequences of Latin letters or general punctuation
-  (U+0080-U+024F, U+2000-U+206F) as bytes outside valid UTF-8, or more;
-  or a UTF-8 byte order mark first and any byte outside valid UTF-8
-  after it. Real 8-bit text almost never forms such a sequence: a
-  lower-case accent is followed by ASCII, and the pairs capitals form by
-  accident (`ŁÓŻKO` holds `D3 AF`) decode to Cyrillic, Hebrew, Arabic or
-  Armenian letters, which do not count. These two verdicts win over a refused byte (`Á` in UTF-8 is
-  `C3 81`) and need the whole file: the copy is written as the input
-  streams and, on any failure, cut back to empty and removed. A pure
-  ASCII file converts to itself. A converted input gets one `warn`,
-  `converted from Windows-1250 to UTF-8` (or `ISO-8859-2`): the contract
-  has no other line for a note on a converted input; a route without a
-  lossy action does not count it as a loss.
+  valid UTF-8 sequences of Latin letters, punctuation or symbols
+  (U+0080-U+024F, U+2000-U+206F, U+20A0-U+214F) as bytes outside valid
+  UTF-8, or more; or a UTF-8 byte order mark first and any byte outside
+  valid UTF-8 after it. Real 8-bit text almost never forms such a
+  sequence: a lower-case accent is followed by ASCII, and most pairs
+  capitals form by accident (`ŁÓŻKO` holds `D3 AF`) decode to Cyrillic,
+  Hebrew, Arabic or Armenian letters, which do not count. The residue:
+  a capital `Â Ă Ä Ĺ Ć Ç Č` before any byte `0x80-0xBF` (or `É` before
+  `0x80-0x8F`) decodes into the Latin range, so one-line all-caps Slovak
+  or Czech such as `DĹŽKA`, `PÄŤ` or `ČŠ` is refused; lower-case text or
+  more lines outweigh it. These two verdicts win over a refused byte
+  (`Á` in UTF-8 is `C3 81`) and need the whole file: the copy is
+  written as the input streams and, on any failure, cut back to empty
+  and removed. A pure ASCII file converts to itself. A converted input
+  gets one `warn`, `converted from Windows-1250 to UTF-8` (or
+  `ISO-8859-2`): the contract has no other line for a note on a
+  converted input; a route without a lossy action does not count it as
+  a loss.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
