@@ -1133,7 +1133,17 @@ fn group_menu(list: Vec<u8>) -> wheel::GroupMenu {
 fn drop_paths(list: Vec<u8>) -> Vec<PathBuf> {
     let paths = uri::parse_uri_list_owned(list)
         .into_iter()
-        .filter_map(|p| absolute(&p, None))
+        .filter_map(|p| {
+            let mut n = absolute(&p, None)?;
+            // A path already in shape keeps its buffer; a rebuilt one is
+            // trimmed to its length (building can leave up to twice that),
+            // so the paths stay held once at their own size.
+            if n.as_os_str() == p.as_os_str() {
+                return Some(p);
+            }
+            n.shrink_to_fit();
+            Some(n)
+        })
         .collect();
     dedup(paths)
 }
