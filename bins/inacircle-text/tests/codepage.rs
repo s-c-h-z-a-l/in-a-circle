@@ -723,6 +723,22 @@ fn cp1250_srt_to_utf8_srt() {
     );
 }
 
+/// The `.srt` byte order mark ignores the extension's case.
+#[test]
+fn srt_bom_ignores_case() {
+    let t = Tmp::new(&std::env::temp_dir(), "srtcase");
+    let upper = t.0.join("X.SRT");
+    let mixed = t.0.join("x.Srt");
+    fs::write(&upper, b"\xF5\r\n").unwrap();
+    fs::write(&mixed, b"\xF5\r\n").unwrap();
+    let o = run_action("text.cp1250-to-utf8", &t.work(), &[&upper, &mixed]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let want = [&BOM[..], "ő\r\n".as_bytes()].concat();
+    assert_eq!(fs::read(t.work().join("0/X.SRT")).unwrap(), want);
+    assert_eq!(fs::read(t.work().join("1/x.Srt")).unwrap(), want);
+}
+
 /// A refused input, a control byte, an already UTF-8 file and a mostly
 /// UTF-8 one leave nothing in the work folder; the others still convert.
 /// Exit 1 when only failures remain, 3 when only skips.
