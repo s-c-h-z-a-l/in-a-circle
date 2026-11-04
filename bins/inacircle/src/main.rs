@@ -447,7 +447,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 None => {
                     let planned = p
                         .input
-                        .and_then(|i| menu::route(&cat, i, p.output))
+                        .and_then(|i| menu::route_for(&cat, p, i))
                         .unwrap_or_default();
                     (
                         p.input.into_iter().collect(),

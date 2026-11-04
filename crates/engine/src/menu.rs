@@ -18,6 +18,13 @@ pub struct Preset {
     /// MIME types a join action must accept for this preset to offer it
     /// (many inputs, one output); empty: the preset has no join form.
     pub join: &'static [&'static str],
+    /// The id of the one action the preset's 1:1 form runs, when two
+    /// actions share its input and output types and only the id tells
+    /// them apart (two code pages, text to UTF-8). It runs exactly that
+    /// action, never a route the planner finds instead; one that is not
+    /// installed (or does not have the preset's types, or is a join)
+    /// dims the slice. `None`: the planner finds the route.
+    pub action: Option<&'static str>,
 }
 
 /// A category on the first-level wheel. `direction`: as for [`Preset`].
@@ -61,6 +68,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 0,
         group: "document",
         join: &[],
+        action: None,
     },
     Preset {
         id: "plain-text",
@@ -70,6 +78,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 4,
         group: "document",
         join: &[],
+        action: None,
     },
     Preset {
         id: "html-txt",
@@ -79,6 +88,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 2,
         group: "document",
         join: &[],
+        action: None,
     },
     Preset {
         id: "html",
@@ -88,6 +98,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 2,
         group: "document",
         join: &[],
+        action: None,
     },
     Preset {
         id: "epub-txt",
@@ -97,6 +108,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 2,
         group: "book",
         join: &[],
+        action: None,
     },
     // Many Markdown files (with the images they use) join into one book.
     Preset {
@@ -107,6 +119,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 2,
         group: "book",
         join: &["text/markdown"],
+        action: None,
     },
     Preset {
         id: "pdf",
@@ -116,6 +129,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 0,
         group: "book",
         join: &["image/jpeg", "image/png"],
+        action: None,
     },
     Preset {
         id: "cbz",
@@ -125,6 +139,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 4,
         group: "book",
         join: &["image/jpeg", "image/png"],
+        action: None,
     },
     Preset {
         id: "plain-text-epub",
@@ -134,6 +149,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 4,
         group: "document",
         join: &[],
+        action: None,
     },
     Preset {
         id: "markdown-epub",
@@ -143,6 +159,7 @@ pub const PRESETS: &[Preset] = &[
         direction: 0,
         group: "document",
         join: &[],
+        action: None,
     },
 ];
 
@@ -152,6 +169,31 @@ pub const PRESETS: &[Preset] = &[
 /// be a step of a chain (see [`choose`]).
 pub fn route<'a>(cat: &'a Catalog, input: &str, output: &str) -> Option<Vec<&'a Action>> {
     plan(cat, input, output, |a| missing_tools(a).is_empty())
+}
+
+/// The 1:1 route `preset` runs for `input`: its named action alone when
+/// it names one ([`Preset::action`]; `None` when that one is not
+/// installed, not runnable or not of these types), else the planner's
+/// [`route`] to the preset's output.
+pub fn route_for<'a>(cat: &'a Catalog, preset: &Preset, input: &str) -> Option<Vec<&'a Action>> {
+    route_with(cat, preset, input, |a| missing_tools(a).is_empty())
+}
+
+fn route_with<'a>(
+    cat: &'a Catalog,
+    preset: &Preset,
+    input: &str,
+    usable: impl Fn(&Action) -> bool,
+) -> Option<Vec<&'a Action>> {
+    let Some(id) = preset.action else {
+        return plan(cat, input, preset.output, usable);
+    };
+    // The name alone is not enough: an action of other types (a plugin's
+    // id clash, a typo) must not run in its place.
+    cat.get(id)
+        .filter(|a| a.join.is_none() && a.input == input && a.output == preset.output)
+        .filter(|a| usable(a))
+        .map(|a| vec![a])
 }
 
 fn plan<'a>(
@@ -354,9 +396,7 @@ fn join_wins(a: &Action, one: usize, docs: usize, assets: usize) -> bool {
 /// "applicable": the wheel, the offer and the run all ask it.
 pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(Choice<'c>, usize)> {
     let (one, route) = match preset.input {
-        Some(input) if tally.of(input).0 > 0 => {
-            (tally.of(input).0, route(cat, input, preset.output))
-        }
+        Some(input) if tally.of(input).0 > 0 => (tally.of(input).0, route_for(cat, preset, input)),
         _ => (0, None),
     };
     let join = join_action(cat, preset, tally);
@@ -409,7 +449,7 @@ fn disabled_reason(cat: &Catalog, p: &Preset, tally: &Tally) -> Option<String> {
     let Some(input) = p.input else {
         return Some("no action installed".into());
     };
-    Some(match plan(cat, input, p.output, |_| true) {
+    Some(match route_with(cat, p, input, |_| true) {
         Some(r) => match r.iter().find_map(|a| missing_tools(a).into_iter().next()) {
             Some(t) => format!("needs {t}"),
             None => "no action installed".into(),
@@ -1026,6 +1066,116 @@ mod tests {
         assert!(!g[0].as_ref().unwrap().lit);
     }
 
+    /// Two actions with the same input and output types (two code pages),
+    /// each named by its own preset.
+    fn code_pages() -> Catalog {
+        Catalog {
+            actions: vec![
+                act("cp.a", "text/x-8bit", "text/plain", 10, false),
+                act("cp.b", "text/x-8bit", "text/plain", 10, false),
+            ],
+        }
+    }
+
+    const fn named(id: &'static str, action: &'static str, direction: u8) -> Preset {
+        Preset {
+            id,
+            input: Some("text/x-8bit"),
+            output: "text/plain",
+            label: id,
+            direction,
+            group: "document",
+            join: &[],
+            action: Some(action),
+        }
+    }
+
+    /// A preset that names its action runs exactly that one, even where
+    /// the planner would pick the other (same types and cost, the id
+    /// breaks the tie); a preset without a name still gets the planner's.
+    #[test]
+    fn preset_runs_its_named_action() {
+        let cat = code_pages();
+        let t = tally(&[("a.srt", "text/x-8bit"), ("b.srt", "text/x-8bit")]);
+        let ran = |p: &Preset| match choose(&cat, p, &t) {
+            Some((Choice::Route(r), n)) => (ids(Some(r)), n),
+            other => panic!("{}: {other:?}", p.id),
+        };
+        let some = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(ran(&named("a", "cp.a", 6)), (some(&["cp.a"]), 2));
+        assert_eq!(ran(&named("b", "cp.b", 2)), (some(&["cp.b"]), 2));
+        let plain = Preset {
+            action: None,
+            ..named("p", "", 0)
+        };
+        assert_eq!(ran(&plain), (some(&["cp.a"]), 2));
+        assert_eq!(
+            ids(route_for(&cat, &named("b", "cp.b", 2), "text/x-8bit")),
+            some(&["cp.b"])
+        );
+        // Both slices are lit, each in its own direction.
+        let presets = [named("a", "cp.a", 6), named("b", "cp.b", 2)];
+        let o = offer_group_in(GROUPS, &presets, &cat, &t, "document");
+        for (d, id) in [(6, "a"), (2, "b")] {
+            let s = o.slices[d].as_ref().unwrap();
+            assert_eq!(
+                (s.preset, s.applicable, s.disabled.as_deref()),
+                (id, 2, None)
+            );
+        }
+    }
+
+    /// A named action that is not installed dims its slice with the usual
+    /// reason, even when another action of the same types is: the preset
+    /// never falls back to a route. Neither does one of other types or a
+    /// join that happens to have the name; one whose tool is missing says
+    /// what to install.
+    #[test]
+    fn named_action_missing_dims_the_slice() {
+        let t = tally(&[("a.srt", "text/x-8bit")]);
+        let dim = |cat: &Catalog, p: &Preset| {
+            assert!(choose(cat, p, &t).is_none(), "{}", p.id);
+            assert!(route_for(cat, p, "text/x-8bit").is_none(), "{}", p.id);
+            let presets = [Preset { ..*p }];
+            let o = offer_group_in(GROUPS, &presets, cat, &t, "document");
+            let s = o.slices[usize::from(p.direction)].as_ref().unwrap();
+            assert_eq!(s.applicable, 1);
+            s.disabled.clone()
+        };
+        let cat = code_pages();
+        let gone = named("c", "cp.c", 6);
+        assert_eq!(dim(&cat, &gone).as_deref(), Some("no action installed"));
+        // Control: with it installed the slice is lit.
+        let mut with = code_pages();
+        with.actions
+            .push(act("cp.c", "text/x-8bit", "text/plain", 10, false));
+        assert!(choose(&with, &gone, &t).is_some());
+        // The name on an action of other types, or on a join.
+        let mut other = code_pages();
+        other
+            .actions
+            .push(act("cp.c", "text/plain", "text/plain", 10, false));
+        assert_eq!(dim(&other, &gone).as_deref(), Some("no action installed"));
+        let mut join = code_pages();
+        let mut j = act("cp.c", "text/x-8bit", "text/plain", 10, false);
+        j.join = Some(crate::catalog::Join {
+            types: vec!["text/x-8bit".into()],
+            min: 1,
+            assets: Vec::new(),
+        });
+        join.actions.push(j);
+        assert_eq!(dim(&join, &gone).as_deref(), Some("no action installed"));
+        // Installed, but its tool is not.
+        let mut tool = code_pages();
+        let mut c = act("cp.c", "text/x-8bit", "text/plain", 10, false);
+        c.requires = vec!["no-such-tool-inacircle".into()];
+        tool.actions.push(c);
+        assert_eq!(
+            dim(&tool, &gone).as_deref(),
+            Some("needs no-such-tool-inacircle")
+        );
+    }
+
     #[test]
     fn unknown_group_is_not_shown() {
         let presets = [Preset {
@@ -1036,6 +1186,7 @@ mod tests {
             direction: 0,
             group: "nonexistent",
             join: &[],
+            action: None,
         }];
         let t = tally(&[("a.txt", "text/plain")]);
         let g = groups_in(GROUPS, &presets, &two_way(), &t);

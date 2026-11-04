@@ -866,7 +866,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   wheel offers): curated defaults, replaceable by the user.
 - For each preset the planner finds a route: a direct edge, or **at most
   two steps** through a lossless intermediate. No route means a greyed-out
-  slice with the reason.
+  slice with the reason. A preset may instead name its action
+  (`Preset.action`, an action id) where two actions share its input and
+  output types and only the id tells them apart (two code pages to
+  UTF-8): it then runs exactly that one-to-one action, never another
+  route. Not installed, a join, or not of the preset's types, it greys
+  the slice out ("no action installed"); a missing tool says what to
+  install, as for a route. A preset without a name finds its route as
+  before.
 - **Eight fixed directions.** A target always sits in the same direction,
   whatever the input; unused directions are dimmed. Muscle memory is the
   point. The actual layout is a design decision.
