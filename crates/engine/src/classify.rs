@@ -175,14 +175,19 @@ fn classify_open(mut file: File, path: &Path, reread: &mut Reread) -> io::Result
         }
     }
 
-    if eight_bit(&mut file, &head, ext.as_deref(), reread)? {
+    // The head's UTF-8 check serves both rules: whether it is UTF-8 text
+    // and the 8-bit candidate check.
+    let mut scan = Scan::default();
+    let cut = scan.utf8(&head);
+    let text = utf8_text(&head, &scan, cut) && !head.contains(&0);
+    if eight_bit(&mut file, &head, ext.as_deref(), scan, cut, reread)? {
         return Ok(Classified::File(Kind {
             mime: Some(X8BIT_MIME.into()),
             label: "8-bit text".into(),
         }));
     }
 
-    let kind = if is_text(&head) {
+    let kind = if text {
         match ext.as_deref() {
             None | Some("txt" | "text" | "log" | "1st" | "me" | "readme" | "diz" | "nfo") => Kind {
                 mime: Some("text/plain".into()),
@@ -209,26 +214,24 @@ fn classify_open(mut file: File, path: &Path, reread: &mut Reread) -> io::Result
     Ok(Classified::File(kind))
 }
 
-/// No NUL and valid UTF-8. A multi-byte sequence cut by the end of a full
-/// buffer is allowed; at the end of a shorter (whole) file it is not.
-fn is_text(head: &[u8]) -> bool {
-    if head.contains(&0) {
-        return false;
-    }
-    match std::str::from_utf8(head) {
-        Ok(_) => true,
-        Err(e) => e.error_len().is_none() && head.len() == HEAD,
-    }
+/// Whether the head is valid UTF-8, from its `scan` and `cut`. A
+/// multi-byte sequence cut by the end of a full head is allowed; at the end
+/// of a shorter (whole) file it is not.
+fn utf8_text(head: &[u8], scan: &Scan, cut: usize) -> bool {
+    !scan.invalid && (cut == 0 || head.len() == HEAD)
 }
 
 /// Whether the file is an 8-bit text candidate: a text extension or none,
 /// no control byte, and not UTF-8, judged on the head; a text-named file
-/// whose head is all ASCII is judged on what is read on as well. `file` is
-/// positioned right after the head.
+/// whose head is all ASCII is judged on what is read on as well. `scan` and
+/// `cut` are the head's, checked for UTF-8 only; `file` is positioned
+/// right after the head.
 fn eight_bit(
     file: &mut File,
     head: &[u8],
     ext: Option<&str>,
+    mut scan: Scan,
+    mut cut: usize,
     reread: &mut Reread,
 ) -> io::Result<bool> {
     let text_name = match ext {
@@ -236,8 +239,16 @@ fn eight_bit(
         Some(e) if X8BIT_EXT.contains(&e) => true,
         Some(_) => return Ok(false),
     };
-    let mut scan = Scan::default();
-    let mut cut = scan.feed(head);
+    // Only a full, all-ASCII head of a text-named file is read on, and only
+    // while the budget lasts (checked first: it is free).
+    let read_on =
+        text_name && reread.left > 0 && head.len() == HEAD && head[..head.len() - cut].is_ascii();
+    // UTF-8 text that is not read on: the head decides, not a candidate,
+    // and its control bytes need no look.
+    if !read_on && utf8_text(head, &scan, cut) {
+        return Ok(false);
+    }
+    scan.controls(head);
     if scan.control {
         return Ok(false);
     }
@@ -251,11 +262,7 @@ fn eight_bit(
         let at_end = !scan.pending_ctrl_z || file.read(&mut [0u8; 1])? == 0;
         return Ok(scan.finish(at_end, cut));
     }
-    // Valid UTF-8 with an accent: UTF-8 text. All ASCII without a text
-    // name: the head decides.
-    if !text_name || !head[..head.len() - cut].is_ascii() {
-        return Ok(false);
-    }
+    // A full head that is UTF-8 so far, and `read_on` holds.
     let want = (WINDOW - HEAD).min(usize::try_from(reread.left).unwrap_or(usize::MAX));
     let mut buf = [0u8; CHUNK + CUT_MAX];
     buf[..cut].copy_from_slice(&head[head.len() - cut..]);
@@ -298,8 +305,14 @@ impl Scan {
     /// how many bytes at the end are a sequence cut by the buffer's end, to
     /// be fed again in front of the next bytes.
     fn feed(&mut self, bytes: &[u8]) -> usize {
+        self.controls(bytes);
+        self.utf8(bytes)
+    }
+
+    /// The control byte half of [`Scan::feed`].
+    fn controls(&mut self, bytes: &[u8]) {
         let Some((&last, body)) = bytes.split_last() else {
-            return 0;
+            return;
         };
         // A cut sequence fed again is >= 0x80, never a control byte, and
         // never follows a pending Ctrl-Z (that was the last byte). A fold,
@@ -312,6 +325,10 @@ impl Scan {
         if control(last) && last != CTRL_Z {
             self.control = true;
         }
+    }
+
+    /// The UTF-8 half of [`Scan::feed`]: returns the cut sequence's length.
+    fn utf8(&mut self, bytes: &[u8]) -> usize {
         if self.invalid {
             return 0;
         }
