@@ -377,6 +377,85 @@ fn mostly_utf8_with_damaged_bytes_fails() {
     // (`É©` in Windows-1250) is valid UTF-8 by accident.
     let input = b"\xC9\xA9 t\xFBr\xF5";
     assert_eq!(run(Codepage::Cp1250, input).unwrap(), "É© tűrő".as_bytes());
+    // UTF-8 Hungarian text with one stray Windows-1250 byte: every accent
+    // and the quotes count, so it is refused at the stray byte.
+    let mut input = "„Árvíztűrő tükörfúrógép”\n".as_bytes().to_vec();
+    let at = input.len();
+    input.extend_from_slice(b"\xE9 ok\n");
+    for cp in BOTH {
+        assert_eq!(
+            err(cp, &input),
+            format!("looks like UTF-8 with damaged bytes (first at {at})")
+        );
+    }
+}
+
+/// All-caps Central European text holds valid UTF-8 pairs by accident (a
+/// capital's byte followed by a capital or punctuation in `0x80-0xBF`),
+/// but they decode to Cyrillic, Hebrew, Arabic or Armenian letters, never
+/// to the Latin letters and punctuation UTF-8 Hungarian, Polish or Czech
+/// text is made of: they are no evidence of UTF-8, and the text converts.
+#[test]
+fn capitals_that_look_like_utf8_convert() {
+    // Polish `ŁÓŻKO`: `D3 AF` is U+04EF.
+    for cp in BOTH {
+        assert_eq!(
+            run(cp, b"\xA3\xD3\xAFKO\r\n").unwrap(),
+            "ŁÓŻKO\r\n".as_bytes()
+        );
+    }
+    // Czech `ÚŽASNÉ`: `DA 8E` / `DA AE` are U+068E / U+06AE.
+    assert_eq!(
+        run(Codepage::Cp1250, b"\xDA\x8EASN\xC9\r\n").unwrap(),
+        "ÚŽASNÉ\r\n".as_bytes()
+    );
+    assert_eq!(
+        run(Codepage::Iso88592, b"\xDA\xAEASN\xC9\r\n").unwrap(),
+        "ÚŽASNÉ\r\n".as_bytes()
+    );
+    // Hungarian `„ANYÓ”`: `D3 94` is U+04D4.
+    assert_eq!(
+        run(Codepage::Cp1250, b"\x84ANY\xD3\x94\r\n").unwrap(),
+        "„ANYÓ”\r\n".as_bytes()
+    );
+    // Polish `ZAŻÓŁĆ GĘŚLĄ JAŹŃ` (two such pairs) and Hungarian `«NŐ»`
+    // (`D5 BB`, U+057B, Armenian).
+    assert_eq!(
+        run(
+            Codepage::Cp1250,
+            b"ZA\xAF\xD3\xA3\xC6 G\xCA\x8CL\xA5 JA\x8F\xD1\r\n"
+        )
+        .unwrap(),
+        "ZAŻÓŁĆ GĘŚLĄ JAŹŃ\r\n".as_bytes()
+    );
+    assert_eq!(
+        run(Codepage::Cp1250, b"\xABN\xD5\xBB\r\n").unwrap(),
+        "«NŐ»\r\n".as_bytes()
+    );
+}
+
+/// A UTF-8 byte order mark says the file was written as UTF-8: with any
+/// byte that is not UTF-8 after it, the file is damaged UTF-8, never
+/// converted (a converted body would start with `ď»ż`).
+#[test]
+fn a_utf8_bom_with_damaged_bytes_fails() {
+    for cp in BOTH {
+        assert_eq!(
+            err(cp, b"\xEF\xBB\xBFk\xE9s \xE1"),
+            "looks like UTF-8 with damaged bytes (first at 4)"
+        );
+        assert_eq!(
+            err(cp, b"\xEF\xBB\xBF\xA3\xD3\xAFKO\r\n"),
+            "looks like UTF-8 with damaged bytes (first at 3)"
+        );
+        // A BOM and nothing but UTF-8: already UTF-8.
+        assert_eq!(err(cp, b"\xEF\xBB\xBFok\n"), "already UTF-8");
+    }
+    // The same bytes later in the file are only U+FEFF, no signal.
+    assert_eq!(
+        run(Codepage::Cp1250, b"k\xE9s \xE1\xEF\xBB\xBF").unwrap(),
+        "kés áď»ż".as_bytes()
+    );
 }
 
 /// Only ASCII is its own UTF-8: the output is the input, byte for byte

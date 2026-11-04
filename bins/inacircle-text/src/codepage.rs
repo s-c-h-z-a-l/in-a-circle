@@ -9,12 +9,16 @@
 //! A file that is already UTF-8 is refused too: valid UTF-8 with at least
 //! one multi-byte character is `AlreadyUtf8` (decoding it would turn `é`
 //! into `Ă©`), and so is a file that is mostly UTF-8 with a few damaged
-//! bytes (`DamagedUtf8`): over the whole input, as many valid multi-byte
-//! UTF-8 sequences as bytes outside valid UTF-8, or more. Real 8-bit text
-//! almost never forms one: its accented letter is followed by ASCII, which
-//! is never a UTF-8 continuation byte. That verdict needs the whole input,
-//! so the output is written as the input streams and the caller throws it
-//! away on any error.
+//! bytes (`DamagedUtf8`): over the whole input, as many valid UTF-8
+//! sequences of Latin letters or general punctuation ([`is_evidence`]) as
+//! bytes outside valid UTF-8, or more; or a UTF-8 byte order mark first
+//! and any byte outside valid UTF-8 after it. Real 8-bit text almost never
+//! forms such a sequence: a lower-case accent is followed by ASCII, which
+//! is never a UTF-8 continuation byte, and the pairs capitals do form
+//! (`ÓŻ` = `D3 AF`, U+04EF) decode to Cyrillic, Hebrew, Arabic or Armenian
+//! letters, not counted. That verdict needs the whole input, so the output
+//! is written as the input streams and the caller throws it away on any
+//! error.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -124,10 +128,28 @@ fn is_control(b: u8) -> bool {
     b < 0x20 && !matches!(b, b'\t' | b'\n' | 0x0C | b'\r')
 }
 
+/// A decoded UTF-8 character that counts as evidence of a UTF-8 file:
+/// Latin-1 Supplement to Latin Extended-B (U+0080-U+024F) and General
+/// Punctuation (U+2000-U+206F), the characters UTF-8 Hungarian, Polish,
+/// Czech and other Latin-script text is made of (`é ő ł č`, `„ ” – …`).
+/// The pairs Windows-1250 or ISO-8859-2 capitals form by accident land
+/// past U+024F: a capital's byte is `0xC2-0xDE`, so a pair is U+0080-
+/// U+07BF, and only `0xC2-0xC9` reach this range (`Â Ă Ä Ĺ Ć Ç Č É`
+/// before a byte `0x80-0xBF`; `É„`, `É…` still count). An exhaustive list
+/// of scripts is not needed: anything outside the range is simply not
+/// counted, which can only let a file convert, losslessly.
+fn is_evidence(c: u32) -> bool {
+    matches!(c, 0x0080..=0x024F | 0x2000..=0x206F)
+}
+
+/// U+FEFF, the byte order mark, when it is the file's first character.
+const BOM_CHAR: u32 = 0xFEFF;
+
 /// An incremental UTF-8 checker (Unicode Table 3-7, well-formed byte
 /// sequences: no overlongs, no surrogates, nothing past U+10FFFF) that
-/// counts the valid multi-byte sequences and the bytes outside any valid
-/// sequence, across chunk boundaries.
+/// counts the valid multi-byte sequences, those of them that are
+/// [`is_evidence`], and the bytes outside any valid sequence (each
+/// maximal ill-formed subpart as its length), across chunk boundaries.
 #[derive(Default)]
 struct Utf8Census {
     /// Continuation bytes still needed by the open sequence.
@@ -135,9 +157,15 @@ struct Utf8Census {
     /// The range the next continuation byte must be in.
     lo: u8,
     hi: u8,
-    /// Where the open sequence started.
+    /// Where the open sequence started, and its code point so far.
     start: u64,
+    code: u32,
+    /// Valid multi-byte sequences, any character.
     valid: u64,
+    /// Valid sequences whose character [`is_evidence`].
+    evidence: u64,
+    /// The file starts with a UTF-8 byte order mark.
+    bom: bool,
     invalid: u64,
     first_invalid: Option<u64>,
 }
@@ -153,8 +181,11 @@ impl Utf8Census {
             if (self.lo..=self.hi).contains(&b) {
                 self.need -= 1;
                 (self.lo, self.hi) = (0x80, 0xBF);
+                self.code = self.code << 6 | u32::from(b & 0x3F);
                 if self.need == 0 {
                     self.valid += 1;
+                    self.evidence += u64::from(is_evidence(self.code));
+                    self.bom |= self.start == 0 && self.code == BOM_CHAR;
                 }
                 return;
             }
@@ -163,19 +194,21 @@ impl Utf8Census {
             self.bad(self.start, at - self.start);
             self.need = 0;
         }
-        let (need, lo, hi) = match b {
+        // The lead's payload bits: 5, 4 or 3 by the sequence's length.
+        let (need, lo, hi, code) = match b {
             0x00..=0x7F => return,
-            0xC2..=0xDF => (1, 0x80, 0xBF),
-            0xE0 => (2, 0xA0, 0xBF),
-            0xED => (2, 0x80, 0x9F),
-            0xE1..=0xEF => (2, 0x80, 0xBF),
-            0xF0 => (3, 0x90, 0xBF),
-            0xF4 => (3, 0x80, 0x8F),
-            0xF1..=0xF3 => (3, 0x80, 0xBF),
+            0xC2..=0xDF => (1, 0x80, 0xBF, b & 0x1F),
+            0xE0 => (2, 0xA0, 0xBF, b & 0x0F),
+            0xED => (2, 0x80, 0x9F, b & 0x0F),
+            0xE1..=0xEF => (2, 0x80, 0xBF, b & 0x0F),
+            0xF0 => (3, 0x90, 0xBF, b & 0x07),
+            0xF4 => (3, 0x80, 0x8F, b & 0x07),
+            0xF1..=0xF3 => (3, 0x80, 0xBF, b & 0x07),
             // A continuation byte alone, an overlong lead or past U+10FFFF.
             _ => return self.bad(at, 1),
         };
         (self.need, self.lo, self.hi, self.start) = (need, lo, hi, at);
+        self.code = u32::from(code);
     }
 
     /// At the end of `len` bytes: a sequence still open is damaged.
@@ -195,6 +228,9 @@ impl Utf8Census {
 /// error stops at once; a byte the code page refuses stops the output but
 /// the rest is still read for the UTF-8 verdict, which wins over it: valid
 /// UTF-8 such as `Á` (`C3 81`) is `AlreadyUtf8`, not a refused `0x81`.
+/// `AlreadyUtf8` counts every multi-byte character (a file that is all
+/// valid UTF-8 is never 8-bit text worth converting, whatever its
+/// script); `DamagedUtf8` counts only [`is_evidence`] characters.
 pub fn decode(
     cp: Codepage,
     input: &mut impl Read,
@@ -269,7 +305,7 @@ pub fn decode(
     if census.invalid == 0 && census.valid > 0 {
         return Err(CodepageError::AlreadyUtf8);
     }
-    if census.invalid > 0 && census.valid >= census.invalid {
+    if census.invalid > 0 && (census.bom || census.evidence >= census.invalid) {
         let at = census.first_invalid.unwrap_or(0);
         return Err(CodepageError::DamagedUtf8 { at });
     }

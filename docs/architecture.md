@@ -626,12 +626,16 @@ are in `CLAUDE.md`.
   input (any case), whose copy starts with one (players on old TVs and
   Windows read a subtitle without it as the local code page). A file
   that is already UTF-8 (valid, with at least one multi-byte character)
-  is skipped, `already UTF-8`; one that is mostly UTF-8, with as many
-  valid multi-byte sequences as bytes outside valid UTF-8 or more over
-  the whole file, fails with `looks like UTF-8 with damaged bytes (first
-  at N)` instead of turning every `é` into `Ă©`: real 8-bit text almost
-  never forms a valid sequence, since its accented letter is followed by
-  ASCII. These two verdicts win over a refused byte (`Á` in UTF-8 is
+  is skipped, `already UTF-8`; one that is mostly UTF-8 fails with
+  `looks like UTF-8 with damaged bytes (first at N)` instead of turning
+  every `é` into `Ă©`. Mostly UTF-8 is: over the whole file, as many
+  valid UTF-8 sequences of Latin letters or general punctuation
+  (U+0080-U+024F, U+2000-U+206F) as bytes outside valid UTF-8, or more;
+  or a UTF-8 byte order mark first and any byte outside valid UTF-8
+  after it. Real 8-bit text almost never forms such a sequence: a
+  lower-case accent is followed by ASCII, and the pairs capitals form by
+  accident (`ŁÓŻKO` holds `D3 AF`) decode to Cyrillic, Hebrew, Arabic or
+  Armenian letters, which do not count. These two verdicts win over a refused byte (`Á` in UTF-8 is
   `C3 81`) and need the whole file: the copy is written as the input
   streams and, on any failure, cut back to empty and removed. A pure
   ASCII file converts to itself. A converted input gets one `warn`,
