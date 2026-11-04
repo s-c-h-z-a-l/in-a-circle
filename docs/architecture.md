@@ -837,11 +837,12 @@ Every action runs sandboxed, set up in the child between `fork` and
   first byte that is not valid UTF-8, or a control byte (valid UTF-8
   accents do not stop it); one wheel invocation reads on at most 1 MiB
   for all its files together, after which the head alone decides
-  (`text/plain` for an ASCII head). A head that is valid UTF-8 with any non-ASCII byte, or a
-  file without an extension, is decided by the head. Every valid UTF-8 file
-  keeps the plain text and Markdown rule above. The classifier only
-  proposes: the action checks the whole file, and a non-UTF-8 byte past
-  the window shows in the error of whatever action runs on the file.
+  (`text/plain` for an ASCII head). A head that is valid UTF-8 with any
+  non-ASCII byte, or a file without an extension, is decided by the head.
+  Every valid UTF-8 file keeps the plain text and Markdown rule above.
+  The classifier only proposes: the action checks the whole file, and a
+  non-UTF-8 byte past the window shows in the error of whatever action
+  runs on the file.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
@@ -1256,8 +1257,9 @@ compositor.
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
   Paths are made what the command line makes them (`.` components and
   trailing slashes dropped; `..` and non-UTF-8 bytes stay), so the wheel
-  classifies the same files the run it starts is given. CRLF and LF both end a line; lines starting with `#` are
-  comments. If nothing is left, the hub says `Nothing to do`.
+  classifies the same files the run it starts is given. CRLF and LF both
+  end a line; lines starting with `#` are comments. If nothing is left,
+  the hub says `Nothing to do`.
 - Choosing: only an applicable target is clickable (left button); that
   is the choice. The URI bytes are freed before classification, and the
   files are tallied per type (count and the first name), not kept per file.

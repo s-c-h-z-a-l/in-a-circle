@@ -1167,11 +1167,13 @@ fn the_pss_gate_rejects_missing_or_zero_evidence() {
 fn the_largest_drop_stays_within_the_memory_budget() {
     // `late`: the early read is left unanswered and the list comes with
     // the drop; the run ends at level 1. Else it ends at stage 2.
-    let peak = |name: &str, largest: bool, late: bool| -> (Vec<(String, u64)>, u64) {
+    // `slash`: every path of the largest list ends in `/`, so the wheel
+    // rebuilds each one when it normalizes them.
+    let peak = |name: &str, largest: bool, late: bool, slash: bool| -> (Vec<(String, u64)>, u64) {
         let root = Root::new(name);
         root.markdown_action_cached();
         let list = if largest {
-            root.largest_list().1
+            root.largest_list(slash).1
         } else {
             root.files(1)
         };
@@ -1209,10 +1211,11 @@ fn the_largest_drop_stays_within_the_memory_budget() {
         (obs, anon)
     };
     let runs = [
-        (1, peak("rss1a", false, false)),
-        (1, peak("rss1b", false, false)),
-        (2, peak("rss-largest", true, false)),
-        (2, peak("rss-largest-late", true, true)),
+        (1, peak("rss1a", false, false, false)),
+        (1, peak("rss1b", false, false, false)),
+        (2, peak("rss-largest", true, false, false)),
+        (2, peak("rss-largest-late", true, true, false)),
+        (2, peak("rss-largest-slash", true, false, true)),
     ];
     for (_, (obs, anon)) in &runs {
         for (label, kb) in obs {
@@ -2478,10 +2481,12 @@ impl Root {
     /// files under `f/`, each line `LARGEST_LINE` bytes, so the list is
     /// `action::INPUT_LIST_BYTES` to the byte (the wheel's own limit, which
     /// a unit test keeps equal). Every path component stays within
-    /// `NAME_MAX` whatever the temp root's length. The files' directory
-    /// and the list.
-    fn largest_list(&self) -> (PathBuf, Vec<u8>) {
+    /// `NAME_MAX` whatever the temp root's length. `slash`: each name is
+    /// one byte shorter and its URI ends in `/` (same list length), a path
+    /// the wheel must normalize. The files' directory and the list.
+    fn largest_list(&self, slash: bool) -> (PathBuf, Vec<u8>) {
         let path_len = LARGEST_LINE - "file://".len() - "\r\n".len();
+        let path_len = path_len - usize::from(slash);
         let mut dir = self.0.join("f");
         assert!(dir.as_os_str().len() + 1 + SHORTEST_NAME <= path_len);
         loop {
@@ -2500,7 +2505,8 @@ impl Root {
             let p = dir.join(format!("{i:04}{pad}.txt"));
             fs::write(&p, "w\n").unwrap();
             assert!(p.components().all(|c| c.as_os_str().len() <= NAME_MAX));
-            list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+            let end = if slash { "/" } else { "" };
+            list.extend_from_slice(format!("file://{}{end}\r\n", p.display()).as_bytes());
         }
         assert_eq!(list.len(), action::INPUT_LIST_BYTES);
         (dir, list)
@@ -2624,7 +2630,7 @@ const RUN_EXIT: Duration = Duration::from_secs(120);
 fn the_largest_drop_through_the_choice_stays_within_the_budget() {
     let root = Root::new("through1024");
     root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "markdown");
-    let (dir, list) = root.largest_list();
+    let (dir, list) = root.largest_list(false);
     let (mut c, mut child) = start(&root, false);
     let pid = child.id();
     let sampler = PssSampler::start(pid);

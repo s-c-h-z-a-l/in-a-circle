@@ -1134,14 +1134,18 @@ fn drop_paths(list: Vec<u8>) -> Vec<PathBuf> {
     let paths = uri::parse_uri_list_owned(list)
         .into_iter()
         .filter_map(|p| {
-            let mut n = absolute(&p, None)?;
-            // A path already in shape keeps its buffer; a rebuilt one is
-            // trimmed to its length (building can leave up to twice that),
-            // so the paths stay held once at their own size.
-            if n.as_os_str() == p.as_os_str() {
-                return Some(p);
+            if !p.is_absolute() {
+                return None;
             }
-            n.shrink_to_fit();
+            // What `absolute` makes of an absolute path, built in a buffer
+            // of the parsed path's size: normalizing never lengthens it, so
+            // the buffer never regrows (a collected one can end up twice its
+            // length), and the parsed path's block, freed next, fits the
+            // following path. The paths stay held once at their own size.
+            let mut n = PathBuf::with_capacity(p.as_os_str().len());
+            for c in p.components() {
+                n.push(c);
+            }
             Some(n)
         })
         .collect();
