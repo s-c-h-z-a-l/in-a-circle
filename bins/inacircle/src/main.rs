@@ -64,7 +64,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
-use engine::classify::{Classified, Kind, classify};
+use engine::classify::{Classified, Kind, Reread, classify_with};
 use engine::exec::{
     self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
 };
@@ -413,10 +413,12 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     mark("catalog");
     // Classify once: the preset choice needs the selection's types, and the
     // per-input verdicts below reuse the result.
+    // One read-on budget for the whole run's inputs.
+    let mut reread = Reread::per_drop();
     let classified: Vec<(PathBuf, io::Result<Classified>)> = files
         .into_iter()
         .map(|f| {
-            let c = classify(&f);
+            let c = classify_with(&f, &mut reread);
             (f, c)
         })
         .collect();
@@ -745,13 +747,15 @@ fn cmd_offer(mut args: Vec<OsString>) -> u8 {
     EXIT_DONE
 }
 
-/// Each file's name and what it is, as the offer needs them.
+/// Each file's name and what it is, as the offer needs them; one read-on
+/// budget for them all.
 fn named_kinds(files: &[PathBuf]) -> Vec<(String, Kind)> {
-    files.iter().map(|p| named_kind(p)).collect()
+    let mut reread = Reread::per_drop();
+    files.iter().map(|p| named_kind(p, &mut reread)).collect()
 }
 
-/// A file's name and what it is.
-fn named_kind(p: &Path) -> (String, Kind) {
+/// A file's name and what it is, charged to the drop's read-on budget.
+fn named_kind(p: &Path, reread: &mut Reread) -> (String, Kind) {
     let name = p
         .file_name()
         .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
@@ -759,7 +763,7 @@ fn named_kind(p: &Path) -> (String, Kind) {
         mime: None,
         label: label.into(),
     };
-    let kind = match classify(p) {
+    let kind = match classify_with(p, reread) {
         Ok(Classified::File(k)) => k,
         Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
         Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => unknown("broken link"),
@@ -1148,8 +1152,10 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
             return gm;
         }
     };
+    // Up to 1024 dropped files share one read-on budget.
+    let mut reread = Reread::per_drop();
     for p in &paths {
-        let (name, kind) = named_kind(p);
+        let (name, kind) = named_kind(p, &mut reread);
         gm.tally.add(&name, &kind);
     }
     for (dir, g) in menu::groups(&cat, &gm.tally).into_iter().enumerate() {

@@ -824,6 +824,23 @@ Every action runs sandboxed, set up in the child between `fork` and
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
   content cannot tell them apart. Today that is plain text and Markdown;
   recognising HTML and JSON by content is planned.
+- **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
+  the code page actions and taken by no other preset. A file is one when
+  its extension is on the classifier's text list (`txt`, `text`, `md`,
+  `markdown`, `mdown`, `mkd`, `srt`, `vtt`, `ass`, `ssa`, `sub`, `csv`,
+  `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; not
+  `nfo`, usually CP437 art) or it has none, what is read has no NUL and no
+  C0 control byte other than TAB, LF, CR and FF (one Ctrl-Z, `0x1A`, as the
+  file's very last byte is allowed), and it is not valid UTF-8. A file with
+  a listed extension whose 4 KiB head is all ASCII is read on, on the same
+  handle, up to its first 256 KiB, stopping at the read that finds a
+  non-UTF-8 byte; one wheel invocation reads on at most 1 MiB for all its
+  files together, after which the head alone decides (`text/plain` for an
+  ASCII head). A head that is valid UTF-8 with any non-ASCII byte, or a
+  file without an extension, is decided by the head. Every valid UTF-8 file
+  keeps the plain text and Markdown rule above. The classifier only
+  proposes: the action checks the whole file, and a non-UTF-8 byte past
+  the window shows in the error of whatever action runs on the file.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
