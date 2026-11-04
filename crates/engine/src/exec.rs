@@ -1057,8 +1057,9 @@ fn place_outputs(
     cancel: &CancelToken,
     sink: &mut Sink,
 ) {
-    // Outputs per original input, in order.
-    let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
+    // Outputs per original input, in order, each with the step input
+    // (`j`) that made it.
+    let mut per: Vec<(usize, Vec<(usize, PathBuf)>)> = Vec::new();
     for (j, outs) in outputs.into_iter().enumerate() {
         if outs.is_empty() {
             continue;
@@ -1071,25 +1072,35 @@ fn place_outputs(
                 per.len() - 1
             }
         };
-        per[at].1.extend(outs);
+        per[at].1.extend(outs.into_iter().map(|rel| (j, rel)));
     }
-    for (o, rels) in per {
+    let x8 = reads_8bit(action);
+    for (o, made) in per {
+        if x8 && made.len() > 1 {
+            sink.fail(o, X8BIT_ONE_OUTPUT.to_owned());
+            continue;
+        }
         let stem = stem_of(&sink.inputs[o]);
         let ext = ext_for(action, &sink.inputs[o]);
-        // The largest file this input handed the step (one, but for an
-        // intermediate input that step 1 made into several).
-        let bytes = step_in
-            .origin
-            .iter()
-            .zip(handed)
-            .filter(|&(&x, _)| x == o)
-            .map(|(_, &n)| n)
-            .max()
+        // An 8-bit text action's one output is capped by the file that
+        // made it (an intermediate one on a two-step route, never a
+        // sibling part of the same input); `handed` is empty otherwise.
+        let bytes = made
+            .first()
+            .and_then(|&(j, _)| handed.get(j))
+            .copied()
             .unwrap_or(0);
+        let rels: Vec<PathBuf> = made.into_iter().map(|(_, rel)| rel).collect();
         let text = text_rule(action, bytes);
         publish(dir, &rels, target, &stem, &ext, text, &[o], cancel, sink);
     }
 }
+
+/// Why an input of an 8-bit text action fails when the action made more
+/// than one output of it: the action makes one UTF-8 copy of one file, so
+/// a second output is a fault, and the cap ([`text_rule`]) names one
+/// output only (the others would be published unchecked).
+const X8BIT_ONE_OUTPUT: &str = "8-bit text action made more than one output";
 
 /// Whether `action` reads 8-bit text (`text/x-8bit` among its input
 /// types), whose output [`output::TextCap::ThreeTimes`] caps.
@@ -3776,6 +3787,144 @@ pub(crate) mod tests {
         let got = done_paths(&[&plain], std::slice::from_ref(&input));
         assert_eq!(got, [docs.join("a (1)/a.srt")]);
         assert_eq!(fs::metadata(&got[0]).unwrap().len(), 13);
+    }
+
+    /// Each input of `$6` tripled plus `more`, reported done; but with
+    /// `only` set, an input of another size is failed instead.
+    fn tripler(more: &str, only: Option<u64>) -> String {
+        let (open, close) = match only {
+            Some(n) => (
+                format!("if [ \"$(wc -c < \"$in\")\" -eq {n} ]; then "),
+                "; else printf 'fail\\t%s\\tskipped\\n' \"$in\"; fi",
+            ),
+            None => (String::new(), ""),
+        };
+        format!(
+            "i=0; while IFS= read -r in; do {open}mkdir \"$4/$i\"; \
+             cat \"$in\" \"$in\" \"$in\" > \"$4/$i/out\"; printf '{more}' >> \"$4/$i/out\"; \
+             printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"{close}; i=$((i+1)); done < \"$6\""
+        )
+    }
+
+    /// An action that reads 8-bit text makes one UTF-8 copy of each
+    /// input: a second output fails that input, and nothing of it is
+    /// published (the second one would escape the cap, which names one
+    /// output). Control: the same outputs from a plain text action are
+    /// published together.
+    #[test]
+    fn an_8bit_action_publishes_one_output() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_8bit_action_publishes_one_output", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-one");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        let body = "read -r in < \"$6\"; mkdir \"$4/0\"; cp \"$in\" \"$4/0/a.srt\"; \
+                    cp \"$in\" \"$4/0/b.srt\"; printf 'done\\t%s\\t0/a.srt\\n' \"$in\"; \
+                    printf 'done\\t%s\\t0/b.srt\\n' \"$in\"";
+        let mut two = script_action(&t, "two", body, crate::catalog::EXT_SAME);
+        two.input = crate::classify::X8BIT_MIME.into();
+        two.output = "text/plain".into();
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&two], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: X8BIT_ONE_OUTPUT.to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        two.input = "text/plain".into();
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&two], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(seen.0.len(), 2, "{:?}", seen.0);
+        assert!(docs.join("a/a.srt").is_file() && docs.join("a/b.srt").is_file());
+    }
+
+    /// On a two-step route the cap comes from the intermediate the engine
+    /// handed the decoder, not from the user's input: a 3-byte input that
+    /// step 1 makes 10 bytes may decode to 33. When step 1 makes several
+    /// parts of one input, decoding two of them is two outputs (refused);
+    /// the one part decoded is capped by its own size, not its sibling's.
+    #[test]
+    fn x8bit_cap_on_a_two_step_route() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("x8bit_cap_on_a_two_step_route", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-two");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        // Step 1: a 10-byte part, after a 3-byte one when `split`.
+        let first = |name: &str, split: bool| {
+            let small = if split {
+                "printf 'ab\\n' > \"$4/0/small\"; printf 'done\\t%s\\t0/small\\n' \"$in\"; "
+            } else {
+                ""
+            };
+            let body = format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; {small}printf '0123456789' > \"$4/0/big\"; \
+                 printf 'done\\t%s\\t0/big\\n' \"$in\""
+            );
+            script_action(&t, name, &body, "mid")
+        };
+        let decoder = |name: &str, body: &str| {
+            let mut a = script_action(&t, name, body, crate::catalog::EXT_SAME);
+            a.input = crate::classify::X8BIT_MIME.into();
+            a.output = "text/plain".into();
+            a
+        };
+        let failed = |steps: &[&Action]| {
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(steps, vec![input.clone()], &mut seen, &tok);
+            seen.0
+        };
+        let one = first("one", false);
+        // 3 x 10 + 3 = 33 bytes: at the cap.
+        let at = decoder("at", &tripler("xyz", None));
+        let got = done_paths(&[&one, &at], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 33);
+        let over = decoder("over", &tripler("xyzw", None));
+        assert_eq!(
+            failed(&[&one, &over]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output larger than three times its \
+                         input (33 bytes)"
+                    .to_owned()
+            }]
+        );
+        let split = first("split", true);
+        assert_eq!(
+            failed(&[&split, &at]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: X8BIT_ONE_OUTPUT.to_owned()
+            }]
+        );
+        // Only the 10-byte part decoded (the 3-byte one failed): its 33
+        // bytes are within its own cap, past its sibling's (12).
+        let big = decoder("big", &tripler("xyz", Some(10)));
+        let seen = failed(&[&split, &big]);
+        let placed: Vec<&PathBuf> = seen
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Done { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(placed, [&docs.join("a (1)/a.srt")], "{seen:?}");
+        assert_eq!(fs::metadata(placed[0]).unwrap().len(), 33);
     }
 
     /// The group is killed before its members are counted, so even when

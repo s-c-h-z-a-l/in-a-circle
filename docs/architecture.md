@@ -1065,9 +1065,13 @@ In the engine, in one place:
    output budget), except an 8-bit text decoder's (`in=text/x-8bit`):
    three times the bytes the engine handed it, plus 3 for a byte order
    mark, taken from the input's size when the action starts, never from
-   anything the action reports. Past its cap, or not UTF-8, the input
-   fails ("text output is not UTF-8", "text output larger than ...") and
-   nothing of it is published. The engine publishes text only as UTF-8:
+   anything the action reports (on a two-step route, the size of the
+   intermediate file that made the output). Past its cap, or not UTF-8,
+   the input fails ("text output is not UTF-8", "text output larger than
+   ...") and nothing of it is published. An 8-bit text decoder makes one
+   UTF-8 copy of one file, so it may publish exactly one output per
+   input: a second one fails the input ("8-bit text action made more than
+   one output") and nothing of it is published. The engine publishes text only as UTF-8:
    the contract has no 8-bit output type. `text/x-8bit` is an input type
    the classifier gives; an action that declares it as its `out=` (an
    encoder from UTF-8 to a code page) is checked like any `text/*`, so
