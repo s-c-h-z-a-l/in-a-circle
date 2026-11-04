@@ -169,6 +169,17 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- `ext=same` names no extension: the output keeps its input's, exactly
+  as it is (the last one, its case kept: `Film.hu.srt` gives
+  `Film.hu/Film.hu.srt`, `a.SRT` gives `a/a.SRT`, `a.tar.gz` gives
+  `a.tar/a.tar.gz`; an input without one gives an output without one).
+  It is valid on every one-to-one action, `batch=yes` and `batch=no`; a
+  join's one output has no single input to take it from, so `join=yes`
+  with `ext=same` rejects the line. Any other value is still the
+  extension itself (`ext=SAME` is `.SAME`). A line without it means what
+  it did before, and the catalog cache keeps its format and version. An
+  engine older than this rule reads `same` as an extension and names the
+  output `x.same`.
 - A join action turns many inputs into one output (`join=yes`; absent
   means `no`). It may take a set of input types: `in=` is then a
   comma-separated MIME set of at most 16 members (the roadmap's image
@@ -906,7 +917,8 @@ Every action runs sandboxed, set up in the child between `fork` and
   [Output policy](#output-policy)), and its one result is published once,
   as one group, by the same staging and no-replace rename as any other
   output. A two-step route runs both steps in the same temp dir; only the
-  last step's outputs are placed. Step 1's outputs are checked again once
+  last step's outputs are placed, named after the user's input (with
+  `ext=same` its extension too, never that of step 1's output). Step 1's outputs are checked again once
   its whole group is gone (a regular file, no symlink on the way), so an
   action cannot swap one for a link before step 2 reads it.
 - The supervisor is a single-threaded `poll` loop over the action's
@@ -1011,7 +1023,11 @@ In the engine, in one place:
    folder, and the notification says so.
 2. Same base name, new extension. When the format stays the same, a fixed
    suffix, English and Latin-only by default (`-small`, `-compressed`),
-   configurable.
+   configurable. The exception is an `ext=same` action (a re-encoding,
+   such as a subtitle to UTF-8): its output keeps the input's name
+   exactly, with no suffix (`Film.hu.srt` gives `Film.hu/Film.hu.srt`),
+   because the wrapper folder already tells the two apart and players
+   pair a subtitle with its film by the name.
 3. Every input gets its own folder, a single output too (`a.txt` gives
    `a/a.md`; several outputs keep their names, `doc/doc-01.png`, …).
    Never overwrite: `name (1)/`, `name (2)/`, without asking.

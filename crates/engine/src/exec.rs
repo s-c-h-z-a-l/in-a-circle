@@ -1052,7 +1052,22 @@ fn place_outputs(
     }
     for (o, rels) in per {
         let stem = stem_of(&sink.inputs[o]);
-        publish(dir, &rels, target, &stem, &action.ext, &[o], cancel, sink);
+        let ext = ext_for(action, &sink.inputs[o]);
+        publish(dir, &rels, target, &stem, &ext, &[o], cancel, sink);
+    }
+}
+
+/// The output extension of `action` for the user's input `input`: its own
+/// `ext=`, or with `ext=same` the input's (the last one, case kept; none
+/// when it has none). On a two-step route `input` is still the user's
+/// file, never step 1's intermediate output.
+fn ext_for<'a>(action: &'a Action, input: &'a Path) -> Cow<'a, str> {
+    if action.keeps_ext() {
+        input
+            .extension()
+            .map_or(Cow::Borrowed(""), |e| e.to_string_lossy())
+    } else {
+        Cow::Borrowed(&action.ext)
     }
 }
 
@@ -3450,6 +3465,115 @@ pub(crate) mod tests {
     /// Copies the first input to `0/a.md` and reports it.
     const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
                         printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// Copies every input to `<i>/out` and reports it done.
+    const COPY_ALL: &str = "i=0; while IFS= read -r in; do mkdir \"$4/$i\"; \
+                            cat \"$in\" > \"$4/$i/out\"; \
+                            printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; i=$((i+1)); done < \"$6\"";
+
+    /// `run` of `steps` over `inputs`: each input's `Done` output paths.
+    fn done_paths(steps: &[&Action], inputs: &[PathBuf]) -> Vec<PathBuf> {
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(steps, inputs.to_vec(), &mut seen, &tok);
+        let done: Vec<PathBuf> = seen
+            .0
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Done { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), inputs.len(), "{:?}", seen.0);
+        done
+    }
+
+    /// An `ext=same` action's copy of `t`'s input.
+    fn same_action(t: &Tmp) -> Action {
+        let mut a = script_action(t, "same", COPY_ALL, crate::catalog::EXT_SAME);
+        a.input = "text/x-8bit".into();
+        a.output = "text/plain".into();
+        a
+    }
+
+    /// `ext=same`: the output is named `<stem>.<the input's extension>`,
+    /// its case kept, only the last extension counted, none for an input
+    /// without one; the wrapper folder alone tells it from its input.
+    #[test]
+    fn ext_same_keeps_the_input_extension() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_keeps_the_input_extension", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let names = ["Film.hu.srt", "B.SRT", "notes", "a.tar.gz"];
+        let inputs: Vec<PathBuf> = names.iter().map(|n| docs.join(n)).collect();
+        for p in &inputs {
+            fs::write(p, "x\n").unwrap();
+        }
+        let a = same_action(&t);
+        let got = done_paths(&[&a], &inputs);
+        // `notes/` would be the input itself: the wrapper takes the next name.
+        let want = [
+            "Film.hu/Film.hu.srt",
+            "B/B.SRT",
+            "notes (1)/notes",
+            "a.tar/a.tar.gz",
+        ]
+        .map(|r| docs.join(r));
+        assert_eq!(got, want);
+        for p in &want {
+            assert_eq!(fs::read(p).unwrap(), b"x\n", "{}", p.display());
+        }
+    }
+
+    /// On a two-step route the extension kept is the user's input's, not
+    /// that of step 1's intermediate output.
+    #[test]
+    fn ext_same_on_a_two_step_route_keeps_the_original() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_on_a_two_step_route_keeps_the_original", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same-two");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.SRT");
+        fs::write(&input, "x\n").unwrap();
+        let s1 = script_action(&t, "first", COPY_ALL, "mid");
+        let s2 = same_action(&t);
+        let got = done_paths(&[&s1, &s2], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film.hu/Film.hu.SRT")]);
+    }
+
+    /// The output of `ext=same` carries no suffix: inside its wrapper it
+    /// has exactly its input's name, and nothing else is made beside it.
+    #[test]
+    fn ext_same_output_has_no_suffix() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_output_has_no_suffix", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same-suffix");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.srt");
+        fs::write(&input, "x\n").unwrap();
+        let a = same_action(&t);
+        done_paths(&[&a], std::slice::from_ref(&input));
+        let list = |d: &Path| {
+            let mut v: Vec<String> = fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(list(&docs), ["Film.hu", "Film.hu.srt"]);
+        assert_eq!(list(&docs.join("Film.hu")), ["Film.hu.srt"]);
+    }
 
     /// The group is killed before its members are counted, so even when
     /// they cannot be counted (an injected `waitid` error) nothing of the
