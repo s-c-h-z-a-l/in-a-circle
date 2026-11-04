@@ -10,7 +10,10 @@
 //! and encodes back to the input byte for byte; every error names a byte
 //! that really is what it says at that offset; the UTF-8 verdicts agree
 //! with `std::str::from_utf8` (the first damaged offset is its
-//! `valid_up_to`).
+//! `valid_up_to`). Every verdict, `Ok` included, is also predicted from
+//! scratch: the first control byte, the UTF-8 counts taken from std's
+//! `utf8_chunks()` (not the decoder's own checker), then the first byte
+//! the code page refuses.
 
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -40,6 +43,62 @@ fn is_control(b: u8) -> bool {
     b < 0x20 && !matches!(b, b'\t' | b'\n' | 0x0C | b'\r')
 }
 
+/// The verdict the rules give `input`, worked out apart from `decode`:
+/// a control byte (a Ctrl-Z only as the last byte is text) stops at once;
+/// then the UTF-8 verdicts from `utf8_chunks()` (all valid with a
+/// multi-byte character: already UTF-8; bytes outside valid UTF-8 and
+/// either a leading byte order mark or at least as many Latin letters
+/// U+0080-U+024F and general punctuation U+2000-U+206F: damaged, at the
+/// first such byte); then the first byte the code page refuses.
+fn expected(cp: Codepage, input: &[u8]) -> Result<(), CodepageError> {
+    let last = input.len().saturating_sub(1);
+    if let Some(at) = input
+        .iter()
+        .enumerate()
+        .position(|(i, &b)| is_control(b) && !(b == 0x1A && i == last))
+    {
+        return Err(CodepageError::Control { at: at as u64 });
+    }
+    let (mut multi, mut latin, mut invalid) = (0u64, 0u64, 0u64);
+    let (mut pos, mut first) = (0usize, None);
+    for chunk in input.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            multi += u64::from(c.len_utf8() > 1);
+            latin += u64::from(matches!(c, '\u{80}'..='\u{24F}' | '\u{2000}'..='\u{206F}'));
+        }
+        pos += chunk.valid().len();
+        if !chunk.invalid().is_empty() {
+            first.get_or_insert(pos as u64);
+            invalid += chunk.invalid().len() as u64;
+        }
+        pos += chunk.invalid().len();
+    }
+    if invalid == 0 && multi > 0 {
+        return Err(CodepageError::AlreadyUtf8);
+    }
+    if invalid > 0 && (input.starts_with(BOM) || latin >= invalid) {
+        return Err(CodepageError::DamagedUtf8 {
+            at: first.expect("an invalid byte"),
+        });
+    }
+    let refused = |b: u8| match cp {
+        Codepage::Iso88592 => (0x80..0xA0).contains(&b),
+        Codepage::Cp1250 => cp.mapping(b).is_none(),
+    };
+    match input.iter().position(|&b| refused(b)) {
+        None => Ok(()),
+        Some(at) => {
+            let (byte, at) = (input[at], at as u64);
+            Err(match cp {
+                Codepage::Iso88592 if Codepage::Cp1250.mapping(byte).is_some() => {
+                    CodepageError::LooksLikeCp1250 { byte, at }
+                }
+                _ => CodepageError::NotThisCodepage { cp, byte, at },
+            })
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&sel, input)) = data.split_first() else {
         return;
@@ -60,6 +119,12 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(
         got.as_ref().map_err(|e| e.to_string()),
         again.as_ref().map_err(|e| e.to_string())
+    );
+
+    // The verdict the rules give, worked out apart from `decode`.
+    assert_eq!(
+        got.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+        expected(cp, input).map_err(|e| e.to_string())
     );
 
     let utf8 = std::str::from_utf8(input);
