@@ -746,6 +746,47 @@ fn wheel_offers_and_runs_md_to_epub() {
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
 }
 
+/// Real `inacircle-text` on the wheel: a dropped Windows-1250 `.srt` (the
+/// accents are in its first bytes) lights Encoding (west); its west slice
+/// is Windows-1250, its east slice ISO-8859-2; clicking the west one writes
+/// the UTF-8 subtitle with the byte order mark next to the source in its
+/// wrapper folder, as one history group that Undo trashes. The drawn
+/// wheels (Encoding west lit, then Windows-1250 west and ISO-8859-2 east
+/// lit) are pinned by `encoding_menus_offer_the_two_code_pages` in the
+/// binary's unit tests.
+#[test]
+fn wheel_offers_and_runs_cp1250() {
+    // "Příliš žluťoučký kůň" and the quotes „…” in Windows-1250.
+    let cp1250: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nP\xf8\xedli\x9a \x9eslu\x9d\
+        ou\xe8k\xfd k\xf9\xf2 \x84ok\x94\r\n";
+    let root = Root::new("cp1250");
+    root.real_action_cached("inacircle-text", ("primer.srt", cp1250), "cp1250");
+    // The flat offer names both code pages for this file, lit.
+    let src = root.0.join("f/Film.hu.srt");
+    fs::write(&src, cp1250).unwrap();
+    let offer = root.cmd().arg("offer").arg(&src).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    for (dir, preset, label) in [(6, "cp1250", "Windows-1250"), (2, "iso88592", "ISO-8859-2")] {
+        let line = format!(
+            "slice\tgroup=encoding\tdir={dir}\tpreset={preset}\tlabel={label}\tapplicable=1"
+        );
+        assert!(
+            offer.contains(&line) && !offer.contains(&format!("{line}\tdisabled")),
+            "{offer}"
+        );
+    }
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Encoding is west of the center, Windows-1250 is its west slice.
+    let code = choose_on_the_wheel(&root, &list, (810, 540), (810, 540));
+    assert_eq!(code, Some(0));
+    let out = fs::read(root.0.join("f/Film.hu/Film.hu.srt")).expect("no subtitle written");
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nP\u{159}\u{ed}li\u{161} \
+        \u{17e}slu\u{165}ou\u{10d}k\u{fd} k\u{16f}\u{148} \u{201e}ok\u{201d}\r\n";
+    assert_eq!(out, want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), cp1250, "the source changed");
+    assert_one_group_and_undo(&root, "Film.hu", "Film.hu.srt");
+}
+
 /// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document
 /// (north); its south slice is Plain text; clicking it writes the book's
 /// text next to the source in its wrapper folder, as one history group
