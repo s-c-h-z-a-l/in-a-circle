@@ -4743,6 +4743,29 @@ mod tests {
         out
     }
 
+    /// Writing a joined span again charges the output budget with the
+    /// joined text (the sum of the two texts), not more: an output within
+    /// the budget is written, one past it is refused.
+    #[test]
+    fn code_join_charges_the_joined_text() {
+        let code = |s: &str| Inline::Code(s.into());
+        let s = Inline::Strikethrough;
+        // 9 + 9 bytes of text, the second ending in a backtick, so the
+        // joined text needs a pad the first span has not: it is written
+        // again. 29 bytes out; a product of the lengths (81) is past 60.
+        let d = doc(vec![Block::Paragraph(vec![
+            s(vec![code("aaaaaaaaa")]),
+            s(vec![code("bbbbbbbb`")]),
+        ])]);
+        let limits = |output_bytes| Limits {
+            output_bytes,
+            ..Limits::UNLIMITED
+        };
+        let (out, _) = write_limited_with(&d, limits(60), Dialect::Gfm).unwrap();
+        assert_eq!(out, "~~`` aaaaaaaaabbbbbbbb` ``~~\n");
+        assert!(write_limited_with(&d, limits(28), Dialect::Gfm).is_err());
+    }
+
     /// GFM: code spans side by side (`<kbd>Ctrl</kbd><kbd>C</kbd>`) are
     /// written as one span of their joined text. Written apart they
     /// touched (`` `Ctrl``C` ``), and a reader took that for one span
@@ -4818,6 +4841,27 @@ mod tests {
             (
                 vec![s(vec![code("`a")]), s(vec![code("b")])],
                 "~~`` `ab ``~~\n",
+            ),
+            // A span of spaces next to one that is not: the joined text
+            // is not all spaces, so it needs a pad to keep its edge spaces.
+            (
+                vec![s(vec![code(" ")]), s(vec![code("x ")])],
+                "~~`  x  `~~\n",
+            ),
+            (
+                vec![s(vec![code(" x")]), s(vec![code(" ")])],
+                "~~`  x  `~~\n",
+            ),
+            // The backticks ending the joined text are counted across
+            // joins: the third span's leading backtick makes a run as
+            // long as the fence, so the fence grows.
+            (
+                vec![
+                    s(vec![code("``a```a`")]),
+                    s(vec![code("``")]),
+                    s(vec![code("`b")]),
+                ],
+                "~~```````` ``a```a````b ````````~~\n",
             ),
         ] {
             let d = doc(vec![Block::Paragraph(inlines)]);
