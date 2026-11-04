@@ -931,9 +931,13 @@ Every action runs sandboxed, set up in the child between `fork` and
   as one group, by the same staging and no-replace rename as any other
   output. A two-step route runs both steps in the same temp dir; only the
   last step's outputs are placed, named after the user's input (with
-  `ext=same` its extension too, never that of step 1's output). Step 1's outputs are checked again once
-  its whole group is gone (a regular file, no symlink on the way), so an
-  action cannot swap one for a link before step 2 reads it.
+  `ext=same` its extension too, never that of step 1's output). Step 1's
+  outputs are checked again once its whole group is gone (a regular
+  file, no symlink on the way), so an action cannot swap one for a link
+  before step 2 reads it. When step 1 makes several parts of one input,
+  the input is still all or nothing: a part that either step fails,
+  skips or leaves unreported settles the input (failed or skipped,
+  once), and none of its other parts is handed on or placed.
 - The supervisor is a single-threaded `poll` loop over the action's
   pipes, a cancel `signalfd` and the child's pidfd; its only timers are an
   hourly refresh of the temp dir's mtime and the grace after `SIGTERM`.
@@ -1077,12 +1081,13 @@ In the engine, in one place:
    the input fails ("text output is not UTF-8", "text output larger than
    ...") and nothing of it is published. An 8-bit text decoder makes one
    UTF-8 copy of one file, so it may publish exactly one output per
-   input: a second one fails the input ("8-bit text action made more than
-   one output") and nothing of it is published. The engine publishes text only as UTF-8:
-   the contract has no 8-bit output type. `text/x-8bit` is an input type
-   the classifier gives; an action that declares it as its `out=` (an
-   encoder from UTF-8 to a code page) is checked like any `text/*`, so
-   every output byte past ASCII fails its input as not UTF-8.
+   input: a second one fails the input ("8-bit text action made more
+   than one output") and nothing of it is published. The engine
+   publishes text only as UTF-8: the contract has no 8-bit output type.
+   `text/x-8bit` is an input type the classifier gives; an action that
+   declares it as its `out=` (an encoder from UTF-8 to a code page) is
+   checked like any `text/*`, so every output byte past ASCII fails its
+   input as not UTF-8.
 5. Extraction: the extracted files go, flattened, into one folder named
    after the archive; a single top-level folder inside the archive is not
    kept as such. (Every input gets its wrapper folder, also a single

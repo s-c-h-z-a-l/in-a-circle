@@ -1082,8 +1082,7 @@ fn place_outputs(
         let stem = stem_of(&sink.inputs[o]);
         let ext = ext_for(action, &sink.inputs[o]);
         // An 8-bit text action's one output is capped by the file that
-        // made it (an intermediate one on a two-step route, never a
-        // sibling part of the same input).
+        // made it (an intermediate one on a two-step route).
         let bytes = made
             .first()
             .and_then(|&(j, _)| handed.get(j))
@@ -2533,6 +2532,23 @@ impl<'a> Supervisor<'a> {
                 sink.fail(o, reason.clone());
             }
         }
+        // Per input, all or nothing: an original input one of whose parts
+        // (a two-step fan-out) failed, was skipped or said nothing is
+        // settled by that, and none of its other parts' outputs is placed
+        // or handed on.
+        let short: Vec<usize> = origin
+            .iter()
+            .zip(&self.reported)
+            .filter(|&(_, r)| *r != Reported::Done)
+            .map(|(&o, _)| o)
+            .collect();
+        if !short.is_empty() {
+            let mut cut = vec![false; sink.inputs.len()];
+            for o in short {
+                cut[o] = true;
+            }
+            self.outputs.retain(|&(i, _)| !cut[origin[i]]);
+        }
         let mut per = vec![Vec::new(); self.reported.len()];
         for (index, rel) in self.outputs {
             per[index].push(rel);
@@ -3842,8 +3858,8 @@ pub(crate) mod tests {
     /// On a two-step route the cap comes from the intermediate the engine
     /// handed the decoder, not from the user's input: a 3-byte input that
     /// step 1 makes 10 bytes may decode to 33. When step 1 makes several
-    /// parts of one input, decoding two of them is two outputs (refused);
-    /// the one part decoded is capped by its own size, not its sibling's.
+    /// parts of one input, decoding two of them is two outputs (refused),
+    /// and decoding one fails the input on the other (nothing placed).
     #[test]
     fn x8bit_cap_on_a_two_step_route() {
         use crate::sandbox::tests::abi_or_skip;
@@ -3904,19 +3920,119 @@ pub(crate) mod tests {
                 reason: X8BIT_ONE_OUTPUT.to_owned()
             }]
         );
-        // Only the 10-byte part decoded (the 3-byte one failed): its 33
-        // bytes are within its own cap, past its sibling's (12).
+        // Only the 10-byte part decoded, the 3-byte one failed: the input
+        // fails once, and its decoded part is not placed either.
         let big = decoder("big", &tripler("xyz", Some(10)));
-        let seen = failed(&[&split, &big]);
-        let placed: Vec<&PathBuf> = seen
-            .iter()
-            .filter_map(|o| match o {
-                Outcome::Done { output, .. } => Some(output),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(placed, [&docs.join("a (1)/a.srt")], "{seen:?}");
-        assert_eq!(fs::metadata(placed[0]).unwrap().len(), 33);
+        assert_eq!(
+            failed(&[&split, &big]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "skipped".to_owned()
+            }]
+        );
+        assert!(!docs.join("a (1)").exists());
+    }
+
+    /// Per input, all or nothing, across a fan-out too: when step 1 makes
+    /// parts of an input and step 2 fails one of them, the input fails
+    /// once and nothing of it is placed, not its other parts either. The
+    /// history agrees (one done, one failed, undoable) and Undo moves only
+    /// the group of the input whose parts all converted.
+    #[test]
+    fn a_failed_part_fails_its_whole_input() {
+        use crate::journal::{GroupOutcome, Recorder};
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("a_failed_part_fails_its_whole_input", 0).is_none() {
+            return;
+        }
+        struct Rec(Seen, Recorder);
+        impl Observer for Rec {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+                self.1.outcome(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn prepare_group(&mut self, g: &OutputGroup, p: &Path) -> io::Result<()> {
+                self.1.prepare_group(g, p)
+            }
+            fn group(&mut self, g: &OutputGroup, l: &LocationEvidence, d: &Durability) {
+                self.1.group(g, l, d);
+            }
+        }
+        let t = Tmp::new("fan-fail");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let (a, b) = (docs.join("a.txt"), docs.join("b.txt"));
+        fs::write(&a, "ab\n").unwrap();
+        fs::write(&b, "cd\n").unwrap();
+        // Step 1: two parts of every input, a copy and a 10-byte one.
+        let split = script_action(
+            &t,
+            "split",
+            "i=0; while IFS= read -r in; do mkdir \"$4/$i\"; cp \"$in\" \"$4/$i/small\"; \
+             printf '0123456789' > \"$4/$i/big\"; printf 'done\\t%s\\t%s/small\\n' \"$in\" \"$i\"; \
+             printf 'done\\t%s\\t%s/big\\n' \"$in\" \"$i\"; i=$((i+1)); done < \"$6\"",
+            "mid",
+        );
+        // Step 2: copies every part but the copy of `a.txt`, which fails.
+        let copy = script_action(
+            &t,
+            "copy",
+            "i=0; while IFS= read -r in; do if [ \"$(cat \"$in\")\" = ab ]; then \
+             printf 'fail\\t%s\\tpart refused\\n' \"$in\"; else mkdir \"$4/$i\"; \
+             cp \"$in\" \"$4/$i/out\"; printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; fi; \
+             i=$((i+1)); done < \"$6\"",
+            "md",
+        );
+        let p = |d: &str| t.0.join(d).into_os_string().into_string().unwrap();
+        let (s, r, d, h) = (p("state"), p("run"), p("data"), p("home"));
+        let env = [
+            ("XDG_STATE_HOME", Some(s.as_str())),
+            ("XDG_RUNTIME_DIR", Some(r.as_str())),
+            ("XDG_DATA_HOME", Some(d.as_str())),
+            ("HOME", Some(h.as_str())),
+        ];
+        crate::xdg::tests::with_env(&env, || {
+            let job = crate::journal::new_job_id();
+            let mut obs = Rec(Seen::default(), Recorder::open(&job, "convert"));
+            let tok = CancelToken::install().unwrap();
+            run(&[&split, &copy], vec![a.clone(), b.clone()], &mut obs, &tok);
+            let Rec(seen, rec) = obs;
+            let of = |i: &Path| -> Vec<&Outcome> {
+                seen.0
+                    .iter()
+                    .filter(|o| match o {
+                        Outcome::Done { input, .. } | Outcome::Failed { input, .. } => input == i,
+                        _ => false,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                of(&a),
+                [&Outcome::Failed {
+                    input: a.clone(),
+                    reason: "part refused".to_owned()
+                }],
+                "{:?}",
+                seen.0
+            );
+            assert!(!docs.join("a").exists(), "a part of a.txt was placed");
+            let b_out = [docs.join("b/out"), docs.join("b/out (1)")];
+            assert_eq!(of(&b).len(), 2, "{:?}", seen.0);
+            assert!(b_out.iter().all(|f| f.is_file()));
+            let recorded = rec.finish(true);
+            assert_eq!(recorded.tally.counts(), (1, 0, 1));
+            assert!(recorded.undoable, "{:?}", recorded.warning);
+            let undone = crate::journal::undo(&job).unwrap();
+            assert_eq!(undone.groups.len(), 1, "{:?}", undone.groups);
+            assert!(matches!(
+                undone.groups[0],
+                GroupOutcome::MovedToTrash { .. }
+            ));
+            assert!(b_out.iter().all(|f| fs::symlink_metadata(f).is_err()));
+            assert!(a.is_file() && b.is_file(), "an input was moved");
+        });
     }
 
     /// The group is killed before its members are counted, so even when
