@@ -621,6 +621,9 @@ mod tests {
         // TAB, LF, CR and FF are text.
         let p = with("ok.txt", b"\t\n\r\x0c");
         assert_eq!(kind(&p), x8bit());
+        // Two control bytes are as bad as one (the head's check folds them).
+        let p = with("two.txt", &[0x01, 0x01]);
+        assert_eq!(kind(&p), is(None, ".txt file"));
         // DEL and C1 bytes are the code page's business, not control here.
         let p = with("del.txt", b"\x7f\x85");
         assert_eq!(kind(&p), x8bit());
@@ -962,6 +965,48 @@ mod tests {
         // A text name makes it an 8-bit candidate (`â‚` in Windows-1250).
         let p = d.file("x.txt", &b);
         assert_eq!(kind(&p), x8bit());
+        // A short file is whole: a spent read-on budget changes nothing.
+        let mut r = Reread { left: 0 };
+        assert_eq!(kind_with(&p, &mut r), x8bit());
+    }
+
+    /// The read-on stops at the window's end: a valid sequence cut there
+    /// (`é` across the last byte of the window and the first one past it)
+    /// is not judged, so the file stays what its UTF-8 prefix says.
+    #[test]
+    fn sequence_cut_by_the_window_is_not_judged() {
+        let d = Dir::new("window-cut");
+        let mut b = late(300 * 1024, None, 0);
+        b[WINDOW - 1..WINDOW + 1].copy_from_slice("é".as_bytes());
+        let mut r = Reread::per_drop();
+        assert_eq!(
+            kind_with(&d.file("x.srt", &b), &mut r),
+            is(None, ".srt text")
+        );
+        assert_eq!(r.left, PER_DROP - (WINDOW - HEAD) as u64);
+    }
+
+    /// A read error during the read-on is the caller's error, never retried:
+    /// only `Interrupted` is. A handle opened for writing only fails every
+    /// read with EBADF; a retry would spin for ever, hence the deadline.
+    #[test]
+    fn read_on_error_is_returned() {
+        let d = Dir::new("read-on-error");
+        let p = d.file("x.srt", b"");
+        let head = late(HEAD, None, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut file = File::create(&p).unwrap();
+            let mut scan = Scan::default();
+            let cut = scan.utf8(&head);
+            let mut r = Reread::per_drop();
+            let got = eight_bit(&mut file, &head, Some("srt"), scan, cut, &mut r);
+            tx.send(got.map_err(|e| e.raw_os_error())).unwrap();
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the read-on did not return");
+        assert_eq!(got, Err(Some(libc::EBADF)));
     }
 
     #[test]
