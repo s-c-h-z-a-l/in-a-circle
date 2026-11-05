@@ -169,12 +169,15 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
-- `ext=same` names no extension: the output keeps its input's, exactly
+- `ext=same` names no extension: the output keeps its input's
   as it is (the last one, its case kept: `Film.hu.srt` gives
   `Film.hu/Film.hu.srt`, `a.SRT` gives `a/a.SRT`, `a.tar.gz` gives
   `a.tar/a.tar.gz`; an input without one gives an output without one,
   and so does a trailing dot, an empty extension: `Film.` gives
-  `Film/Film`).
+  `Film/Film`). A name is written as UTF-8: bytes of the extension that
+  are not UTF-8 become U+FFFD, as those of the stem already do in every
+  output name (`a.b\xff` gives `a/a.b\u{FFFD}`). Only a plugin can meet
+  this: the shipped `ext=same` actions take only listed ASCII extensions.
   It is valid on every one-to-one action, `batch=yes` and `batch=no`; a
   join's one output has no single input to take it from, so `join=yes`
   with `ext=same` rejects the line. Any other value is still the
