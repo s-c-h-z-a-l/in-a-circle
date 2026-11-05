@@ -337,7 +337,18 @@ fn control_byte_late_fails() {
 #[test]
 fn already_utf8_is_skipped() {
     for cp in BOTH {
-        for text in ["Árvíztűrő tükörfúrógép\n", "Á", "e\u{20AC}", "\u{1F600} ok"] {
+        // Every lead byte range of Unicode Table 3-7: U+0800 (`E0`),
+        // U+D7FF (`ED`), U+40000 (`F1`), U+10FFFF (`F4`).
+        for text in [
+            "Árvíztűrő tükörfúrógép\n",
+            "Á",
+            "e\u{20AC}",
+            "\u{1F600} ok",
+            "\u{800}",
+            "\u{D7FF}",
+            "\u{40000}",
+            "\u{10FFFF}",
+        ] {
             assert_eq!(err(cp, text.as_bytes()), "already UTF-8", "{text}");
         }
         assert!(matches!(
@@ -444,6 +455,62 @@ fn capitals_that_look_like_utf8_convert() {
     assert_eq!(
         run(Codepage::Cp1250, b"\xABN\xD5\xBB\r\n").unwrap(),
         "«NŐ»\r\n".as_bytes()
+    );
+}
+
+/// What Unicode Table 3-7 does not allow is not UTF-8, whatever it looks
+/// like: an overlong `E0` or `F0` sequence, a surrogate (`ED A0`) and past
+/// U+10FFFF (`F4 A0`) are Windows-1250 bytes and convert.
+#[test]
+fn ill_formed_sequences_are_not_utf8() {
+    for input in [
+        &b"\xE0\x80\x80"[..],
+        b"\xF0\x80\x80\x80",
+        b"\xED\xA0\x80",
+        b"\xF4\xA0\x80\x80",
+    ] {
+        let want = reference(Codepage::Cp1250, input);
+        assert_eq!(run(Codepage::Cp1250, input).unwrap(), want, "{input:x?}");
+    }
+}
+
+/// An interrupted read is retried; any other read error stops the decode
+/// with that error, even when the next read would succeed.
+#[test]
+fn interrupted_read_is_retried_other_errors_are_not() {
+    struct Once {
+        err: Option<io::Error>,
+        data: &'static [u8],
+    }
+    impl Read for Once {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(e) = self.err.take() {
+                return Err(e);
+            }
+            let n = self.data.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+    let mut out = Vec::new();
+    let mut r = Once {
+        err: Some(io::ErrorKind::Interrupted.into()),
+        data: b"\xE9",
+    };
+    assert_eq!(
+        decode(Codepage::Cp1250, &mut r, &mut out, false).unwrap(),
+        2
+    );
+    assert_eq!(out, "é".as_bytes());
+    let mut r = Once {
+        err: Some(io::Error::from_raw_os_error(libc::EIO)),
+        data: b"\xE9",
+    };
+    let got = decode(Codepage::Cp1250, &mut r, &mut Vec::new(), false);
+    assert!(
+        matches!(&got, Err(CodepageError::Io(e)) if e.raw_os_error() == Some(libc::EIO)),
+        "{got:?}"
     );
 }
 
@@ -804,6 +871,65 @@ fn failure_leaves_nothing() {
     assert!(files(&work2).is_empty());
     let o = run_action("text.iso88592-to-utf8", &work2, &[&utf]);
     assert_eq!(o.status.code(), Some(3), "{}", stdout(&o));
+    assert!(files(&work2).is_empty());
+}
+
+/// An output past the process's `RLIMIT_FSIZE` (64 KiB here, as the
+/// engine's sandbox bounds an action's output) fails that input with the
+/// size copy and leaves nothing; any other I/O error fails it with its own
+/// text. `/proc/self/mem` is a regular file whose read at offset 0 (never
+/// mapped) fails with EIO.
+#[test]
+fn write_and_read_errors_fail_with_their_own_text() {
+    use std::os::unix::process::CommandExt;
+    // Under 1 MiB, so the copy is in KiB; 48 KiB of accents are 96 KiB.
+    const CAP: u64 = 64 * 1024;
+    let t = Tmp::new(&std::env::temp_dir(), "errors");
+    let big = t.0.join("big.txt");
+    fs::write(&big, vec![0xE9; 48 * 1024]).unwrap();
+    let mut c = bin();
+    c.args(["run", "text.cp1250-to-utf8", "--work"])
+        .arg(t.work())
+        .arg("--")
+        .arg(&big);
+    // SAFETY: the closure runs between fork and exec and only calls
+    // `setrlimit`, which is async-signal-safe, on a local struct; it
+    // touches no memory of the parent and takes no lock.
+    unsafe {
+        c.pre_exec(|| {
+            let rl = libc::rlimit {
+                rlim_cur: CAP as libc::rlim_t,
+                rlim_max: CAP as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let o = c.output().unwrap();
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    let fail = lines(&out, "fail");
+    assert_eq!(fail.len(), 1, "{out}");
+    assert_eq!(fail[0][2], "The text would be larger than 64 KiB");
+    assert!(files(&t.work()).is_empty());
+
+    let work2 = t.0.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = run_action(
+        "text.cp1250-to-utf8",
+        &work2,
+        &[Path::new("/proc/self/mem")],
+    );
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    let fail = lines(&out, "fail");
+    assert_eq!(fail.len(), 1, "{out}");
+    assert_eq!(
+        fail[0][2],
+        io::Error::from_raw_os_error(libc::EIO).to_string()
+    );
     assert!(files(&work2).is_empty());
 }
 
