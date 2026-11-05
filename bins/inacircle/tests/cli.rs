@@ -1800,9 +1800,25 @@ fn many_long_paths_stay_within_the_pss_budget() {
         .and_then(Path::file_name)
         .is_some_and(|d| d == "release");
     let e = Env::new("longpaths");
+    // Folders of at most 240 bytes (under NAME_MAX) fill what the temp
+    // directory's own length leaves of `LONG_PATH`, so every path is
+    // exactly `LONG_PATH` bytes and the list stays within 1 MiB whatever
+    // TMPDIR is.
     let mut dir = e.files();
-    for c in ['a', 'b', 'c', 'd'] {
-        dir = dir.join(c.to_string().repeat(240));
+    let name = "/0000.txt".len();
+    let base = dir.as_os_str().len();
+    assert!(
+        base + name < LONG_PATH,
+        "temp dir of {base} bytes leaves no room for {LONG_PATH}-byte paths"
+    );
+    let mut left = LONG_PATH - base - name;
+    for c in ('a'..='z').cycle() {
+        if left < 2 {
+            break;
+        }
+        let n = (left - 1).min(240);
+        dir = dir.join(c.to_string().repeat(n));
+        left -= n + 1;
     }
     fs::create_dir_all(&dir).unwrap();
     let mut paths = Vec::with_capacity(MANY_INPUTS);
@@ -1810,6 +1826,7 @@ fn many_long_paths_stay_within_the_pss_budget() {
         let plen = dir.join(format!("{i:04}.txt")).as_os_str().len();
         let pad = LONG_PATH.saturating_sub(plen);
         let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
+        assert_eq!(p.as_os_str().len(), LONG_PATH, "{}", p.display());
         fs::write(&p, "w\n").unwrap();
         paths.push(p);
     }
