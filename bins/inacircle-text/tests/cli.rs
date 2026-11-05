@@ -223,7 +223,10 @@ fn batch_mixed_invalid_utf8() {
     assert_eq!(lines(&out, "done").len(), 2);
     let skip = lines(&out, "skip");
     assert_eq!(skip.len(), 1);
-    assert_eq!(skip[0][1..], [b.to_str().unwrap(), "unsupported"]);
+    assert_eq!(
+        skip[0][1..],
+        [b.to_str().unwrap(), "not UTF-8: byte 0xFF at 0"]
+    );
     assert!(out.starts_with("progress\t0\n"), "{out}");
     assert_eq!(lines(&out, "progress").len(), 4);
     assert!(work.join("0").is_dir() && work.join("2").is_dir());
@@ -240,7 +243,76 @@ fn all_unsupported_exit_3() {
     fs::write(&b, b"nul\0byte").unwrap();
     let o = run_raw("text.txt-to-md", &work, &[&a, &b]);
     assert_eq!(o.status.code(), Some(3));
-    assert_eq!(lines(&stdout(&o), "skip").len(), 2);
+    let out = stdout(&o);
+    let skip = lines(&out, "skip");
+    assert_eq!(skip.len(), 2, "{out}");
+    // Bad UTF-8 names its byte; valid UTF-8 with a NUL stays `unsupported`.
+    assert_eq!(
+        skip[0][1..],
+        [a.to_str().unwrap(), "not UTF-8: byte 0xFF at 0"]
+    );
+    assert_eq!(skip[1][1..], [b.to_str().unwrap(), "unsupported"]);
+}
+
+/// A file whose first non-UTF-8 byte lies past the classifier's 256 KiB
+/// window reaches the text actions as plain text: each one names that
+/// byte and its offset, 1:1 and document actions alike, and leaves
+/// nothing behind. A cut multi-byte sequence at the very end is named too.
+#[test]
+fn late_non_utf8_byte_is_named_with_its_offset() {
+    // 260 KiB: past the classifier's 256 KiB window.
+    const AT: usize = 260 << 10;
+    let (root, work) = workdir("late-bad-utf8");
+    let mut body = b"line of ascii text\n".repeat(AT / 19 + 1);
+    body.truncate(AT);
+    body.extend_from_slice(b"caf\xe9 au lait\n");
+    body.extend_from_slice(&b"more ascii\n".repeat(4096));
+    let (srt, txt, md) = (
+        root.join("late.srt"),
+        root.join("late.txt"),
+        root.join("late.md"),
+    );
+    for p in [&srt, &txt, &md] {
+        fs::write(p, &body).unwrap();
+    }
+    let want = format!("not UTF-8: byte 0xE9 at {}", AT + 3);
+    for (id, input) in [
+        ("text.txt-to-md", &txt),
+        ("text.txt-to-md", &srt),
+        ("text.txt-to-html", &txt),
+        ("text.txt-to-epub", &txt),
+        ("text.md-to-txt", &md),
+        ("text.md-to-html", &md),
+        ("text.md-to-epub", &md),
+    ] {
+        let w = work.join(id);
+        fs::create_dir_all(&w).unwrap();
+        let o = run_raw(id, &w, &[input]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(3), "{id}: {out}");
+        let skip = lines(&out, "skip");
+        assert_eq!(skip.len(), 1, "{id}: {out}");
+        assert_eq!(
+            skip[0][1..],
+            [input.to_str().unwrap(), want.as_str()],
+            "{id}"
+        );
+        assert!(snapshot(&w).is_empty(), "{id}: output left behind");
+    }
+
+    // A sequence cut by the end of the file: its lead byte is named.
+    let cut = root.join("cut.txt");
+    fs::write(&cut, b"ab\xc3").unwrap();
+    let w = work.join("cut");
+    fs::create_dir_all(&w).unwrap();
+    let o = run_raw("text.txt-to-md", &w, &[&cut]);
+    let out = stdout(&o);
+    let skip = lines(&out, "skip");
+    assert_eq!(
+        skip[0][1..],
+        [cut.to_str().unwrap(), "not UTF-8: byte 0xC3 at 2"],
+        "{out}"
+    );
 }
 
 #[test]
@@ -1788,9 +1860,34 @@ fn join_failure_reasons_and_exit_codes() {
     let o = join(&work2, &[&bin]);
     let out = stdout(&o);
     assert_eq!(o.status.code(), Some(3), "{out}");
-    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    let skip = lines(&out, "skip");
+    assert_eq!(skip.len(), 1, "{out}");
+    assert_eq!(skip[0][2], "not UTF-8: byte 0xFF at 0", "{out}");
     assert!(lines(&out, "fail").is_empty(), "{out}");
     assert!(!work2.join("join").exists());
+}
+
+/// A joined document whose first non-UTF-8 byte lies past the
+/// classifier's 256 KiB window is skipped with that byte and its offset;
+/// the book is made from the other document.
+#[test]
+fn join_names_a_late_non_utf8_byte() {
+    // 260 KiB: past the classifier's 256 KiB window.
+    const AT: usize = 260 << 10;
+    let (root, work) = workdir("join-late-bad-utf8");
+    let (a, late) = (root.join("a.md"), root.join("late.md"));
+    fs::write(&a, "# A\n").unwrap();
+    let mut body = vec![b'x'; AT];
+    body.extend_from_slice(b"\x80 tail\n");
+    fs::write(&late, &body).unwrap();
+    let o = join(&work, &[&a, &late]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let skip = lines(&out, "skip");
+    assert_eq!(skip.len(), 1, "{out}");
+    let want = format!("not UTF-8: byte 0x80 at {AT}");
+    assert_eq!(skip[0][1..], [late.to_str().unwrap(), want.as_str()]);
+    assert_eq!(lines(&out, "joined").len(), 1, "{out}");
 }
 
 /// A damaged image says so, and a header past the pixel limit says that.

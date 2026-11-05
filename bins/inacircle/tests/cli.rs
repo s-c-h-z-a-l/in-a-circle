@@ -505,6 +505,37 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// A `.txt` whose first accent lies past the classifier's 256 KiB window
+/// is classified as plain text, so the wheel offers Markdown; the action
+/// then says which byte is not UTF-8 and where, and nothing is published.
+#[test]
+fn late_accent_beyond_the_window_is_named_by_the_action() {
+    // 260 KiB: past the classifier's 256 KiB window.
+    const AT: usize = 260 << 10;
+    let e = Env::new("late-accent");
+    let mut body = vec![b'a'; AT];
+    body.extend_from_slice(b"\xe9\n");
+    body.extend_from_slice(&[b'b'; 40 << 10]);
+    let txt = e.file("late.txt", &body);
+    let srt = e.file("late.srt", &body);
+    let o = e.run(&["run", "markdown", "late.txt", "late.srt"]);
+    assert_eq!(o.code, Some(3), "{}{}", o.stdout, o.stderr);
+    // The `.srt` has no type of its own past the window, so no text action
+    // takes it: the engine skips it, the action never sees it.
+    let why = format!("not UTF-8: byte 0xE9 at {AT}");
+    let mut skips = o.pairs("skip");
+    skips.sort();
+    assert_eq!(
+        skips,
+        [(srt.clone(), "unsupported".to_owned()), (txt.clone(), why)],
+        "{}",
+        o.stdout
+    );
+    assert!(o.pairs("done").is_empty(), "{}", o.stdout);
+    assert!(!e.files().join("late").exists());
+    assert_eq!(fs::read(&txt).unwrap(), body);
+}
+
 /// A Windows-1250 subtitle (accents in the first lines) converts to
 /// UTF-8 with the `.srt` byte order mark, in its own folder; the history
 /// records the action, and Undo moves the folder to the Trash.

@@ -903,9 +903,15 @@ Every action runs sandboxed, set up in the child between `fork` and
   (`text/plain` for an ASCII head). A head that is valid UTF-8 with any
   non-ASCII byte, or a file without an extension, is decided by the head.
   Every valid UTF-8 file keeps the plain text and Markdown rule above.
-  The classifier only proposes: the action checks the whole file, and a
-  non-UTF-8 byte past the window shows in the error of whatever action
-  runs on the file.
+  The classifier only proposes: the action checks the whole file. A file
+  the head decides as plain text or Markdown (a listed text or Markdown
+  extension, or none) whose first byte that is not valid UTF-8 lies past
+  the window, or past a spent budget, is offered the text actions; each
+  one reads all of it and skips it, naming that byte and its offset from
+  0 (`not UTF-8: byte 0xE9 at 266240`); nothing is published. Valid UTF-8
+  with a NUL byte is still skipped as `unsupported` by the plain-text
+  reader. Any other listed extension (`.srt`, `.csv`...) has no type
+  with such a head, so no shipped action takes it.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are

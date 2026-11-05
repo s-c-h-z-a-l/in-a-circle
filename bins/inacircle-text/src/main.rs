@@ -51,6 +51,21 @@ fn input_too_large() -> String {
     )
 }
 
+/// The `skip` reason of an input a text reader refused as not text: its
+/// first non-UTF-8 byte and that byte's offset (0-based), so a file whose
+/// late accent the classifier's window did not reach says where it is.
+/// Valid UTF-8 refused for a NUL byte (plain text only) keeps the generic
+/// `unsupported`.
+fn not_text_reason(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Err(e) => {
+            let at = e.valid_up_to();
+            format!("not UTF-8: byte 0x{:02X} at {at}", bytes[at])
+        }
+        Ok(_) => "unsupported".to_string(),
+    }
+}
+
 /// The `fail` reason of a budget error (copies of the shipped budgets).
 fn limit_reason(e: LimitError) -> String {
     match e {
@@ -432,7 +447,7 @@ fn process(
     let (text, losses) = match conv.convert(&bytes) {
         Ok(r) => r,
         Err(ConvertError::NotText) => {
-            ev.skip(input, "unsupported");
+            ev.skip(input, &not_text_reason(&bytes));
             return Outcome::Unsupported;
         }
         Err(ConvertError::Limit(e)) => {
@@ -554,7 +569,7 @@ fn document(
         Err(e) => {
             match e {
                 ConvertError::NotText => {
-                    ev.skip(input, "unsupported");
+                    ev.skip(input, &not_text_reason(bytes));
                     return Outcome::Unsupported;
                 }
                 ConvertError::Limit(l) => ev.fail(input, &limit_reason(l)),

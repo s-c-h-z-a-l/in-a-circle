@@ -21,7 +21,7 @@ use probe::{Format, ProbeError};
 
 use crate::{
     Conversion, ConvertError, IMAGE_BYTES, LIMITS, MAX_PIXELS, input_too_large, lang, limit_reason,
-    title, too_large,
+    not_text_reason, title, too_large,
 };
 
 /// The `fail` reason of a book whose documents together pass the one
@@ -329,7 +329,7 @@ fn read_document(path: &Path, left: &mut doc::Limits, ev: &mut Events<impl Write
     match doc::md::read_spending(&bytes, left, Dialect::Gfm) {
         Ok(d) => Doc::Parsed(d, bytes.len(), epub::fnv1a_128(&[&bytes])),
         Err(ReadError::NotText) => {
-            ev.skip(path, "unsupported");
+            ev.skip(path, &not_text_reason(&bytes));
             Doc::Skipped
         }
         Err(ReadError::Limit(LimitError::Exceeded("nodes" | "owned text"))) if !first => {
