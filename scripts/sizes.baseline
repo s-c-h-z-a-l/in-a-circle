@@ -96,6 +96,17 @@
 # limit. inacircle grew 264 B (file, 16 B of .text) from the new action row
 # and preset; inacircle-pages is unchanged. The shipped inacircle still does
 # not link the xml, doc, zip or epub crates.
-inacircle 1182872 911880
-inacircle-text 1243208 879699
+# Refreshed after the code page work (8-bit text classification and the
+# Windows-1250 and ISO-8859-2 to UTF-8 actions), same toolchain and profile,
+# built from commit 69ab9ad8 (tree clean; the commits after the last source
+# change touch only fuzz corpora). inacircle-text grew 24712 B (file, 21392 B
+# of .text): the code page decoder with its two 128-entry tables, the UTF-8
+# census that rejects text that is already UTF-8, and the action around them;
+# under the 100 KB explanation threshold, and the .text (901091 B) stays
+# under the 1 MiB family limit. inacircle grew 13072 B (file, 10912 B of
+# .text): the classifier's 8-bit text detection with its bounded re-read, and
+# the new group and two presets. inacircle-pages is unchanged. The shipped
+# inacircle still does not link the xml, doc, zip or epub crates.
+inacircle 1195944 922792
+inacircle-text 1267920 901091
 inacircle-pages 504208 403763
