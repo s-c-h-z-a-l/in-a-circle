@@ -1,0 +1,5 @@
+inarkdniacircle-manifest 0
+action	text.md-join-epub	family=text	in=group=book	cost=10	lossy=ie=yes	join=yes	min=1509998
+yesaction	imafest 0
+action	text.md-join-epub	family='text	in=text/markdown,text/x-maratch=yes	join=yes	min=1509998
+yesh=ye}	join=yes	mee-h

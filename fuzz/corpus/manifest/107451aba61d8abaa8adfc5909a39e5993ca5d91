@@ -1,0 +1,7 @@
+inai																est 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	ay=image	i 0
+action	text.md-join-ep	in=text/markdown,text/x-chrcle-manifemaatch=yes	join=yes	st 0
+-min=1024
+action	image.join-pdf	fly=image	in=image/jpemage.join-pdf	s	join=yes	0t 
+s-min=1024
+acdion	image.join-pdf	group=d

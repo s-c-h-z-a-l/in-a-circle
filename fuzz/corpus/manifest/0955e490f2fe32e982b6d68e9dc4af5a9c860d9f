@@ -1,0 +1,4 @@
+inacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/Mx-markdown	assets=image/jpeg,image/png	out=applicatip/ebnou+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.jIn-manifes  f	label=PDnifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/Mx-markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	jn=yes	min	join=yes	min=2

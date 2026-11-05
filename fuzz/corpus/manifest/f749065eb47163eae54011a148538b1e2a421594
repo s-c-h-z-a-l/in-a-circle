@@ -1,0 +1,2 @@
+inaant 5
+action	textepub	family=text	in=teme/png	out=appbatchion/pdf	ext=pdf	label=PDF	group=dotch=yes	join=yes	min=2

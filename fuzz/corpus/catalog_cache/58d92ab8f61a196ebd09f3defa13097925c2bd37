@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=6	builtin=yes	fails=1	retry=1700000060
+action	x.a	family=f	in=failsplain	out=text/rica0mlabel=A	group=wn	ext=md	label=A	group=g	cost=10y=f	in=texatetry=1700000060
+action	x.a	family=f	in=failsplain	out=text/rica0mlabel=A	group=wn	ext=md	label=A	group=g	cost=10y=f	in=texatcs

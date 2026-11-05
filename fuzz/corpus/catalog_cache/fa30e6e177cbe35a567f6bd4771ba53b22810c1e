@@ -1,0 +1,40 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdow	group=g	cost=1	lossy=no	batch=yoin=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	cost=0	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=app=f	in=text/markdown,text/x-marly=f	in=teataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	builtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=applicatiB	groupcircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/markd	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plaij	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yoin=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	cost=0	losasby	o=ntch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=app=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	cost=0	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=app=f	in=text/markdown,text/x-marly=f	in=teataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	builtin=yes
+action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=applicatiB	groupcircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/markd	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plaij	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yoin=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	lication/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plaij	out=application/pdf	ext=pdf	label=L	group=G	cost=1	lossy=no	batch=yoin=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	coup=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plaij	out=application/pdf	ext=pdf	label=L	group=G	cost=1	lossy=no	batch=yoin=yes	min=1024
+action	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=applicaip	=xt=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=te.b	family=f	in=teataess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plaij	out=application/pdf	ext=pdf	label=L	group=G	cost=1	lossaction	j.b	family=f	in=teataess=image/png	out=application/epub+zip	=xt=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=applicaip	=xt=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=2	lossy=no	batch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es	join=no

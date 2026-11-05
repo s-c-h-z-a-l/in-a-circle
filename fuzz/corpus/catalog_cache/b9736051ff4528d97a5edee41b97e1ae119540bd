@@ -1,0 +1,7 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	application/epub+zipext=epub	label=L	t=2noy=ssno	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdo.wn	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	oudtion/e=yes	min=1025
+action	j+b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	join=no

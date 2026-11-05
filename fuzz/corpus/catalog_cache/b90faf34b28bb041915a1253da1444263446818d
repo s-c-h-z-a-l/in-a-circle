@@ -1,0 +1,8 @@
+inacircle-catalog 1
+bin	path=cton	mtime=1792398	size=59366	builtin=yes
+action	test.
+action	
+action	t.?\t	es
+action	t
+action	tes
+action	(

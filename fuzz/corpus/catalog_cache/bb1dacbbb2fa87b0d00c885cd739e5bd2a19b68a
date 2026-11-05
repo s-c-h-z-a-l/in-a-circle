@@ -1,0 +1,6 @@
+inacircle-catalog 1
+bin	path=/a/1one	mtim/one	mtime=5	size=7	builtin=yes	fails=1	in=yes	fails=1	retry=17	x.a	family=f	in= 1
+bin	path=/a/1one	mtim/one	mtime=5	size=7	builtin=yes	fails=1	in=yes	fails=1	retry=17	x.a	facata 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=2	in=yes~	fails=0	retry=17	x.a	fam1ily=f	in=ter
+\rla
+i\ratch=yes

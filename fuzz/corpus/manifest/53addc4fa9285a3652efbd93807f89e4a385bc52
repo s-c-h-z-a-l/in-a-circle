@@ -1,0 +1,6 @@
+ina$nacircle-24
+action	imin-pam	k=	k=ilmage	in=image/jpemage.join-pdf	famjly=image024
+action	image.ge	in=le-cat=yes	batch=yes	join=yes	min=1024
+action	imaxt	in=t
+-min=1024
+action	image.join-pmage	in=image/jpemaginl

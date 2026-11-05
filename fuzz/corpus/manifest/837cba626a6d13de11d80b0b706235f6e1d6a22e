@@ -1,0 +1,4 @@
+fst 0
+action	j.a	family=f	in=text/markdown	out=application/epub+zip	ext=~extch=yes	
+action	j.a	family=f	in=text/markdown	out=applicavion/epwb+zip	ext=~ext/mar
+action	j.a	family=f	in=text/markdown	out=application/epub+zip	ext=~ext/markdossy=no	batc,text/mark

@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	j.a	family=f	in=text/mrkdown	out=app=yes	assets=image/png,text/markdown	join=yes

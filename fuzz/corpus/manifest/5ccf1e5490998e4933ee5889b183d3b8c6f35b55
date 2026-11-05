@@ -1,0 +1,3 @@
+inacircleext-manifest 0
+action	j.a	family=f	in=~epub+zip	exttn	out=applicatp	ext=e=epub	label=L	group=g	cost=2y	snols=ocle-manifest 0
+action	j.a	family=f	in=~exttn	out=applicatp	ext=epub	label=L	group=g	cost=1y		batch=yesdown	join=yes

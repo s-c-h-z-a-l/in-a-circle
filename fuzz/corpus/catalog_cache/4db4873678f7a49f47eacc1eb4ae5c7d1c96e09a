@@ -1,0 +1,5 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	famil[y=f	in=text/markdown,text/x-markdown	assets=image/png	out=a	batch=yes	join=yes	min=2048
+action	j.b	famidown	0ssets=image/ion	j.a	family=f	in=te=g	cost=1	ltch=yes	join=yes	min=2048
+action	j.png	=no

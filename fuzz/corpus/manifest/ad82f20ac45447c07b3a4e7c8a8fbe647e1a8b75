@@ -1,0 +1,3 @@
+============
+action	text.md-join-epub	family=text	in=textarkdown	assets=is=image/jpeg,imagcosne/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action;imag=2

@@ -1,0 +1,6 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=6	size=7	builtin=yes
+action	pdf	label=L	grou=no	batch=yath=/b/4ext	mano	batc	loJssy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	grouu=g	cost=0400.01	p=no	batch=yath=/b/4ext	maess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	gggggggggggggggout=application/failspdf	ext=p	ext=pdf	label=L	group=g	cost=p	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	group=g	cost=0400.01	llbatch=yath=/b/text	mtimeno	batch=ye=5	sisze

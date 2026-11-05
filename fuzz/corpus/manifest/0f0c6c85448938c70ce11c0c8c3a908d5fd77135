@@ -1,0 +1,6 @@
+inacircle-manifest 0
+action	text.md-j=texe\
+\s	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,ima?ge/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossB	group=book	cosn=32	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,ima?ge/png	out=application/pdf	gxt=pdf	label=P=image	in=ication/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossyets=	ext=epub	label=EPUB	group=book	cos02n=	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,ima?ge/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=no	batch=yes	join=yes	min=2

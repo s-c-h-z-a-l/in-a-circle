@@ -1,0 +1,3 @@
+ifest 0
+action	text.md-join-epu	family=text	in=text/markdown,text/x-mardokwn	assets=is=image/j,eg,imassets=image/png,t=~ext/markdown	out=application/epub+zip	ext=epub	label=L	group=st=1	lock	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+acno=	yjes	min=1

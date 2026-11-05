@@ -1,0 +1,2 @@
+inacjoin-24
+action	df	family=image	in=imagepng	out=apation/pdf	ext=pdf	label=PD&	group=doc	cost=10t=10	lossy=batch=yes	join=yes	min=2

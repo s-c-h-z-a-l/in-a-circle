@@ -1,0 +1,5 @@
+fest 0
+action	j.a	family=f	in=text/markdown	out=applicauion/epub+zip	ext=~ext/markdowngroup=g	cost=0	lossy=no	batch=yes	
+action	j.a	family=f	in=text/ab+zip	ext=~ily=f	in=tut=application/epub+zip	ext=~ext/markdowngr/markdown	out=apoup=g	st=0	lossy=no	batch=yes	
+action	j.a	family=f	in=text/markdown	out=applicaton/epub+zip	ext=~ext/mark=yes	
+action	j.a	family=f	in=tut=application/epub+zip	ext=~ext/markdowngr/markdown	out=apoup=g	st=0	lossy=no	bes

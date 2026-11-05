@@ -1,0 +1,109 @@
+inacircle-manife3t 0
+2
+s!inacircle-manifest 0
+action	text.md-join-epub	ly=text	in=text/markdown,text/x-marksr0e
+i1
+sre
+i
+esct
+iecte
+i
+e 1e
+ 1
+s
+=pdf=is=iinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	famil-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+ac			tion	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+ziin=yes	min=2
+i
+eslf	exte
+1
+sr0e
+i1
+sre
+i
+esct
+iecte
+i
+e 1e
+ 1
+s
+=pdf=is=iinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	joi#
+#
+#
+n=yes	markdownassetsmarkdown,text/x-markdownassets=is=iinacircle-manifest 5
+action	text.md-join-epub	family=text	in=texttexst 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+zip	ext=epuaction	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	iinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=05	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	iny=batch=yes	join=yes	min=2
+i
+eslf	exte
+1
+sr0e
+i1
+sre
+i
+esct
+family=text	in=text/markdown,text/x-markdownassetsmarkdown,texst 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownass-ets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=%application/pdg,image/png	out=application/epub+zip	ext=epuaction	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=application/pdg,image/png	out=application/p	ext=epub	label=EPUB	group=book	cost=text.md-join-epi#
+#
+#
+n=yes	markdownassetsmarkdown,text/x-markdownassets=is=iinacircle-manifest 5
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imin=2
+i
+eslf	exte
+1
+sr0e
+i1
+sre
+i
+esct
+icete
+i
+e 1e
+ 1
+s
+=pdf=is=iinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=05	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	iny=batch=yes	joircle-manifest 5
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	
+i
+2sre
+lossy=batch=yes	join=yes	min=2
+i
+eslf	exte
+1
+sr0e
+i1
+sre
+i
+esct
+icete
+i
+e 1e
+ 1
+s
+=pdf=is=iinacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=05	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	iny=batch=yes	join=yes	min=2
+i
+eslf	exte
+1
+sr0e
+i1
+sre
+i
+esct
+family=text	in=text/markdown,text/x-markdownassetsmarkdown,texst 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+zip	ext=epuaction	text.md-join-epub	family=text	in=text/markdown,text/x-markdownassets=is=image/j,emage/j,eg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.=image/jpeg,image/png	out=application/pdg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	famf	label=PDF	group=doc	cost=02

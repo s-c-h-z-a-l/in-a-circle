@@ -1,0 +1,207 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=Ps	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,tage/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=Ps	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-4bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	p,ages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=age/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aitin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=asy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=texta	fay=f	in=texttaess=image/png	out=app/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epub+zip	ext=epub	label=EPUB	group=book	cl.a	fay=f	in=texttaess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1j.a	famlly=f	in=text/plain	outch=yesbook	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	baext/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-4bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	p,ages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buin=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	labelyes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aitin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=asy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=texta	fay=f	in=texttaess=image/png	out=app/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epub+zip	ext=epub	label=EPUB	group=book	cl.a	fay=f	in=texttaess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1j.a	family=f	in=text/plain	outch=yesbook	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bjoin=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=age/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aitin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=asy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=texta	fay=f	in=texttaess=image/png	out=app/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epub+zip	ext=epub	label=EPUB	group=book	cl.a	fay=f	in=texttaess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1j.a	family=f	in=text/plain	outch=yesbook	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	baext/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-4bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	baext/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-4bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	p,ages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buin=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-ti-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aitin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=asy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=texta	fay=f	in=texttaess=image/png	out=app/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epub+zip	ext=epub	label=EPUB	group=book	cl.a	fay=f	in=texttaess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1j.a	family=f	in=text/plain	outch=yesbook	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossyion	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	buil=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes5yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markd/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-joi-8bit	out=appl	builtin=yes=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=appl	builtin=yes
+action	pages.images-ti-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aitin=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/on	pages.images-to-pdf	family=pages	in=image/jperown	assets=text/x-8bit	out=asy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=texta	fay=f	in=texttaess=image/png	out=app/markdown	aication/epu
+action	pages.images-to-pdf	family=pages	in=image/jpeg,text/x-8bit	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.md-join-epub	family=text	in=text/markdown	aication/epub+zip	ext=epub	label=EPUB	group=book	cl.a	fay=f	in=texttaess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1j.a	family=f	in=text/plain	outch=yes	joinatch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es	jnomin=1
+

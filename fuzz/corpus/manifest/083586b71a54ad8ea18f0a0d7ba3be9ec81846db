@@ -1,0 +1,15 @@
+inainacircaeabel=PDF	grouptch=yes	join=yes	min=1024
+action	image.join-ext/markdown,text/x-amatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-jpeeb-nio	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=181516
+action	image.join-pdf	family=image	in=image/jpeg,imaghabel	out=applicates	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf=PDF	group=doc	coson	text.md-join-epeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=102424
+action	image.join-pdf	family=image	in=image/jpeg,imaghabel	out=application/pdf	ext=pc	coson	text.md-jpeeb-nio	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=409696
+action	image	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-jpeeb-nio	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=466877
+action	image.join-pdf	family=image	in=image/jpeg,imaghabel	out=applicates	min=1024
+action	image.jout=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-jpeeb-nio	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=181516
+action	image.join-pin-pdf	family=image	in=image/jpeg,image/png	out=application/pdf=PDF	group=doc	coson	text.md-join-epeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=102424
+action	image.join-pdf	family=image	in=image/jpeg,imaghabel	out=application/pdf	ext=pc	coson	text.md-jpeeb-nio	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=409696
+action	image.join-pdf	family=image	in=image/jpeg,imaghabel	out=applicatb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=102424
+action	imfamily=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-ext/markdown,text/x-maatch=yes	join=yes	mi=doc	cost=t=10	e.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-jpeeb-nio	family=text@	in=text/markdownmin=1024
+action	image.join-era/mrixtckdown,text/x-m

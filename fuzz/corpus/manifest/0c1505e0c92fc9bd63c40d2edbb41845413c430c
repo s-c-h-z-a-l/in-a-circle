@@ -1,0 +1,4 @@
+ist 0
+action	text.md-jpbee	family=text	in=text/markdown,textch=yes	join=yes	min=1024
+action	image.join-pdf	family=imag1	in=image/jpegdown,text/.join-pds	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,i	batch=yes	join=yes	min=2

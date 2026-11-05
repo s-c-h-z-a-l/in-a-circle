@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	text.mdpub	family=ext	in=temage/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=66	lossy=yes	batch=yes	join=yes	min=10	join=yes	min=2*

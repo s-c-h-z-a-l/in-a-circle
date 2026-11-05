@@ -1,0 +1,3 @@
+ncle-manifest 0
+action	tex-t.md-joib	family=text	in=text/markdown,text/x-maatc~=yes	join=yes	min=1024
+action	i-pdf	family=image	in=image/jpimage/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=no	batch=yes	join=yes	min=2

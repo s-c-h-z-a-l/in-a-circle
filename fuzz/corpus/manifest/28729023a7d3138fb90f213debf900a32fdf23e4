@@ -1,0 +1,3 @@
+inacircle-catalog \##inaciroup=b
+action	im##age.join-pn-epub	family=text	in=text/markdown,own	assets=				batch=yes	join=yes	min=1024
+action	imdf	family=image	in=imagrkdown	assets=					ctnimage/jpeg,image/pn	batch=yes	join=yes	min=2

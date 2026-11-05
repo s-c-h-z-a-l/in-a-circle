@@ -1,0 +1,5 @@
+fest 0
+action	j.a	family=f	in=text/markdown	out=applicauion/epub+zip	ext=~ext/markdowngroup=g	cost=0	lossy=no	bayes	
+action	j.a	family=f	in=texrkdowngr/markdown	out=application/epub+zip	ext=ext/mark=yes	
+action	j.a	family=f	in=tut=application/epub+zip	ext=~ext/markdowngr/markdown	out=apoup=g	cost=0	lossy=no	batch=yes	
+action	j.a	family=f	in=text/markdown	out=application/epub+zip	ext=~eion/eub+zip	ext=~ext/markdowngroup=g	cost=0	own	join=yes

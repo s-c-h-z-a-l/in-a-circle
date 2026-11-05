@@ -1,0 +1,2 @@
+inacir 0
+action	tex+.md--epub	family=text	in=text/markdown	aage/g	out=aub+zip	ext=epub	label=EPUB	group=book	cost=347so	=mihn=1

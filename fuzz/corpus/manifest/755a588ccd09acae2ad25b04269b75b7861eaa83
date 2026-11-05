@@ -1,0 +1,4 @@
+nifet 0
+action	text.md-join-epubf	amily=text	in=text/markdown,textdow	join=yes	min=10124
+action	image.join-pdf	family=image	in=image/jptloes	join=yes	min=10123
+action	text.md-joinbatch=yes	join=yes	min=2

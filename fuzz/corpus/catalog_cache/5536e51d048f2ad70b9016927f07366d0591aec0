@@ -1,0 +1,13 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=6	size=7	builtin=yes
+action	pdf	label=L	grou=no	batcdf	ext=p	ext=pdf	label=L	group=g	cost=p	ext=epub	lab~l=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	group=g	cost=0400.01	p=g	cost=1t=pdf	label=L	group=g	cost=1	lossy=n=p	ext=epub	lab~l=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=aprlication/pdf	ext=p	ext=pdf	label=L	gh=/b/text	mtime=6	size=7	builtin=yes
+action	pdf	label=L	grou=no	batcdf	ext=p	ext=pdf	label=L	group=g	cost=p	ext=epub	lab~l=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	group=g	cost=0400.01	p=g	cost=1t=pdf	label=L	group=g	cost=1	lossy=no	batch=yath=/bplication/epub+zircle-catalog 1
+bin	path=/b/text	mtime=6	size=7	builtin=yes
+action	pdf	label=L	group=g	cost=1t=pdf	label=L	group=g	cost=1	lossy=no	batch=yath=/b/4ext	maess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=minlication/pdf	ext=p	ext=pdf	label=L	groupt=p	ext=pdf	label=L	group=g	cost=0400.01	llbatch=yath=/b/text	mtimeno	batch=ye	cost=1t=pdf	label=L	group=g	cost=1	lossy=no	batch=yath=/b/4ext	maess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=minlication/pdf	ext=p	ext=pdf	label=L	group=g	cost=p	ext=epub	label=L	group=g	cost=1*	lossy=no	batch=yes
+action	j.a	pdf	label=L	group=g	cost=p	ext=epub	label=L	group=g	cost=1*	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	group=g	cost=0400.01	llbatch=yath=/b/text	mtimeno	batch=ye=5	sisze
