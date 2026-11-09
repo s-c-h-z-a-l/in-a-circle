@@ -38,9 +38,10 @@ it's a bug.
      into its waiting points, each p95 <= 1 ms of our CPU for one input:
      wheel-mode entry to the wheel's commit, the early list to level 1,
      the drop's data to the stage-2 wheel's commit, and the choice to the
-     action's start. Per-input work beyond one input scales and is
-     reported, not budgeted. CPU before `main` (a launcher's `sh -c`, exec,
-     loader) is reported, not budgeted.
+     action's start. For `inacircle run` the target ends at the action's
+     start; the CPU after it is reported, not budgeted. Per-input work
+     beyond one input scales and is reported, not budgeted. CPU before
+     `main` (a launcher's `sh -c`, exec, loader) is reported, not budgeted.
    - hover repaint: <= 100 µs wall time per event on the reference
      environment; report p95 and maximum separately
    - while the wheel waits: no autonomous periodic work. Input/protocol
@@ -64,8 +65,10 @@ it's a bug.
      measurement. Build- and test-time tools may use a few pinned crates
      (e.g. offline atlas baking, test-suite loaders); a check keeps them
      out of the shipped binaries' dependency tree.
-   - timing acceptance: >= 50 valid observations per metric and condition;
-     p95 is sorted sample `ceil(0.95 * N)`, one-based (nearest-rank).
+   - timing acceptance: >= 50 valid observations per metric and condition
+     (>= 10 when p95 <= 25% of the budget and the standard deviation <= 10%
+     of the p50; `docs/benchmarks/acceptance.md`); p95 is sorted sample
+     `ceil(0.95 * N)`, one-based (nearest-rank).
      Preserve valid outliers; document every failed/missing attempt.
    - regression against an environment-matched baseline: > 10% p95
      worsening requires investigation; > 15%, reproduced in an independent
@@ -227,8 +230,8 @@ Test behavior, not lines. Coverage is a signal, never a target.
 - A plan that changes a budgeted path (start, hover, memory, wakeups)
   also measures it on a second, untuned machine (stock kernel), and the
   numbers go to the benchmark page. Record the entire environment and
-  distinguish preliminary diagnosis from >= 50-sample p95 acceptance;
-  report absolute overruns even outside the reference timing gate.
+  distinguish preliminary diagnosis from p95 acceptance (sample counts as
+  above); report absolute overruns even outside the reference timing gate.
 - The closing verification runs the suite with
   `INACIRCLE_REQUIRE_LANDLOCK=1`.
 - Tests never touch the user's home. Cargo runs every test binary through
