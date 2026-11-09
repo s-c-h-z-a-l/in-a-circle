@@ -390,6 +390,24 @@ mod tests {
         assert_eq!(w.inner.len(), 8);
     }
 
+    /// A flush reaches the inner writer and its error comes back: a wrapper
+    /// that swallowed it would report a failed final write as written. The
+    /// shipped inner writer is a file, whose flush does nothing, so this pins
+    /// the contract of the wrapper rather than a shipped path.
+    #[test]
+    fn capped_flush_returns_the_inner_error() {
+        struct FailsOnFlush;
+        impl Write for FailsOnFlush {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+        assert!(Capped::new(FailsOnFlush, 10).flush().is_err());
+    }
+
     /// Reader and writer counts of one kind are summed, skipped cues come
     /// first, and the kinds follow the `Loss` order whatever order they came in.
     #[test]

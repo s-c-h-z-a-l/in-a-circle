@@ -613,6 +613,22 @@ fn id_block_without_timing_is_text_outside_any_cue() {
     );
 }
 
+/// A second line that is no timing line keeps the block as text outside any
+/// cue, reported at the block's first line; only a line with `-->` is a broken
+/// timing line of its own.
+#[test]
+fn id_block_of_two_lines_is_reported_at_its_first_line() {
+    let parsed = read("WEBVTT\n\nintro\nmore\n\n00:00:01.000 --> 00:00:02.000\nkept\n");
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((3, "text outside any cue")),
+        }
+    );
+}
+
 #[test]
 fn dropped_arrow_line_is_counted_however_its_block_ends() {
     // A `-->` line that is no timing line drops its block, and the block is one

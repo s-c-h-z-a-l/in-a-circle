@@ -461,6 +461,21 @@ fn batch_of_three_one_bad_goes_on() {
     assert_eq!(lines(&out, "fail")[0][2], "no subtitles found");
 }
 
+/// `progress 0` opens the run, then one line per input: the fraction of the
+/// inputs done, so the last one is 1. A bad input counts as done too.
+#[test]
+fn progress_reaches_one_after_the_last_input() {
+    let root = tmp("progress");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(&root, "a.srt", b"1\n00:00:01,000 --> 00:00:02,000\nYes\n\n");
+    let b = put(&root, "b.srt", b"not subtitles at all\n");
+    let o = run("subtitles.srt-to-vtt", &work, &[&a, &b]);
+    let out = stdout(&o);
+    let p: Vec<&str> = lines(&out, "progress").iter().map(|f| f[1]).collect();
+    assert_eq!(p, ["0", "0.5", "1"], "{out}");
+}
+
 /// The cues are written in start order, whatever order the file gives them
 /// in; cues that start together keep the file's order.
 #[test]
