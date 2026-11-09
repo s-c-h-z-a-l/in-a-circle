@@ -23,7 +23,8 @@
 //!   A line with `-->` ends the text of a cue, as in the standard: a timing
 //!   line there starts the next cue. Any other such line is dropped, and the
 //!   line after it may be the timing line. The dropped line is counted as
-//!   skipped. The writers escape `>`, so their output has no such line.
+//!   skipped. The writers escape `>` and keep dashes off a speaker's name's
+//!   end, so their output has no such line.
 //! - Timing: `[H+:]MM:SS.mmm`, hours of any length, minutes and seconds 00 to
 //!   59, milliseconds exactly three digits. A cue that ends before it starts,
 //!   or is 100 hours or more, is skipped, as in the SRT reader.

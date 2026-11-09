@@ -168,6 +168,27 @@ fn arrow_and_markup_are_escaped_in_vtt() {
     assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
 }
 
+/// The `>` that closes `<v Name>` follows the name, so a name ending in `--`
+/// would put `-->` in the line and end the cue on read back. The trailing dashes
+/// are written as references, so the name reads back whole and the cue stays.
+#[test]
+fn voice_name_ending_in_dashes_does_not_read_as_an_arrow() {
+    let voiced = Line {
+        voice: Some("T00:00.000 --".into()),
+        runs: vec![run("hi")],
+    };
+    let cues = [cue(0, 1_000, vec![voiced])];
+    let (v, losses) = vtt(&cues);
+    let back = read_vtt(v.as_bytes()).expect("our output is usable");
+    assert_eq!(back.skipped.count, 0, "{v:?}");
+    assert_eq!(back.cues.len(), 1);
+    assert_eq!(
+        back.cues[0].lines[0].voice.as_deref(),
+        Some("T00:00.000 --")
+    );
+    assert!(losses.is_empty());
+}
+
 #[test]
 fn voice_is_a_name_prefix_in_srt_and_a_tag_in_vtt() {
     let voiced = |name: &str, text: &str| Line {

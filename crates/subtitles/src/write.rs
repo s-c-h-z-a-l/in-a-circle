@@ -201,7 +201,14 @@ pub fn write_vtt(cues: &[Cue], out: &mut impl Write) -> io::Result<BTreeMap<Loss
         for line in cue.lines.iter().filter(|l| has_text(l)) {
             if let Some(name) = &line.voice {
                 out.write_all(b"<v ")?;
-                write_text(out, name, true)?;
+                // The `>` that closes the tag follows the name, so trailing
+                // dashes would make `-->` and end the cue: they are written
+                // as `&#45;`, which reads back as `-`.
+                let bare = name.trim_end_matches('-');
+                write_text(out, bare, true)?;
+                for _ in bare.len()..name.len() {
+                    out.write_all(b"&#45;")?;
+                }
                 out.write_all(b">")?;
             }
             write_runs(out, line, true)?;

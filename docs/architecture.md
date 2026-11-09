@@ -746,7 +746,9 @@ are in `CLAUDE.md`.
   U+FF1E, also counted as `Brackets`; the writer's own timing lines are not
   touched. WebVTT has no byte
   order mark, LF only, ` line:0` on a top cue, `<v Name>` for a speaker, and
-  `<i> <b> <u>`; in its text `&`, `<` and `>` are escaped. In both, a line
+  `<i> <b> <u>`; in its text `&`, `<` and `>` are escaped, and a speaker name's
+  trailing dashes are written as `&#45;` (the `>` of its tag would make a `-->`).
+  In both, a line
   break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
   white space and a cue with no text are dropped, and a blank line ends a cue.
 - The subtitle `warn` lines, at most eight per input: first the skipped cues
