@@ -1193,6 +1193,12 @@ fn cancel_in_the_same_wake_as_the_exit_is_kept() {
             // cancel token blocks it: it only becomes readable on the
             // token's signalfd.
             unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+            // Lets the action go on (it waits for this signal after its
+            // first event, see the script below), so it can only exit after
+            // the cancel is pending. SAFETY: kill has no memory
+            // preconditions; `pid` is the action, not yet reaped (this
+            // callback runs inside the supervisor's loop).
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
             // Then wait, on the action's own pidfd, until it has exited:
             // the supervisor's next poll finds both ready, whatever the
             // machine's speed. (Bounded: a broken fixture fails the test.)
@@ -1214,10 +1220,21 @@ fn cancel_in_the_same_wake_as_the_exit_is_kept() {
     }
     let t = Tmp::new("cancel-exit");
     let a = t.input("a.txt", "a");
+    // The first event is `started`'s trigger, and the supervisor reads it
+    // only while the action is still running: a script that printed
+    // everything and exited at once could be seen as exited first, and the
+    // event would then be read after the final cancel check, leaving the
+    // SIGTERM pending when the token is dropped (which kills the whole test
+    // binary). So the action waits (30 s at most) for the observer's SIGUSR1
+    // between its first event and its result; the trap is set before the
+    // first event, so the signal cannot arrive too early.
     let bin = t.script(
         "quick",
         "work=$4; in=$(head -n1 \"$6\"); mkdir -p \"$work/0\"; echo x > \"$work/0/a.md\"\n\
-         printf 'progress\\t0.5\\ndone\\t%s\\t0/a.md\\n' \"$in\"",
+         go=; trap 'go=1' USR1\n\
+         printf 'progress\\t0.5\\n'\n\
+         n=0; while [ -z \"$go\" ] && [ $n -lt 3000 ]; do n=$((n+1)); sleep 0.01; done\n\
+         printf 'done\\t%s\\t0/a.md\\n' \"$in\"",
     );
     let act = action(&bin, "md");
     let mut obs = CancelAtStart(common::Ran::default());
