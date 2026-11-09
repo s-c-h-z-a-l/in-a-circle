@@ -975,3 +975,22 @@ fn densest_real_file_still_fits() {
     assert_eq!(parsed.cues.len(), count);
     assert!(3 * count <= subtitles::ITEM_BUDGET);
 }
+
+/// A cue whose text is only white space has no text left: it is dropped
+/// silently. A drawing removed from it is still counted, as for any cue with
+/// no text left.
+#[test]
+fn white_space_only_cue_is_dropped_silently() {
+    // The space sits between two tags: the line's own trim would take a
+    // space at its end before the reader saw it.
+    let events = format!(
+        "{}{}{}",
+        dialogue("Default", r"{\i1} {\i0}"),
+        dialogue("Default", r"{\p1}m 0 0{\p0}{\i1} {\i0}"),
+        dialogue("Default", "x")
+    );
+    let parsed = read(&plain(&events));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(parsed.skipped.count, 0);
+    assert_eq!(parsed.losses, losses(&[(Loss::Drawing, 1)]));
+}

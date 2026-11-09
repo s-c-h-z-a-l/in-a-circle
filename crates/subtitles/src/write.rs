@@ -2,22 +2,12 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::time::write_time;
-use crate::{Cue, Line, Loss};
+use crate::{Cue, Line, Loss, has_text};
 
 /// UTF-8 byte order mark. Older TVs and Windows tools read an SRT as UTF-8
 /// only when it starts with one; WebVTT is written without it, as its
 /// standard says.
 const BOM: &[u8] = b"\xEF\xBB\xBF";
-
-/// A line is written only if it has text: an empty line ends a cue in both
-/// formats, so a blank line inside a cue would split it. Text is anything but
-/// white space (the set `str::trim` removes): the readers trim each line, so a
-/// line of only white space would read back as a blank line.
-fn has_text(line: &Line) -> bool {
-    line.runs
-        .iter()
-        .any(|r| r.text.chars().any(|c| !c.is_whitespace()))
-}
 
 /// Writes text with each line break as a space (a blank line would end the
 /// cue) and, for WebVTT, escapes `&`, `<` and `>`. Escaping `>` also keeps

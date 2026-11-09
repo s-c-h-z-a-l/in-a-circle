@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped};
+use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped, has_text};
 
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
@@ -192,7 +192,7 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
         };
-        if open.lines.is_empty() {
+        if !open.lines.iter().any(has_text) {
             if open.lost.contains(&Loss::Drawing) {
                 *self.losses.entry(Loss::Drawing).or_insert(0) += 1;
             }

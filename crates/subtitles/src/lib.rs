@@ -131,6 +131,16 @@ pub struct Line {
     pub runs: Vec<Run>,
 }
 
+/// Whether a line has text: a character that is not white space, the set
+/// `str::trim` removes. The readers trim lines, so a line of only white space
+/// reads back as a blank line. A cue with no such line has no text: the readers
+/// do not keep it and the writers drop it.
+pub(crate) fn has_text(line: &Line) -> bool {
+    line.runs
+        .iter()
+        .any(|r| r.text.chars().any(|c| !c.is_whitespace()))
+}
+
 /// One subtitle: when it is shown, whether it sits at the top, and its lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cue {

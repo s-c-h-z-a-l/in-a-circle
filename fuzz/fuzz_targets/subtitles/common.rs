@@ -3,8 +3,8 @@
 //! verdict the reader must keep its promises:
 //!
 //! - the same bytes give the same verdict;
-//! - `Ok` has cues, each with `start <= end <= MAX_MS` and some non-empty
-//!   text, the skipped count and its first line agree, and every loss is
+//! - `Ok` has cues, each with `start <= end <= MAX_MS` and some text that is
+//!   not white space, the skipped count and its first line agree, and every loss is
 //!   counted at least once;
 //! - `NotUtf8` names the first bad byte of the input, `TooLarge` comes only
 //!   past `INPUT_BYTES`; `TooComplex` and `NoCues` are valid verdicts.
@@ -94,7 +94,7 @@ fn assert_usable(parsed: &Parsed) {
             cue.lines
                 .iter()
                 .flat_map(|line| &line.runs)
-                .any(|run| !run.text.is_empty()),
+                .any(|run| run.text.chars().any(|c| !c.is_whitespace())),
             "a cue with no text: {cue:?}"
         );
     }

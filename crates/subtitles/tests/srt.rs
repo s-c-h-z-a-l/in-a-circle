@@ -730,3 +730,18 @@ fn srt_coordinates_report_position_loss() {
     assert_eq!(texts(&parsed), vec!["hi\nthere", "plain", "last"]);
     assert_eq!(parsed.losses, losses(&[(Loss::Position, 2)]));
 }
+
+/// A cue whose text is only white space has no text left: it is dropped
+/// silently, as an empty cue is, and a file of only such cues has no cue.
+#[test]
+fn white_space_only_cue_is_dropped_silently() {
+    let parsed =
+        read("1\n00:00:01,000 --> 00:00:02,000\n<i> </i>\n\n2\n00:00:03,000 --> 00:00:04,000\nx\n");
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(parsed.skipped.count, 0);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(
+        read_srt("1\n00:00:01,000 --> 00:00:02,000\n<i> </i>\n".as_bytes()),
+        Err(ReadError::NoCues)
+    );
+}

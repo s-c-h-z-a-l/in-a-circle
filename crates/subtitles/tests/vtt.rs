@@ -518,3 +518,18 @@ fn densest_real_file_still_fits() {
     assert_eq!(parsed.cues.len(), count);
     assert!(3 * count <= subtitles::ITEM_BUDGET);
 }
+
+/// A cue whose text is only white space has no text left: it is dropped
+/// silently, as an empty cue is, and a file of only such cues has no cue.
+#[test]
+fn white_space_only_cue_is_dropped_silently() {
+    let parsed =
+        read("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\t\n\n00:00:03.000 --> 00:00:04.000\nx\n");
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(parsed.skipped.count, 0);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(
+        read_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\u{a0}\n".as_bytes()),
+        Err(ReadError::NoCues)
+    );
+}

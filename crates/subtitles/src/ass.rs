@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use crate::srt::{Fault, STRAY, Style, lines, number, push_text};
-use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped};
+use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped, has_text};
 
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
@@ -304,7 +304,7 @@ impl<'a> Reader<'a> {
         // A cue with no text is not stored: it has nothing to show. A drawing
         // removed from it is still text the conversion dropped, so it is
         // counted. Styling, position and karaoke took no text, so they are not.
-        if scene.lines.is_empty() {
+        if !scene.lines.iter().any(has_text) {
             if scene.lost.contains(&Loss::Drawing) {
                 *self.losses.entry(Loss::Drawing).or_insert(0) += 1;
             }
