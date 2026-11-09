@@ -24,8 +24,8 @@
 //!   `TOP_ROW` and `TOP_PERCENT`). Any other valid placement and every other
 //!   setting is a `Position` loss. Unknown setting names are ignored.
 //! - Cue text: `<i> <b> <u>` as in SRT. `<v Name>` gives the line its
-//!   speaker, and `</v>` ends it, so text after `</v>` on a line is a line of
-//!   its own. `<c.class>` is `Styling`, a timestamp tag is `Karaoke` (its text
+//!   speaker (`<v.class Name>` too: the classes are not part of the name), and
+//!   `</v>` ends it, so text after `</v>` on a line is a line of its own. `<c.class>` is `Styling`, a timestamp tag is `Karaoke` (its text
 //!   stays). Other tags are dropped and their text kept. `&amp;`, `&lt;`,
 //!   `&gt;`, `&lrm;`, `&rlm;` and `&nbsp;` are decoded; a NUL is U+FFFD.
 //!
@@ -563,7 +563,14 @@ fn tag(
         open.voice = if closing {
             None
         } else {
-            let who = unescape(annotation.trim());
+            // The classes (`.a.b`) end at the first white space; the name follows.
+            let who = match annotation.strip_prefix('.') {
+                Some(classes) => classes
+                    .find(|c: char| c.is_ascii_whitespace())
+                    .map_or("", |i| &classes[i..]),
+                None => annotation,
+            };
+            let who = unescape(who.trim());
             (!who.is_empty()).then(|| Rc::from(who))
         };
     } else if name.eq_ignore_ascii_case("c") && !closing && annotation.starts_with('.') {

@@ -252,6 +252,34 @@ fn voice_tag_sets_the_line_voice() {
 }
 
 #[test]
+fn voice_classes_are_not_part_of_the_name() {
+    // The classes (`.a.b`) follow the tag name and end at the first white
+    // space; the speaker is what follows that. A `v` with classes and no name
+    // has no speaker.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v.loud Esme>It</v>\n\n00:00:03.000 --> 00:00:04.000\n<v Esme>It</v>\n\n00:00:05.000 --> 00:00:06.000\n<v.a.b Name With Spaces>It</v>\n\n00:00:07.000 --> 00:00:08.000\n<v.loud>It</v>\n\n00:00:09.000 --> 00:00:10.000\n<c.yellow>styled</c>\n",
+    );
+    let voices: Vec<Option<String>> = parsed
+        .cues
+        .iter()
+        .map(|c| c.lines[0].voice.as_deref().map(String::from))
+        .collect();
+    assert_eq!(
+        voices,
+        vec![
+            Some("Esme".into()),
+            Some("Esme".into()),
+            Some("Name With Spaces".into()),
+            None,
+            None,
+        ]
+    );
+    assert_eq!(texts(&parsed), vec!["It", "It", "It", "It", "styled"]);
+    // Only `<c.class>` is reported as styling; the classes of `<v>` are not.
+    assert_eq!(parsed.losses, losses(&[(Loss::Styling, 1)]));
+}
+
+#[test]
 fn karaoke_timestamp_tags_keep_text_and_report() {
     let parsed = read(
         "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<00:00:01.250>one <00:00:01.500>two\n\n00:00:03.000 --> 00:00:04.000\n<c.yellow>styled</c> <c>plain</c> <lang en>x</lang>\n",
