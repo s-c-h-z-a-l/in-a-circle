@@ -62,6 +62,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "epub"
+version = "0.0.0"
+dependencies = [
+ "doc",
+ "zip",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -149,6 +157,8 @@ version = "0.0.0"
 dependencies = [
  "action",
  "doc",
+ "epub",
+ "libc",
  "manifest",
 ]
 

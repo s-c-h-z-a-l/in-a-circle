@@ -10,4 +10,6 @@ workspace = true
 [dependencies]
 action = { path = "../../crates/action" }
 doc = { path = "../../crates/doc" }
+epub = { path = "../../crates/epub" }
+libc = "0.2"
 manifest = { path = "../../crates/manifest" }

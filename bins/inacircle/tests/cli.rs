@@ -1180,7 +1180,7 @@ fn sandbox_children_get_a_clean_environment() {
          if [ \"$1\" = --manifest ]; then\n\
          l=clean\n\
          for v in SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY LD_PRELOAD \\\n\
-           INACIRCLE_FAKE_TOKEN HOME XDG_RUNTIME_DIR; do\n\
+           INACIRCLE_FAKE_TOKEN INACIRCLE_LANG HOME XDG_RUNTIME_DIR; do\n\
            eval \"[ -z \\\"\\${$v+x}\\\" ]\" || l=leaked-$v\n\
          done\n\
          [ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C.UTF-8 ] && [ \"$LANG\" = C.UTF-8 ] \\\n\
@@ -1213,6 +1213,8 @@ fn sandbox_children_get_a_clean_environment() {
             .env("LD_PRELOAD", "libc.so.6")
             .env("INACIRCLE_FAKE_TOKEN", "token-canary-4711")
             .env("TMPDIR", "/tmp/parent-canary")
+            // The engine's own language reaches the action as INACIRCLE_LANG.
+            .env("LC_ALL", "hu_HU.UTF-8")
             .output()
             .unwrap(),
     );
@@ -1237,14 +1239,25 @@ fn sandbox_children_get_a_clean_environment() {
         "parent-canary",
         "HOME=",
         "XDG_",
-        "INACIRCLE_",
+        "hu_HU",
     ] {
         assert!(!env.contains(canary), "{canary} leaked: {env}");
     }
     let vars: Vec<&str> = env.lines().collect();
-    for want in ["PATH=/usr/bin:/bin", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"] {
+    for want in [
+        "PATH=/usr/bin:/bin",
+        "LC_ALL=C.UTF-8",
+        "LANG=C.UTF-8",
+        "INACIRCLE_LANG=hu",
+    ] {
         assert!(vars.contains(&want), "{want} missing: {env}");
     }
+    // Nothing else of ours is passed.
+    let ours: Vec<&&str> = vars
+        .iter()
+        .filter(|v| v.starts_with("INACIRCLE_"))
+        .collect();
+    assert_eq!(ours, [&"INACIRCLE_LANG=hu"], "{env}");
     let tmpdir = vars
         .iter()
         .find_map(|v| v.strip_prefix("TMPDIR="))
@@ -1785,12 +1798,18 @@ fn offer_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\nhub\t2 / 3 files\n"
+        "slice\tgroup=document\tdir=2\tpreset=html\tlabel=HTML\tapplicable=2\n\
+         slice\tgroup=document\tdir=4\tpreset=plain-text\tlabel=Plain text\tapplicable=2\n\
+         slice\tgroup=book\tdir=2\tpreset=epub\tlabel=EPUB\tapplicable=2\n\
+         hub\t2 / 3 files\n"
     );
     let o = e.run(&["offer", "a.txt"]);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
+         hub\ta.txt\n"
     );
 }
 
@@ -1804,12 +1823,12 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
@@ -1830,7 +1849,10 @@ fn offer_counts_the_same_file_once() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
+         hub\ta.txt\n"
     );
 }
 
@@ -1847,7 +1869,10 @@ fn offer_pdfs_and_one_txt() {
     let o = e.run(&args);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\nhub\t1 / 6 files\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\n\
+         hub\t1 / 6 files\n"
     );
 }
 
@@ -1899,8 +1924,8 @@ fn offer_images_shows_join_count() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\n\
-         slice\tdir=4\tpreset=cbz\tlabel=CBZ\tapplicable=2\tdisabled=no action installed\n\
+        "slice\tgroup=book\tdir=0\tpreset=pdf\tlabel=PDF\tapplicable=2\n\
+         slice\tgroup=book\tdir=4\tpreset=cbz\tlabel=CBZ\tapplicable=2\tdisabled=no action installed\n\
          hub\t2 / 3 files\n",
         "the CBZ slice is on the wheel, dim: only the PDF join is installed"
     );
@@ -2065,7 +2090,10 @@ fn offer_without_actions_disables_slices() {
     let o = e.run(&["offer", "a.txt"]);
     assert_eq!(
         o.stdout,
-        "slice\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\tdisabled=no action installed\nhub\ta.txt\n"
+        "slice\tgroup=document\tdir=0\tpreset=markdown\tlabel=Markdown\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=document\tdir=2\tpreset=html-txt\tlabel=HTML\tapplicable=1\tdisabled=no action installed\n\
+         slice\tgroup=book\tdir=2\tpreset=epub-txt\tlabel=EPUB\tapplicable=1\tdisabled=no action installed\n\
+         hub\ta.txt\n"
     );
     // Running the preset then has no route: the input is unsupported.
     let o = e.run(&["run", "markdown", "a.txt"]);

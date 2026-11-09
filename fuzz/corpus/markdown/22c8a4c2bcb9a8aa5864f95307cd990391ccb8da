@@ -1,0 +1,23 @@
+| a-- | --- |
+ f 		 
+- 
+
+| b&bcdef|   |-- | --- |
+ f 		 
+- 
+
+| b&bcdef|   |
+ --- | --- |
+| | --- |
+f  		 
+- 
+
+| b&bc[ef|   |
+ --- | --- |
+| b&linkr+uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuaa       |
+ f 		 
+- 
+
+| b&bcdef|   |
+ --- | --- |
+| b&linkr+uuuuuuuuuuuuuuuuuuu;

@@ -860,7 +860,7 @@ fn spawn_manifest(bin: &Path) -> Result<std::process::Child, Fail> {
     let fd = ruleset.as_raw_fd();
     let mut cmd = Command::new(bin);
     // No writable place, so no usable TMPDIR.
-    sandbox::configure_child_env(&mut cmd, None);
+    sandbox::configure_child_env(&mut cmd, None, None);
     cmd.arg("--manifest")
         .current_dir("/")
         .stdin(Stdio::null())

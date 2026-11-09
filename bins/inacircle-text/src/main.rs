@@ -3,13 +3,15 @@
 //! structure). Contract v0 (docs/architecture.md).
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::UNIX_EPOCH;
 
 use action::{Command, Events, Invocation, parse_args};
-use doc::{LimitError, Limits, Loss, ReadError};
+use doc::xhtml::{Anchors, Chapter, Mode};
+use doc::{Dialect, Document, LimitError, Limits, Loss, ReadError};
 
 /// The structure budgets of one conversion (`document_*` budgets, see
 /// [`Limits::DEFAULT`] for the values and their reasons). The input is read
@@ -22,6 +24,17 @@ const LIMITS: Limits = Limits::DEFAULT;
 enum ConvertError {
     NotText,
     Limit(LimitError),
+    /// Any other failure, as the `fail` reason.
+    Other(String),
+}
+
+impl From<epub::BookError> for ConvertError {
+    fn from(e: epub::BookError) -> Self {
+        match e {
+            epub::BookError::Limit(l) => ConvertError::Limit(l),
+            other => ConvertError::Other(other.to_string()),
+        }
+    }
 }
 
 impl From<ReadError> for ConvertError {
@@ -88,7 +101,7 @@ fn limit_reason(e: LimitError) -> String {
 }
 
 fn manifest_text() -> String {
-    let action = |id: &str, input: &str, out: &str, ext: &str, label: &str, lossy: &str| {
+    let action = |id: &str, input: &str, out: &str, ext: &str, label: &str, group: &str| {
         manifest::write_line(
             &manifest::Line::new("action")
                 .bare(id)
@@ -97,9 +110,11 @@ fn manifest_text() -> String {
                 .pair("out", out)
                 .pair("ext", ext)
                 .pair("label", label)
-                .pair("group", "document")
+                .pair("group", group)
                 .pair("cost", "10")
-                .pair("lossy", lossy)
+                // Every action here can drop something (structure, markup,
+                // images), so all are lossy.
+                .pair("lossy", "yes")
                 .pair("batch", "yes"),
         )
     };
@@ -110,7 +125,7 @@ fn manifest_text() -> String {
         "text/markdown",
         "md",
         "Markdown",
-        "yes",
+        "document",
     ));
     s.push_str(&action(
         "text.md-to-txt",
@@ -118,8 +133,27 @@ fn manifest_text() -> String {
         "text/plain",
         "txt",
         "Plain text",
-        "yes",
+        "document",
     ));
+    for (id, input) in [
+        ("text.md-to-epub", "text/markdown"),
+        ("text.txt-to-epub", "text/plain"),
+    ] {
+        s.push_str(&action(
+            id,
+            input,
+            "application/epub+zip",
+            "epub",
+            "EPUB",
+            "book",
+        ));
+    }
+    for (id, input) in [
+        ("text.md-to-html", "text/markdown"),
+        ("text.txt-to-html", "text/plain"),
+    ] {
+        s.push_str(&action(id, input, "text/html", "html", "HTML", "document"));
+    }
     s
 }
 
@@ -127,6 +161,10 @@ fn manifest_text() -> String {
 enum Conversion {
     TxtToMd,
     MdToTxt,
+    MdToEpub,
+    TxtToEpub,
+    MdToHtml,
+    TxtToHtml,
 }
 
 impl Conversion {
@@ -134,6 +172,10 @@ impl Conversion {
         match id {
             "text.txt-to-md" => Some(Conversion::TxtToMd),
             "text.md-to-txt" => Some(Conversion::MdToTxt),
+            "text.md-to-epub" => Some(Conversion::MdToEpub),
+            "text.txt-to-epub" => Some(Conversion::TxtToEpub),
+            "text.md-to-html" => Some(Conversion::MdToHtml),
+            "text.txt-to-html" => Some(Conversion::TxtToHtml),
             _ => None,
         }
     }
@@ -142,7 +184,14 @@ impl Conversion {
         match self {
             Conversion::TxtToMd => "md",
             Conversion::MdToTxt => "txt",
+            Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
+            Conversion::MdToHtml | Conversion::TxtToHtml => "html",
         }
+    }
+
+    /// Whether the input is Markdown (else plain text) for a book or a page.
+    fn reads_markdown(self) -> bool {
+        matches!(self, Conversion::MdToEpub | Conversion::MdToHtml)
     }
 
     /// Converted text plus every loss from the reader and the writer.
@@ -157,8 +206,170 @@ impl Conversion {
                 let d = doc::md::read_limited_with(bytes, LIMITS, doc::Dialect::Gfm)?;
                 Ok(doc::txt::write_limited(&d, LIMITS)?)
             }
+            Conversion::MdToEpub
+            | Conversion::TxtToEpub
+            | Conversion::MdToHtml
+            | Conversion::TxtToHtml => unreachable!("books and pages go through `publish`"),
         }
     }
+
+    /// The parsed input of a book or a page, with the reader's losses.
+    fn read(self, bytes: &[u8]) -> Result<(Document, BTreeSet<Loss>), ConvertError> {
+        if self.reads_markdown() {
+            let d = doc::md::read_limited_with(bytes, LIMITS, Dialect::Gfm)?;
+            Ok((d, BTreeSet::new()))
+        } else {
+            Ok(doc::txt::read_limited(bytes, LIMITS)?)
+        }
+    }
+}
+
+/// The language of the book or page: the engine's `INACIRCLE_LANG`, kept
+/// only when it is a well-formed tag, else `und` (undetermined). Fail
+/// closed: the value lands in attributes, and readers choose fonts and
+/// hyphenation by it.
+fn lang() -> String {
+    let v = std::env::var("INACIRCLE_LANG").unwrap_or_default();
+    epub::lang_tag(&v).to_string()
+}
+
+/// The title of a book or page: Markdown's first H1, else (and always for
+/// plain text) the file's stem. Never empty, so `<title>` has text.
+fn title(conv: Conversion, d: &Document, input: &Path) -> String {
+    let h1 = conv.reads_markdown().then(|| doc::book::title(d)).flatten();
+    let t = h1.unwrap_or_else(|| {
+        input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let t: String = t.chars().filter(|&c| doc::xhtml::xml_char(c)).collect();
+    let t = t.trim();
+    if t.is_empty() { "Untitled" } else { t }.to_string()
+}
+
+/// The soft `RLIMIT_FSIZE` of this process, the largest file it may write
+/// (the engine sets it to 16 x the input, 256 MiB to 16 GiB). `None` is
+/// unlimited. A failing `getrlimit` is an error, so the input fails closed
+/// instead of writing without a known ceiling. `getrlimit` on itself is
+/// allowed by the sandbox's seccomp policy.
+fn output_cap() -> Result<Option<u64>, ConvertError> {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `rl` is a valid, writable `rlimit` for the whole call, and
+    // RLIMIT_FSIZE is a valid resource; the call only writes into `rl`.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut rl) };
+    if rc != 0 {
+        return Err(ConvertError::Other(format!(
+            "cannot read the output size limit: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok((rl.rlim_cur != libc::RLIM_INFINITY).then_some(rl.rlim_cur))
+}
+
+/// The copy for an output past the ceiling (N rounded down, so it never
+/// overstates the limit; in KiB below 1 MiB, so it never reads "0 MiB").
+/// If the ceiling cannot be read now, the generic copy.
+fn too_large(what: &str) -> ConvertError {
+    match output_cap() {
+        Ok(Some(c)) if c >= 1 << 20 => {
+            ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20))
+        }
+        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} KiB", c >> 10)),
+        _ => ConvertError::Other(format!("{what} would be too large")),
+    }
+}
+
+/// Writes the EPUB or the HTML page of `d`, which `conv.read` made of
+/// `bytes` (and lost `losses` doing so), to `out`; what was lost in all.
+/// Whatever is left at `out` after an error is the caller's to remove.
+fn publish(
+    conv: Conversion,
+    input: &Path,
+    bytes: &[u8],
+    (d, mut losses): (Document, BTreeSet<Loss>),
+    out: &Path,
+) -> Result<BTreeSet<Loss>, ConvertError> {
+    let title = title(conv, &d, input);
+    let lang = lang();
+    let more = match conv {
+        Conversion::MdToEpub | Conversion::TxtToEpub => {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(out)
+                .map_err(|e| ConvertError::Other(format!("cannot create output: {e}")))?;
+            // Seconds since the epoch; a time before it counts backwards.
+            // No readable mtime: the epoch, so the book stays reproducible.
+            let modified_unix =
+                fs::metadata(input)
+                    .and_then(|m| m.modified())
+                    .map_or(0, |t| match t.duration_since(UNIX_EPOCH) {
+                        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+                        Err(e) => -i64::try_from(e.duration().as_secs()).unwrap_or(i64::MAX),
+                    });
+            let meta = epub::Meta {
+                title,
+                lang,
+                modified_unix,
+                // The 16 bytes of the input's digest, not a copy of it.
+                id_seed: epub::fnv1a_128(&[bytes]).to_be_bytes().to_vec(),
+            };
+            // SIGXFSZ would kill the process (and the batch) at the first
+            // byte past `RLIMIT_FSIZE`; ignored, that write fails with
+            // EFBIG instead and only this input fails. The size of a book
+            // is known only once it is packed, so this is the ceiling's
+            // one check; the file is cut back to empty by `epub::write`.
+            // SAFETY: `signal` with SIG_IGN installs no handler code and
+            // touches no Rust state; SIGXFSZ is a valid signal number.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            }
+            epub::write(&d, &meta, file, LIMITS).map_err(|e| {
+                if e.write_error().and_then(io::Error::raw_os_error) == Some(libc::EFBIG) {
+                    too_large("EPUB")
+                } else {
+                    e.into()
+                }
+            })?
+        }
+        Conversion::MdToHtml | Conversion::TxtToHtml => {
+            let ch = Chapter {
+                blocks: &d.blocks,
+                file: "index.html".to_string(),
+            };
+            let anchors = Anchors::build(std::slice::from_ref(&ch));
+            let (page, more) = doc::xhtml::write_chapter(
+                &ch,
+                &anchors,
+                &Mode::Standalone { lang, title },
+                LIMITS,
+            )?;
+            // The page is whole in memory, so its exact size is checked
+            // before the file exists on disk.
+            if output_cap()?.is_some_and(|c| page.len() as u64 > c) {
+                return Err(too_large("HTML"));
+            }
+            // Created new, like the book: an existing file is never
+            // overwritten.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(out)
+                .map_err(|e| ConvertError::Other(format!("cannot create output: {e}")))?;
+            file.write_all(page.as_bytes())
+                .map_err(|e| ConvertError::Other(format!("cannot write output: {e}")))?;
+            more
+        }
+        Conversion::TxtToMd | Conversion::MdToTxt => {
+            unreachable!("text goes through `convert`")
+        }
+    };
+    losses.extend(more);
+    Ok(losses)
 }
 
 /// Union of the reader's and the writer's losses: a loss both report is one
@@ -196,6 +407,9 @@ fn process(
             return Outcome::Failed;
         }
     };
+    if !matches!(conv, Conversion::TxtToMd | Conversion::MdToTxt) {
+        return document(conv, inv, i, input, &bytes, ev);
+    }
     let (text, losses) = match conv.convert(&bytes) {
         Ok(r) => r,
         Err(ConvertError::NotText) => {
@@ -204,6 +418,10 @@ fn process(
         }
         Err(ConvertError::Limit(e)) => {
             ev.fail(input, &limit_reason(e));
+            return Outcome::Failed;
+        }
+        Err(ConvertError::Other(reason)) => {
+            ev.fail(input, &reason);
             return Outcome::Failed;
         }
     };
@@ -223,6 +441,59 @@ fn process(
         ev.warn(input, loss.message());
     }
     Outcome::Done
+}
+
+/// One input to an EPUB or an HTML page. The output is removed on any
+/// error, so a half book never stays for the engine to publish.
+fn document(
+    conv: Conversion,
+    inv: &Invocation,
+    i: usize,
+    input: &Path,
+    bytes: &[u8],
+    ev: &mut Events<impl Write>,
+) -> Outcome {
+    // Parse (once) before the output exists: an input nobody reads leaves nothing.
+    let read = match conv.read(bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            match e {
+                ConvertError::NotText => {
+                    ev.skip(input, "unsupported");
+                    return Outcome::Unsupported;
+                }
+                ConvertError::Limit(l) => ev.fail(input, &limit_reason(l)),
+                ConvertError::Other(r) => ev.fail(input, &r),
+            }
+            return Outcome::Failed;
+        }
+    };
+    let out = match action::output_path(&inv.work, i, input, conv.ext()) {
+        Ok(p) => p,
+        Err(e) => {
+            ev.fail(input, &format!("cannot create output: {e}"));
+            return Outcome::Failed;
+        }
+    };
+    match publish(conv, input, bytes, read, &out) {
+        Ok(losses) => {
+            ev.done(input, out.strip_prefix(&inv.work).unwrap_or(&out));
+            for loss in losses {
+                ev.warn(input, loss.message());
+            }
+            Outcome::Done
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&out);
+            let reason = match e {
+                ConvertError::Limit(l) => limit_reason(l),
+                ConvertError::Other(r) => r,
+                ConvertError::NotText => "not text".to_string(),
+            };
+            ev.fail(input, &reason);
+            Outcome::Failed
+        }
+    }
 }
 
 fn run(inv: &Invocation, conv: Conversion) -> u8 {

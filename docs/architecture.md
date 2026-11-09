@@ -211,6 +211,60 @@ are in `CLAUDE.md`.
   reported as a flattened link, as before. Padding and the repeated
   headers of the listed form count against the output budget like any
   other byte.
+- The user-facing XHTML and HTML output goes through its own strict
+  writer, `doc::xhtml`; the test writer `doc::html`, which reproduces the
+  CommonMark and GFM reference renderers for the spec tests, is not that
+  path and stays unchanged. The strict writer's output is well-formed XML:
+  characters XML 1.0 forbids are left out (reported), raw HTML is dropped
+  (reported), only the five XML entities are written, headings get
+  GitHub-style ids (Unicode letters and digits kept, an id that is not an
+  XML name gets the prefix `h-`, repeats are numbered `-1`, `-2`), and a
+  `#id` link resolves across the chapters of a document to the file that
+  holds the heading. `http(s):` and `mailto:` links stay; any other link,
+  or one whose target is missing, keeps its text (reported). Every image
+  becomes its alt text (reported), in a chapter and in a standalone page
+  alike, so a page never loads anything from outside. A task list item
+  is written with a `[x] ` or `[ ] ` text marker and table alignment as a
+  `left`, `center` or `right` class, so the output needs no form element and
+  no inline style. Every piece counts against the output budget before it
+  is appended.
+- The book packer, `crates/epub` (doc and zip, no XML parser), writes a
+  document as an EPUB 3 book through the stored ZIP writer: `mimetype`
+  first and stored, `META-INF/container.xml`, `OEBPS/content.opf`,
+  `OEBPS/nav.xhtml` (the EPUB 3 table of contents; no NCX),
+  `OEBPS/style.css` (tables and code only; typeface, size and measure
+  stay the reader's) and one XHTML file per chapter,
+  `OEBPS/ch0001.xhtml` onwards. Chapters split at the top-level H1s when
+  there are at least two, else at the H2s when there are at least two,
+  else the document is one chapter; content before the first split
+  heading is its own chapter; at most 1,024 chapters
+  (`book would have more than 1024 chapters`, nothing written). The table
+  of contents lists the chapters and, one level below, their top-level
+  headings of the next level. The metadata is deterministic: `dc:title`
+  and `dc:language` (a tag that is not well-formed is `und`) from the
+  caller, `dc:identifier` `urn:uuid:` plus a version 8 UUID made from a
+  128-bit FNV-1a hash of the input, and `dcterms:modified` the input's
+  modification time in UTC (`YYYY-MM-DDThh:mm:ssZ`), so the same input
+  gives the same bytes. One chapter's XHTML is in memory at a time; the
+  table of contents and the package document are built first from the
+  headings. On a failure the packer cuts the file back to empty.
+- `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
+  one book per input into the work directory, `<stem>.epub`. The title is
+  the first non-empty H1 of a Markdown input, else the file's stem (always
+  the stem for plain text); the language is the engine's `INACIRCLE_LANG`,
+  `und` when it is missing or not a well-formed tag; the identifier is
+  made from a digest of the input and the modification time is the
+  input's. The output file is created new (never overwritten) and removed
+  when the book fails, so no half book is left; losses of the reader and
+  the writer (raw HTML, images, links) are reported once each.
+- `text.md-to-html` and `text.txt-to-html` (`group=document`, `lossy=yes`)
+  write one self-contained page per input, `<stem>.html`, as a single
+  chapter: `<!DOCTYPE html>`, `lang` (as for the book), `<meta charset>`,
+  `<title>` (the same rule as the book's title), an embedded stylesheet
+  of at most 1.5 KiB with a dark mode through `prefers-color-scheme`, no
+  script and nothing loaded from outside. The losses are those of the
+  book. The page is created new too (never overwritten) and checked
+  against the output size ceiling before it is written.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -224,6 +278,10 @@ are in `CLAUDE.md`.
 inacircle-manifest 0
 action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
+action	text.md-to-epub	family=text	in=text/markdown	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
+action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes
+action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
+action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
@@ -382,8 +440,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   cap again.
 - **Clean environment**: the parent's is cleared; the child gets only
   `PATH=/usr/bin:/bin`, `LC_ALL` and `LANG` `C.UTF-8`, and `TMPDIR` (an
-  action's private `<work>/tmp`, mode 0700). No session socket, bus,
-  display, token or loader variable is passed through.
+  action's private `<work>/tmp`, mode 0700). An action also gets
+  `INACIRCLE_LANG`, the user's language code computed by the engine: the
+  first non-empty of its own `LC_ALL`, `LC_MESSAGES`, `LANG`, cut at the
+  first `_`, `.` or `@`, lowercased, if that is 2 or 3 ASCII letters; else
+  `und` (so `hu_HU.UTF-8` gives `hu`, `LC_ALL=C` gives `und`). A manifest
+  probe does not get it. It adds no path or syscall, so the ruleset and
+  the filter are unchanged. No session socket, bus, display, token or
+  loader variable is passed through.
 - **Mandatory**: nothing runs without the whole sandbox, built-in actions
   and manifests included, and an action the catalog knows from its cache
   meets the same gate when it runs. The gate needs Landlock ABI >= 6 (the
@@ -759,10 +823,16 @@ compositor.
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
   north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
-  no one-to-one form, it only joins images into one comic book): lit if
+  no one-to-one form, it only joins images into one comic book; `html`
+  and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
+  a direction is unique per group and input type, and when the dropped
+  files fit both inputs, a preset that can run beats a dim one, then the one
+  that takes more of the files holds the slot, then the earlier preset in
+  the table, plain text before Markdown, which is also the flat offer's tie
+  order): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
-  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1.
+  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1. The flat `inacircle offer <files…>` prints the presets of the most common input type, each `slice` line with its `group=`, since a direction repeats across groups.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
@@ -1060,15 +1130,16 @@ inacircle cancel <job-id>
 ## Repository layout
 
 ```
-crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
-          probe, pdf (planned: toml)
+crates/   wire, dbus, ui, engine, manifest, action, doc, epub, flate,
+          zip, probe, pdf (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
           `inacircle-pages`, zip also writes archives with stored
-          entries only; the shipped `inacircle` links wire, dbus, ui,
-          engine, manifest and action, never `doc`, `flate`, `zip`,
-          `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
+          entries only; epub: the EPUB packer of `inacircle-text`; the
+          shipped `inacircle` links wire, dbus, ui, engine, manifest and
+          action, never `doc`, `epub`, `flate`, `zip`, `probe` or `pdf`;
+          `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,
           inacircle-testaction (test-only)
 tools/    gen-entities, bake-atlas, testzip (dev tools; bake-atlas alone

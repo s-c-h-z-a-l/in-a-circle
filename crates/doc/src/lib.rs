@@ -1,10 +1,12 @@
 //! Shared document model of the text family: one reader and one writer per
 //! format, all going through this tree.
 
+pub mod book;
 mod budget;
 pub mod html;
 pub mod md;
 pub mod txt;
+pub mod xhtml;
 
 /// The Markdown syntax a reader accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -124,6 +126,7 @@ pub enum Loss {
     Strikethrough,
     TableLayout,
     TableWidth,
+    ControlCharacters,
 }
 
 impl Loss {
@@ -141,6 +144,7 @@ impl Loss {
             Loss::Strikethrough => "strikethrough removed",
             Loss::TableLayout => "table too wide; rows listed one by one",
             Loss::TableWidth => "table columns may be misaligned by wide or combining characters",
+            Loss::ControlCharacters => "characters not allowed in XHTML removed",
         }
     }
 }

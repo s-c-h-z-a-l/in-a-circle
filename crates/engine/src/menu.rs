@@ -40,6 +40,12 @@ pub const GROUPS: &[Group] = &[
     },
 ];
 
+/// The order is the tie-break of both wheel levels: when two presets of
+/// one group share a direction (HTML from Markdown and from plain text)
+/// and the dropped files fit both equally, the earlier preset wins; the
+/// flat offer's most common type picks the first preset's input on a tie
+/// the same way. Plain text therefore precedes Markdown for HTML and EPUB,
+/// as `markdown` (which takes plain text) does at the head of the table.
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "markdown",
@@ -57,6 +63,42 @@ pub const PRESETS: &[Preset] = &[
         label: "Plain text",
         direction: 4,
         group: "document",
+        join: &[],
+    },
+    Preset {
+        id: "html-txt",
+        input: Some("text/plain"),
+        output: "text/html",
+        label: "HTML",
+        direction: 2,
+        group: "document",
+        join: &[],
+    },
+    Preset {
+        id: "html",
+        input: Some("text/markdown"),
+        output: "text/html",
+        label: "HTML",
+        direction: 2,
+        group: "document",
+        join: &[],
+    },
+    Preset {
+        id: "epub-txt",
+        input: Some("text/plain"),
+        output: "application/epub+zip",
+        label: "EPUB",
+        direction: 2,
+        group: "book",
+        join: &[],
+    },
+    Preset {
+        id: "epub",
+        input: Some("text/markdown"),
+        output: "application/epub+zip",
+        label: "EPUB",
+        direction: 2,
+        group: "book",
         join: &[],
     },
     Preset {
@@ -384,12 +426,23 @@ fn offer_group_in(
         } else {
             disabled_reason(cat, p, tally)
         };
-        slices[usize::from(p.direction)] = Some(Slice {
-            preset: p.id,
-            label: p.label.into(),
-            applicable,
-            disabled,
-        });
+        // Presets of different inputs may share a direction (HTML from
+        // Markdown and from plain text). A preset that can run beats a dim
+        // one; then the one that takes more of the dropped files holds the
+        // slot; a tie keeps the earlier preset in [`PRESETS`] order (the
+        // flat offer breaks its ties by the same order).
+        let score = (disabled.is_none(), applicable);
+        let held = slices[usize::from(p.direction)]
+            .as_ref()
+            .map(|h| (h.disabled.is_none(), h.applicable));
+        if held.is_none_or(|h| score > h) {
+            slices[usize::from(p.direction)] = Some(Slice {
+                preset: p.id,
+                label: p.label.into(),
+                applicable,
+                disabled,
+            });
+        }
     }
     // A lit target is one that can run; its `applicable` is `choose`'s count.
     let taken = slices
@@ -407,9 +460,37 @@ fn offer_group_in(
     Offer { slices, hub, total }
 }
 
-/// The wheel for a selection: presets of the most common file type, each in
-/// its fixed direction.
-pub fn offer(cat: &Catalog, files: &[(String, Kind)]) -> Offer {
+/// The flat offer for a selection: the presets of the most common file
+/// type, each in its fixed direction inside its own group. Two groups may
+/// use the same direction for the same source (Document and Book both have
+/// an east slot for Markdown), so the slices are kept per group, never in
+/// one array.
+pub struct FlatOffer {
+    /// Groups that have a preset for the best source, in [`GROUPS`] order.
+    pub groups: Vec<(&'static str, Offer)>,
+    pub hub: String,
+    pub total: usize,
+}
+
+impl FlatOffer {
+    /// The first group's wheel; an empty wheel (with the hub) when no group
+    /// has a preset for the selection.
+    #[cfg(test)]
+    pub fn into_first(self) -> Offer {
+        let (hub, total) = (self.hub, self.total);
+        match self.groups.into_iter().next() {
+            Some((_, o)) => o,
+            None => Offer {
+                slices: Default::default(),
+                hub,
+                total,
+            },
+        }
+    }
+}
+
+/// The flat offer for a selection (see [`FlatOffer`]).
+pub fn offer(cat: &Catalog, files: &[(String, Kind)]) -> FlatOffer {
     let mut tally = Tally::default();
     for (name, kind) in files {
         tally.add(name, kind);
@@ -418,9 +499,8 @@ pub fn offer(cat: &Catalog, files: &[(String, Kind)]) -> Offer {
 }
 
 /// [`offer`] from a [`Tally`].
-pub fn offer_tally(cat: &Catalog, tally: &Tally) -> Offer {
+pub fn offer_tally(cat: &Catalog, tally: &Tally) -> FlatOffer {
     let total = tally.total;
-    let mut slices: [Option<Slice>; 8] = Default::default();
     // Per preset: its files' count, the first one's name and the type that
     // groups presets sharing a source. The count is `choose`'s when the
     // preset can run, else what it would take.
@@ -453,23 +533,44 @@ pub fn offer_tally(cat: &Catalog, tally: &Tally) -> Offer {
             Some(label) => format!("no action for {label}"),
             None => String::new(),
         };
-        return Offer { slices, hub, total };
+        return FlatOffer {
+            groups: Vec::new(),
+            hub,
+            total,
+        };
     };
-    for p in PRESETS.iter().filter(|p| source(p).2 == key) {
-        let disabled = disabled_reason(cat, p, tally);
-        slices[usize::from(p.direction)] = Some(Slice {
-            preset: p.id,
-            label: p.label.into(),
-            applicable,
-            disabled,
-        });
-    }
     let hub = if total == 1 {
         name.to_owned()
     } else {
         format!("{applicable} / {total} files")
     };
-    Offer { slices, hub, total }
+    let mut groups = Vec::new();
+    for g in GROUPS {
+        let mut slices: [Option<Slice>; 8] = Default::default();
+        for p in PRESETS
+            .iter()
+            .filter(|p| p.group == g.id && source(p).2 == key)
+        {
+            let disabled = disabled_reason(cat, p, tally);
+            slices[usize::from(p.direction)] = Some(Slice {
+                preset: p.id,
+                label: p.label.into(),
+                applicable,
+                disabled,
+            });
+        }
+        if slices.iter().any(Option::is_some) {
+            groups.push((
+                g.id,
+                Offer {
+                    slices,
+                    hub: hub.clone(),
+                    total,
+                },
+            ));
+        }
+    }
+    FlatOffer { groups, hub, total }
 }
 
 #[cfg(test)]
@@ -545,12 +646,12 @@ mod tests {
     }
 
     #[test]
-    fn presets_have_unique_directions_per_input() {
+    fn presets_unique_per_group_and_input() {
         for (i, a) in PRESETS.iter().enumerate() {
             assert!(a.direction < 8, "{}", a.id);
             for b in &PRESETS[i + 1..] {
                 assert!(
-                    a.input != b.input || a.direction != b.direction,
+                    a.group != b.group || a.input != b.input || a.direction != b.direction,
                     "{} {}",
                     a.id,
                     b.id
@@ -627,7 +728,7 @@ mod tests {
         a.requires = vec!["no-such-tool-inacircle".into()];
         let cat = Catalog { actions: vec![a] };
         assert_eq!(ids(route(&cat, "text/plain", "text/markdown")), None);
-        let o = offer(&cat, &[file("a.txt", "text/plain")]);
+        let o = offer(&cat, &[file("a.txt", "text/plain")]).into_first();
         let s = o.slices[0].as_ref().unwrap();
         assert_eq!(s.disabled.as_deref(), Some("needs no-such-tool-inacircle"));
     }
@@ -648,19 +749,96 @@ mod tests {
     #[test]
     fn no_action_installed_slice_still_shown() {
         let cat = Catalog { actions: vec![] };
-        let o = offer(&cat, &[file("a.txt", "text/plain")]);
+        let o = offer(&cat, &[file("a.txt", "text/plain")]).into_first();
         let s = o.slices[0].as_ref().unwrap();
         assert_eq!(s.disabled.as_deref(), Some("no action installed"));
     }
 
     #[test]
     fn offer_single_txt() {
-        let o = offer(&two_way(), &[file("notes.txt", "text/plain")]);
+        let o = offer(&two_way(), &[file("notes.txt", "text/plain")]).into_first();
         let s = o.slices[0].as_ref().unwrap();
         assert_eq!((s.preset, s.label.as_str()), ("markdown", "Markdown"));
         assert_eq!((s.applicable, s.disabled.as_deref()), (1, None));
-        assert_eq!(o.slices.iter().flatten().count(), 1);
+        assert_eq!(o.slices.iter().flatten().count(), 2);
         assert_eq!((o.hub.as_str(), o.total), ("notes.txt", 1));
+    }
+
+    /// One markdown file: Document's east slot is HTML and Book's east slot
+    /// is EPUB; neither overwrites the other.
+    #[test]
+    fn offer_keeps_epub_and_html_apart() {
+        let f = offer(&two_way(), &[file("a.md", "text/markdown")]);
+        let slot = |g: &str| {
+            let o = &f.groups.iter().find(|(id, _)| *id == g).unwrap().1;
+            let s = o.slices[2].as_ref().unwrap();
+            (s.preset, s.label.clone())
+        };
+        assert_eq!(slot("document"), ("html", "HTML".to_owned()));
+        assert_eq!(slot("book"), ("epub", "EPUB".to_owned()));
+        // Document keeps its other slice; Book has only EPUB.
+        let doc = &f.groups[0].1;
+        assert_eq!(doc.slices[4].as_ref().unwrap().preset, "plain-text");
+        assert_eq!(f.groups[1].1.slices.iter().flatten().count(), 1);
+    }
+
+    /// The two-level wheel holds one slice per direction: the HTML preset
+    /// whose input the dropped files have.
+    #[test]
+    fn group_wheel_picks_the_html_of_the_dropped_input() {
+        let slot = |name: &str, mime: &str| {
+            let o = offer_group(&two_way(), &tally(&[(name, mime)]), "document");
+            o.slices[2].as_ref().unwrap().preset
+        };
+        assert_eq!(slot("a.md", "text/markdown"), "html");
+        assert_eq!(slot("a.txt", "text/plain"), "html-txt");
+    }
+
+    /// One Markdown and one plain-text file: the flat offer and both
+    /// two-level wheels pick the same variant (the earlier preset wins).
+    #[test]
+    fn tie_of_md_and_txt_is_the_same_at_both_levels() {
+        let files = [file("a.md", "text/markdown"), file("b.txt", "text/plain")];
+        let f = offer(&two_way(), &files);
+        let mut t = Tally::default();
+        for (n, k) in &files {
+            t.add(n, k);
+        }
+        for g in ["document", "book"] {
+            let flat = f.groups.iter().find(|(id, _)| *id == g).unwrap().1.slices[2]
+                .as_ref()
+                .unwrap()
+                .preset;
+            let wheel = offer_group(&two_way(), &t, g).slices[2]
+                .as_ref()
+                .unwrap()
+                .preset;
+            assert_eq!(flat, wheel, "{g}");
+            assert!(flat.ends_with("-txt"), "{g}: {flat}");
+        }
+    }
+
+    #[test]
+    fn txt_offers_txt_variants() {
+        let f = offer(&two_way(), &[file("a.txt", "text/plain")]);
+        let ids: Vec<(&str, usize, &str)> = f
+            .groups
+            .iter()
+            .flat_map(|(g, o)| {
+                o.slices
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(d, s)| s.as_ref().map(|s| (*g, d, s.preset)))
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("document", 0, "markdown"),
+                ("document", 2, "html-txt"),
+                ("book", 2, "epub-txt"),
+            ]
+        );
     }
 
     #[test]
@@ -672,7 +850,7 @@ mod tests {
         for i in 0..2 {
             f.push(file(&format!("{i}.txt"), "text/plain"));
         }
-        let o = offer(&two_way(), &f);
+        let o = offer(&two_way(), &f).into_first();
         let s = o.slices[4].as_ref().unwrap();
         assert_eq!((s.preset, s.applicable), ("plain-text", 3));
         assert!(o.slices[0].is_none());
@@ -682,7 +860,7 @@ mod tests {
     #[test]
     fn offer_tie_uses_preset_order() {
         let f = [file("a.md", "text/markdown"), file("b.txt", "text/plain")];
-        let o = offer(&two_way(), &f);
+        let o = offer(&two_way(), &f).into_first();
         assert!(o.slices[0].is_some() && o.slices[4].is_none());
         assert_eq!(o.hub, "1 / 2 files");
     }
@@ -693,7 +871,7 @@ mod tests {
             ("a.pdf".to_string(), kind(Some("application/pdf"), "PDF")),
             ("b".to_string(), kind(None, "unknown")),
         ];
-        let o = offer(&two_way(), &f);
+        let o = offer(&two_way(), &f).into_first();
         assert!(o.slices.iter().all(Option::is_none));
         assert_eq!((o.hub.as_str(), o.total), ("no action for PDF", 2));
     }
@@ -764,7 +942,10 @@ mod tests {
         let pt = o.slices[4].as_ref().unwrap();
         assert_eq!(pt.applicable, 0);
         assert!(pt.disabled.is_some());
-        assert_eq!(o.slices.iter().flatten().count(), 2);
+        // html (from Markdown) is dim too; html-txt would take the file but
+        // has no action yet, so its slot stays the dim, runnable-less one.
+        assert_eq!(o.slices[2].as_ref().unwrap().preset, "html-txt");
+        assert_eq!(o.slices.iter().flatten().count(), 3);
         let o = offer_group(&two_way(), &t, "nope");
         assert!(o.slices.iter().all(Option::is_none));
         assert_eq!(o.hub, "");
@@ -805,10 +986,10 @@ mod tests {
         for (i, a) in PRESETS.iter().enumerate() {
             assert!(GROUPS.iter().any(|g| g.id == a.group), "{}", a.id);
             assert!(
-                PRESETS[i + 1..]
-                    .iter()
-                    .all(|b| a.group != b.group || a.direction != b.direction),
-                "{} shares a direction in its group",
+                PRESETS[i + 1..].iter().all(|b| a.group != b.group
+                    || a.input != b.input
+                    || a.direction != b.direction),
+                "{} shares a direction in its group and input",
                 a.id
             );
         }
@@ -866,7 +1047,7 @@ mod tests {
             ("pdf", "PDF", 1, None)
         );
         // The CBZ slice is on the wheel too, dim: a comic book is not an image.
-        assert_eq!(o.slices.iter().flatten().count(), 2);
+        assert_eq!(o.slices.iter().flatten().count(), 3);
         assert_eq!(o.slices[4].as_ref().unwrap().applicable, 0);
         // The flat offer for the same file offers it too.
         let o = offer(
@@ -875,7 +1056,8 @@ mod tests {
                 "x.cbz".into(),
                 kind(Some("application/vnd.comicbook+zip"), "Comic book"),
             )],
-        );
+        )
+        .into_first();
         assert_eq!(o.slices[0].as_ref().unwrap().preset, "pdf");
     }
 
@@ -1009,7 +1191,7 @@ mod tests {
             (s.preset, s.applicable, s.disabled.as_deref()),
             ("pdf", 22, None)
         );
-        let o = offer_tally(&cat, &t);
+        let o = offer_tally(&cat, &t).into_first();
         assert_eq!(pdf_slice(&o).applicable, 22);
         assert_eq!(o.hub, "22 / 22 files");
     }
@@ -1018,7 +1200,7 @@ mod tests {
     fn single_image_offers_pdf() {
         let cat = pdf_catalog(true);
         let t = tally(&[("kep.png", "image/png")]);
-        let o = offer_tally(&cat, &t);
+        let o = offer_tally(&cat, &t).into_first();
         let s = pdf_slice(&o);
         assert_eq!(
             (s.preset, s.applicable, s.disabled.as_deref()),
@@ -1059,7 +1241,7 @@ mod tests {
                 (join, n),
                 "{books}+{images}"
             );
-            let o = offer_tally(&cat, &t);
+            let o = offer_tally(&cat, &t).into_first();
             assert_eq!(pdf_slice(&o).applicable, n);
             assert_eq!(o.hub, format!("{n} / 8 files"));
             let o = offer_group(&cat, &t, "book");
@@ -1083,7 +1265,7 @@ mod tests {
         let o = offer_group(&cat, &t, "book");
         assert_eq!(pdf_slice(&o).applicable, 20);
         assert_eq!(o.hub, "20 / 22 files");
-        let o = offer_tally(&cat, &t);
+        let o = offer_tally(&cat, &t).into_first();
         assert_eq!(pdf_slice(&o).applicable, 20);
         assert_eq!(o.hub, "20 / 22 files");
     }
@@ -1112,7 +1294,7 @@ mod tests {
             (s.applicable, s.disabled.as_deref()),
             (2, Some("no action installed"))
         );
-        let o = offer_tally(&cat, &t);
+        let o = offer_tally(&cat, &t).into_first();
         assert_eq!(
             pdf_slice(&o).disabled.as_deref(),
             Some("no action installed")
@@ -1124,7 +1306,7 @@ mod tests {
     fn lone_png_without_join_action_dims_pdf_and_names_the_file() {
         let cat = pdf_catalog(false);
         let t = tally(&[("a.png", "image/png")]);
-        let o = offer_tally(&cat, &t);
+        let o = offer_tally(&cat, &t).into_first();
         assert_eq!(o.hub, "a.png");
         let s = pdf_slice(&o);
         assert_eq!(
@@ -1177,7 +1359,7 @@ mod tests {
 
     #[test]
     fn offer_empty() {
-        let o = offer(&two_way(), &[]);
+        let o = offer(&two_way(), &[]).into_first();
         assert!(o.slices.iter().all(Option::is_none));
         assert_eq!(o.total, 0);
     }

@@ -619,18 +619,73 @@ pub fn validate_privilege(p: &PrivilegeSnapshot) -> io::Result<()> {
 ///   directories are not executable inside the sandbox anyway.
 /// - `LC_ALL` and `LANG` `C.UTF-8`: UTF-8 text handling with no dependency
 ///   on which locales the user has generated (glibc builds C.UTF-8 in).
+/// - `INACIRCLE_LANG` for an action (`lang` given): the user's language
+///   code ([`child_lang`] of the engine's own environment), the one
+///   locale-dependent input an action needs (the language of a book it
+///   writes). A manifest probe passes `None` and gets none: it only prints
+///   its description. It is a value the engine computed, never the
+///   parent's variable passed through, and it costs the child no new
+///   syscall or path, so the ruleset and filter are unchanged.
 /// - `TMPDIR=tmp` when given: a private directory the engine made inside
 ///   the one the ruleset lets the child write (an action's `<work>/tmp`,
 ///   see [`make_child_tmp`]). A manifest has no writable place: its
 ///   `TMPDIR` is [`NO_TMPDIR`], so a tool that reads it finds nothing
 ///   rather than falling back on a guess of ours.
-pub fn configure_child_env(command: &mut std::process::Command, tmp: Option<&Path>) {
+pub fn configure_child_env(
+    command: &mut std::process::Command,
+    tmp: Option<&Path>,
+    lang: Option<&str>,
+) {
     command
         .env_clear()
         .env("PATH", CHILD_PATH)
         .env("LC_ALL", CHILD_LOCALE)
         .env("LANG", CHILD_LOCALE)
         .env("TMPDIR", tmp.unwrap_or(Path::new(NO_TMPDIR)));
+    if let Some(lang) = lang {
+        command.env(LANG_VAR, lang);
+    }
+}
+
+/// The variable that carries the user's language to an action.
+pub const LANG_VAR: &str = "INACIRCLE_LANG";
+
+/// The language code for a book or page an action writes: the first
+/// non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG` (the POSIX order of
+/// precedence; an empty one counts as unset), cut at the first `_`, `.` or
+/// `@`, lowercased, when what is left is 2 or 3 ASCII letters (ISO 639-1
+/// or -2); else `und` (BCP 47: undetermined). The first set variable
+/// decides even when it is unusable (`LC_ALL=C` gives `und` whatever
+/// `LANG` says): that is what the C library does too. A BCP 47 tag with a
+/// `-` (`zh-Hant`) is not a locale name and gives `und`.
+pub fn child_lang(env: impl Fn(&str) -> Option<String>) -> String {
+    const UNDETERMINED: &str = "und";
+    let Some(v) = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|k| env(k).filter(|v| !v.is_empty()))
+    else {
+        return UNDETERMINED.to_owned();
+    };
+    let code = v.split(['_', '.', '@']).next().unwrap_or_default();
+    if (2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic()) {
+        code.to_ascii_lowercase()
+    } else {
+        UNDETERMINED.to_owned()
+    }
+}
+
+/// [`child_lang`] of this process's own environment, read once.
+pub fn user_lang() -> &'static str {
+    static LANG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LANG.get_or_init(|| lang_of_os_env(|k| std::env::var_os(k)))
+}
+
+/// [`child_lang`] over raw environment values. A value that is not UTF-8
+/// still counts as set (the first non-empty variable decides, as in libc);
+/// its invalid bytes become U+FFFD, which is no letter, so the result is
+/// `und` unless a valid 2-3 letter code precedes a `_`/`.`/`@`.
+fn lang_of_os_env(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> String {
+    child_lang(|k| get(k).map(|v| v.to_string_lossy().into_owned()))
 }
 
 /// The manifest's `TMPDIR`: a path that does not exist and is never made.
@@ -3047,14 +3102,14 @@ pub(crate) mod tests {
             ("INACIRCLE_FAKE_TOKEN", "token-canary-4711"),
             ("TMPDIR", "/tmp/parent-canary"),
         ];
-        let env = |clean: Option<Option<&Path>>| {
+        let env = |clean: Option<(Option<&Path>, Option<&str>)>| {
             let mut c = Command::new("/usr/bin/env");
             c.stdin(Stdio::null());
             for (k, v) in canaries {
                 c.env(k, v);
             }
-            if let Some(tmp) = clean {
-                configure_child_env(&mut c, tmp);
+            if let Some((tmp, lang)) = clean {
+                configure_child_env(&mut c, tmp, lang);
             }
             let o = c.output().unwrap();
             assert!(o.status.success(), "{}", stderr(&o));
@@ -3075,10 +3130,82 @@ pub(crate) mod tests {
             "PATH=/usr/bin:/bin".to_owned(),
         ];
         want.push("TMPDIR=/nonexistent".to_owned());
-        assert_eq!(env(Some(None)), want, "a manifest gets no usable TMPDIR");
+        assert_eq!(
+            env(Some((None, None))),
+            want,
+            "a manifest gets no usable TMPDIR and no language"
+        );
         assert!(!Path::new(NO_TMPDIR).exists());
         want[3] = format!("TMPDIR={}", tmp.0.display());
-        assert_eq!(env(Some(Some(&tmp.0))), want);
+        assert_eq!(env(Some((Some(&tmp.0), None))), want);
+    }
+
+    /// An action gets the computed language, never the parent's variable.
+    #[test]
+    fn child_env_has_inacircle_lang() {
+        let tmp = Tmp::new("envlang");
+        let mut c = Command::new("/usr/bin/env");
+        c.stdin(Stdio::null())
+            .env("INACIRCLE_LANG", "parent-canary");
+        configure_child_env(&mut c, Some(&tmp.0), Some("hu"));
+        let o = c.output().unwrap();
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = String::from_utf8(o.stdout).unwrap();
+        let langs: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("INACIRCLE_LANG="))
+            .collect();
+        assert_eq!(langs, ["INACIRCLE_LANG=hu"]);
+    }
+
+    #[test]
+    fn child_lang_from_locale() {
+        let lang = |vars: &[(&str, &str)]| {
+            child_lang(|k| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| (*v).to_owned())
+            })
+        };
+        assert_eq!(lang(&[("LANG", "hu_HU.UTF-8")]), "hu");
+        assert_eq!(lang(&[("LC_ALL", "C")]), "und");
+        assert_eq!(lang(&[("LC_ALL", "C"), ("LANG", "hu_HU.UTF-8")]), "und");
+        assert_eq!(lang(&[("LANG", "")]), "und");
+        assert_eq!(lang(&[]), "und");
+        // An empty variable is unset: the next one decides.
+        assert_eq!(lang(&[("LC_ALL", ""), ("LANG", "de_DE.UTF-8")]), "de");
+        assert_eq!(lang(&[("LC_MESSAGES", "fr_FR"), ("LANG", "hu_HU")]), "fr");
+        assert_eq!(lang(&[("LC_ALL", "pt_BR"), ("LC_MESSAGES", "fr")]), "pt");
+        assert_eq!(lang(&[("LANG", "de_DE@euro")]), "de");
+        assert_eq!(lang(&[("LANG", "HU_hu")]), "hu");
+        assert_eq!(lang(&[("LANG", "fil_PH")]), "fil");
+        assert_eq!(lang(&[("LANG", "zh-Hant")]), "und");
+        assert_eq!(lang(&[("LANG", "POSIX")]), "und");
+        assert_eq!(lang(&[("LANG", "x1_US")]), "und");
+        assert_eq!(lang(&[("LANG", "abcd_XX")]), "und");
+        assert_eq!(lang(&[("LANG", "é_HU")]), "und");
+    }
+
+    #[test]
+    fn non_utf8_locale_counts_as_set() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(b"hu\xff".to_vec());
+        let lang = |vars: Vec<(&'static str, OsString)>| {
+            lang_of_os_env(|k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()))
+        };
+        // The broken LC_ALL decides; LANG does not get a say.
+        assert_eq!(
+            lang(vec![
+                ("LC_ALL", bad.clone()),
+                ("LANG", "hu_HU.UTF-8".into())
+            ]),
+            "und"
+        );
+        // Valid bytes before a separator still give their code.
+        let tail = OsString::from_vec(b"hu_\xff".to_vec());
+        assert_eq!(lang(vec![("LANG", tail)]), "hu");
+        assert_eq!(lang(vec![("LANG", "hu_HU".into())]), "hu");
     }
 
     #[test]

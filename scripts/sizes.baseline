@@ -39,6 +39,26 @@
 # 100 KB explanation threshold and the .text stays under the 1 MiB family
 # limit; inacircle and inacircle-pages are unchanged. +416 B of .text (+416 B
 # file) from the closing fixes (wrap at runs of spaces, control characters warn).
-inacircle 1160024 891880
-inacircle-text 756872 450866
-inacircle-pages 503712 403267
+# Refreshed after the EPUB and HTML work (Markdown and plain text to an
+# EPUB book or one HTML page), same toolchain and profile, built from commit
+# 31ced7b5 (tree clean; the commits after the last source change touch only
+# fuzz corpora): inacircle-text grew 103096 B (file, 87606 B of .text). That
+# is just over the 100 KB explanation threshold; the .text (538472 B) stays
+# far under the 1 MiB family limit. The growth is new code in this binary:
+# the XHTML writer (heading anchors, link and image policy, character
+# filter; about 39 KB of symbols), the EPUB packer (package document,
+# navigation, chapter split, UUID and timestamp; about 20 KB), the ZIP
+# writer (about 3 KB; the stored-entry writer already existed for the CBZ
+# work), the book and HTML action code (about 30 KB, with the language and
+# title rules), and the rest is formatting, hashing and allocation code
+# monomorphised for them. Symbol sizes are from an unstripped build of the
+# same sources (nm), an approximation under LTO inlining. inacircle grew
+# 6368 B (file, 4880 B of .text), from the new action rows, presets and the
+# language environment passed to the child; inacircle-pages grew 496 B. The
+# shipped inacircle still does not link the doc, zip or epub crates.
+inacircle 1166392 896760
+# After the closing fixes: inacircle-text grew 1552 B (file, 1200 B of .text)
+# from the URL validity checks in the XHTML writer (percent escapes, one
+# fragment, authority brackets) and the create-new write of the HTML page.
+inacircle-text 861520 539672
+inacircle-pages 504208 403763

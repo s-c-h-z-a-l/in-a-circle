@@ -4,6 +4,10 @@
 //! 0x0021 (1980-01-01), no extra field, comment, data descriptor or ZIP64.
 //! The same entries in the same order give the same bytes.
 //!
+//! Names are relative paths of `/`-separated segments (folders), each
+//! segment at most 255 bytes, the whole path at most 512; no folder entries
+//! are written, a folder exists through the names under it.
+//!
 //! Entry data is streamed in chunks of 64 KiB and never held whole. The
 //! local header is written first with zero CRC and sizes, and patched in
 //! place once the data is known, so the output must be a file that takes
@@ -43,9 +47,14 @@ pub const MAX_ENTRIES: usize = 65_534;
 /// Every offset, size and the archive itself must fit the 32 bits fields:
 /// past them a reader would need ZIP64.
 const MAX_ARCHIVE: u64 = u32::MAX as u64;
-/// Longest name: a file name component is at most 255 bytes on the
+/// Longest name segment (one folder or file name): at most 255 bytes on the
 /// filesystems an archive is unpacked to.
 const MAX_NAME: usize = 255;
+/// Longest whole path: 512 bytes, twice the segment limit and the name
+/// limit our CBZ reader applies, so a name the writer accepts reads back.
+/// Far below the 65,535 the format's 16-bit name length could hold; a longer
+/// path is `BadName`.
+const MAX_PATH: usize = 512;
 /// DOS date 1980-01-01 (year 0, month 1, day 1): the earliest date, a fixed
 /// value so the output does not depend on the clock.
 const DOS_DATE: u16 = 0x0021;
@@ -70,8 +79,9 @@ pub enum WriteError {
     /// The archive would pass `u32::MAX` bytes; rolled back.
     ArchiveTooLarge,
     TooManyEntries,
-    /// Empty, longer than 255 bytes, not ASCII graphic, or `/` or `\` in
-    /// it, or the name `.` or `..`.
+    /// Empty, a segment (between `/`) empty, longer than 255 bytes, `.` or
+    /// `..`, the whole path longer than 512 bytes, or a byte that is not
+    /// ASCII graphic or is `\`.
     BadName,
     DuplicateName,
     /// An earlier write failed.
@@ -114,14 +124,17 @@ pub struct StoreWriter {
     poisoned: bool,
 }
 
+/// A relative path of `/`-separated segments: no leading or trailing `/`,
+/// no empty segment (so no `//`), no `.` or `..` segment.
 fn name_ok(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_NAME
-        && name != "."
-        && name != ".."
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_graphic() && b != b'/' && b != b'\\')
+    name.len() <= MAX_PATH
+        && name.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg.len() <= MAX_NAME
+                && seg != "."
+                && seg != ".."
+                && seg.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
+        })
 }
 
 impl StoreWriter {
@@ -240,7 +253,7 @@ impl StoreWriter {
         head.extend_from_slice(&0u16.to_le_bytes()); // time
         head.extend_from_slice(&DOS_DATE.to_le_bytes());
         head.extend_from_slice(&[0; 12]); // crc, sizes: patched below
-        head.extend_from_slice(&(name.len() as u16).to_le_bytes()); // <= 255
+        head.extend_from_slice(&(name.len() as u16).to_le_bytes()); // <= MAX_PATH
         head.extend_from_slice(&0u16.to_le_bytes()); // extra length
         head.extend_from_slice(name.as_bytes());
         if let Err(e) = self.file.write_all_at(&head, start) {
@@ -328,7 +341,7 @@ impl StoreWriter {
             .filter(|&t| t <= MAX_ARCHIVE)
             .ok_or(WriteError::ArchiveTooLarge)?;
         let mut at = cd_start;
-        let mut out: Vec<u8> = Vec::with_capacity(CHUNK + CENTRAL_LEN as usize + MAX_NAME);
+        let mut out: Vec<u8> = Vec::with_capacity(CHUNK + CENTRAL_LEN as usize + MAX_PATH);
         for r in &self.entries {
             out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
             out.extend_from_slice(&VERSION.to_le_bytes()); // made by: MS-DOS
