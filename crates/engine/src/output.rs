@@ -148,11 +148,21 @@ fn same_inode(a: RawFd, b: RawFd) -> bool {
 
 /// Entry names of the directory open as `dir` (without `.` and `..`).
 fn list_dir(dir: &Fd) -> Vec<CString> {
+    list_dir_upto(dir, usize::MAX)
+}
+
+/// At most `max` entry names of `dir`, from its start (the shared offset
+/// is rewound, so entries removed since the last call do not hide the
+/// rest).
+fn list_dir_upto(dir: &Fd, max: usize) -> Vec<CString> {
     // SAFETY: dir.0 is an open fd; dup gives fdopendir its own fd to own.
     let dup = unsafe { libc::fcntl(dir.0, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
         return Vec::new();
     }
+    // The dup shares dir's offset: start from the beginning.
+    // SAFETY: dup is an open fd.
+    unsafe { libc::lseek(dup, 0, libc::SEEK_SET) };
     // SAFETY: dup is an open directory fd; on success the DIR owns it.
     let d = unsafe { libc::fdopendir(dup) };
     if d.is_null() {
@@ -161,7 +171,7 @@ fn list_dir(dir: &Fd) -> Vec<CString> {
         return Vec::new();
     }
     let mut names = Vec::new();
-    loop {
+    while names.len() < max {
         // SAFETY: d is a valid DIR until closedir below.
         let ent = unsafe { libc::readdir(d) };
         if ent.is_null() {
@@ -179,24 +189,64 @@ fn list_dir(dir: &Fd) -> Vec<CString> {
     names
 }
 
-/// Removes everything under the open directory `dir`. Symlinks are unlinked,
-/// never followed; every step is relative to an fd, so a concurrent swap of
-/// a path component cannot redirect the deletion. Errors are ignored.
-fn empty_dir(dir: &Fd) {
-    for name in list_dir(dir) {
-        // SAFETY: st is a valid out-pointer; name is NUL-terminated.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        let r = unsafe { libc::fstatat(dir.0, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-        if r != 0 {
+/// Names read per step while removing: memory stays this many names (a few
+/// KiB) whatever the directory holds. Derived from nothing finer than
+/// "small enough to ignore, large enough that a step is one readdir run".
+const REMOVE_BATCH: usize = 64;
+/// Directory levels removed at once, one open fd each. A work dir we made
+/// is two or three deep; 64 keeps the fds far under the usual soft limit
+/// of 1024 and a deeper tree (hostile or buggy action) is left in place
+/// (the next stale-folder pass tries again), never recursed into.
+const REMOVE_DEPTH: usize = 64;
+
+/// Removes everything under the open directory `root`, iteratively and in
+/// bounded memory (`REMOVE_BATCH` names, `REMOVE_DEPTH` fds). Symlinks are
+/// unlinked, never followed; every step is relative to an fd, so a
+/// concurrent swap of a path component cannot redirect the deletion. A
+/// directory whose batch makes no progress (an entry that cannot be
+/// removed, or a tree past `REMOVE_DEPTH`) is left as it is. Errors are
+/// ignored.
+fn empty_dir(root: &Fd) {
+    // The open subdirectories being emptied, with their names in the parent.
+    let mut stack: Vec<(Fd, CString)> = Vec::new();
+    loop {
+        let dir = stack.last().map_or(root, |(fd, _)| fd);
+        let mut progress = false;
+        let mut descended = false;
+        for name in list_dir_upto(dir, REMOVE_BATCH) {
+            // SAFETY: st is a valid out-pointer; name is NUL-terminated.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let r =
+                unsafe { libc::fstatat(dir.0, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+            if r != 0 {
+                continue;
+            }
+            let is_dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+            if is_dir
+                && stack.len() < REMOVE_DEPTH
+                && let Ok(child) = open_dir_for_removal(Some(dir.0), &name)
+            {
+                stack.push((child, name));
+                descended = true;
+                break;
+            }
+            let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
+            // SAFETY: dir.0 is an open dir fd, name is NUL-terminated.
+            progress |= unsafe { libc::unlinkat(dir.0, name.as_ptr(), flags) } == 0;
+        }
+        if descended || progress {
             continue;
         }
-        let is_dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
-        if is_dir && let Ok(child) = open_dir_for_removal(Some(dir.0), &name) {
-            empty_dir(&child);
+        // Empty, or stuck: either way this level is done.
+        let Some((_, name)) = stack.pop() else { return };
+        let parent = stack.last().map_or(root, |(fd, _)| fd);
+        // SAFETY: parent.0 is an open dir fd, name is NUL-terminated.
+        let gone = unsafe { libc::unlinkat(parent.0, name.as_ptr(), libc::AT_REMOVEDIR) };
+        // A level that is stuck stays, so its parent can never empty either:
+        // stop (descending again would loop). The rest is left as it is.
+        if gone != 0 {
+            return;
         }
-        let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
-        // SAFETY: dir.0 is an open dir fd, name is NUL-terminated.
-        unsafe { libc::unlinkat(dir.0, name.as_ptr(), flags) };
     }
 }
 
@@ -267,10 +317,22 @@ pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
             }
             return Err(e);
         }
-        let id = ident(&stat_at(At {
-            dir: parent.0,
-            name: &name,
-        })?);
+        let st = at(Point::WorkStat).and_then(|()| {
+            stat_at(At {
+                dir: parent.0,
+                name: &name,
+            })
+        });
+        let id = match st {
+            Ok(st) => ident(&st),
+            Err(e) => {
+                // No guard exists yet: take back the folder just made (empty
+                // and ours, so rmdir removes nothing else).
+                // SAFETY: name is NUL-terminated; parent is an open dir fd.
+                unsafe { libc::unlinkat(parent.0, name.as_ptr(), libc::AT_REMOVEDIR) };
+                return Err(e);
+            }
+        };
         // Independent of the umask. The WorkDir guard removes the
         // directory again if this fails.
         let dir = WorkDir {
@@ -914,6 +976,8 @@ pub(crate) enum Point {
     SyncStagingAfter,
     /// The target folder's sync after the commit.
     SyncParentAfter,
+    /// The stat of a work folder right after it was made.
+    WorkStat,
 }
 
 /// A test's fault at `p` (an errno), or its race action; nothing outside
@@ -1634,6 +1698,95 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             remove_tree(&self.0);
         }
+    }
+
+    /// hardening-2 #17: a failure between the folder's creation and its
+    /// guard leaves no folder behind.
+    #[test]
+    fn a_work_dir_whose_stat_fails_is_not_left_behind() {
+        let t = Tmp::new("workstat");
+        FAULT.set(Some(Box::new(|p| {
+            (p == Point::WorkStat).then_some(libc::EIO)
+        })));
+        let r = make_work_dir(&t.0);
+        FAULT.set(None);
+        assert_eq!(r.err().and_then(|e| e.raw_os_error()), Some(libc::EIO));
+        assert_eq!(fs::read_dir(&t.0).unwrap().count(), 0);
+    }
+
+    /// hardening-2 #10: removal reads a bounded batch of names at a time,
+    /// whatever the directory holds, and still removes all of it.
+    #[test]
+    fn removal_is_batched_and_complete() {
+        let t = Tmp::new("batch");
+        let big = t.0.join("big");
+        fs::create_dir_all(big.join("sub/deeper")).unwrap();
+        for i in 0..(3 * REMOVE_BATCH + 5) {
+            file(&big, &format!("f{i}"), "x");
+            file(&big.join("sub/deeper"), &format!("g{i}"), "x");
+        }
+        std::os::unix::fs::symlink("/", big.join("link-to-root")).unwrap();
+        let fd = open_dir_for_removal(None, &cstr(&big).unwrap()).unwrap();
+        assert_eq!(list_dir_upto(&fd, REMOVE_BATCH).len(), REMOVE_BATCH);
+        assert_eq!(list_dir(&fd).len(), 3 * REMOVE_BATCH + 5 + 2);
+        drop(fd);
+        remove_tree(&big);
+        assert!(!big.exists(), "all of it is removed");
+        assert!(Path::new("/").exists(), "the symlink was not followed");
+    }
+
+    /// Peak resident growth (VmHWM, KiB) of `f`. The high-water mark only
+    /// rises, so the test that uses it runs alone (`--ignored`, one thread).
+    fn hwm_growth_kib(f: impl FnOnce()) -> u64 {
+        let hwm = || {
+            let s = fs::read_to_string("/proc/self/status").unwrap();
+            let l = s.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
+            l.split_whitespace().nth(1).unwrap().parse::<u64>().unwrap()
+        };
+        let before = hwm();
+        f();
+        hwm() - before
+    }
+
+    /// hardening-2 #10 acceptance: removing 200k entries grows the peak by
+    /// under 2 MiB (measured 1.4 MiB, the old way 12 MiB); reading them all into a Vec (the old way) is measured
+    /// after it for comparison. Run: `cargo test -p engine --lib
+    /// removal_memory -- --ignored --nocapture --test-threads=1`.
+    #[test]
+    #[ignore = "measures the process high-water mark: run alone"]
+    fn removal_memory_is_bounded() {
+        let t = Tmp::new("mem");
+        let big = t.0.join("big");
+        fs::create_dir_all(&big).unwrap();
+        for i in 0..200_000 {
+            fs::write(big.join(format!("entry-with-a-longish-name-{i:08}")), "").unwrap();
+        }
+        let new = hwm_growth_kib(|| remove_tree(&big));
+        // Rebuild, then collect every name as the old code did.
+        fs::create_dir_all(&big).unwrap();
+        for i in 0..200_000 {
+            fs::write(big.join(format!("entry-with-a-longish-name-{i:08}")), "").unwrap();
+        }
+        let fd = open_dir_for_removal(None, &cstr(&big).unwrap()).unwrap();
+        let old = hwm_growth_kib(|| assert_eq!(list_dir(&fd).len(), 200_000));
+        eprintln!("peak growth: batched {new} KiB, collect-all {old} KiB");
+        assert!(new < 2048, "{new} KiB");
+        assert!(old > 4 * new.max(1), "the comparison is meaningful");
+    }
+
+    /// A tree deeper than REMOVE_DEPTH is not recursed into: it is left
+    /// as it is and nothing loops or panics (the stack stays flat).
+    #[test]
+    fn a_tree_past_the_depth_cap_is_left_in_place() {
+        let t = Tmp::new("deep");
+        let mut deep = t.0.join("d");
+        for _ in 0..REMOVE_DEPTH + 6 {
+            deep.push("x");
+        }
+        fs::create_dir_all(&deep).unwrap();
+        remove_tree(&t.0.join("d"));
+        assert!(t.0.join("d").exists(), "left in place, not half-removed");
+        fs::remove_dir_all(t.0.join("d")).unwrap();
     }
 
     fn file(dir: &Path, name: &str, body: &str) -> PathBuf {

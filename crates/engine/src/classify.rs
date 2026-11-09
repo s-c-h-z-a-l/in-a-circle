@@ -16,7 +16,18 @@ pub enum Classified {
     /// A regular file (after following links) and what it is.
     File(Kind),
     /// Directory, device, FIFO, socket or broken link: never opened.
-    NotRegular,
+    NotRegular(Shape),
+}
+
+/// What a path that is not a regular file is, as the one stat in
+/// [`classify_with`] saw it: callers need no second look at the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Folder,
+    /// A dangling link or a link loop.
+    BrokenLink,
+    /// Device, FIFO, socket.
+    Special,
 }
 
 /// How much of the file decides the type.
@@ -111,21 +122,29 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
 /// UTF-8; one `Reread` serves every file of a drop.
 pub fn classify_with(path: &Path, reread: &mut Reread) -> io::Result<Classified> {
     match open_regular(path)? {
-        Some(file) => classify_open(file, path, reread),
-        None => Ok(Classified::NotRegular),
+        Ok(file) => classify_open(file, path, reread),
+        Err(shape) => Ok(Classified::NotRegular(shape)),
     }
 }
 
-/// The path opened for reading if it is a regular file (links followed).
-fn open_regular(path: &Path) -> io::Result<Option<File>> {
+/// The path opened for reading if it is a regular file (links followed);
+/// else what it is.
+fn open_regular(path: &Path) -> io::Result<Result<File, Shape>> {
+    let shape = |m: &std::fs::Metadata| {
+        if m.is_dir() {
+            Shape::Folder
+        } else {
+            Shape::Special
+        }
+    };
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => {}
-        Ok(_) => return Ok(None),
+        Ok(m) => return Ok(Err(shape(&m))),
         // A broken link or a symlink loop is not a regular file.
         Err(e) if e.kind() == io::ErrorKind::NotFound && path.is_symlink() => {
-            return Ok(None);
+            return Ok(Err(Shape::BrokenLink));
         }
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(Err(Shape::BrokenLink)),
         Err(e) => return Err(e),
     }
     // The path may have been swapped for a FIFO since the stat: never block
@@ -134,10 +153,11 @@ fn open_regular(path: &Path) -> io::Result<Option<File>> {
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Ok(None);
+    let m = file.metadata()?;
+    if !m.is_file() {
+        return Ok(Err(shape(&m)));
     }
-    Ok(Some(file))
+    Ok(Ok(file))
 }
 
 /// Classify an opened regular file; `path` gives only the extension. Every
@@ -387,7 +407,7 @@ mod tests {
     fn kind(p: &Path) -> (Option<String>, String) {
         match classify(p).unwrap() {
             Classified::File(k) => (k.mime, k.label),
-            Classified::NotRegular => panic!("not regular: {}", p.display()),
+            Classified::NotRegular(_) => panic!("not regular: {}", p.display()),
         }
     }
     fn is(mime: Option<&str>, label: &str) -> (Option<String>, String) {
@@ -399,7 +419,7 @@ mod tests {
     fn kind_with(p: &Path, r: &mut Reread) -> (Option<String>, String) {
         match classify_with(p, r).unwrap() {
             Classified::File(k) => (k.mime, k.label),
-            Classified::NotRegular => panic!("not regular: {}", p.display()),
+            Classified::NotRegular(_) => panic!("not regular: {}", p.display()),
         }
     }
 
@@ -741,7 +761,10 @@ mod tests {
                 label: "8-bit text".into()
             })
         );
-        assert_eq!(classify(&p).unwrap(), Classified::NotRegular);
+        assert_eq!(
+            classify(&p).unwrap(),
+            Classified::NotRegular(Shape::Special)
+        );
         // Opened, then the name becomes a link to an all-ASCII file.
         let p = d.file("b.srt", &b);
         let f = open_regular(&p).unwrap().unwrap();
@@ -912,7 +935,10 @@ mod tests {
         let d = Dir::new("nr");
         let sub = d.0.join("sub");
         std::fs::create_dir(&sub).unwrap();
-        assert!(matches!(classify(&sub).unwrap(), Classified::NotRegular));
+        assert_eq!(
+            classify(&sub).unwrap(),
+            Classified::NotRegular(Shape::Folder)
+        );
 
         let fifo = d.0.join("fifo");
         let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
@@ -920,11 +946,17 @@ mod tests {
         let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
         assert_eq!(rc, 0);
         // Must return without blocking (no open/read on a FIFO).
-        assert!(matches!(classify(&fifo).unwrap(), Classified::NotRegular));
+        assert_eq!(
+            classify(&fifo).unwrap(),
+            Classified::NotRegular(Shape::Special)
+        );
 
         let link = d.0.join("broken");
         std::os::unix::fs::symlink(d.0.join("missing"), &link).unwrap();
-        assert!(matches!(classify(&link).unwrap(), Classified::NotRegular));
+        assert_eq!(
+            classify(&link).unwrap(),
+            Classified::NotRegular(Shape::BrokenLink)
+        );
     }
 
     #[test]
@@ -1026,7 +1058,7 @@ mod tests {
         let (a, b) = (d.0.join("a"), d.0.join("b"));
         std::os::unix::fs::symlink(&b, &a).unwrap();
         std::os::unix::fs::symlink(&a, &b).unwrap();
-        assert!(matches!(classify(&a).unwrap(), Classified::NotRegular));
+        assert!(matches!(classify(&a).unwrap(), Classified::NotRegular(_)));
     }
 
     #[test]

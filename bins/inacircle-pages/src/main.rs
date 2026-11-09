@@ -34,7 +34,7 @@ use probe::{Image, ProbeError, Unsupported};
 /// measures with room for folders. Cost: the entry list is about 200 B per
 /// record (struct, name, sort index), 2.4 MB at the limit. Past it:
 /// `CBZ has more than 12000 entries`.
-const ENTRIES: usize = 12_000;
+const ENTRIES: usize = zip::Limits::ARCHIVE.entries;
 
 /// Largest declared size of one page file (not its decoded pixels, the
 /// data is passed through): 64 MiB. The page is the one thing held whole
@@ -52,7 +52,7 @@ const ENTRY_BYTES: u64 = 64 << 20;
 /// `ENTRY_BYTES`, is checked per page here so the message names the page
 /// (the reader's error does not), before anything is read. Entries that
 /// are not pages are never read, so their size is not our concern.
-const ZIP_ENTRY_BYTES: u64 = u32::MAX as u64;
+const ZIP_ENTRY_BYTES: u64 = zip::Limits::ARCHIVE.entry_bytes;
 
 /// Largest `size / compressed_size` of an entry: 1032, the most a deflate
 /// stream can reach (a 258-byte match costs at least two bits). Every valid
@@ -62,13 +62,13 @@ const ZIP_ENTRY_BYTES: u64 = u32::MAX as u64;
 /// is not this ratio but `ENTRY_BYTES`: nothing past 64 MiB is produced
 /// per page. Past it: `damaged CBZ: an entry's compression ratio is too
 /// high`.
-const RATIO: u64 = 1032;
+const RATIO: u64 = zip::Limits::ARCHIVE.ratio;
 
 /// Longest entry name: 512 bytes, twice the 255-byte file name limit of
 /// common file systems, which fits `Series/Volume/Chapter/page` paths with
 /// room. Names are held for every entry: 12,000 x 512 B = 6 MB at the
 /// worst. Past it: `damaged CBZ: an entry name is too long`.
-const NAME_BYTES: usize = 512;
+const NAME_BYTES: usize = zip::Limits::ARCHIVE.name_bytes;
 
 /// Most pages: 10,000 (below `ENTRIES`, so the page copy is reachable). An
 /// omnibus of a long-running series is a few thousand pages. Cost per page:

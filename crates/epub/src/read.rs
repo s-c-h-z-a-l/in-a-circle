@@ -45,39 +45,11 @@ use std::io;
 use doc::xhtml::{normalize, percent_decode};
 use xml::{Event, Options, Reader};
 
-/// Most ZIP directory records: 12,000, the CBZ reader's value, so the two
-/// archive readers accept the same archives. A long book is a few thousand
-/// entries (chapters, images, fonts); about 200 B per record, 2.4 MB at the
-/// limit. Past it: `damaged EPUB: too many entries`.
-const ZIP_ENTRIES: usize = 12_000;
-
-/// The ZIP reader's per-entry size limit: the largest size a non-ZIP64
-/// header can declare (u32::MAX), as for the CBZ reader. The real limits
-/// (`Limits::chapter_bytes`, `Limits::package_bytes`) are checked here per
-/// entry before it is read, so a large font or image the reader never
-/// opens does not fail the book.
-const ZIP_ENTRY_BYTES: u64 = u32::MAX as u64;
-
-/// Largest `size / compressed_size` of an entry: 1032, the most a deflate
-/// stream can reach (a 258-byte match costs at least two bits); the CBZ
-/// reader's value. A header claiming more is lying or damaged, and the
-/// ZIP reader refuses the archive before inflating anything. Past it:
-/// `damaged EPUB: an entry's compression ratio is too high`.
-const ZIP_RATIO: u64 = 1032;
-
-/// Longest entry name: 512 bytes, the CBZ reader's value (twice the
-/// 255-byte file name limit, room for `OEBPS/Text/<name>` paths); at most
-/// 6 MB for 12,000 names. Past it: `damaged EPUB: an entry name is too
-/// long`.
-const ZIP_NAME_BYTES: usize = 512;
-
-/// The ZIP reader's limits for a book: the CBZ reader's values.
-const ZIP_LIMITS: zip::Limits = zip::Limits {
-    entries: ZIP_ENTRIES,
-    entry_bytes: ZIP_ENTRY_BYTES,
-    ratio: ZIP_RATIO,
-    name_bytes: ZIP_NAME_BYTES,
-};
+/// The ZIP reader's limits for a book: the CBZ reader's values
+/// ([`zip::Limits::ARCHIVE`]). The real limits (`Limits::chapter_bytes`,
+/// `Limits::package_bytes`) are checked here per entry before it is read,
+/// so a large font or image the reader never opens does not fail the book.
+const ZIP_LIMITS: zip::Limits = zip::Limits::ARCHIVE;
 
 /// Most spine items: 10,000, the CBZ reader's page limit (below the
 /// 12,000 entries, so the message is reachable). The longest real books
@@ -88,11 +60,11 @@ const ZIP_LIMITS: zip::Limits = zip::Limits {
 pub const MAX_SPINE: usize = 10_000;
 
 /// Longest path an [`Item`] keeps: 512 bytes, the ZIP reader's name limit
-/// (`ZIP_NAME_BYTES`). A resolved path longer than that can name no entry,
+/// (`ZIP_LIMITS.name_bytes`). A resolved path longer than that can name no entry,
 /// so the item is `missing`, and only its first 512 bytes are kept (an
 /// href outside the book likewise), so a spine of 10,000 items naming one
 /// href of megabytes holds 512 bytes, not 10,000 copies.
-pub const MAX_PATH: usize = ZIP_NAME_BYTES;
+pub const MAX_PATH: usize = ZIP_LIMITS.name_bytes;
 
 /// Longest media type (its `type/subtype`, parameters cut): 255 bytes,
 /// RFC 6838 section 4.2 (type and subtype names at most 127 characters
@@ -887,7 +859,7 @@ fn resolve(base: &str, href: &str) -> Option<String> {
 
 /// `href` starts with a URL scheme (RFC 3986: a letter, then letters,
 /// digits, `+`, `-` or `.`, then `:`).
-fn has_scheme(href: &str) -> bool {
+pub fn has_scheme(href: &str) -> bool {
     let Some((scheme, _)) = href.split_once(':') else {
         return false;
     };

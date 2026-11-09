@@ -64,7 +64,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
-use engine::classify::{Classified, Kind, Reread, classify_with};
+use engine::classify::{Classified, Kind, Reread, Shape, classify_with};
 use engine::exec::{
     self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
 };
@@ -216,27 +216,33 @@ fn files_of(args: Vec<OsString>) -> Option<Vec<PathBuf>> {
     Some(dedup(files))
 }
 
-/// Each file (by canonical path) once, first spelling kept. Only a hash
-/// of each kept file's canonical path is held, not the path: a hash match
-/// is confirmed by canonicalizing the kept file again.
+/// Each file once, first spelling kept. A file is the (device, inode) of
+/// what its path names (links followed, one `stat`): no `canonicalize`, so
+/// no walk of the path's components, which can block on a hung mount. A
+/// hard link of a kept file is the same file. A path that cannot be
+/// statted is matched by its path as given.
 fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let state = std::hash::RandomState::new();
-    let mut seen = HashSet::with_capacity(paths.len());
-    let mut hashes: Vec<u64> = Vec::with_capacity(paths.len());
+    let mut seen: HashSet<(u64, u64)> = HashSet::with_capacity(paths.len());
     let mut kept: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    // The unstatted ones, by index into `kept`: compared by path, which
+    // costs nothing against the cap on the list (1024) and the rarity.
+    let mut unstatted: Vec<usize> = Vec::new();
     for p in paths {
-        let c = canon(&p);
-        let h = std::hash::BuildHasher::hash_one(&state, &c);
-        let dup = !seen.insert(h)
-            && kept
-                .iter()
-                .zip(&hashes)
-                .any(|(k, &kh)| kh == h && canon(k) == c);
-        if !dup {
-            hashes.push(h);
-            kept.push(p);
+        match std::fs::metadata(&p) {
+            Ok(m) => {
+                use std::os::unix::fs::MetadataExt;
+                if !seen.insert((m.dev(), m.ino())) {
+                    continue;
+                }
+            }
+            Err(_) => {
+                if unstatted.iter().any(|&i| kept[i] == p) {
+                    continue;
+                }
+                unstatted.push(kept.len());
+            }
         }
+        kept.push(p);
     }
     kept
 }
@@ -496,7 +502,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     };
     for (f, c) in classified {
         match c {
-            Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
+            Ok(Classified::NotRegular(_)) => pre.push(Outcome::Skipped {
                 input: f,
                 reason: "not a regular file".into(),
             }),
@@ -771,9 +777,9 @@ fn named_kind(p: &Path, reread: &mut Reread) -> (String, Kind) {
     };
     let kind = match classify_with(p, reread) {
         Ok(Classified::File(k)) => k,
-        Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
-        Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => unknown("broken link"),
-        Ok(Classified::NotRegular) => unknown("special file"),
+        Ok(Classified::NotRegular(Shape::Folder)) => unknown("folder"),
+        Ok(Classified::NotRegular(Shape::BrokenLink)) => unknown("broken link"),
+        Ok(Classified::NotRegular(Shape::Special)) => unknown("special file"),
         Err(_) => unknown("unreadable file"),
     };
     (name, kind)
@@ -1342,6 +1348,50 @@ mod tests {
             missing.clone(),
         ]);
         assert_eq!(kept, [dir.join("./a.txt"), b, missing]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// hardening-2 #7: a file is its (device, inode); a link through a
+    /// linked folder and a hard link are the kept file again.
+    #[test]
+    fn dedup_is_by_inode_not_by_spelling() {
+        let (dir, a) = text_file("dedup-ino", "a.txt");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/f.txt"), "f\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("dirlink")).unwrap();
+        std::fs::hard_link(&a, dir.join("hard.txt")).unwrap();
+        let kept = dedup(vec![
+            dir.join("real/f.txt"),
+            dir.join("dirlink/f.txt"),
+            a.clone(),
+            dir.join("hard.txt"),
+        ]);
+        assert_eq!(kept, [dir.join("real/f.txt"), a]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The labels of what is not a regular file come from classify's own
+    /// stat: a folder, a dangling link, a link loop, a FIFO.
+    #[test]
+    fn named_kind_labels_what_is_not_a_file() {
+        let (dir, _) = text_file("labels", "a.txt");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nope"), dir.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(dir.join("loop"), dir.join("loop")).unwrap();
+        let fifo = std::ffi::CString::new(dir.join("fifo").to_str().unwrap()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let mut reread = Reread::per_drop();
+        for (name, label) in [
+            ("sub", "folder"),
+            ("dangling", "broken link"),
+            ("loop", "broken link"),
+            ("fifo", "special file"),
+            ("missing", "unreadable file"),
+        ] {
+            let (_, kind) = named_kind(&dir.join(name), &mut reread);
+            assert_eq!((name, kind.label.as_str()), (name, label));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

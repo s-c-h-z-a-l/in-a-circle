@@ -36,11 +36,6 @@ ifaces! {
     DataOffer,
     Viewporter,
     Viewport,
-    Presentation,
-    PresentationFeedback,
-    PrimaryManager,
-    PrimaryDevice,
-    PrimaryOffer,
     LayerShell,
     LayerSurface,
 }
@@ -68,11 +63,6 @@ impl Iface {
             Iface::DataOffer => "wl_data_offer",
             Iface::Viewporter => "wp_viewporter",
             Iface::Viewport => "wp_viewport",
-            Iface::Presentation => "wp_presentation",
-            Iface::PresentationFeedback => "wp_presentation_feedback",
-            Iface::PrimaryManager => "zwp_primary_selection_device_manager_v1",
-            Iface::PrimaryDevice => "zwp_primary_selection_device_v1",
-            Iface::PrimaryOffer => "zwp_primary_selection_offer_v1",
             Iface::LayerShell => "zwlr_layer_shell_v1",
             Iface::LayerSurface => "zwlr_layer_surface_v1",
         }
@@ -240,13 +230,8 @@ mod tests {
                 Iface::DataOffer => 16,
                 Iface::Viewporter => 17,
                 Iface::Viewport => 18,
-                Iface::Presentation => 19,
-                Iface::PresentationFeedback => 20,
-                Iface::PrimaryManager => 21,
-                Iface::PrimaryDevice => 22,
-                Iface::PrimaryOffer => 23,
-                Iface::LayerShell => 24,
-                Iface::LayerSurface => 25,
+                Iface::LayerShell => 19,
+                Iface::LayerSurface => 20,
             }
         }
         for (n, i) in Iface::ALL.iter().enumerate() {

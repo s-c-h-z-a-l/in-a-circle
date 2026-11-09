@@ -79,6 +79,24 @@ pub struct Limits {
     pub name_bytes: usize,
 }
 
+impl Limits {
+    /// The limits of an archive a user hands us as a document: a comic book
+    /// (CBZ) or an EPUB read the same way. 12,000 records (about 200 B each,
+    /// 2.4 MB; twice a 5,000-page comic with room for folders); the largest
+    /// size a non-ZIP64 header can declare, the real per-entry limit being
+    /// checked by the caller before it reads; a ratio of 1032, the most a
+    /// deflate stream can reach (a 258-byte match costs two bits), so every
+    /// valid stream passes; names of 512 bytes, twice the common 255-byte
+    /// file name limit. One value for both readers, so they accept the same
+    /// archives and cannot drift.
+    pub const ARCHIVE: Limits = Limits {
+        entries: 12_000,
+        entry_bytes: u32::MAX as u64,
+        ratio: 1032,
+        name_bytes: 512,
+    };
+}
+
 #[derive(Debug)]
 pub enum ZipError {
     NotZip,
@@ -554,5 +572,21 @@ mod tests {
         ] {
             assert_eq!(e.to_string(), text);
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_limits_tests {
+    use super::Limits;
+
+    /// hardening-2 #13/#14: the CBZ and EPUB readers share these values;
+    /// changing one is a decision (see `docs/resource-limits.md`).
+    #[test]
+    fn the_shared_archive_limits_are_pinned() {
+        let l = Limits::ARCHIVE;
+        assert_eq!(
+            (l.entries, l.entry_bytes, l.ratio, l.name_bytes),
+            (12_000, u64::from(u32::MAX), 1032, 512)
+        );
     }
 }

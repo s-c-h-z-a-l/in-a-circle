@@ -8,6 +8,27 @@ fn invalid(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg)
 }
 
+/// PDF 1.4 Appendix C: a page side is 3..=14400 units.
+const MIN_SIDE: f64 = 3.0;
+const MAX_SIDE: f64 = 14_400.0;
+
+/// The page's sides in points: 1 pixel = 1 point, scaled uniformly (the
+/// aspect kept, the image data untouched) when a side leaves the PDF 1.4
+/// limits. The upper limit wins over the lower one: past an aspect of
+/// 4800:1 the short side stays under 3.
+fn page_size(width: u32, height: u32) -> (String, String) {
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (long, short) = (w.max(h), w.min(h));
+    let scale = if long > MAX_SIDE {
+        MAX_SIDE / long
+    } else if short < MIN_SIDE {
+        (MIN_SIDE / short).min(MAX_SIDE / long)
+    } else {
+        return (width.to_string(), height.to_string());
+    };
+    (format!("{:.3}", w * scale), format!("{:.3}", h * scale))
+}
+
 /// Write the three objects of a page and return the page's id.
 pub(crate) fn add_page<W: Write>(
     objs: &mut Objects<W>,
@@ -102,13 +123,13 @@ pub(crate) fn add_page<W: Write>(
         // JPEG: the whole file is the DCT stream.
         None => objs.write_stream(img, &dict, [bytes])?,
     }
-    // 1 pixel = 1 point: the image is scaled to its own pixel size.
-    let draw = format!("q {width} 0 0 {height} 0 0 cm /Im0 Do Q\n");
+    let (pw, ph) = page_size(width, height);
+    let draw = format!("q {pw} 0 0 {ph} 0 0 cm /Im0 Do Q\n");
     objs.write_stream(content, "", [draw.as_bytes()])?;
     objs.write_object(
         page,
         &format!(
-            "/Type /Page /Parent {parent} 0 R /MediaBox [0 0 {width} {height}] \
+            "/Type /Page /Parent {parent} 0 R /MediaBox [0 0 {pw} {ph}] \
              /Resources <</XObject <</Im0 {img} 0 R>>>> /Contents {content} 0 R"
         ),
     )?;

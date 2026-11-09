@@ -265,6 +265,39 @@ fn image_dictionaries_carry_the_color_model() {
     assert!(t.contains("/Colors 1 "));
 }
 
+/// The page's `MediaBox` sides, read back from the file.
+fn media_box(out: &[u8]) -> Vec<f64> {
+    let text = String::from_utf8_lossy(out);
+    let at = text.find("/MediaBox [0 0 ").expect("a MediaBox") + "/MediaBox [0 0 ".len();
+    let end = text[at..].find(']').unwrap();
+    text[at..at + end]
+        .split(' ')
+        .map(|v| v.parse().unwrap())
+        .collect()
+}
+
+/// hardening-2 #6: PDF 1.4 (Appendix C) limits a page to 3..=14400 units a
+/// side. A tall webtoon strip is scaled to fit (the image data is
+/// untouched, the aspect kept); a tiny image to the minimum.
+#[test]
+fn page_size_stays_inside_the_pdf_14_limits() {
+    for (w, h, want) in [
+        (20, 15_000, [19.2, 14_400.0]),
+        (15_000, 20, [14_400.0, 19.2]),
+        (1, 1, [3.0, 3.0]),
+        (2, 4, [3.0, 6.0]),
+        (21, 13, [21.0, 13.0]),
+    ] {
+        let out = build(&[png_page(2, w, h, "size")]);
+        let got = media_box(&out);
+        for (g, e) in got.iter().zip(want) {
+            assert!((g - e).abs() < 0.01, "{w}x{h}: {got:?} want {want:?}");
+        }
+        assert!(got.iter().all(|&v| (3.0..=14_400.0).contains(&v)));
+        check_structure(&out);
+    }
+}
+
 #[test]
 fn png_stream_is_the_idat_concatenation() {
     // Several IDAT chunks: the PDF stream is their data back to back,

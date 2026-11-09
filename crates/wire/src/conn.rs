@@ -952,9 +952,9 @@ mod tests {
         assert_eq!(e.string().as_deref(), Ok("text/uri-list"));
 
         // A reused server id takes its new type.
-        c.register_server_id(id, Iface::PrimaryOffer);
+        c.register_server_id(id, Iface::Callback);
         send(&server, &msg(id, 0, &[]), &[]);
-        assert_eq!(next(&mut c).iface, Iface::PrimaryOffer);
+        assert_eq!(next(&mut c).iface, Iface::Callback);
     }
 
     /// An event for an id we never allocated, or a server id never
@@ -1451,6 +1451,8 @@ mod tests {
             let nums = [pid as RawFd, uid as RawFd, gid as RawFd];
             // Best effort: a pid above the descriptor limit cannot be occupied;
             // the queue check below covers that case.
+            // SAFETY (the dup2 below): the sentinel is an open fd and `n` is
+            // a number in this forked child, which owns its whole table.
             let nums: Vec<RawFd> = nums
                 .into_iter()
                 .filter(|n| *n <= 2 || unsafe { libc::dup2(sentinel.as_raw_fd(), *n) } == *n)

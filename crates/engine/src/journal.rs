@@ -999,6 +999,19 @@ impl Recorder {
                 false
             }
         };
+        // The reader refuses a longer path for good (`path_dec`): refuse it
+        // here, before anything is published, not after.
+        if private_path
+            .as_os_str()
+            .len()
+            .max(group.directory.as_os_str().len())
+            > HISTORY_PATH_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a path exceeds the history safety limit",
+            ));
+        }
         let (job, private) = (self.job_field.clone(), path_enc(private_path));
         let target = path_enc(&group.directory);
         let (op, gid) = (group.op.0, group.group.0);
@@ -2727,6 +2740,7 @@ fn refusal(r: &JobRecords) -> Option<io::Error> {
 struct HistLog<'a> {
     file: &'a mut File,
     lock: &'a File,
+    /// The raw job id: each record escapes it once.
     job: String,
 }
 
@@ -2735,7 +2749,7 @@ impl trash::Log for HistLog<'_> {
         let line = format!(
             "recovery-intent\top={}\tjob={}\tgroup={}\tsource={}\ttarget={}\tinfo_rel={}\tsource_parent_dev={}\tsource_parent_ino={}\ttarget_parent_dev={}\ttarget_parent_ino={}\twrapper_dev={}\twrapper_ino={}\tmount={}\tdeletion_date={}\n",
             hex(i.op.0),
-            self.job,
+            manifest::escape(&self.job),
             hex(i.group.0),
             enc(i.source),
             enc(i.target),
@@ -2749,7 +2763,9 @@ impl trash::Log for HistLog<'_> {
             i.mount,
             i.date,
         );
-        if line.len() > RECOVERY_INTENT_MAX_BYTES {
+        if line.len() > RECOVERY_INTENT_MAX_BYTES
+            || i.source.len().max(i.target.len()) > HISTORY_PATH_BYTES
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "recovery intent exceeds the safety limit",
@@ -2829,7 +2845,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     let mut log = HistLog {
         file: &mut file,
         lock: &lock,
-        job: manifest::escape(&job.0),
+        job: job.0.clone(),
     };
     for g in &r.groups {
         let Some(place) = &g.commit else { continue };
@@ -2866,13 +2882,11 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .iter()
         .filter(|o| matches!(o, GroupOutcome::MovedToTrash { .. }))
         .count();
-    // Nothing undone (every group kept, e.g. no safe Trash today): no
-    // closing record, so the user can try again once the cause is fixed.
-    if res
-        .groups
-        .iter()
-        .all(|o| matches!(o, GroupOutcome::Kept { .. }))
-    {
+    // A group kept for a passing reason (no safe Trash today, a name
+    // taken): no closing record, so the user can try again once the cause
+    // is fixed. The retry reports the finished groups as recorded and
+    // moves only the kept ones (`Recovery::Closed` above).
+    if res.groups.iter().all(is_kept) || res.groups.iter().any(is_retryable) {
         return Ok(res);
     }
     let l = Line::new("undo")
@@ -2885,6 +2899,15 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
             .push(format!("history: the undo was not recorded: {e}"));
     }
     Ok(res)
+}
+
+fn is_kept(o: &GroupOutcome) -> bool {
+    matches!(o, GroupOutcome::Kept { .. })
+}
+
+/// A group kept for a cause that can pass (see [`UndoReason::retryable`]).
+fn is_retryable(o: &GroupOutcome) -> bool {
+    matches!(o, GroupOutcome::Kept { reason, .. } if reason.retryable())
 }
 
 #[cfg(test)]
@@ -5751,15 +5774,14 @@ mod tests {
                 };
                 trash::Log::intent(&mut log, &i)
             };
-            let before = fs::metadata(history_path()).unwrap().len();
+            // The documented bound: a path of at most `HISTORY_PATH_BYTES`
+            // raw bytes, in `%XX` form the worst case (the reader's limit
+            // is on the decoded bytes, so a longer one could never be read
+            // back). hardening-2 #4.
             intent(b"/").unwrap();
-            let frame = fs::metadata(history_path()).unwrap().len() - before - 1;
-            let fill = vec![b'a'; RECOVERY_INTENT_MAX_BYTES - frame as usize];
-            intent(&fill).unwrap();
+            intent(&vec![0u8; HISTORY_PATH_BYTES]).unwrap();
             let len = fs::metadata(history_path()).unwrap().len();
-            let mut over = fill.clone();
-            over.push(b'a');
-            let e = intent(&over).unwrap_err();
+            let e = intent(&vec![b'a'; HISTORY_PATH_BYTES + 1]).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(fs::metadata(history_path()).unwrap().len(), len);
         });
@@ -5820,6 +5842,69 @@ mod tests {
             let v = fields(&l, RCLOSE).unwrap();
             assert_eq!(closed_outcome(&l.kind, 5, 9, &v).unwrap(), o, "{line}");
         }
+    }
+
+    /// hardening-2 #19: `HistLog::job` is the raw id; each record escapes
+    /// it exactly once (the intent by hand, the closing line through
+    /// `write_line`), so both read back as the same job.
+    #[test]
+    fn the_intent_and_the_close_write_the_same_job_field() {
+        let t = Tmp::new("jobfield");
+        t.env(|| {
+            let job = JobId("1-2\\x=y\tz".into());
+            job_of(&t, &new_job_id(), &[("a", "a")]);
+            let dir = StateDir::open(&history_dir().unwrap()).unwrap();
+            let mut file = dir
+                .open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0)
+                .unwrap();
+            let lock = dir
+                .open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)
+                .unwrap();
+            let mut log = HistLog {
+                file: &mut file,
+                lock: &lock,
+                job: job.0.clone(),
+            };
+            let i = trash::Intent {
+                op: OperationId(1),
+                group: GroupId(2),
+                source: b"/s",
+                target: b"/t",
+                info_rel: 0,
+                source_parent: (1, 2),
+                target_parent: (3, 4),
+                wrapper: (5, 6),
+                mount: 7,
+                date: "2026-10-27T10:00:00",
+            };
+            trash::Log::intent(&mut log, &i).unwrap();
+            let loc = LocationEvidence {
+                path_at_check: None,
+                last_unverified_path: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 3,
+                    object_ino: 4,
+                    leaf: "a".into(),
+                    op: OperationId(1),
+                },
+                checked_at: CheckPoint::Precheck,
+            };
+            let kept = GroupOutcome::Kept {
+                group: GroupId(2),
+                location: loc,
+                reason: UndoReason::NoTrash,
+            };
+            trash::Log::close(&mut log, OperationId(1), &kept).unwrap();
+            let jobs: Vec<String> = history()
+                .lines()
+                .map(|l| parse_line(l).unwrap())
+                .filter(|l| l.kind == "recovery-intent" || l.kind.starts_with("recovery-"))
+                .filter_map(|l| l.get("job").map(str::to_owned))
+                .collect();
+            assert_eq!(jobs, [job.0.clone(), job.0.clone()], "{jobs:?}");
+        });
     }
 
     /// The Trash spec's `Path=` form of `p`: bytes outside the unreserved
@@ -6007,6 +6092,101 @@ mod tests {
             };
             assert_eq!(location.path_at_check, None, "no place is made up");
             assert!(moved.join(f[0].file_name().unwrap()).exists());
+        });
+    }
+
+    /// hardening-2 #3: a group kept for a passing reason (its move was
+    /// refused) must not close the job. The second undo reports the
+    /// finished group as recorded (nothing moves twice) and moves the one
+    /// that was kept.
+    #[test]
+    fn a_group_kept_for_a_passing_reason_does_not_close_the_job() {
+        let t = Tmp::new("partial");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "da"), ("b", "db")]);
+            {
+                // The second move into the Trash is refused.
+                let mut n = 0;
+                let _f = fault(move |p| {
+                    n += (p == Point::Rename) as u32;
+                    (p == Point::Rename && n == 2).then_some(libc::EPERM)
+                });
+                let r = undo(&job).unwrap();
+                assert_eq!(kept(&r), [UndoReason::MoveRefused(libc::EPERM)], "{r:?}");
+            }
+            assert!(fs::symlink_metadata(&f[0]).is_err(), "a is in the Trash");
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &f), "{:?}", r.groups);
+            assert_eq!(r.groups.len(), 2);
+            // Every group is final now: the job is closed.
+            assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        });
+    }
+
+    /// hardening-2 #4: a path the reader refuses (over `HISTORY_PATH_BYTES`
+    /// decoded) is refused by the writer before anything is published,
+    /// not recorded and published, with its undo refused for good.
+    #[test]
+    fn the_writer_refuses_a_path_the_reader_would() {
+        let t = Tmp::new("longpath");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            // The target itself fits; the private folder inside it
+            // (`/.inacircle-<16 hex>/w`) does not.
+            let mut dir = t.0.join("deep");
+            while dir.as_os_str().len() < HISTORY_PATH_BYTES - 16 {
+                let room = HISTORY_PATH_BYTES - 16 - dir.as_os_str().len();
+                dir.push("d".repeat(room.clamp(2, 200) - 1));
+            }
+            assert!(dir.as_os_str().len() <= HISTORY_PATH_BYTES);
+            fs::create_dir_all(&dir).unwrap();
+            let root = t.0.join("producer-long");
+            fs::create_dir_all(root.join("0")).unwrap();
+            fs::write(root.join("0/x.md"), "d").unwrap();
+            let rels = [PathBuf::from("0/x.md")];
+            let e = match output::publish_beneath(&root, &rels, &dir, "a", "md", &mut |g, p| {
+                rec.prepare_group(g, p)
+            }) {
+                Err(e) => e,
+                Ok(_) => panic!("published a group the reader would refuse"),
+            };
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing published");
+        });
+    }
+
+    /// hardening-2 #3, crash safety: job state is derived from the groups'
+    /// own records (no second, job-level state to disagree with them). A
+    /// partial undo, then a crash inside the retry, then another retry:
+    /// the group already in the Trash is reported from its record and
+    /// never moved again; the crashed one is recovered; then the job closes.
+    #[test]
+    fn a_partial_undo_survives_a_crash_in_the_retry() {
+        let t = Tmp::new("partial-crash");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "da"), ("b", "db")]);
+            let in_trash = || fs::read_dir(t.trash().join("files")).unwrap().count();
+            {
+                let mut n = 0;
+                let _f = fault(move |p| {
+                    n += (p == Point::Rename) as u32;
+                    (p == Point::Rename && n == 2).then_some(libc::EPERM)
+                });
+                assert_eq!(kept(&undo(&job).unwrap()).len(), 1);
+            }
+            assert_eq!(in_trash(), 1);
+            // Only b is tried again (a's record is closed): the crash is b's.
+            crash_at(&job, Point::BeforeMove);
+            assert_eq!(in_trash(), 1, "the crash moved nothing twice");
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &f), "{:?}", r.groups);
+            assert_eq!(in_trash(), 2, "each group moved exactly once");
+            // Idempotent at the end: the job is closed, nothing moves.
+            assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(in_trash(), 2);
         });
     }
 

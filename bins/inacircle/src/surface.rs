@@ -507,7 +507,7 @@ impl Surface {
         let until = Instant::now() + TEARDOWN;
         // No render waits for a buffer that will not be released.
         self.pending = false;
-        let (id, c) = (&self.id, &mut self.conn);
+        let (id, c) = (&mut self.id, &mut self.conn);
         for (obj, op) in [
             (id.layer, op::zwlr_layer_surface_v1::DESTROY),
             (id.sub, op::wl_subsurface::DESTROY),
@@ -518,6 +518,9 @@ impl Surface {
                 c.req(obj, op, &[]);
             }
         }
+        // Dead from here: an event already in flight (a configure, the
+        // keyboard capability) must not make a request on them.
+        (id.layer, id.sub, id.wheel, id.surface) = (0, 0, 0, 0);
         if ack {
             self.ack_cb = c.new_id(Iface::Callback);
             c.req(DISPLAY, op::wl_display::SYNC, &[U(self.ack_cb)]);
@@ -984,6 +987,9 @@ impl Surface {
     /// Acks a configure; the first one maps the overlay with its 1x1
     /// transparent buffer stretched to the output.
     fn configure(&mut self, serial: u32, w: u32, h: u32) -> io::Result<()> {
+        if self.id.layer == 0 {
+            return Ok(()); // closing: the layer surface is destroyed
+        }
         if w == 0 || h == 0 || w > i32::MAX as u32 || h > i32::MAX as u32 {
             return Err(other(format!("unusable overlay size {w}x{h}")));
         }
@@ -1248,6 +1254,9 @@ impl Surface {
     /// Brings the screen to the machine's state with a free buffer; waits
     /// for a release if both are held.
     fn render(&mut self, m: &Machine) -> io::Result<()> {
+        if self.id.surface == 0 {
+            return Ok(()); // closing: the surfaces are destroyed
+        }
         let Some((x, y)) = m.origin() else {
             return Ok(());
         };
@@ -1512,7 +1521,8 @@ fn pollfd(fd: RawFd) -> libc::pollfd {
 
 /// Most globals kept from the registry; past it the compositor is broken.
 const MAX_GLOBALS: usize = 256;
-/// Most MIME types kept per data offer.
+/// Most MIME types kept per data offer (the uri-list one is always kept):
+/// bounds memory against an offer that never stops; a larger one is cut.
 const MAX_MIMES: usize = 64;
 /// Most data offers alive at once (we destroy every one we are done with).
 const MAX_OFFERS: usize = 16;
@@ -1559,10 +1569,10 @@ impl Offers {
         let Some((_, mimes)) = self.0.iter_mut().find(|o| o.0 == id) else {
             return Ok(());
         };
-        if mimes.len() >= MAX_MIMES {
-            return Err(other(format!(
-                "over {MAX_MIMES} MIME types in a data offer"
-            )));
+        // Past the cap only the type the wheel reads is kept (once): the
+        // rest is never looked at, and an offer with many types is normal.
+        if mimes.len() >= MAX_MIMES && (mime != URI_LIST || mimes.contains(&mime)) {
+            return Ok(());
         }
         mimes.push(mime);
         Ok(())
@@ -2320,6 +2330,35 @@ mod tests {
         s.dispatch(m).unwrap();
     }
 
+    /// hardening-2 #2: after the ordered close queued the destroys, a
+    /// `configure` already in flight must not ack / commit on the layer and
+    /// surface just destroyed (the compositor answers a request on a dead
+    /// object with a protocol error, which ends the ordered close).
+    #[test]
+    fn nothing_is_sent_on_an_object_the_close_destroyed() {
+        let (mut s, server) = render_surface();
+        s.id.layer = s.conn.new_id(Iface::LayerSurface);
+        s.id.viewport = s.conn.new_id(Iface::Viewport);
+        let dead = [s.id.layer, s.id.sub, s.id.wheel, s.id.surface];
+        s.teardown(&Machine::new(), false);
+        let (destroys, _) = requests(&mut s, &server);
+        assert_eq!(destroys.len(), 4, "{destroys:?}");
+        deliver(
+            &mut s,
+            &server,
+            &msg(
+                dead[0],
+                op::zwlr_layer_surface_v1::CONFIGURE,
+                &[7, 640, 480],
+            ),
+        );
+        let (late, _) = requests(&mut s, &server);
+        assert!(
+            late.iter().all(|(obj, _)| !dead.contains(obj)),
+            "requests on destroyed objects: {late:?}"
+        );
+    }
+
     /// The requests the surface sent so far, as (object, opcode), and the
     /// fds that came with them.
     fn requests(s: &mut Surface, server: &OwnedFd) -> (Vec<(u32, u16)>, Vec<OwnedFd>) {
@@ -2879,11 +2918,15 @@ mod tests {
         for k in 0..MAX_MIMES {
             o.mime(id, format!("type/{k}")).unwrap();
         }
-        assert!(
-            o.mime(id, "one/more".into()).is_err(),
-            "too many MIME types"
-        );
+        // Past the cap a type is dropped, not an error: an offer with many
+        // types must not close the wheel (hardening-2 #1).
+        o.mime(id, "one/more".into()).unwrap();
         assert_eq!(o.mimes(id).len(), MAX_MIMES);
+        // The one type the wheel reads survives the cap, once.
+        o.mime(id, URI_LIST.into()).unwrap();
+        o.mime(id, URI_LIST.into()).unwrap();
+        assert_eq!(o.mimes(id).len(), MAX_MIMES + 1);
+        assert!(o.mimes(id).iter().any(|m| m == URI_LIST));
         // A retired offer frees its slot; MIME types for it are ignored.
         assert!(o.retire(id));
         o.mime(id, "late/type".into()).unwrap();

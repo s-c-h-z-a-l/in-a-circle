@@ -699,6 +699,25 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// hardening-2 #11 measurement (run alone: `cargo test -p doc --release
+    /// --lib nested_quote_cost -- --ignored --nocapture`): the writer's time
+    /// for one 1 MiB quoted body at growing nesting depths.
+    #[test]
+    #[ignore = "timing, not a contract"]
+    fn nested_quote_cost() {
+        for depth in [1usize, 16, 64, 256] {
+            let mut src = "> ".repeat(depth);
+            src.push_str("x\n");
+            while src.len() < 1 << 20 {
+                src.push_str("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n");
+            }
+            let doc = crate::md::read(src.as_bytes()).unwrap();
+            let t = std::time::Instant::now();
+            let (out, _) = write(&doc);
+            eprintln!("depth {depth}: {:?} for {} B out", t.elapsed(), out.len());
+        }
+    }
     use crate::plain_items;
 
     fn t(s: &str) -> Inline {
