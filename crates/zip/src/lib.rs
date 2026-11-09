@@ -1,5 +1,6 @@
 //! Strict reader for ZIP archives (stored and deflated entries) read from a
-//! file on disk. The archive is foreign input and a security boundary:
+//! file on disk, and writer of archives with stored entries (`write`). The
+//! archive the reader opens is foreign input and a security boundary:
 //!
 //! - Everything is read with positioned reads (`read_exact_at`); there is no
 //!   way to read outside the file, and every offset or length addition is
@@ -23,6 +24,9 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
+
+pub mod write;
+pub use write::{MAX_ENTRIES, StoreWriter, WriteError};
 
 use flate::{Crc32, InflateError, inflate};
 
@@ -502,5 +506,53 @@ impl Archive<'_> {
             out.truncate(base);
         }
         r.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_reader_error_has_its_own_text() {
+        for (e, text) in [
+            (ZipError::NotZip, "not a ZIP archive"),
+            (ZipError::Truncated, "the central directory is truncated"),
+            (ZipError::Zip64, "ZIP64 archives are not supported"),
+            (ZipError::MultiDisk, "multi-disk archives are not supported"),
+            (ZipError::OutOfBounds, "an entry lies outside the file"),
+            (
+                ZipError::Overlap,
+                "entries overlap each other or the directory",
+            ),
+            (
+                ZipError::HeaderMismatch("name"),
+                "local and central headers disagree: name",
+            ),
+            (ZipError::DuplicateName, "two entries have the same name"),
+            (ZipError::TooManyEntries, "too many entries"),
+            (ZipError::NameTooLong, "an entry name is too long"),
+            (ZipError::EntryTooLarge, "an entry is too large"),
+            (
+                ZipError::RatioTooHigh,
+                "an entry's compression ratio is too high",
+            ),
+            (ZipError::Encrypted, "the entry is encrypted"),
+            (
+                ZipError::UnsupportedMethod(99),
+                "unsupported compression method 99",
+            ),
+            (
+                ZipError::SizeMismatch,
+                "the entry's data does not match its declared size",
+            ),
+            (ZipError::CrcMismatch, "the entry's CRC-32 does not match"),
+            (
+                ZipError::from(io::Error::other("boom")),
+                "read failed: boom",
+            ),
+        ] {
+            assert_eq!(e.to_string(), text);
+        }
     }
 }

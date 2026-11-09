@@ -551,6 +551,122 @@ fn wheel_offers_and_runs_images_to_pdf() {
     );
 }
 
+/// Real `inacircle-pages` on the wheel: two PNGs (one with alpha), a JPEG
+/// and a text file are dropped, Book (east) lights, the CBZ slice (south)
+/// is clicked, and one CBZ of the three images appears in the wrapper
+/// folder; Undo moves the wrapper to the Trash.
+#[test]
+fn wheel_offers_and_runs_images_to_cbz() {
+    let root = Root::new("img2cbz");
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let png = testzip::png(8, 8, 0, None, false, false, &rows);
+    // RGBA: one filter byte and 8 pixels of 4 bytes per row.
+    let alpha_rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 33]).collect();
+    let alpha = testzip::png(8, 8, 6, None, false, false, &alpha_rows);
+    let jpg_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    let jpg = fs::read(&jpg_path).unwrap();
+    root.real_action_cached("inacircle-pages", ("primer.png", &png), "cbz");
+    let dir = root.0.join("f/Nyaralás");
+    fs::create_dir_all(&dir).unwrap();
+    let mut list = Vec::new();
+    for (name, data) in [
+        ("1.jpg", &jpg),
+        ("2.png", &png),
+        ("3.png", &alpha),
+        ("jegyzet.txt", &b"nem kep\n".to_vec()),
+    ] {
+        let p = dir.join(name);
+        fs::write(&p, data).unwrap();
+        list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+    }
+    // Book is east of the center, CBZ is its south slice.
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (960, 690));
+    assert_eq!(code, Some(0));
+    let cbz = fs::read(dir.join("Nyaralás/Nyaralás.cbz")).expect("no CBZ written");
+    assert!(cbz.starts_with(b"PK\x03\x04"));
+    // The end record is the last 22 bytes (no comment); entry count at +10.
+    let eocd = &cbz[cbz.len() - 22..];
+    assert_eq!(&eocd[..4], b"PK\x05\x06");
+    assert_eq!(u16::from_le_bytes([eocd[10], eocd[11]]), 3, "one per image");
+    // Walk the central directory: names, their order and each entry's bytes
+    // (stored, so they sit right after the local header).
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([cbz[at], cbz[at + 1]]));
+    let u32_at =
+        |at: usize| u32::from_le_bytes([cbz[at], cbz[at + 1], cbz[at + 2], cbz[at + 3]]) as usize;
+    let mut at = u32_at(cbz.len() - 22 + 16);
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(&cbz[at..at + 4], b"PK\x01\x02");
+        let (size, name_len) = (u32_at(at + 24), u16_at(at + 28));
+        let skip = name_len + u16_at(at + 30) + u16_at(at + 32);
+        let local = u32_at(at + 42);
+        let name = String::from_utf8(cbz[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        got.push((name, cbz[data..data + size].to_vec()));
+        at += 46 + skip;
+    }
+    let want = [("001.jpg", &jpg), ("002.png", &png), ("003.png", &alpha)];
+    for ((name, bytes), (want_name, want_bytes)) in got.iter().zip(want) {
+        assert_eq!(name, want_name, "entry name and order");
+        assert_eq!(bytes, want_bytes, "{name} holds the input's bytes");
+    }
+    assert_eq!(
+        fs::read(dir.join("1.jpg")).unwrap(),
+        jpg,
+        "the source changed"
+    );
+    // One group in the history; its job undoes to the Trash.
+    let history = fs::read_to_string(root.0.join("state/inacircle/history")).unwrap();
+    let begins = history
+        .lines()
+        .filter(|l| l.starts_with("group-begin\t"))
+        .count();
+    assert_eq!(begins, 1, "{history}");
+    let job = history
+        .lines()
+        .find(|l| l.starts_with("job-start\t"))
+        .and_then(|l| l.split('\t').find_map(|f| f.strip_prefix("job=")))
+        .unwrap_or_else(|| panic!("no job in {history}"));
+    let u = root.cmd().args(["undo", job]).output().unwrap();
+    assert!(u.status.success(), "{u:?}");
+    assert!(!dir.join("Nyaralás").exists(), "the wrapper stayed");
+    assert!(
+        root.0
+            .join("home/.local/share/Trash/files/Nyaralás/Nyaralás.cbz")
+            .is_file()
+    );
+}
+
+/// An archive no action reads (a RAR `.cbr`): no category lights, so the
+/// drop on Book is rejected and the wheel closes without a stage 2; the
+/// hub text itself is pinned by `unknown_type_hub_says_no_action`.
+#[test]
+fn wheel_shows_no_action_for_unknown_file() {
+    let root = Root::new("cbr");
+    root.markdown_action_cached();
+    let src = root.0.join("f/x.cbr");
+    fs::write(&src, b"Rar!\x1a\x07\0 pages").unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    let (mut c, mut child) = start(&root, false);
+    let w = c
+        .drag_enters(0, Duration::from_secs(2))
+        .expect("the early receive");
+    source_writes(w, &list);
+    c.attached(2, Duration::from_secs(5));
+    c.release_held();
+    // Book, east: dim, so the drop is rejected.
+    c.drag_motion(1110, 540);
+    c.pump(Duration::from_millis(200));
+    c.drop_it();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).code(),
+        Some(0)
+    );
+    assert_eq!(c.attaches(), 2, "no stage 2 for an unknown file");
+    assert!(src.is_file(), "the source changed");
+}
+
 /// The same path with `inacircle-text`: Document (north), Markdown (north).
 /// Until now no test ran an action chosen on the wheel.
 #[test]

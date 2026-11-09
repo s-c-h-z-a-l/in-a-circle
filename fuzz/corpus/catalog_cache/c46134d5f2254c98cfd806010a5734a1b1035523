@@ -1,0 +1,5 @@
+inacircle-catalog 1
+bin	path=/a/one	mtim/one	mtime=5	size=7	builtin=yes	f(ils=1	in=yes	fails=1	retry=17	x.a	familye-cOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOatalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	ine=7	builtin=yes	fails=1	in=yes	fails=1	retry=17	x.a	family=f	in=text=text/markdown	ext=OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOatalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	ine=5	size=7	builtin=yes	fails=1	in=yes	fails=1	retry=17	x.a	family=f	ext=md	lcle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	in=yes	fails=1	retry=17	x.a	family=f	in=text/plain	out=text/markdown	ext=md	labssy=no	batch=yes

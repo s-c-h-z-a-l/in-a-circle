@@ -66,7 +66,7 @@ are in `CLAUDE.md`.
   part: PDF → PNG belongs to the PDF family, which links the PNG encoder.
   As a fallback, the planner chains two edges through a lossless
   intermediate file, mostly for external tools.
-- **`pages`** (`inacircle-pages`): page-image books to PDF. Two
+- **`pages`** (`inacircle-pages`): page-image books to PDF and CBZ. Three
   actions. `pages.images-to-pdf` is a join action: any number of JPEG and
   PNG files (the same image rules as below) become one PDF, one page per
   file in the given order. An image that cannot be taken is left out and
@@ -77,6 +77,17 @@ are in `CLAUDE.md`.
   and those not yet examined fail with the size copy, while those already
   skipped or failed keep their own outcome. It is
   `lossy=yes` for the same reasons as the other action.
+  `pages.images-to-cbz` is the other join action: the same JPEG and PNG
+  files become one CBZ, each image stored byte for byte (ZIP method 0, a
+  fixed header with no timestamp, extra field or ZIP64) under a numbered
+  name (`001.jpg`, `002.png`, ... in the given order; at least three digits,
+  more when there are more than 999 inputs). Only the header is checked, so
+  every valid JPEG and PNG is taken (alpha, 16-bit, interlaced, CMYK,
+  12-bit, arithmetic) and nothing is changed: it is `lossy=no`. An image
+  that is not a JPEG or PNG, is damaged in its header or is over a limit
+  (64 MiB, 180 MP) is left out and reported as `fail`; the rest is joined.
+  If the archive as a whole would pass the output size limit or 4 GiB, or a
+  write fails, nothing is written and every taken input fails.
   `pages.cbz-to-pdf` is a one-to-one action: a CBZ (a ZIP of PNG and JPEG pages, 8-bit
   PNG without transparency, JPEG passed through untouched) becomes one
   PDF with one page per image, in natural order of the entry names; one
@@ -103,6 +114,24 @@ are in `CLAUDE.md`.
   `TMPDIR=/nonexistent`. Without the whole sandbox no manifest runs,
   built-in or not ("sandbox unavailable"; not cached, so a later start
   retries).
+- A failed run is the binary's own fault, or not. Its own: it hung past
+  its own 2 s deadline, crashed (died by a signal), exited non-zero, left
+  processes behind (also ones still there when the cleanup gives up),
+  kept its output open after its exit, or did not exit after SIGKILL. Then
+  the binary backs off (the negative cache): its `bin` line keeps its
+  current identity plus `fails=<n>` and `retry=<unix seconds>`, and its old
+  actions, if any, stay on the wheel. Its manifest is not rerun before
+  `retry`: 60 s after the first failure in a row, doubling (60 s x 2^(n-1)) up to 24 h, reached at the 12th; the count
+  stops at 64. A success clears both fields; a changed binary (mtime or
+  size) is tried at once and counts from zero. `retry` is wall-clock time
+  (`CLOCK_REALTIME`, which survives a reboot); one more than 24 h ahead
+  (the clock went back) is tried at once. Not its fault, so not
+  penalized ("will retry" at the next start, as before): the refresh
+  budget ran out, even when it cut a manifest short of its own 2 s; the
+  sandbox or the supervision did not start; the spawn failed; no stdout;
+  a `poll`, `wait`, `read` or child-list error. A broken manifest (not
+  UTF-8, too large, malformed) stays cached without actions and without a
+  backoff until the binary changes.
 - A whole catalog refresh shares one 10 s budget: each manifest gets
   min(2 s, the rest of the budget), so a run of hanging binaries cannot
   hold a start for N x 2 s. A binary cut by it keeps its old cache entry
@@ -112,9 +141,14 @@ are in `CLAUDE.md`.
 - The cache, `$XDG_CACHE_HOME/inacircle/catalog` (with an
   `INACIRCLE_ACTIONS_DIR` override: `catalog-<FNV-1a of the list>`, one file
   per set of directories), is a manifest-style file
-  (header `inacircle-catalog 0`): per binary a `bin` line (path, mtime,
-  size, built in or not) followed by its `action` lines; it is valid only
-  while the set of binaries and their mtime and size match it exactly.
+  (header `inacircle-catalog 1`): per binary a `bin` line (path, mtime,
+  size, built in or not, and `fails`/`retry` while it backs off) followed
+  by its `action` lines; it is used as it is only while the set of
+  binaries and their mtime and size match it exactly and no backoff is
+  due; otherwise only the binaries that are new, changed or due rerun.
+  `fails` (1 to 64) and `retry` (at most 20 digits, a `u64`) are plain
+  decimals, both or neither; anything else, or another version, rejects
+  the cache, which is rebuilt.
   The wheel never runs a manifest while its overlay is up: it reads the
   cache as it is and refreshes it after it closes (see the B path).
   The cache is read bounded (256 KiB, measured on the bytes read, not on
@@ -167,6 +201,7 @@ action	text.txt-to-md	family=text	in=text/plain	out=text/markdown	ext=md	label=M
 action	text.md-to-txt	family=text	in=text/markdown	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
 ```
 
 ## Invocation
@@ -390,7 +425,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   broken by the fixed preset order). The other files are skipped, and the
   hub says so ("15 / 20").
 - **Join presets.** A preset may name a set of MIME types (`Preset.join`);
-  the `pdf` preset names JPEG and PNG. `menu::choose` decides what a preset
+  the `pdf` and `cbz` presets name JPEG and PNG. A preset's 1:1 input is
+  optional: `cbz` has none (`Preset.input` is `None`), so `choose` only
+  looks at the join. A run of a preset that matches no input is named
+  (the history's `action=`) after the 1:1 route it would have taken, or the
+  preset's id when it has none. `menu::choose` decides what a preset
   runs for a selection: the 1:1 route (for the preset's own input) or a join
   action, which is a catalog action whose type set covers the preset's set,
   with the preset's output, runnable, and with at least its `min` files in
@@ -482,6 +521,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   timeout, I/O error or hangup during the run only drops the connection:
   no more updates, and the end opens once more (with the end's deadlines)
   so the result still replaces the "running" notification and its Cancel.
+  A cancel (signal or Cancel click) reads as "Cancelled" only if it stopped at
+  least one input; one that came after the last result is reported as the finished
+  run.
   A broken server, or any failure at the end, turns notifications off for
   the rest of the run with one line on stderr
   (`inacircle: notifications unavailable: …`); the result, the history and
@@ -686,14 +728,16 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not shown, one stderr line per run). A category is **lit** when any dragged file has a
-  target in it, dim when it exists but nothing fits, and a direction
+  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not
+  shown, one stderr line per run). A category is **lit** when any dragged
+  file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south; `pdf` north in Book): lit if applicable, dim otherwise; the hub is
-  the category's label, or `<n> / <total> files` when the most files any lit
-  target of the category takes (`n`, the count the run would take) is below
-  the number dropped. `inacircle offer --groups <files…>` prints level 1.
+  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
+  no one-to-one form, it only joins images into one comic book): lit if
+  applicable, dim otherwise; the hub is the category's label, or
+  `<n> / <total> files` when the most files any lit target of the category
+  takes (`n`, the count the run would take) is below the number dropped. `inacircle offer --groups <files…>` prints level 1.
 - The **early read**: at `wl_data_device.enter`, if the offer's MIME list
   has `text/uri-list` (offers arrive before `enter`), the wheel `receive`s
   it into a pipe at once, read in the `poll` loop (500 ms, 1 MiB, 1024
@@ -770,7 +814,12 @@ name is missing from the atlas (or the name is empty), the name is
 replaced by `1 file · <type label>` (e.g. `1 file · text`), until a larger
 atlas exists. On level 2 the hub keeps the category's label when one file
 was dropped or the category's lit targets take every dropped file;
-otherwise it shows `<n> / <total> files` as above.
+otherwise it shows `<n> / <total> files` as above. When no category is
+lit on level 1, the hub says `no action for <type label>` (the first file's
+label, e.g. `no action for .cbr file`) if the hub can draw all of it
+(108 px wide, every glyph in the atlas), else `no action`: with the 15 px
+font `no action for ` alone takes about 85 px, so in practice the short
+form shows and `inacircle offer` prints the long one.
 
 **Text**
 
@@ -991,7 +1040,8 @@ crates/   wire, dbus, ui, engine, manifest, action, doc, flate, zip,
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
-          `inacircle-pages`; the shipped `inacircle` links wire, dbus, ui,
+          `inacircle-pages`, zip also writes archives with stored
+          entries only; the shipped `inacircle` links wire, dbus, ui,
           engine, manifest and action, never `doc`, `flate`, `zip`,
           `probe` or `pdf`; `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,

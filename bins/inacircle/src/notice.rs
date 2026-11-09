@@ -581,8 +581,6 @@ pub struct Notifier {
     sent: Instant,
     /// A Cancel click read outside `wake`, for the next `wake` to answer.
     cancel_seen: bool,
-    /// `wake` answered Cancel.
-    cancelled: bool,
     /// Drains in a row that spent all of `WAKE_FRAMES`.
     spent: u32,
     /// `finish` has begun: a failure now is final.
@@ -608,7 +606,6 @@ impl Notifier {
             shown: (0, 0),
             sent: now,
             cancel_seen: false,
-            cancelled: false,
             spent: 0,
             ending: false,
         }
@@ -778,14 +775,32 @@ impl Notifier {
         self.summary.warning = warning.map(str::to_owned);
     }
 
+    /// The run's summary for the final notification. `cancelled` follows
+    /// `cut` only: a Cancel click that stopped no input is not a cancelled
+    /// run (the engine counts the cut inputs whoever asked).
+    fn closing_summary(
+        &mut self,
+        sandboxed: bool,
+        counts: (usize, usize, usize, usize),
+        cut: usize,
+    ) -> Summary {
+        let mut s = std::mem::take(&mut self.summary);
+        s.set_counts(counts);
+        s.sandboxed = sandboxed;
+        s.cancelled = cut > 0;
+        s
+    }
+
     /// The result of the run with Undo, then the Undo window: an Undo click
     /// undoes `job` and says how it went. Undo is offered only when the
     /// history holds the run complete, durable and synced (`undoable`, from
     /// `journal::Recorded`), with the warning of
     /// [`Notifier::record_warning`] shown otherwise; at the end of the
     /// window the notification is sent again without the button. `counts` are the
-    /// run's `(done, skipped, failed)` inputs; `cancelled`: a cancel signal
-    /// stopped the run (a Cancel click seen here counts too). A signal on
+    /// run's `(done, skipped, failed)` inputs; `cut`: the inputs a cancel
+    /// stopped (`exec::Report::cut`, from a signal or a Cancel click alike).
+    /// Only a cancel that cut an input reads as Cancelled: one that came
+    /// after the last result stopped nothing. A signal on
     /// `stop` during the window ends it. The run's history and job registry
     /// entry must be closed before this is called.
     pub fn finish(
@@ -793,7 +808,7 @@ impl Notifier {
         job: &JobId,
         sandboxed: bool,
         counts: (usize, usize, usize, usize),
-        cancelled: bool,
+        cut: usize,
         undoable: bool,
         stop: &CancelToken,
     ) {
@@ -811,10 +826,7 @@ impl Notifier {
             return lap();
         };
         let markup = bus.has("body-markup");
-        let mut s = std::mem::take(&mut self.summary);
-        s.set_counts(counts);
-        s.sandboxed = sandboxed;
-        s.cancelled = cancelled || self.cancelled;
+        let s = self.closing_summary(sandboxed, counts, cut);
         let (summary, body) = final_text(&s, markup);
         let undo: &[(&str, &str)] = if s.done_count > 0 && undoable && s.unknown_count == 0 {
             &[("undo", "Undo")]
@@ -968,12 +980,7 @@ impl Observer for Notifier {
     fn wake(&mut self) -> Wake {
         let cancel = self.drain() || std::mem::take(&mut self.cancel_seen);
         self.tick();
-        if cancel {
-            self.cancelled = true;
-            Wake::Cancel
-        } else {
-            Wake::Continue
-        }
+        if cancel { Wake::Cancel } else { Wake::Continue }
     }
 }
 
@@ -1336,6 +1343,27 @@ mod tests {
             final_text(&s, false),
             ("Cancelled".into(), "1 done, 2 not converted".into())
         );
+    }
+
+    /// A Cancel (click or signal) after the join's result stopped nothing
+    /// (`cut == 0`): the notice is the result's, with Undo offered.
+    #[test]
+    fn cancel_that_cut_nothing_reads_as_done() {
+        let out = "/d/Trip/Trip.pdf";
+        let mut n = Notifier::new("PDF", false, 2);
+        n.summary.record(&done("/d/Trip/1.jpg", out));
+        n.summary.record(&done("/d/Trip/2.jpg", out));
+        n.record_join(2, 2, false);
+        let s = n.closing_summary(true, (2, 0, 0, 0), 0);
+        assert!(!s.cancelled);
+        let (sum, body) = final_text(&s, false);
+        assert_eq!(sum, "Trip.pdf");
+        assert_eq!(body, "2 / 2 files");
+        assert!(s.done_count > 0 && s.unknown_count == 0, "Undo is offered");
+        // The same click that did cut an input is a cancelled run.
+        let mut n = Notifier::new("PDF", false, 2);
+        let s = n.closing_summary(true, (0, 0, 2, 0), 2);
+        assert!(s.cancelled);
     }
 
     #[test]

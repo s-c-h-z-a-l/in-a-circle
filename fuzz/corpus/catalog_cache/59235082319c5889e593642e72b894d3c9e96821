@@ -1,0 +1,10 @@
+inacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.a	famipat.ly/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.a	famn=texte	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x=f	in=texte	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	xno	batch=log 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=1700000060
+action	x.a	fanacircle-catalog 1
+bin	path=/a/one	mtime=5	size=7	builtin=yes	fails=1	retry=0850000476
+action	x.a	atalotexte	mtime=5yes

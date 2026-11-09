@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/a/	mtime=5	size=7	builtin=yes	0
+action	x>a060
+action	xno	batch=yes

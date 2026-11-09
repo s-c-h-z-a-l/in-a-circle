@@ -181,6 +181,11 @@ pub struct Report {
     pub sandboxed: bool,
     /// The join of a [`run_join`]; `None` for a [`run`].
     pub joined: Option<Joined>,
+    /// Inputs a cancel stopped: failed as `cancelled` while still unsettled
+    /// (not started, killed, or their result dropped before the commit).
+    /// 0 for a cancel that came after every input was settled, which then
+    /// stopped nothing.
+    pub cut: usize,
 }
 
 /// What a join run made of its inputs.
@@ -351,6 +356,17 @@ impl Drop for CancelToken {
     }
 }
 
+/// The reason of an input a cancel stopped (see [`Sink::cut`]).
+const CANCELLED: &str = "cancelled";
+
+/// Why a group of inputs ends unfinished: a cancel (counted in
+/// [`Report::cut`]) or an ordinary failure with its text. A typed value, so
+/// no failure whose text happens to read "cancelled" is taken for a cancel.
+enum Stop<'a> {
+    Cancelled,
+    Failed(&'a str),
+}
+
 /// Runs `route` over `inputs` and places the results. Never panics on a
 /// misbehaving action; every input ends with at least one outcome.
 pub fn run(
@@ -410,7 +426,7 @@ pub fn run(
         sink.begin_group(members.len());
         if sink.is_cancelled(cancel) {
             for &i in &members {
-                sink.fail(i, "cancelled".to_owned());
+                sink.cut(i);
             }
         } else {
             if cleaned.insert(g.target) {
@@ -505,9 +521,12 @@ pub fn run_join(
         downloads: false,
     };
     let mut sink = Sink::new(obs, &uniq);
-    let all = |sink: &mut Sink, ins: &[usize], reason: &str| {
+    let all = |sink: &mut Sink, ins: &[usize], stop: Stop| {
         for &i in ins {
-            sink.fail(i, reason.to_owned());
+            match stop {
+                Stop::Cancelled => sink.cut(i),
+                Stop::Failed(reason) => sink.fail(i, reason.to_owned()),
+            }
         }
     };
     let every: Vec<usize> = (0..uniq.len()).collect();
@@ -516,11 +535,15 @@ pub fn run_join(
         ..sink.report(sandboxed)
     };
     let Some(min) = action.join.as_ref().map(|j| j.min as usize) else {
-        all(&mut sink, &every, "invalid route");
+        all(&mut sink, &every, Stop::Failed("invalid route"));
         return end(&mut sink, gate.is_ok(), joined);
     };
     if let Err(e) = gate {
-        all(&mut sink, &every, &format!("sandbox unavailable: {e}"));
+        all(
+            &mut sink,
+            &every,
+            Stop::Failed(&format!("sandbox unavailable: {e}")),
+        );
         return end(&mut sink, false, joined);
     }
     let ok = admit(&mut sink);
@@ -534,13 +557,17 @@ pub fn run_join(
     let anchor = match placed {
         Ok(a) => a,
         Err(e) => {
-            all(&mut sink, &ok, &format!("no folder for the output: {e}"));
+            all(
+                &mut sink,
+                &ok,
+                Stop::Failed(&format!("no folder for the output: {e}")),
+            );
             return end(&mut sink, true, joined);
         }
     };
     sink.begin_group(ok.len());
     if sink.is_cancelled(cancel) {
-        all(&mut sink, &ok, "cancelled");
+        all(&mut sink, &ok, Stop::Cancelled);
     } else {
         // The download fallback may not exist yet.
         let _ = fs::create_dir_all(&anchor.target);
@@ -631,6 +658,8 @@ struct Sink<'a> {
     step: usize,
     /// The observer answered [`Wake::Cancel`]: sticky, like the token.
     cancelled: bool,
+    /// Inputs failed by [`Sink::cut`]: see [`Report::cut`].
+    cut: usize,
     /// The observer's wake fd that hung up (or is invalid): not polled
     /// again while `wake_fd` returns it.
     dead_wake_fd: Option<RawFd>,
@@ -652,6 +681,7 @@ impl<'a> Sink<'a> {
             steps: 1,
             step: 0,
             cancelled: false,
+            cut: 0,
             dead_wake_fd: None,
             fired_at: None,
         }
@@ -686,6 +716,17 @@ impl<'a> Sink<'a> {
         let input = self.input(i);
         self.emit(Outcome::Failed { input, reason });
         self.finish(i);
+    }
+
+    /// Input `i` stopped by a cancel: failed as `cancelled` and counted in
+    /// [`Report::cut`], unless it was already settled (a cancel cannot cut
+    /// what is finished). Only the engine's own cancel paths call this: an
+    /// action's `fail` event with that text is an ordinary failure.
+    fn cut(&mut self, i: usize) {
+        if !self.finished[i] {
+            self.cut += 1;
+        }
+        self.fail(i, CANCELLED.to_owned());
     }
 
     fn skip(&mut self, i: usize, reason: String) {
@@ -768,6 +809,7 @@ impl<'a> Sink<'a> {
         Report {
             sandboxed,
             joined: None,
+            cut: self.cut,
         }
     }
 }
@@ -993,13 +1035,16 @@ fn publish(
     cancel: &CancelToken,
     sink: &mut Sink,
 ) -> Option<Publication> {
-    let fail = |sink: &mut Sink, reason: String| {
+    let fail = |sink: &mut Sink, stop: Stop| {
         for &o in settle {
-            sink.fail(o, reason.clone());
+            match stop {
+                Stop::Cancelled => sink.cut(o),
+                Stop::Failed(reason) => sink.fail(o, reason.to_owned()),
+            }
         }
     };
     if sink.is_cancelled(cancel) {
-        fail(sink, "cancelled".to_owned());
+        fail(sink, Stop::Cancelled);
         return None;
     }
     let mut cancelled = false;
@@ -1027,11 +1072,11 @@ fn publish(
     let p = match published {
         Ok(p) => p,
         Err(_) if cancelled => {
-            fail(sink, "cancelled".to_owned());
+            fail(sink, Stop::Cancelled);
             return None;
         }
         Err(e) => {
-            fail(sink, format!("cannot publish output: {e}"));
+            fail(sink, Stop::Failed(&format!("cannot publish output: {e}")));
             return None;
         }
     };
@@ -1478,7 +1523,7 @@ fn run_step(
     }
     if sink.is_cancelled(cancel) {
         for &o in &step_in.origin {
-            sink.fail(o, "cancelled".to_owned());
+            sink.cut(o);
         }
         return None;
     }
@@ -1595,8 +1640,15 @@ pub(crate) fn pidfd_open(pid: libc::pid_t) -> Option<OwnedFd> {
 }
 
 /// Whether our child `pid` has exited, observed without reaping it (the
-/// fallback for kernels without pidfd).
+/// fallback for kernels without pidfd). A `waitid` error reads as not
+/// exited.
 pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
+    probe_exit(pid).unwrap_or(false)
+}
+
+/// [`exited_unreaped`] with the `waitid` error kept apart from "still
+/// running".
+fn probe_exit(pid: libc::pid_t) -> io::Result<bool> {
     #[cfg(test)]
     tests::PROBES.set(tests::PROBES.get() + 1);
     // SAFETY: a zeroed siginfo_t is valid storage for waitid to fill.
@@ -1604,19 +1656,43 @@ pub(crate) fn exited_unreaped(pid: libc::pid_t) -> bool {
     let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
     // SAFETY: info is a valid out-pointer; WNOWAIT leaves the child unreaped.
     let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
     // With WNOHANG and no state change, si_pid stays 0.
     // SAFETY: waitid filled (or zeroed) the CLD fields that si_pid reads.
-    r == 0 && unsafe { info.si_pid() } != 0
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+/// What [`wait_for_exit`] saw by its deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// The child has exited (still unreaped).
+    Exited,
+    /// It still ran at the deadline: the last look said so.
+    Running,
+    /// The last look at it was a failed `waitid`: whether it runs is not
+    /// known.
+    Unknown,
 }
 
 /// Waits until our unreaped child `pid` has exited (it stays unreaped),
 /// by its pidfd or, without one, by `waitid(WNOWAIT)`; false if it has not
-/// by `until`.
+/// by `until` (or the last look at it failed, see [`wait_for_exit`]).
 pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> bool {
+    wait_for_exit(pid, pidfd, until) == Waited::Exited
+}
+
+/// [`wait_exited`], telling a child still running at `until` from one the
+/// last `waitid` could not look at. Same waits, same deadline: only the
+/// verdict at the end differs.
+pub(crate) fn wait_for_exit(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Instant) -> Waited {
     let mut nap = Duration::from_millis(1);
     loop {
         let left = until.saturating_duration_since(Instant::now());
-        match pidfd {
+        // Whether this look at the child was a failed `waitid` (a pidfd
+        // poll that timed out is a clean "still running").
+        let unknown = match pidfd {
             Some(fd) => {
                 let mut p = libc::pollfd {
                     fd: fd.as_raw_fd(),
@@ -1628,14 +1704,15 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
                 // SAFETY: p is one valid pollfd.
                 let r = unsafe { libc::poll(&mut p, 1, ms) };
                 if r > 0 {
-                    return true;
+                    return Waited::Exited;
                 }
                 // mutants: not killable by a test. No signal handler is
                 // installed and SIGTERM/SIGINT are blocked, so poll does not
                 // see EINTR; the `==` -> `!=` mutant on the EINTR test would
-                // only matter then (an early `false`). Every caller of
-                // `wait_exited` (the supervisor, catalog.rs twice) treats
-                // `false` as "not gone" and fails closed: no security gap.
+                // only matter then (an early "not exited"). Every caller
+                // (the supervisor and the catalog's kill-and-wait, through
+                // `wait_exited` or `wait_for_exit`) treats that as "not
+                // gone" and fails closed: no security gap.
                 if r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
@@ -1643,14 +1720,26 @@ pub(crate) fn wait_exited(pid: libc::pid_t, pidfd: Option<&OwnedFd>, until: Inst
                 // valid pidfd; none can be provoked. It asks `waitid` instead (no verdict
                 // is guessed), so a changed condition cannot open a gap.
                 if r < 0 {
-                    return exited_unreaped(pid);
+                    return match probe_exit(pid) {
+                        Ok(true) => Waited::Exited,
+                        Ok(false) => Waited::Running,
+                        Err(_) => Waited::Unknown,
+                    };
                 }
+                false
             }
-            None if exited_unreaped(pid) => return true,
-            None => {}
-        }
+            None => match probe_exit(pid) {
+                Ok(true) => return Waited::Exited,
+                Ok(false) => false,
+                Err(_) => true,
+            },
+        };
         if left.is_zero() {
-            return false;
+            return if unknown {
+                Waited::Unknown
+            } else {
+                Waited::Running
+            };
         }
         if pidfd.is_none() {
             std::thread::sleep(nap.min(left));
@@ -2217,13 +2306,12 @@ impl<'a> Supervisor<'a> {
         if !wait_exited(self.pid, self.pidfd.as_ref(), until) {
             // Killed but not exiting: stuck in the kernel. It stays
             // unreaped (its group id stays ours); nothing is accepted.
-            let why = if self.cancelled {
-                "cancelled"
-            } else {
-                "action left processes behind"
-            };
             for &o in &self.step_in.origin {
-                sink.fail(o, why.to_owned());
+                if self.cancelled {
+                    sink.cut(o);
+                } else {
+                    sink.fail(o, "action left processes behind".to_owned());
+                }
             }
             return None;
         }
@@ -2256,7 +2344,7 @@ impl<'a> Supervisor<'a> {
         let origin = &self.step_in.origin;
         if self.cancelled {
             for &o in origin {
-                sink.fail(o, "cancelled".to_owned());
+                sink.cut(o);
             }
             return None;
         }
@@ -3128,6 +3216,105 @@ pub(crate) mod tests {
         );
     }
 
+    /// A cancel that comes after the join's commit stopped nothing: the
+    /// result is in place, every input is `Done`, and `cut` is 0.
+    #[test]
+    fn cancel_after_join_commit_cuts_nothing() {
+        let t = Tmp::new("cancel-after-join");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let a = docs.join("a.txt");
+        let b = docs.join("b.txt");
+        fs::write(&a, "a\n").unwrap();
+        fs::write(&b, "b\n").unwrap();
+        let bin = t.0.join("joiner");
+        install_script(
+            &bin,
+            "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.md\"\n\
+             while IFS= read -r in; do cat \"$in\" >> \"$work/join/out.md\"; \
+             printf 'take\\t%s\\n' \"$in\"; done < \"$6\"\n\
+             printf 'joined\\tjoin/out.md\\n'",
+        );
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        action.join = Some(crate::catalog::Join {
+            types: vec!["text/plain".into()],
+            min: 1,
+        });
+        let tok = CancelToken::install().unwrap();
+        AFTER_PUBLISH.set(Some(Box::new(|_p: &Publication| {
+            // SAFETY: signals this thread, which has SIGTERM blocked.
+            unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        })));
+        let mut seen = Seen::default();
+        let report = run_join(&action, vec![a.clone(), b.clone()], &mut seen, &tok);
+        AFTER_PUBLISH.set(None);
+        assert_eq!(report.cut, 0, "{:?}", seen.0);
+        let j = report.joined.unwrap();
+        assert_eq!((j.taken, j.total), (2, 2));
+        assert!(j.publication.is_some());
+        let done = seen
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Done { .. }))
+            .count();
+        assert_eq!(done, 2, "{:?}", seen.0);
+        assert!(
+            !seen.0.iter().any(|o| matches!(o, Outcome::Failed { .. })),
+            "{:?}",
+            seen.0
+        );
+        assert!(tok.is_cancelled(), "the cancel did arrive");
+    }
+
+    /// Three inputs, a cancel after the first is done: the other two are
+    /// cut.
+    #[test]
+    fn cancel_mid_batch_counts_cut_inputs() {
+        struct CancelOnDone(Seen);
+        impl Observer for CancelOnDone {
+            fn event(&mut self, o: &Outcome) {
+                if matches!(o, Outcome::Done { .. }) {
+                    // SAFETY: signals this thread, which has SIGTERM blocked.
+                    unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+                }
+                self.0.event(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+        }
+        let t = Tmp::new("cancel-mid-batch");
+        let mut inputs = Vec::new();
+        for d in ["d1", "d2", "d3"] {
+            let dir = t.0.join(d);
+            fs::create_dir(&dir).unwrap();
+            let f = dir.join("a.txt");
+            fs::write(&f, "a\n").unwrap();
+            inputs.push(f);
+        }
+        let bin = t.0.join("copy");
+        install_script(&bin, COPY);
+        let mut action = script_action(&t, "unused", "exit 1", "md");
+        action.bin = bin;
+        let tok = CancelToken::install().unwrap();
+        let mut seen = CancelOnDone(Seen::default());
+        let report = run(&[&action], inputs, &mut seen, &tok);
+        let done = seen
+            .0
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Done { .. }))
+            .count();
+        let cancelled = seen
+            .0
+            .0
+            .iter()
+            .filter(|o| matches!(o, Outcome::Failed { reason, .. } if reason == "cancelled"))
+            .count();
+        assert_eq!((done, cancelled), (1, 2), "{:?}", seen.0.0);
+        assert_eq!(report.cut, 2);
+    }
+
     /// A cancel that arrives while the outputs are copied stops before
     /// `prepare_group` (no intent for a group that is never published),
     /// not only before the commit.
@@ -3903,6 +4090,32 @@ pub(crate) mod tests {
         assert!(probes <= PROBES_MAX, "the wait spun: {probes} probes");
         slow.kill().unwrap();
         slow.wait().unwrap();
+    }
+
+    /// `wait_for_exit` tells an exit, a child still running at the
+    /// deadline (with and without a pidfd) and a `waitid` that cannot look
+    /// at it (not our child: ECHILD) apart.
+    #[test]
+    fn wait_for_exit_tells_running_from_unknown() {
+        let mut quick = spawn_sh("exit 0");
+        let pid = quick.id() as libc::pid_t;
+        let until = Instant::now() + Duration::from_secs(5);
+        assert_eq!(wait_for_exit(pid, None, until), Waited::Exited);
+        quick.wait().unwrap();
+
+        let mut slow = spawn_sh("sleep 30");
+        let pid = slow.id() as libc::pid_t;
+        let short = || Instant::now() + Duration::from_millis(20);
+        assert_eq!(wait_for_exit(pid, None, short()), Waited::Running);
+        let pidfd = pidfd_open(pid);
+        if pidfd.is_some() {
+            assert_eq!(wait_for_exit(pid, pidfd.as_ref(), short()), Waited::Running);
+        }
+        slow.kill().unwrap();
+        slow.wait().unwrap();
+
+        assert_eq!(wait_for_exit(1, None, short()), Waited::Unknown);
+        assert!(!wait_exited(1, None, short()), "unknown is not exited");
     }
 
     /// `reap_group` sleeps between probes of a member that still runs: it

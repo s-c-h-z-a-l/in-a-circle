@@ -20,7 +20,8 @@ it does not turn its measured overruns into successful absolute results.
 | Binary/dependency budgets | Existing `CLAUDE.md` ceilings and shipped-dependency checks remain mandatory |
 
 For non-wheel commands the existing `main` → exit CPU target excludes
-per-event work. For the interactive wheel, apply the target to its
+per-event work and ends at the action's start (`main` → action entry); the
+CPU after it is reported. For the interactive wheel, apply the target to its
 documented waiting points, not the time spent waiting for the user or a
 sum of unrelated phases. Multi-input cost is reported separately; a
 single-input acceptance series must not mix in batches or cancellations.
@@ -34,7 +35,8 @@ time; name the actual marker and leave an unmeasured gate open.
 
 ## Sample and percentile rule
 
-Each acceptance metric/condition needs **at least 50 valid observations**.
+Each acceptance metric/condition needs **at least 50 valid observations**,
+except under the small-sample rule below.
 For sorted observations `x[1] ... x[N]`, use nearest-rank:
 
 ```
@@ -47,12 +49,24 @@ Record N, p50 (lower middle), p95, minimum and maximum, with raw observations.
 Fifty samples are a minimum for acceptance, not a precision or confidence
 guarantee for the tail. Increase the sample count when repeatability is poor.
 
+**Small-sample rule.** A condition may be accepted on **at least 10 valid
+observations** when all three hold: the p95 is at most 25% of the metric's
+budget; the population standard deviation is at most 10% of the p50; and
+every failed attempt is documented. For an A/B comparison both variants
+must meet this, and the two p95 must differ by 5% or less; a larger
+difference needs the full 50. Fewer than 10, a p95 above a quarter of the
+budget or a wider spread leaves the 50-observation rule in force. Reason:
+a CPU-time metric with a spread this small gives the same p50 and p95 at 10
+samples as at 50 (plan 11: standard deviation 5%, p95 17% of the budget), so
+the extra hand-made runs add effort, not evidence. Record N, the standard
+deviation and which rule applied.
+
 Declare the attempt count and workload before collecting data. Record all
 attempts, including crashes, timeouts, missing markers and invalid runs,
 with reasons. Failures need investigation; replacement runs are additional
 attempts, not erasure of failures. Keep every valid outlier. A large duration
-alone is not grounds for invalidation. Fewer than 50 valid observations
-leaves the p95 gate open. Older 20-run series remain preliminary evidence.
+alone is not grounds for invalidation. Fewer valid observations than the rule in force
+requires leave the p95 gate open. Older 20-run series remain preliminary evidence.
 
 Hover p95 requires individual repaint observations, not an average of
 per-run medians or a percentile of per-run maxima. If the current logger

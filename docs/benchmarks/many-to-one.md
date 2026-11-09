@@ -98,6 +98,83 @@ clean; wheel PSS 2,796 kB; drop to stage 2 357 us.
 The second machine is outside the reference timing gate by policy and is
 shown for the absolute overrun check; nothing is over.
 
+## Images to CBZ
+
+The join action `pages.images-to-cbz` writes a stored (method 0) ZIP: each
+image is copied byte for byte into one archive named `001.jpg`, `002.png`
+and so on, with no recompression.
+
+**Method.** The release `inacircle-pages` joins 1,024 sparse 128 KiB
+images (a 128 MiB archive) and the test samples `/proc/<pid>/status`
+`VmHWM` until the child exits (limit in the test: 6 MiB).
+`scripts/check-sizes.sh` gives the stripped release sizes. The drop to
+stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
+
+**Machine.** The reference desktop (Ryzen 7 5700X, 96 GB, CachyOS, kernel
+7.2.9, repository release profile), x86_64.
+
+| Measurement | Result |
+|---|---|
+| 1,024 images x 128 KiB to one CBZ, peak `VmHWM` | 3,232 kB |
+| `inacircle` file (x86_64) | 1,160,024 B |
+| `inacircle-pages` file / `.text` (x86_64) | 503,712 B / 403,267 B |
+| Drop to stage 2, 1 JPEG to Book, p95, reference desktop | 159 us (N=50) |
+| Drop to stage 2, 30 JPEG to Book, p95, reference desktop | 160 us (N=50) |
+| Drop to stage 2, text to Document, `main` vs this branch, p95 | 167 us vs 166 us (-0.6%) |
+| Drop to stage 2, second machine | not measured (reported, not gated) |
+| `main` to action start CPU of `run`, warm cache, p95, reference desktop | 360 us (`main`: 363 us), -0.8%; whole run to exit 1,432 us (`main`: 1,422 us), reported |
+
+**Drop to stage 2.** Hand-made drags on the reference desktop (kernel
+7.3.1, `INACIRCLE_MEASURE=1`, release builds: A is `main` 12992781, B is
+this branch), 50 valid drops per condition, p95 by nearest rank. One log
+per condition; the order the series were run in was not recorded.
+
+| Condition | Build | Valid | p50 (us) | mean (us) | p95 (us) | max (us) | stdev (us) |
+|---|---|---|---|---|---|---|---|
+| text to Document | A | 50 | 156 | 155 | 167 | 174 | 8 |
+| text to Document | B | 50 | 156 | 154 | 166 | 167 | 8 |
+| 1 JPEG to Book | B | 50 | 150 | 149 | 159 | 164 | 7 |
+| 30 JPEG to Book | B | 50 | 150 | 149 | 160 | 163 | 8 |
+
+Wheel PSS peaked at 3,044 kB (gate 5,000 kB). The branch costs the text
+path -0.6% p95 (investigation threshold 10%). The p95 is at most 17% of the
+1,000 us budget and the standard deviation 5% of the p50, so the
+small-sample rule of [acceptance.md](acceptance.md#sample-and-percentile-rule)
+would have accepted 10 drops; 50 were taken before that rule existed. The
+second machine was not measured: it is outside the reference timing gate.
+Raw logs are kept privately with the plan's reports.
+
+**`main` to exit (`inacircle run`).** Headless, 50 valid runs per series on
+the reference desktop, warm cache (one discarded run per build first, the
+catalog cache filled), a fresh input copy per run, private state per
+build, A and B alternating in swapped order. The metric is `self_cpu_us`
+minus `start_abs_cpu_us` (our CPU from `main` to exit; the ~0.6 ms before
+`main` is not in it), with the `main` to action-entry share as the second
+metric. The action's own CPU is a child's and is not counted.
+
+| Series | main to exit p50 / p95 / max (us) | main to action entry p50 / p95 (us) |
+|---|---|---|
+| A, text (`main`) | 1,309 / 1,422 / 1,534 | 321 / 363 |
+| B, text | 1,317 / 1,432 / 1,623 | 330 / 360 |
+| B, 1 JPEG to CBZ | 1,495 / 1,602 / 1,651 | 333 / 388 |
+| B, 30 JPEG to CBZ | 5,625 / 5,843 / 6,032 | 717 / 823 |
+
+The branch moves the text path +0.7% p95 (no regression). Standard
+deviation is 4-5% of the p50. **Whole run:** the whole-run figure
+is 1,422-1,432 us on `main` and the branch alike. The budget for `run`
+ends at the action's start (CLAUDE.md), which is 360-388 us for one input;
+the rest comes after the action has started, reported and not budgeted
+(not broken down further here). The 30-image run scales with
+the input count (per-input work, reported and not budgeted). Peak
+`VmHWM` 3,788 kB. Method: private script kept with the plan's reports.
+
+**Reproduce.**
+
+```
+cargo test --release -p inacircle-pages many_large_images_stay_within_memory -- --nocapture
+scripts/check-sizes.sh
+```
+
 ## Verdict
 
 Within every measured bound: 1,000 images join in under 3 MB of peak

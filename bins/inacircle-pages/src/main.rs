@@ -6,11 +6,13 @@
 //! half-written PDF is removed. `pages.images-to-pdf` is a join action: any
 //! number of JPEG and PNG files become one PDF, one page per file in the
 //! given order; a file that cannot be taken is left out (`skip` or `fail`)
-//! and the rest is joined.
+//! and the rest is joined. `pages.images-to-cbz` is the other join: the
+//! same files become one CBZ, each image stored byte for byte under a
+//! numbered name (`001.jpg`, `002.png`, ...), in the given order.
 
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -172,6 +174,21 @@ fn manifest_text() -> String {
             .pair("group", "book")
             .pair("cost", "10")
             .pair("lossy", "yes")
+            .pair("batch", "yes")
+            .pair("join", "yes")
+            .pair("min", "1"),
+    ));
+    s.push_str(&manifest::write_line(
+        &manifest::Line::new("action")
+            .bare("pages.images-to-cbz")
+            .pair("family", "pages")
+            .pair("in", "image/jpeg,image/png")
+            .pair("out", "application/vnd.comicbook+zip")
+            .pair("ext", "cbz")
+            .pair("label", "CBZ")
+            .pair("group", "book")
+            .pair("cost", "10")
+            .pair("lossy", "no")
             .pair("batch", "yes")
             .pair("join", "yes")
             .pair("min", "1"),
@@ -769,6 +786,278 @@ fn run_join(inv: &Invocation) -> u8 {
     action::EXIT_OK as u8
 }
 
+/// Fewest digits of a CBZ page number: 3, so a book of up to 999 pages
+/// sorts by name in every file manager (`001` ... `999`) and the usual
+/// comic readers, which sort names as text, keep the order. A longer join
+/// widens every name to the digits of the input count (see `cbz_width`).
+const CBZ_MIN_WIDTH: usize = 3;
+
+/// The digits of every page number in a join of `inputs` files: at least
+/// `CBZ_MIN_WIDTH`, else the digits of the count, so all names have one
+/// width and sort as text. The count includes inputs that fail, which can
+/// only make the width one digit too wide, never too narrow.
+fn cbz_width(inputs: usize) -> usize {
+    (inputs.max(1).ilog10() as usize + 1).max(CBZ_MIN_WIDTH)
+}
+
+/// The one output of a CBZ join in progress.
+struct CbzOut {
+    writer: zip::StoreWriter,
+    /// Removes the half-written CBZ on every way out but a finished join:
+    /// the archive has no end record before `finish`, but image data may
+    /// hold one, so a leftover prefix is never kept.
+    partial: Partial,
+}
+
+/// Why an entry could not be added.
+#[derive(Debug, PartialEq)]
+enum AddFail {
+    /// Only this input fails; the writer rolled the entry back.
+    Input(String),
+    /// The whole join fails: the file is in an unknown state or at a limit.
+    Whole(String),
+}
+
+/// Add `len` bytes of `r` as `name`. The writer reads at most `len` bytes
+/// (the size the file had when it was measured, already checked against
+/// `ENTRY_BYTES`), so the file written never passes the size the ceiling
+/// check allowed, even if the source grows while it is copied. A source
+/// that shrinks fails the input as well: a page stored cut short is worse
+/// than a missing one.
+fn add_entry(
+    w: &mut zip::StoreWriter,
+    name: &str,
+    r: &mut impl Read,
+    len: u64,
+) -> Result<(), AddFail> {
+    use zip::WriteError as W;
+    match w.add_exact(name, r, len) {
+        Ok(_) => Ok(()),
+        Err(W::Read(e)) => Err(AddFail::Input(e.to_string())),
+        Err(W::EntryTooLarge | W::EntryTooSmall) => {
+            Err(AddFail::Input("image changed while it was read".into()))
+        }
+        Err(W::ArchiveTooLarge) => Err(AddFail::Whole("CBZ would be larger than 4 GiB".into())),
+        // Unreachable, hence untested here (the writer's own test covers the
+        // error): the run takes at most 1024 inputs, far below the 65 534
+        // entries a ZIP holds without the ZIP64 marker, and the projection
+        // checks the count before an entry is added. The text must still be
+        // true if the limits ever change.
+        Err(W::TooManyEntries) => Err(AddFail::Whole(format!(
+            "CBZ would have more than {} images",
+            zip::MAX_ENTRIES
+        ))),
+        Err(e @ (W::Io(_) | W::Poisoned | W::BadName | W::DuplicateName)) => {
+            Err(AddFail::Whole(format!("cannot write output: {e}")))
+        }
+    }
+}
+
+/// The ceilings before an entry of `len` bytes is written: the ZIP format's
+/// (4 GiB, entry count) and the process's `RLIMIT_FSIZE` (`cap`).
+fn check_ceilings(
+    w: &zip::StoreWriter,
+    name_len: usize,
+    len: u64,
+    cap: Option<u64>,
+) -> Result<(), Whole> {
+    match w.projected_len(name_len, len) {
+        None if w.len() >= zip::MAX_ENTRIES => Err(Whole(format!(
+            "CBZ would have more than {} images",
+            zip::MAX_ENTRIES
+        ))),
+        None => Err(Whole("CBZ would be larger than 4 GiB".into())),
+        Some(total) => match cap {
+            Some(c) if total > c => Err(Whole(format!("CBZ would be larger than {} MiB", c >> 20))),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// A whole-join failure: the half-written CBZ goes (dropping `out`) and
+/// every input that was taken or not yet looked at gets the same `fail`.
+fn fail_cbz_whole<'a>(
+    out: Option<CbzOut>,
+    inputs: impl IntoIterator<Item = &'a Path>,
+    reason: &str,
+    ev: &mut Events<impl Write>,
+) -> u8 {
+    drop(out);
+    for input in inputs {
+        ev.fail(input, reason);
+    }
+    action::EXIT_FAILED as u8
+}
+
+/// Finish the archive. On an error the file goes and every taken input
+/// fails; otherwise the takes and the one `joined` follow.
+fn finish_cbz(o: CbzOut, work: &Path, taken: &[&Path], ev: &mut Events<impl Write>) -> u8 {
+    let CbzOut {
+        writer,
+        mut partial,
+    } = o;
+    if let Err(e) = writer.finish() {
+        let reason = format!("cannot write output: {e}");
+        drop(partial);
+        for input in taken {
+            ev.fail(input, &reason);
+        }
+        return action::EXIT_FAILED as u8;
+    }
+    partial.armed = false;
+    for input in taken {
+        ev.take(input);
+    }
+    let rel = partial.path.strip_prefix(work).unwrap_or(&partial.path);
+    ev.joined(rel);
+    action::EXIT_OK as u8
+}
+
+/// Add one image to the CBZ join. The input's own `skip` or `fail` is
+/// reported here and the join goes on; `Err` fails the whole join.
+fn cbz_one(
+    inv: &Invocation,
+    input: &Path,
+    width: usize,
+    cap: Option<u64>,
+    out: &mut Option<CbzOut>,
+    ev: &mut Events<impl Write>,
+) -> Result<Fate, Whole> {
+    // Opened without waiting (a FIFO fails here) and read as a stream: the
+    // image is never held whole, so memory is one 64 KiB copy buffer.
+    let mut file = match open_input(input) {
+        Ok(f) => f,
+        Err(e) => {
+            ev.fail(input, &e.to_string());
+            return Ok(Fate::Failed);
+        }
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            ev.fail(input, &e.to_string());
+            return Ok(Fate::Failed);
+        }
+    };
+    if len > ENTRY_BYTES {
+        ev.fail(
+            input,
+            &format!("image is larger than {} MiB", ENTRY_BYTES >> 20),
+        );
+        return Ok(Fate::Failed);
+    }
+    // Header check only (the image is stored as it is). A read error is
+    // reported by the sniff as damaged data. `take` bounds the walk if the
+    // file grows after the size check above: the sniff stops at the first
+    // SOF, but a growing file must never make it read without end.
+    let sniffed = match probe::sniff(&mut (&mut file).take(ENTRY_BYTES), MAX_PIXELS) {
+        Ok(s) => s,
+        Err(e) => return Ok(report(input, probe_stop(None, e), ev)),
+    };
+    if let Err(e) = file.seek(SeekFrom::Start(0)) {
+        ev.fail(input, &e.to_string());
+        return Ok(Fate::Failed);
+    }
+
+    if out.is_none() {
+        // Created on the first image that can be taken, so a join with
+        // nothing to take leaves no file and no `join/` folder behind.
+        let path = action::join_path(&inv.work, "cbz");
+        if let Some(dir) = path.parent()
+            && let Err(e) = fs::create_dir_all(dir)
+        {
+            return Err(Whole(format!("cannot create output: {e}")));
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| Whole(format!("cannot create output: {e}")))?;
+        *out = Some(CbzOut {
+            writer: zip::StoreWriter::new(file),
+            partial: Partial { path, armed: true },
+        });
+    }
+    let o = out.as_mut().expect("created above");
+    let name = format!("{:0width$}.{}", o.writer.len() + 1, sniffed.format.ext());
+
+    // The ceilings before anything is written: the projection is the exact
+    // size of the finished archive with this entry (headers, directory and
+    // end record), so no write passes the ZIP format's 4 GiB or the
+    // process's RLIMIT_FSIZE.
+    check_ceilings(&o.writer, name.len(), len, cap)?;
+    match add_entry(&mut o.writer, &name, &mut file, len) {
+        Ok(()) => Ok(Fate::Taken),
+        Err(AddFail::Input(reason)) => {
+            ev.fail(input, &reason);
+            Ok(Fate::Failed)
+        }
+        Err(AddFail::Whole(reason)) => Err(Whole(reason)),
+    }
+}
+
+/// `pages.images-to-cbz`. Events as `run_join`: `take` per image once the
+/// CBZ is finished, `skip`/`fail` per image, `joined` once. A write error
+/// or a ceiling fails the whole join and removes the half-written file.
+fn run_cbz_join(inv: &Invocation) -> u8 {
+    if !inv.work.is_dir() {
+        eprintln!("work directory does not exist: {}", inv.work.display());
+        return action::EXIT_FAILED as u8;
+    }
+    let mut ev = Events::new(io::stdout().lock());
+    let n = inv.inputs.len();
+    ev.progress(0.0);
+    let width = cbz_width(n);
+    let mut taken: Vec<&Path> = Vec::new();
+    let mut any_fail = false;
+    let mut whole: Option<Whole> = None;
+    let mut out: Option<CbzOut> = None;
+    let cap = match output_cap() {
+        Ok(c) => c,
+        Err(e) => {
+            whole = Some(Whole(format!("cannot read the output size limit: {e}")));
+            None
+        }
+    };
+    let mut next = 0;
+    if whole.is_none() {
+        for (i, input) in inv.inputs.iter().enumerate() {
+            if input.to_str().is_none() {
+                ev.skip(input, "non-UTF-8 path");
+                ev.progress((i + 1) as f32 / n as f32);
+                continue;
+            }
+            match cbz_one(inv, input, width, cap, &mut out, &mut ev) {
+                Ok(Fate::Taken) => taken.push(input.as_path()),
+                Ok(Fate::Failed) => any_fail = true,
+                Ok(Fate::Skipped) => {}
+                Err(w) => {
+                    next = i;
+                    whole = Some(w);
+                    break;
+                }
+            }
+            ev.progress((i + 1) as f32 / n as f32);
+        }
+    }
+
+    if let Some(Whole(reason)) = whole {
+        let inputs = taken
+            .iter()
+            .copied()
+            .chain(inv.inputs[next..].iter().map(PathBuf::as_path));
+        return fail_cbz_whole(out, inputs, &reason, &mut ev);
+    }
+    let Some(out) = out else {
+        return if any_fail {
+            action::EXIT_FAILED as u8
+        } else {
+            action::EXIT_UNSUPPORTED as u8
+        };
+    };
+    finish_cbz(out, &inv.work, &taken, &mut ev)
+}
+
 fn main() -> ExitCode {
     let inv = match parse_args(std::env::args_os().skip(1)) {
         Ok(Command::Manifest) => {
@@ -784,6 +1073,7 @@ fn main() -> ExitCode {
     match inv.action.as_str() {
         "pages.cbz-to-pdf" => ExitCode::from(run(&inv)),
         "pages.images-to-pdf" => ExitCode::from(run_join(&inv)),
+        "pages.images-to-cbz" => ExitCode::from(run_cbz_join(&inv)),
         _ => {
             eprintln!("inacircle-pages: unknown action {}", inv.action);
             ExitCode::from(action::EXIT_USAGE as u8)
@@ -883,5 +1173,266 @@ mod tests {
         assert!(is_metadata(b".png"));
         assert!(!is_metadata(b"a/1.png"));
         assert!(!is_metadata(b"__MACOSXX/1.png"));
+    }
+
+    /// A file path under the temp dir, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            Scratch(
+                std::env::temp_dir()
+                    .join(format!("inacircle-pages-unit-{}-{tag}", std::process::id())),
+            )
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn writer(s: &Scratch) -> zip::StoreWriter {
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&s.0)
+            .unwrap();
+        zip::StoreWriter::new(f)
+    }
+
+    #[test]
+    fn cbz_width_is_three_digits_or_the_count_digits() {
+        assert_eq!(cbz_width(0), 3);
+        assert_eq!(cbz_width(1), 3);
+        assert_eq!(cbz_width(999), 3);
+        assert_eq!(cbz_width(1000), 4);
+        assert_eq!(cbz_width(9999), 4);
+        assert_eq!(cbz_width(10_000), 5);
+    }
+
+    #[test]
+    fn a_source_that_shrinks_fails_only_that_entry() {
+        let s = Scratch::new("shrink");
+        let mut w = writer(&s);
+        assert!(add_entry(&mut w, "001.png", &mut &b"abcd"[..], 4).is_ok());
+        // Measured as 4 bytes, yields 2: not stored cut short.
+        let got = add_entry(&mut w, "002.png", &mut &b"ab"[..], 4);
+        assert_eq!(
+            got,
+            Err(AddFail::Input("image changed while it was read".into()))
+        );
+        assert!(add_entry(&mut w, "002.png", &mut &b"wxyz"[..], 4).is_ok());
+        assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn a_source_that_grows_past_its_length_fails_only_that_entry() {
+        let s = Scratch::new("grow");
+        let mut w = writer(&s);
+        assert!(add_entry(&mut w, "001.png", &mut &b"abcd"[..], 4).is_ok());
+        // Measured as 4 bytes, yields 10: the entry is rolled back.
+        let got = add_entry(&mut w, "002.png", &mut &b"0123456789"[..], 4);
+        assert_eq!(
+            got,
+            Err(AddFail::Input("image changed while it was read".into()))
+        );
+        // The writer is usable and the next entry takes the number.
+        assert!(add_entry(&mut w, "002.png", &mut &b"wxyz"[..], 4).is_ok());
+        assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn a_failing_source_fails_only_that_entry() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk gone"))
+            }
+        }
+        let s = Scratch::new("broken");
+        let mut w = writer(&s);
+        let got = add_entry(&mut w, "001.png", &mut Broken, 4);
+        assert_eq!(got, Err(AddFail::Input("disk gone".into())));
+        assert!(add_entry(&mut w, "001.png", &mut &b"abcd"[..], 4).is_ok());
+    }
+
+    #[test]
+    fn a_write_error_fails_the_whole_join_and_the_file_goes() {
+        // A file opened read-only: the first write fails, as ENOSPC would.
+        let s = Scratch::new("ro");
+        fs::write(&s.0, b"").unwrap();
+        let ro = File::open(&s.0).unwrap();
+        let mut out = Some(CbzOut {
+            writer: zip::StoreWriter::new(ro),
+            partial: Partial {
+                path: s.0.clone(),
+                armed: true,
+            },
+        });
+        let o = out.as_mut().unwrap();
+        let got = add_entry(&mut o.writer, "001.png", &mut &b"abcd"[..], 4);
+        assert!(matches!(got, Err(AddFail::Whole(ref r)) if r.starts_with("cannot write output")));
+        // Every later add is refused too (poisoned), then dropping the
+        // output removes the half-written file.
+        let again = add_entry(&mut o.writer, "002.png", &mut &b"abcd"[..], 4);
+        assert!(matches!(again, Err(AddFail::Whole(_))));
+        assert!(s.0.exists());
+        drop(out);
+        assert!(!s.0.exists(), "the half-written CBZ was kept");
+    }
+
+    /// A writer over a read-only file (every write fails, as ENOSPC would)
+    /// and the guard that removes that file.
+    fn read_only_out(s: &Scratch) -> CbzOut {
+        fs::write(&s.0, b"").unwrap();
+        CbzOut {
+            writer: zip::StoreWriter::new(File::open(&s.0).unwrap()),
+            partial: Partial {
+                path: s.0.clone(),
+                armed: true,
+            },
+        }
+    }
+
+    fn event_lines(buf: &[u8], kind: &str) -> Vec<String> {
+        String::from_utf8_lossy(buf)
+            .lines()
+            .filter(|l| l.split('\t').next() == Some(kind))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_finish_error_keeps_no_file_and_fails_every_taken_input() {
+        let s = Scratch::new("finish");
+        let o = read_only_out(&s);
+        let (a, b) = (PathBuf::from("a.png"), PathBuf::from("b.png"));
+        let mut buf = Vec::new();
+        let code = finish_cbz(
+            o,
+            Path::new("/"),
+            &[a.as_path(), b.as_path()],
+            &mut Events::new(&mut buf),
+        );
+        assert_eq!(code, action::EXIT_FAILED as u8);
+        assert!(!s.0.exists(), "the half-written CBZ was kept");
+        assert!(event_lines(&buf, "joined").is_empty());
+        assert!(event_lines(&buf, "take").is_empty());
+        let f = event_lines(&buf, "fail");
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|l| l.contains("cannot write output")), "{f:?}");
+    }
+
+    #[test]
+    fn a_finished_cbz_takes_every_input_and_joins_once() {
+        let s = Scratch::new("finished");
+        let mut o = Some(CbzOut {
+            writer: writer(&s),
+            partial: Partial {
+                path: s.0.clone(),
+                armed: true,
+            },
+        });
+        add_entry(
+            &mut o.as_mut().unwrap().writer,
+            "001.png",
+            &mut &b"abcd"[..],
+            4,
+        )
+        .unwrap();
+        let a = PathBuf::from("a.png");
+        let mut buf = Vec::new();
+        let code = finish_cbz(
+            o.take().unwrap(),
+            s.0.parent().unwrap(),
+            &[a.as_path()],
+            &mut Events::new(&mut buf),
+        );
+        assert_eq!(code, action::EXIT_OK as u8);
+        assert!(s.0.exists());
+        assert_eq!(event_lines(&buf, "take").len(), 1);
+        assert_eq!(event_lines(&buf, "joined").len(), 1);
+        assert!(event_lines(&buf, "fail").is_empty());
+    }
+
+    #[test]
+    fn a_projection_past_four_gib_fails_the_whole_join() {
+        let s = Scratch::new("fourgib");
+        let o = read_only_out(&s);
+        // One entry whose data alone cannot fit the 32 bit fields.
+        let got = check_ceilings(&o.writer, 7, u64::from(u32::MAX), None);
+        let Err(Whole(reason)) = got else {
+            panic!("a 4 GiB entry passed the ceilings");
+        };
+        assert_eq!(reason, "CBZ would be larger than 4 GiB");
+        // The join then fails: no file, no joined, every input gets the copy.
+        let (a, b) = (PathBuf::from("a.png"), PathBuf::from("b.png"));
+        let mut buf = Vec::new();
+        let code = fail_cbz_whole(
+            Some(o),
+            [a.as_path(), b.as_path()],
+            &reason,
+            &mut Events::new(&mut buf),
+        );
+        assert_eq!(code, action::EXIT_FAILED as u8);
+        assert!(!s.0.exists(), "the half-written CBZ was kept");
+        assert!(event_lines(&buf, "joined").is_empty());
+        let f = event_lines(&buf, "fail");
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(
+            f.iter()
+                .all(|l| l.ends_with("CBZ would be larger than 4 GiB"))
+        );
+    }
+
+    #[test]
+    fn the_rlimit_ceiling_names_its_size_and_a_fit_passes() {
+        let s = Scratch::new("cap");
+        let o = read_only_out(&s);
+        let Err(Whole(r)) = check_ceilings(&o.writer, 7, 2 << 20, Some(1 << 20)) else {
+            panic!("over the cap passed");
+        };
+        assert_eq!(r, "CBZ would be larger than 1 MiB");
+        assert!(check_ceilings(&o.writer, 7, 4096, Some(1 << 20)).is_ok());
+    }
+
+    #[test]
+    fn the_rlimit_ceiling_allows_exactly_the_projected_size() {
+        let s = Scratch::new("capedge");
+        let o = read_only_out(&s);
+        let total = o.writer.projected_len(7, 4096).unwrap();
+        assert!(check_ceilings(&o.writer, 7, 4096, Some(total)).is_ok());
+        let Err(Whole(r)) = check_ceilings(&o.writer, 7, 4096, Some(total - 1)) else {
+            panic!("one byte over the cap passed");
+        };
+        assert!(r.starts_with("CBZ would be larger than"), "{r}");
+    }
+
+    #[test]
+    fn the_entry_count_has_its_own_copy() {
+        let s = Scratch::new("count");
+        let mut w = writer(&s);
+        // 65 534 empty entries fill the archive's count.
+        for i in 0..zip::MAX_ENTRIES {
+            add_entry(&mut w, &format!("{i:05}.png"), &mut &b""[..], 0).unwrap();
+        }
+        let Err(Whole(r)) = check_ceilings(&w, 9, 0, None) else {
+            panic!("one entry too many passed");
+        };
+        assert_eq!(r, "CBZ would have more than 65534 images");
+    }
+
+    #[test]
+    fn a_disarmed_partial_keeps_its_file() {
+        let s = Scratch::new("kept");
+        fs::write(&s.0, b"x").unwrap();
+        drop(Partial {
+            path: s.0.clone(),
+            armed: false,
+        });
+        assert!(s.0.exists());
     }
 }
