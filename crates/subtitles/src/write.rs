@@ -21,12 +21,15 @@ fn has_text(line: &Line) -> bool {
 
 /// Writes text with each line break as a space (a blank line would end the
 /// cue) and, for WebVTT, escapes `&`, `<` and `>`. Escaping `>` also keeps
-/// `-->` out of the text, where it would read as a timing line.
+/// `-->` out of the text, where it would read as a timing line. A NUL is
+/// written as U+FFFD: WebVTT's parse rule reads it so, and the SRT reader
+/// would keep the raw byte, which no text file can show.
 fn write_text(out: &mut impl Write, text: &str, vtt: bool) -> io::Result<()> {
     let mut start = 0;
     for (i, c) in text.char_indices() {
         let replacement = match c {
             '\r' | '\n' => " ",
+            '\0' => "\u{fffd}",
             '&' if vtt => "&amp;",
             '<' if vtt => "&lt;",
             '>' if vtt => "&gt;",

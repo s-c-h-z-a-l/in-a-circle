@@ -331,3 +331,18 @@ fn whitespace_only_line_is_dropped_in_srt_and_vtt() {
     assert_eq!(back.cues.len(), 1);
     assert_eq!(texts(&back.cues[0]), ["a", "b"]);
 }
+
+/// A NUL cannot be shown, and WebVTT's parse rule reads it as U+FFFD, so both
+/// writers write U+FFFD for it. Written raw, a WebVTT NUL would read back
+/// changed.
+#[test]
+fn nul_is_written_as_the_replacement_character() {
+    let cues = [cue(0, 1_000, vec![plain("x\0y")])];
+    let (s, _) = srt(&cues);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\nx\u{fffd}y\r\n\r\n"
+    );
+    let (v, _) = vtt(&cues);
+    assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\u{fffd}y\n\n");
+}

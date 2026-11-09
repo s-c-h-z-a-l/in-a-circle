@@ -40,7 +40,9 @@ fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
                         text.push_str(": ");
                     }
                     for run in &line.runs {
-                        text.push_str(&run.text);
+                        // A NUL is written as U+FFFD, so that is what reads
+                        // back; the writers replace it (both formats).
+                        text.push_str(&run.text.replace('\0', "\u{fffd}"));
                     }
                     let trimmed = text.trim();
                     (!trimmed.is_empty()).then(|| trimmed.to_owned())
