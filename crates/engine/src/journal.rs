@@ -6093,6 +6093,39 @@ mod tests {
         });
     }
 
+    /// hardening-2 #3, crash safety: job state is derived from the groups'
+    /// own records (no second, job-level state to disagree with them). A
+    /// partial undo, then a crash inside the retry, then another retry:
+    /// the group already in the Trash is reported from its record and
+    /// never moved again; the crashed one is recovered; then the job closes.
+    #[test]
+    fn a_partial_undo_survives_a_crash_in_the_retry() {
+        let t = Tmp::new("partial-crash");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "da"), ("b", "db")]);
+            let in_trash = || fs::read_dir(t.trash().join("files")).unwrap().count();
+            {
+                let mut n = 0;
+                let _f = fault(move |p| {
+                    n += (p == Point::Rename) as u32;
+                    (p == Point::Rename && n == 2).then_some(libc::EPERM)
+                });
+                assert_eq!(kept(&undo(&job).unwrap()).len(), 1);
+            }
+            assert_eq!(in_trash(), 1);
+            // Only b is tried again (a's record is closed): the crash is b's.
+            crash_at(&job, Point::BeforeMove);
+            assert_eq!(in_trash(), 1, "the crash moved nothing twice");
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &f), "{:?}", r.groups);
+            assert_eq!(in_trash(), 2, "each group moved exactly once");
+            // Idempotent at the end: the job is closed, nothing moves.
+            assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(in_trash(), 2);
+        });
+    }
+
     #[test]
     fn undo_twice_is_already_exists() {
         let t = Tmp::new("twice");
