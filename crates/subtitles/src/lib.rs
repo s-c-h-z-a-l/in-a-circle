@@ -5,10 +5,29 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+mod srt;
 mod time;
 mod write;
 
 pub use write::{write_srt, write_vtt};
+
+/// Reads an SRT file as a media player would. Refused past [`INPUT_BYTES`]
+/// before anything is parsed, refused when it is not UTF-8, and refused with
+/// [`ReadError::NoCues`] when no cue in it is usable. A byte order mark is
+/// skipped. Everything else is read leniently: see `srt.rs` for the rules.
+pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
+    if bytes.len() > INPUT_BYTES {
+        return Err(ReadError::TooLarge);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|e| ReadError::NotUtf8 {
+        at: e.valid_up_to(),
+    })?;
+    let parsed = srt::parse(text.strip_prefix('\u{feff}').unwrap_or(text));
+    if parsed.cues.is_empty() {
+        return Err(ReadError::NoCues);
+    }
+    Ok(parsed)
+}
 
 /// Largest subtitle input, in bytes. 8 MiB is the text family's input budget
 /// too, so one size limit covers both families. A file past it fails before

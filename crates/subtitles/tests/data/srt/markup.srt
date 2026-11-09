@@ -1,0 +1,26 @@
+1
+00:00:01,000 --> 00:00:02,000
+{\an8}Top line
+<i>italic</i>
+
+2
+00:00:03,000 --> 00:00:04,000
+{\i1}ass italic{\i0} plain {\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#ff0000">red</font> text
+{\c&H00FF00&}green {\u1}under{\u0}
+
+4
+00:00:07,000 --> 00:00:08,000
+<c.yellow>tag</c> &amp; kept as written
+
+5
+00:00:09,000 --> 00:00:10,000
+{\an2}bottom, not top
+<I>upper case</I> <i>nested <b>both</b></i>
+
+6
+00:00:11,000 --> 00:00:12,000
+{\an9}top right
