@@ -65,15 +65,27 @@ none of the `doc`, `epub` or `zip` crates
 
 | Machine | Series | p95 |
 |---|---|---|
-| Reference desktop | text drop to stage-2 commit | pending (manual run) |
-| ThinkCentre | text drop to stage-2 commit | pending (manual run) |
+| Reference desktop | `main` (plan 12, feccfcb0), Markdown to Document, N=13 | p50 157, p95 190, max 190 us |
+| Reference desktop | this branch, Markdown to Document, N=12 | p50 158, p95 178, max 178 us |
+| ThinkCentre | Markdown to Document | not measured (not a gate) |
+
+Hand-made drags on the reference desktop, `INACIRCLE_MEASURE=1`, the two
+builds alternating, one log per series. The small-sample rule of
+[acceptance.md](acceptance.md) applies: the largest p95 (190 us) is 19% of
+the 1,000 us budget (limit 25%), the standard deviations are 13 us (8% of
+the p50) and 11 us (7%), and the branch's p95 is 6.3% below the baseline's,
+which comes from a single 190 us sample (the means are both 158 us). There
+is no regression. Eleven drags of a `.epub` on the baseline build, which
+has no action for one, are in its log as failed attempts, not valid
+observations.
 
 ## Verdict
 
 Memory: the largest accepted input peaks at about 105 MiB of RSS, far
 below the smallest `RLIMIT_DATA` net (1 GiB), so the limits and the net
 agree. Size: inside the budgets, with the growth explained. The drop to
-stage 2 is open until the two series above are recorded.
+stage 2 holds its budget on the reference desktop (p95 178-190 us against
+1,000 us); the second machine was not measured.
 
 ## Reproduce
 

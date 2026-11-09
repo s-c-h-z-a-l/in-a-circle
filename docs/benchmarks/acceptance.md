@@ -53,8 +53,11 @@ guarantee for the tail. Increase the sample count when repeatability is poor.
 observations** when all three hold: the p95 is at most 25% of the metric's
 budget; the population standard deviation is at most 10% of the p50; and
 every failed attempt is documented. For an A/B comparison both variants
-must meet this, and the two p95 must differ by 5% or less; a larger
-difference needs the full 50. Fewer than 10, a p95 above a quarter of the
+must meet this, and the candidate's p95 must not exceed the baseline's by
+more than 5%; a larger worsening needs the full 50. A lower candidate p95
+passes at any size: it cannot be a regression. (Clarified after plan 13's
+first series, where the candidate's p95 was 6.3% below the baseline's and
+the earlier wording, "differ by 5% or less", would have asked for 50.) Fewer than 10, a p95 above a quarter of the
 budget or a wider spread leaves the 50-observation rule in force. Reason:
 a CPU-time metric with a spread this small gives the same p50 and p95 at 10
 samples as at 50 (plan 11: standard deviation 5%, p95 17% of the budget), so
