@@ -79,6 +79,28 @@ is no regression. Eleven drags of a `.epub` on the baseline build, which
 has no action for one, are in its log as failed attempts, not valid
 observations.
 
+### Drop to stage 2, Markdown joins
+
+Many Markdown files to one EPUB, and one Markdown file with its images to
+one EPUB (the Book group), on the reference desktop: hand-made drags,
+`INACIRCLE_MEASURE=1`, drop on the Book slice, Esc on the second wheel.
+`main` (plan 13, 0438fc78) is the baseline where it offers the same slice;
+for the Markdown plus 31 images it offers no EPUB, so there is no baseline.
+
+| Series | Valid | p50 | p95 | max | sd |
+|---|---|---|---|---|---|
+| `main`, 30 Markdown files | 23 | 156 us | 164 us | 173 us | 6 us |
+| this branch, 30 Markdown files | 25 | 153 us | 164 us | 164 us | 6 us |
+| this branch, 1 Markdown + 30 JPEG | 23 | 158 us | 169 us | 169 us | 6 us |
+
+The p95 is at most 17% of the 1,000 us budget and the spread 4% of the p50,
+so the small-sample rule of [acceptance.md](acceptance.md) applies and the
+series are well above its 10 observations. The two 30-file series have the
+same p95, so there is no regression. The second machine was not measured.
+By hand: the 30 files made one EPUB of 30 chapters and the Markdown with
+its images made one of 3 documents and 30 images, both with 0 errors and
+0 warnings from `epubcheck`.
+
 ## Verdict
 
 Memory: the largest accepted input peaks at about 105 MiB of RSS, far
