@@ -14,7 +14,14 @@
 //! independent evidence: the same times, top flag and text per line must come
 //! back, and the output must have no block the reader skips. SRT writes a
 //! speaker as a `Name: ` prefix, so its text includes the prefix; WebVTT writes
-//! it as a tag, which the reader sets as the voice, so the text does not.
+//! it as a tag, which the reader sets as the voice, so the text does not. A
+//! `<` that opens a tag in SRT is written as U+FF1C, a look-alike, so the SRT
+//! text expects it there; the rule is the reader's own (`tag.rs`, included
+//! from the crate, so there is one source).
+
+// The SRT reader's tag rule, the same file the crate builds with.
+#[path = "../../../crates/subtitles/src/tag.rs"]
+mod tag;
 
 use subtitles::{
     Cue, INPUT_BYTES, MAX_MS, Parsed, ReadError, read_srt, read_vtt, sort_cues, write_srt,
@@ -26,6 +33,20 @@ use subtitles::{
 /// trim every line (a line of spaces is a blank line), so the spaces at a
 /// line's ends do not come back; a line of spaces is no text on either side.
 type Shape = Vec<(u64, u64, bool, Vec<String>)>;
+
+/// The SRT writer's look-alike: a `<` that opens a tag for the reader becomes
+/// U+FF1C (the writer judges the same text, the speaker's prefix included).
+fn look_alike(text: &str) -> String {
+    text.char_indices()
+        .map(|(i, c)| {
+            if c == '<' && tag::opens_tag(&text[i..]) {
+                '\u{ff1c}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
 
 fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
     cues.iter()
@@ -44,6 +65,11 @@ fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
                         // back; the writers replace it (both formats).
                         text.push_str(&run.text.replace('\0', "\u{fffd}"));
                     }
+                    let text = if voice_prefix {
+                        look_alike(&text)
+                    } else {
+                        text
+                    };
                     let trimmed = text.trim();
                     (!trimmed.is_empty()).then(|| trimmed.to_owned())
                 })

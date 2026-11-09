@@ -3,6 +3,7 @@ use subtitles::{INPUT_BYTES, Loss, OUTPUT_BYTES, ReadError};
 #[test]
 fn loss_order_is_the_warning_order() {
     let mut all = vec![
+        Loss::Brackets,
         Loss::VoiceNames,
         Loss::Settings,
         Loss::Drawing,
@@ -20,6 +21,7 @@ fn loss_order_is_the_warning_order() {
             Loss::Drawing,
             Loss::Settings,
             Loss::VoiceNames,
+            Loss::Brackets,
         ]
     );
 }
@@ -34,6 +36,10 @@ fn loss_messages_are_the_user_text() {
     assert_eq!(
         Loss::VoiceNames.message(),
         "speaker names written as 'Name:' prefixes"
+    );
+    assert_eq!(
+        Loss::Brackets.message(),
+        "angle brackets in text written as look-alikes"
     );
 }
 

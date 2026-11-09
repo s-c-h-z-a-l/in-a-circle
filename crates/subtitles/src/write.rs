@@ -1,8 +1,11 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::rc::Rc;
 
+use crate::tag::opens_tag;
 use crate::time::write_time;
-use crate::{Cue, Line, Loss, has_text};
+use crate::{Cue, Line, Loss, Run, has_text};
 
 /// UTF-8 byte order mark. Older TVs and Windows tools read an SRT as UTF-8
 /// only when it starts with one; WebVTT is written without it, as its
@@ -59,6 +62,59 @@ fn write_runs(out: &mut impl Write, line: &Line, vtt: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// The line as the SRT reader reads it back. Each `<` that opens a tag (the
+/// reader's own rule, `tag::opens_tag`) becomes U+FF1C, a look-alike that no
+/// reader takes for markup. The decision is made on the line's plain text, the
+/// speaker's `Name: ` prefix included, so a `<` at the end of a run is judged
+/// by the next run's first character, as the reader will see it. The line is
+/// borrowed when no `<` needs changing.
+fn srt_safe(line: &Line) -> Cow<'_, Line> {
+    let mut pieces: Vec<&str> = Vec::new();
+    if let Some(name) = &line.voice {
+        pieces.push(name);
+        pieces.push(": ");
+    }
+    pieces.extend(line.runs.iter().map(|r| r.text.as_str()));
+    let plain = pieces.concat();
+    if !plain
+        .match_indices('<')
+        .any(|(i, _)| opens_tag(&plain[i..]))
+    {
+        return Cow::Borrowed(line);
+    }
+    // Each piece starts at `at` in the plain text; its `<` are judged there.
+    let mut at = 0;
+    let mut next = |text: &str| {
+        let fixed = text
+            .char_indices()
+            .map(|(i, c)| {
+                if c == '<' && opens_tag(&plain[at + i..]) {
+                    '\u{ff1c}'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>();
+        at += text.len();
+        fixed
+    };
+    let voice: Option<Rc<str>> = line.voice.as_deref().map(|name| Rc::from(next(name)));
+    if line.voice.is_some() {
+        next(": ");
+    }
+    let runs = line
+        .runs
+        .iter()
+        .map(|r| Run {
+            text: next(&r.text),
+            italic: r.italic,
+            bold: r.bold,
+            underline: r.underline,
+        })
+        .collect();
+    Cow::Owned(Line { voice, runs })
+}
+
 /// Writes cues as SRT: a BOM, CRLF, numbers from 1 over the cues written, a
 /// speaker as a `Name: ` prefix, and `{\an8}` before the first line of a top
 /// cue. Cues are written in the given order. Cues with no text write nothing,
@@ -69,6 +125,7 @@ fn write_runs(out: &mut impl Write, line: &Line, vtt: bool) -> io::Result<()> {
 /// small writes.
 pub fn write_srt(cues: &[Cue], out: &mut impl Write) -> io::Result<BTreeMap<Loss, usize>> {
     let mut voiced = 0;
+    let mut brackets = 0;
     let mut number = 0;
     for cue in cues.iter().filter(|c| c.lines.iter().any(has_text)) {
         if number == 0 {
@@ -81,7 +138,11 @@ pub fn write_srt(cues: &[Cue], out: &mut impl Write) -> io::Result<BTreeMap<Loss
         write_time(out, cue.end_ms, ',')?;
         out.write_all(b"\r\n")?;
         let mut has_voice = false;
+        let mut looked = false;
         for (i, line) in cue.lines.iter().filter(|l| has_text(l)).enumerate() {
+            let safe = srt_safe(line);
+            looked |= matches!(safe, Cow::Owned(_));
+            let line = &*safe;
             if cue.top && i == 0 {
                 out.write_all(b"{\\an8}")?;
             }
@@ -95,10 +156,14 @@ pub fn write_srt(cues: &[Cue], out: &mut impl Write) -> io::Result<BTreeMap<Loss
         }
         out.write_all(b"\r\n")?;
         voiced += usize::from(has_voice);
+        brackets += usize::from(looked);
     }
     let mut losses = BTreeMap::new();
     if voiced > 0 {
         losses.insert(Loss::VoiceNames, voiced);
+    }
+    if brackets > 0 {
+        losses.insert(Loss::Brackets, brackets);
     }
     Ok(losses)
 }

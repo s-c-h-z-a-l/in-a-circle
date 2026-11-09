@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 mod ass;
 mod srt;
+mod tag;
 mod time;
 mod vtt;
 mod write;
@@ -161,6 +162,7 @@ pub enum Loss {
     Drawing,
     Settings,
     VoiceNames,
+    Brackets,
 }
 
 impl Loss {
@@ -173,6 +175,7 @@ impl Loss {
             Loss::Drawing => "drawings removed",
             Loss::Settings => "style and region blocks ignored",
             Loss::VoiceNames => "speaker names written as 'Name:' prefixes",
+            Loss::Brackets => "angle brackets in text written as look-alikes",
         }
     }
 }

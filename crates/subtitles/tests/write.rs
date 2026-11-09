@@ -158,9 +158,14 @@ fn arrow_and_markup_are_escaped_in_vtt() {
         "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\na --&gt; b &amp; &lt;c&gt; d &amp;amp; e\n\n"
     );
 
-    // SRT text is written as it is; its readers do not read markup escapes.
-    let (s, _) = srt(&cues);
-    assert!(s.contains(&format!("\r\n{text}\r\n")), "{s:?}");
+    // SRT has no escapes its reader reads, so the `<` of `<c>` is a look-alike;
+    // `-->` and `&` are not markup and stay.
+    let (s, losses) = srt(&cues);
+    assert!(
+        s.contains("\r\na --> b & \u{ff1c}c> d &amp; e\r\n"),
+        "{s:?}"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
 }
 
 #[test]
@@ -345,4 +350,76 @@ fn nul_is_written_as_the_replacement_character() {
     );
     let (v, _) = vtt(&cues);
     assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\u{fffd}y\n\n");
+}
+
+/// Text that the SRT reader would take for a tag is written with a look-alike
+/// (U+FF1C), so the file reads back with the text and no markup. The VTT text
+/// `a &lt;b&gt; c` holds the literal `<b>`.
+#[test]
+fn literal_tag_like_text_is_not_read_back_as_markup() {
+    let parsed = read_vtt(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\na &lt;b&gt; c\n\n")
+        .expect("the input has a cue");
+    let mut out = Vec::new();
+    let losses = write_srt(&parsed.cues, &mut out).expect("writing to a Vec cannot fail");
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+    let back = read_srt(&out).expect("the SRT output reads back");
+    assert_eq!(back.skipped.count, 0);
+    assert_eq!(
+        back.cues[0].lines,
+        vec![Line {
+            voice: None,
+            runs: vec![run("a \u{ff1c}b> c")],
+        }]
+    );
+    // A `<` that ends a run is judged with the next run: the next run's `b`
+    // makes `<b` a tag, so the `<` is the look-alike and the `b` stays italic.
+    let split = [cue(
+        0,
+        1_000,
+        vec![Line {
+            voice: None,
+            runs: vec![
+                run("a <"),
+                Run {
+                    italic: true,
+                    ..run("b")
+                },
+            ],
+        }],
+    )];
+    let (s, _) = srt(&split);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na \u{ff1c}<i>b</i>\r\n\r\n"
+    );
+}
+
+/// Only a `<` that opens a tag (`<` then a letter, or `</` then a letter) is
+/// changed; `>`, `<` before a space, a digit or a sign stay as they are.
+#[test]
+fn non_tag_angle_bracket_is_left_alone() {
+    let cues = [cue(
+        0,
+        1_000,
+        vec![plain("a < b"), plain("<3 love > you"), plain("x <- y >")],
+    )];
+    let (s, losses) = srt(&cues);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na < b\r\n<3 love > you\r\nx <- y >\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+}
+
+/// The look-alike is counted as a loss once per cue, however many `<` the cue
+/// has; a cue with none adds nothing.
+#[test]
+fn srt_writer_reports_brackets_loss_once_per_cue() {
+    let cues = [
+        cue(0, 1_000, vec![plain("<a"), plain("<b>"), plain("c")]),
+        cue(1_000, 2_000, vec![plain("<c")]),
+        cue(2_000, 3_000, vec![plain("no brackets")]),
+    ];
+    let (_, losses) = srt(&cues);
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 2)]));
 }

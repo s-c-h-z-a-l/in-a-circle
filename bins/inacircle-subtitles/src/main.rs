@@ -292,7 +292,7 @@ impl<W: Write> Write for Capped<W> {
 /// The `warn` lines of one converted input: the skipped cues first (the count
 /// and the first one's line and reason), then one line per kind of loss, in
 /// `Loss` order, counted in cues. The reader's and the writer's counts of a
-/// kind are summed. At most seven lines (six kinds and the skipped line),
+/// kind are summed. At most eight lines (seven kinds and the skipped line),
 /// under the engine's cap of 16 `warn` per input.
 fn warnings(parsed: &Parsed, writer: BTreeMap<Loss, usize>) -> Vec<String> {
     let mut lines = Vec::new();

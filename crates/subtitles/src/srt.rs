@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::tag::opens_tag;
 use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped, has_text};
 
 const MS_PER_SECOND: u64 = 1_000;
@@ -390,8 +391,7 @@ fn emit(
 /// Length of a tag starting at `tail`: `<`, an optional `/`, an ASCII letter,
 /// then up to and including the next `>`.
 fn tag_len(tail: &str, scan: &mut Scan) -> Option<usize> {
-    let body = tail[1..].strip_prefix('/').unwrap_or(&tail[1..]);
-    if scan.no_gt || !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
+    if scan.no_gt || !opens_tag(tail) {
         return None;
     }
     let len = tail.find('>').map(|i| i + 1);

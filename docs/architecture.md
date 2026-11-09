@@ -714,16 +714,19 @@ are in `CLAUDE.md`.
     removed no text, so they are not counted.
 - The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
   a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
-  `<i> <b> <u>` are kept. WebVTT has no byte order mark, LF only, ` line:0` on
-  a top cue, `<v Name>` for a speaker, and `<i> <b> <u>`; in its text `&`, `<`
-  and `>` are escaped. In both, a line break inside a cue becomes a space, a
-  NUL becomes U+FFFD, a line of only white space and a cue with no text are
-  dropped, and a blank line ends a cue.
-- The subtitle `warn` lines, at most seven per input: first the skipped cues
+  `<i> <b> <u>` are kept. The SRT reader has no escapes, so a `<` that would
+  open a tag for it (`<` then a letter, or `</` then a letter) is written as
+  U+FF1C, a look-alike, counted once per cue as `Brackets`. WebVTT has no byte
+  order mark, LF only, ` line:0` on a top cue, `<v Name>` for a speaker, and
+  `<i> <b> <u>`; in its text `&`, `<` and `>` are escaped. In both, a line
+  break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
+  white space and a cue with no text are dropped, and a blank line ends a cue.
+- The subtitle `warn` lines, at most eight per input: first the skipped cues
   (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
   including text outside any cue), then one line per kind of loss in the order
   of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
-  drawings; style and region blocks; speaker names written as prefixes), each
+  drawings; style and region blocks; speaker names written as prefixes; angle
+  brackets in text written as look-alikes), each
   counted in cues as `(N cues)`. The reader's and the writer's counts of one
   kind are added together. That is far under the engine's 16 `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
