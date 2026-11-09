@@ -999,6 +999,19 @@ impl Recorder {
                 false
             }
         };
+        // The reader refuses a longer path for good (`path_dec`): refuse it
+        // here, before anything is published, not after.
+        if private_path
+            .as_os_str()
+            .len()
+            .max(group.directory.as_os_str().len())
+            > HISTORY_PATH_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a path exceeds the history safety limit",
+            ));
+        }
         let (job, private) = (self.job_field.clone(), path_enc(private_path));
         let target = path_enc(&group.directory);
         let (op, gid) = (group.op.0, group.group.0);
@@ -2749,7 +2762,9 @@ impl trash::Log for HistLog<'_> {
             i.mount,
             i.date,
         );
-        if line.len() > RECOVERY_INTENT_MAX_BYTES {
+        if line.len() > RECOVERY_INTENT_MAX_BYTES
+            || i.source.len().max(i.target.len()) > HISTORY_PATH_BYTES
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "recovery intent exceeds the safety limit",
@@ -5758,15 +5773,14 @@ mod tests {
                 };
                 trash::Log::intent(&mut log, &i)
             };
-            let before = fs::metadata(history_path()).unwrap().len();
+            // The documented bound: a path of at most `HISTORY_PATH_BYTES`
+            // raw bytes, in `%XX` form the worst case (the reader's limit
+            // is on the decoded bytes, so a longer one could never be read
+            // back). hardening-2 #4.
             intent(b"/").unwrap();
-            let frame = fs::metadata(history_path()).unwrap().len() - before - 1;
-            let fill = vec![b'a'; RECOVERY_INTENT_MAX_BYTES - frame as usize];
-            intent(&fill).unwrap();
+            intent(&vec![0u8; HISTORY_PATH_BYTES]).unwrap();
             let len = fs::metadata(history_path()).unwrap().len();
-            let mut over = fill.clone();
-            over.push(b'a');
-            let e = intent(&over).unwrap_err();
+            let e = intent(&vec![b'a'; HISTORY_PATH_BYTES + 1]).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(fs::metadata(history_path()).unwrap().len(), len);
         });
@@ -6043,6 +6057,39 @@ mod tests {
             assert_eq!(r.groups.len(), 2);
             // Every group is final now: the job is closed.
             assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        });
+    }
+
+    /// hardening-2 #4: a path the reader refuses (over `HISTORY_PATH_BYTES`
+    /// decoded) is refused by the writer before anything is published,
+    /// not recorded and published, with its undo refused for good.
+    #[test]
+    fn the_writer_refuses_a_path_the_reader_would() {
+        let t = Tmp::new("longpath");
+        t.env(|| {
+            let job = new_job_id();
+            let mut rec = Recorder::open(&job, "convert");
+            // The target itself fits; the private folder inside it
+            // (`/.inacircle-<16 hex>/w`) does not.
+            let mut dir = t.0.join("deep");
+            while dir.as_os_str().len() < HISTORY_PATH_BYTES - 16 {
+                let room = HISTORY_PATH_BYTES - 16 - dir.as_os_str().len();
+                dir.push("d".repeat(room.clamp(2, 200) - 1));
+            }
+            assert!(dir.as_os_str().len() <= HISTORY_PATH_BYTES);
+            fs::create_dir_all(&dir).unwrap();
+            let root = t.0.join("producer-long");
+            fs::create_dir_all(root.join("0")).unwrap();
+            fs::write(root.join("0/x.md"), "d").unwrap();
+            let rels = [PathBuf::from("0/x.md")];
+            let e = match output::publish_beneath(&root, &rels, &dir, "a", "md", &mut |g, p| {
+                rec.prepare_group(g, p)
+            }) {
+                Err(e) => e,
+                Ok(_) => panic!("published a group the reader would refuse"),
+            };
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing published");
         });
     }
 
