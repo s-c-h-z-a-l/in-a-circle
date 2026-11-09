@@ -10,9 +10,13 @@ use crate::{Cue, Line, Loss};
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// A line is written only if it has text: an empty line ends a cue in both
-/// formats, so a blank line inside a cue would split it.
+/// formats, so a blank line inside a cue would split it. Text is anything but
+/// white space (the set `str::trim` removes): the readers trim each line, so a
+/// line of only white space would read back as a blank line.
 fn has_text(line: &Line) -> bool {
-    line.runs.iter().any(|r| !r.text.is_empty())
+    line.runs
+        .iter()
+        .any(|r| r.text.chars().any(|c| !c.is_whitespace()))
 }
 
 /// Writes text with each line break as a space (a blank line would end the

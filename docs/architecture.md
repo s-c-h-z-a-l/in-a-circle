@@ -716,7 +716,8 @@ are in `CLAUDE.md`.
   `<i> <b> <u>` are kept. WebVTT has no byte order mark, LF only, ` line:0` on
   a top cue, `<v Name>` for a speaker, and `<i> <b> <u>`; in its text `&`, `<`
   and `>` are escaped. In both, a line break inside a cue becomes a space,
-  a cue with no text is dropped, and a blank line ends a cue.
+  a line of only white space and a cue with no text are dropped, and a blank
+  line ends a cue.
 - The subtitle `warn` lines, at most seven per input: first the skipped cues
   (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
   including text outside any cue), then one line per kind of loss in the order

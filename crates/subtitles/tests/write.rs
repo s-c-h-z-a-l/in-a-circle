@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use subtitles::{Cue, Line, Loss, MAX_MS, Run, sort_cues, write_srt, write_vtt};
+use subtitles::{
+    Cue, Line, Loss, MAX_MS, Run, read_srt, read_vtt, sort_cues, write_srt, write_vtt,
+};
 
 const BOM: &str = "\u{feff}";
 
@@ -287,4 +289,45 @@ fn line_breaks_in_text_become_spaces() {
     );
     let (v, _) = vtt(&cues);
     assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\na  b\n\n");
+}
+
+/// The text of each line of a cue, runs joined.
+fn texts(cue: &Cue) -> Vec<String> {
+    cue.lines
+        .iter()
+        .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect())
+        .collect()
+}
+
+/// A line of white space only is no text. The SRT reader trims each line, so
+/// it would read a tab or a no-break space as a blank line, end the cue there
+/// and lose the lines after it. Both writers drop such a line, and a cue of
+/// only such lines is dropped as an empty cue.
+#[test]
+fn whitespace_only_line_is_dropped_in_srt_and_vtt() {
+    let cues = [
+        cue(
+            0,
+            1_000,
+            vec![plain("a"), plain("\t"), plain("\u{a0}"), plain("b")],
+        ),
+        cue(1_000, 2_000, vec![plain(" \r\n "), plain("\u{3000}")]),
+    ];
+    let (s, _) = srt(&cues);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na\r\nb\r\n\r\n"
+    );
+    let (v, _) = vtt(&cues);
+    assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\na\nb\n\n");
+
+    // Read back, "b" is still in the cue and nothing is skipped.
+    let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+    assert_eq!(back.skipped.count, 0);
+    assert_eq!(back.cues.len(), 1);
+    assert_eq!(texts(&back.cues[0]), ["a", "b"]);
+    let back = read_vtt(v.as_bytes()).expect("the WebVTT output reads back");
+    assert_eq!(back.skipped.count, 0);
+    assert_eq!(back.cues.len(), 1);
+    assert_eq!(texts(&back.cues[0]), ["a", "b"]);
 }
