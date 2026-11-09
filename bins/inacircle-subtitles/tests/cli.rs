@@ -371,6 +371,40 @@ fn oversize_input_fails() {
     assert!(files(&work).is_empty());
 }
 
+/// A path that is not a regular file fails with the read's own reason. Only a
+/// file over the input limit gets the size message.
+#[test]
+fn directory_input_fails_as_not_a_regular_file() {
+    let root = tmp("notfile");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let dir = root.join("dir.srt");
+    fs::create_dir_all(&dir).unwrap();
+    let o = run("subtitles.srt-to-vtt", &work, &[&dir]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "fail")[0][2], "not a regular file", "{out}");
+    assert!(files(&work).is_empty());
+}
+
+/// A path that is not UTF-8 is unsupported, not failed: a batch of only such
+/// inputs exits 3, the code for nothing usable.
+#[test]
+fn non_utf8_path_alone_exits_unsupported() {
+    use std::os::unix::ffi::OsStrExt;
+    let root = tmp("nonutf8");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join(std::ffi::OsStr::from_bytes(b"bad\xff.srt"));
+    fs::write(&a, b"1\n00:00:01,000 --> 00:00:02,000\nhi\n\n").unwrap();
+    let o = run("subtitles.srt-to-vtt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(3), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "skip")[0][2], "non-UTF-8 path", "{out}");
+    assert!(lines(&out, "fail").is_empty());
+    assert!(files(&work).is_empty());
+}
+
 /// A small input can make a large output: `&` becomes `&amp;` in WebVTT, so
 /// a 7 MiB cue of `&` is 35 MiB. The write past 32 MiB fails the input, and
 /// the half-written file is removed.

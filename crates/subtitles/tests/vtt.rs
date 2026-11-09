@@ -361,6 +361,49 @@ fn bad_cue_in_the_middle_is_skipped_rest_converts() {
     );
 }
 
+#[test]
+fn end_at_100_hours_is_skipped_and_99_59_59_999_is_kept() {
+    // The end is checked against the limit as the start is: 100:00:00.000 is
+    // past it, and the limit itself (99:59:59.999) is still a cue.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 100:00:00.000\nlate end\n\n00:00:02.000 --> 99:59:59.999\nlast\n",
+    );
+    assert_eq!(texts(&parsed), vec!["last"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((3, "time is 100 hours or more")),
+        }
+    );
+}
+
+#[test]
+fn id_block_without_timing_is_text_outside_any_cue() {
+    // A block whose first line has no `-->` is not a broken cue: it is text
+    // outside any cue, reported as such when its block ends.
+    let parsed = read("WEBVTT\n\nintro\n\n00:00:01.000 --> 00:00:02.000\nkept\n");
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((3, "text outside any cue")),
+        }
+    );
+}
+
+#[test]
+fn dotted_tags_other_than_c_are_not_styling() {
+    // Only `<c.class>` is styling. An unknown tag with a dotted name, and a
+    // closing `</c.class>`, change nothing and report nothing.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<span.x>plain</span>\n\n00:00:03.000 --> 00:00:04.000\nplain</c.x>\n",
+    );
+    assert_eq!(texts(&parsed), vec!["plain", "plain"]);
+    assert!(parsed.losses.is_empty());
+}
+
 /// One cue whose text is `unit` repeated to at least `bytes`, after `prefix`.
 fn flood(prefix: &str, unit: &str, bytes: usize) -> Vec<u8> {
     let count = bytes / unit.len() + 1;

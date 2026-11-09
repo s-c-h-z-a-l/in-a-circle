@@ -411,6 +411,22 @@ fn non_tag_angle_bracket_is_left_alone() {
     assert!(losses.is_empty());
 }
 
+/// A `<` in a later run is judged at its own place in the line. The first run
+/// has text, so the `<b` of the second run starts at byte 2, not at 0.
+#[test]
+fn bracket_in_a_later_run_is_judged_at_its_place() {
+    let line = Line {
+        voice: None,
+        runs: vec![run("a "), run("<b>c")],
+    };
+    let (s, losses) = srt(&[cue(0, 1_000, vec![line])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na \u{ff1c}b>c\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+}
+
 /// The look-alike is counted as a loss once per cue, however many `<` the cue
 /// has; a cue with none adds nothing.
 #[test]
