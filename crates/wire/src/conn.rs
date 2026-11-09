@@ -952,9 +952,9 @@ mod tests {
         assert_eq!(e.string().as_deref(), Ok("text/uri-list"));
 
         // A reused server id takes its new type.
-        c.register_server_id(id, Iface::PrimaryOffer);
+        c.register_server_id(id, Iface::Callback);
         send(&server, &msg(id, 0, &[]), &[]);
-        assert_eq!(next(&mut c).iface, Iface::PrimaryOffer);
+        assert_eq!(next(&mut c).iface, Iface::Callback);
     }
 
     /// An event for an id we never allocated, or a server id never
