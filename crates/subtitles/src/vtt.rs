@@ -253,8 +253,9 @@ impl Reader {
         Ok(())
     }
 
-    /// Ends the open cue. A cue with no text is dropped without a report, as
-    /// in the SRT reader.
+    /// Ends the open cue. A cue with no text is not stored, and its losses are
+    /// not counted: WebVTT has no drawing, and its styling, position and
+    /// karaoke took no text.
     fn close(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         let Some(open) = self.open.take() else {
             return Ok(());

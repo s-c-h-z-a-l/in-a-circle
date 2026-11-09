@@ -266,6 +266,46 @@ fn karaoke_timestamp_tags_keep_text_and_report() {
 }
 
 #[test]
+fn textless_cue_with_only_styling_reports_nothing() {
+    // Decision: only a loss that removed text counts for a cue with no text.
+    // Styling, karaoke, position and the settings of a STYLE block removed no
+    // text, so these cues are dropped silently. Only the first cue is kept.
+    let text = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nkept\n\n\
+        STYLE\n::cue { color: red }\n\n\
+        00:00:03.000 --> 00:00:04.000\n<c.red></c>\n\n\
+        00:00:05.000 --> 00:00:06.000 line:50%\n<00:00:05.500>\n\n\
+        00:00:07.000 --> 00:00:08.000 position:10%\n<v Anna></v>\n\n";
+    let parsed = read(text);
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(parsed.skipped, Skipped::default());
+    assert_eq!(
+        read_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<c.red></c>\n".as_bytes()),
+        Err(ReadError::NoCues)
+    );
+}
+
+#[test]
+fn empty_cue_alone_is_silent() {
+    // A cue with no text at all is not a loss: nothing is counted or skipped.
+    let parsed =
+        read("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\n00:00:03.000 --> 00:00:04.000\nkept\n");
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
+fn drawing_syntax_is_text_in_webvtt() {
+    // WebVTT has no drawing commands, so `{\p1}` is text: the cue is kept and
+    // nothing is counted. The drawing rule of the ASS and SRT readers does not
+    // apply here.
+    let parsed = read("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{\\p1}m 0 0 l 1 1{\\p0}\n");
+    assert_eq!(texts(&parsed), vec!["{\\p1}m 0 0 l 1 1{\\p0}"]);
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
 fn entities_are_decoded() {
     let parsed = read(
         "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&amp; &lt;i&gt; &lrm;&rlm;&nbsp;x &unknown; & &amp\n",

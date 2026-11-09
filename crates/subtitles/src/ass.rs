@@ -301,8 +301,13 @@ impl<'a> Reader<'a> {
         };
         let home = self.base(style);
         let scene = self.scene(text, home, budget)?;
-        // A cue with no text is dropped without a report, as in the SRT reader.
+        // A cue with no text is not stored: it has nothing to show. A drawing
+        // removed from it is still text the conversion dropped, so it is
+        // counted. Styling, position and karaoke took no text, so they are not.
         if scene.lines.is_empty() {
+            if scene.lost.contains(&Loss::Drawing) {
+                *self.losses.entry(Loss::Drawing).or_insert(0) += 1;
+            }
             return Ok(());
         }
         budget.charge()?;

@@ -428,6 +428,58 @@ fn drawing_text_is_dropped_and_reported() {
 }
 
 #[test]
+fn drawing_only_cue_reports_the_drawing_loss() {
+    // A cue that is all drawing has no text left, so it is not kept. The
+    // drawing was text the conversion removed, so each such cue is counted.
+    let parsed = read(&plain(
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\p1}m 0 0 l 10 10{\\p0}\n\
+         Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\p1}m 0 0 l 1 1{\\p0}\n\
+         Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,kept\n",
+    ));
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Drawing, 2)]));
+    assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
+fn textless_cue_with_only_styling_reports_nothing() {
+    // Decision: only a loss that removed text counts for a cue with no text.
+    // Styling, position and karaoke removed no text, so those cues are dropped
+    // silently. The third cue is styled and drawn: its drawing is counted and
+    // its styling is not, so the count is one per loss, not per tag.
+    let text = plain(
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\c&HFF&}\n\
+         Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\pos(1,2)}{\\k10}\n\
+         Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\\c&HFF&}{\\p1}m 0 0 l 1 1{\\p0}\n\
+         Dialogue: 0,0:00:07.00,0:00:08.00,Default,,0,0,0,,kept\n",
+    );
+    let parsed = read(&text);
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Drawing, 1)]));
+    assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
+fn file_of_drawings_only_is_refused_with_no_cues() {
+    // Nothing is left to show, so the file is refused. The loss counts are not
+    // part of the refusal; the CLI says `no subtitles found`.
+    let text = plain("Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\p1}m 0 0 l 1 1{\\p0}\n");
+    assert_eq!(read_ass(text.as_bytes()), Err(ReadError::NoCues));
+}
+
+#[test]
+fn empty_cue_alone_is_silent() {
+    // A Dialogue with no text is not a loss: nothing is counted or skipped.
+    let parsed = read(&plain(
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,\n\
+         Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,kept\n",
+    ));
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
 fn events_format_needs_start_end_and_text() {
     // Each of these Format lines lacks one of the three columns a dialogue
     // needs, so its dialogue is skipped with the Format's reason.

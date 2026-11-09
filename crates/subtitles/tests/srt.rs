@@ -448,6 +448,50 @@ fn blocks_without_backslash_are_text_and_drawing_text_is_dropped() {
 }
 
 #[test]
+fn drawing_only_cue_reports_the_drawing_loss() {
+    // A cue that is all drawing has no text left, so it is not kept. The
+    // drawing was text the conversion removed, so each such cue is counted.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\n{\\p1}m 0 0 l 10 10{\\p0}\n\n\
+         2\n00:00:03,000 --> 00:00:04,000\n{\\p1}m 0 0 l 1 1{\\p0}\n\n\
+         3\n00:00:05,000 --> 00:00:06,000\nkept\n",
+    );
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Drawing, 2)]));
+    assert_eq!(parsed.skipped, Skipped::default());
+    assert_eq!(
+        read_srt(b"1\n00:00:01,000 --> 00:00:02,000\n{\\p1}m 0 0 l 1 1{\\p0}\n"),
+        Err(ReadError::NoCues)
+    );
+}
+
+#[test]
+fn textless_cue_with_only_styling_reports_nothing() {
+    // Decision: only a loss that removed text counts for a cue with no text.
+    // Styling, position (the timing line's coordinates included) and karaoke
+    // removed no text, so those cues are dropped silently. The third cue is
+    // styled and drawn: its drawing is counted and its styling is not.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\n{\\c&HFF&}\n\n\
+         2\n00:00:03,000 --> 00:00:04,000 X1:1 Y1:1\n{\\k10}\n\n\
+         3\n00:00:05,000 --> 00:00:06,000\n{\\c&HFF&}{\\p1}m 0 0 l 1 1{\\p0}\n\n\
+         4\n00:00:07,000 --> 00:00:08,000\nkept\n",
+    );
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Drawing, 1)]));
+}
+
+#[test]
+fn empty_cue_alone_is_silent() {
+    // A cue with no text at all is not a loss: nothing is counted or skipped.
+    let parsed =
+        read("1\n00:00:01,000 --> 00:00:02,000\n\n2\n00:00:03,000 --> 00:00:04,000\nkept\n");
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert!(parsed.losses.is_empty());
+    assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
 fn reader_never_panics_on_every_prefix() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/srt");
     let wild = fs::read(dir.join("wild.srt")).expect("the wild file");

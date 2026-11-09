@@ -178,8 +178,9 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// Ends the open cue. A cue with no text is dropped without a report: it
-    /// has nothing to show, and the writers would drop it too.
+    /// Ends the open cue. A cue with no text is not stored: it has nothing to
+    /// show, and the writers would drop it too. A drawing removed from it is
+    /// still counted, as in the ASS reader.
     fn close(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         let Some(open) = self.open.take() else {
             return Ok(());
@@ -192,6 +193,9 @@ impl<'a> Reader<'a> {
             }
         };
         if open.lines.is_empty() {
+            if open.lost.contains(&Loss::Drawing) {
+                *self.losses.entry(Loss::Drawing).or_insert(0) += 1;
+            }
             return Ok(());
         }
         budget.charge()?;

@@ -708,7 +708,9 @@ are in `CLAUDE.md`.
     `Styling`.
   - A cue that cannot be used (a bad timestamp, an end before its start, 100
     hours or more) is skipped and the rest converts. Text outside any cue is
-    one skipped block per run of lines, counted and never shown.
+    one skipped block per run of lines, counted and never shown. A cue with no
+    text left is not kept; a drawing removed from it is still `Drawing`, but
+    styling, position and karaoke removed no text, so they are not counted.
 - The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
   a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
   `<i> <b> <u>` are kept. WebVTT has no byte order mark, LF only, ` line:0` on
