@@ -16,7 +16,7 @@ use std::path::Path;
 use action::{Events, Invocation};
 use doc::xhtml_read::{self, XhtmlError};
 use doc::{Block, Document, Inline, LimitError, Limits, Loss};
-use epub::read::Book;
+use epub::read::{Book, has_scheme};
 use xml::ErrorKind;
 
 use crate::{ConvertError, LIMITS, Outcome, output_cap, too_large};
@@ -340,17 +340,6 @@ fn limit_reason(e: LimitError) -> String {
 /// slashes are needed.
 pub(crate) fn external(dest: &str) -> bool {
     has_scheme(dest) || (dest.len() > 2 && dest.starts_with("//"))
-}
-
-/// Whether `dest` starts with a URL scheme (RFC 3986, section 3.1: a
-/// letter, then letters, digits, `+`, `-` or `.`, then `:`).
-fn has_scheme(dest: &str) -> bool {
-    let Some((scheme, _)) = dest.split_once(':') else {
-        return false;
-    };
-    let mut cs = scheme.chars();
-    cs.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// A link to a place in the book (no URL scheme: `notes.xhtml#fn1`, `#x`)
