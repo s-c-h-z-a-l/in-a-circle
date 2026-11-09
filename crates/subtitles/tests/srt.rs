@@ -9,14 +9,19 @@
 //!   it. We skip it (`hour_100_is_skipped`).
 //! - A `<` that is not a tag (`a < b`): ffmpeg reads it as a tag and rewrites
 //!   it. We keep the text (`literal_less_than_is_text`).
+//! - A `<` whose name does not start with a letter (`<3>`, `<>`, `</>`): ffmpeg
+//!   drops the tag. We keep the text, since text that may be the file's own is
+//!   not dropped on a guess (`angle_text_without_a_leading_letter_is_kept`).
 //! - A broken timing line after a blank line: ffmpeg merges its block into the
 //!   previous cue. We skip the block (`broken_timing_skips_its_text_only`).
 //! - A block of text that is neither a number nor a timing (stray text, a
 //!   wrong index, a title): ffmpeg appends it to the previous cue. We count it
 //!   as one skipped item and show nothing, since text that belongs to no cue
 //!   would show at the wrong time (`stray_text_between_cues_is_skipped_and_counted`).
-//! - `<font>` is kept by ffmpeg and dropped by us. The comparison strips tags
-//!   on both sides, so this does not show in it.
+//! - `<font>` is kept by ffmpeg and dropped by us. The comparison strips the
+//!   style tags ffmpeg writes (`<i>`, `<b>`, `<u>`, `<font …>`, `{\an…}`) from
+//!   its output, so this does not show in it. Every other `<…>` and `{…}` is
+//!   compared as text on both sides.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -422,8 +427,59 @@ fn literal_less_than_is_text() {
 
 #[test]
 fn unknown_tags_drop_but_keep_their_text() {
-    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n<c.yellow>tag</c> <v Anna>hi</v>\n");
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n<c>tag</c> <v Anna>hi</v>\n");
     assert_eq!(texts(&parsed), vec!["tag hi"]);
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
+fn angle_text_that_is_not_a_tag_is_kept() {
+    // A `<` opens a tag only when its name (up to a space or `>`) holds letters,
+    // digits, `_` or `/`. A URL, an address or a dotted name is text, as in
+    // ffmpeg: nothing is dropped and nothing is reported.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\nSync by <www.addic7ed.com>\n\n2\n00:00:03,000 --> 00:00:04,000\nmail <name@mail.com> <a-b> <c.yellow>x</c>\n",
+    );
+    assert_eq!(
+        texts(&parsed),
+        vec![
+            "Sync by <www.addic7ed.com>",
+            "mail <name@mail.com> <a-b> <c.yellow>x",
+        ]
+    );
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
+fn angle_text_without_a_leading_letter_is_kept() {
+    // ffmpeg drops `<3>`, `<>` and `</>`. They are kept: a tag needs a letter
+    // first, so these are text (the divergence list above says why).
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\nI <3 you <3> and <> and </>\n");
+    assert_eq!(texts(&parsed), vec!["I <3 you <3> and <> and </>"]);
+}
+
+#[test]
+fn a_less_than_before_a_closer_is_text() {
+    // The first `<` meets another `<` before its `>`, so it is text; the `<i>`
+    // after it is a tag. ffmpeg reads it the same way.
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\nx <a b<i>y</i>\n");
+    let runs = &parsed.cues[0].lines[0].runs;
+    assert_eq!(texts(&parsed), vec!["x <a by"]);
+    assert!(!runs[0].italic && runs[1].italic && runs[1].text == "y");
+}
+
+#[test]
+fn tag_name_is_read_whole() {
+    // `<i_x>` is an unknown tag: it does not switch italic on, as `<i>` would.
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n<i_x>a</i_x>b\n");
+    assert_eq!(texts(&parsed), vec!["ab"]);
+    assert!(parsed.cues[0].lines[0].runs.iter().all(|r| !r.italic));
+}
+
+#[test]
+fn tag_names_with_underscore_and_slash_are_tags() {
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n<a_b>x<c/d>y</c/d>z\n");
+    assert_eq!(texts(&parsed), vec!["xyz"]);
     assert!(parsed.losses.is_empty());
 }
 
@@ -534,6 +590,12 @@ fn srt_linear_on_tag_floods() {
         ("italic tags on one line", "x<i>"),
         ("ASS italic blocks on one line", "x{\\i1}"),
         ("tag openers never closed", "x<a"),
+        // Each opener scans its name and then the text up to the next `<` or
+        // `>`: those spans do not overlap, so the flood stays linear.
+        (
+            "long tag names, no closer",
+            "<abcdefghijklmnopqrstuvwxyz0123456789_/ ",
+        ),
         ("block openers never closed", "x{\\"),
         ("minimal cues", "0:0:0,0-->0:0:0,0\nx\n\n"),
     ];
@@ -591,28 +653,40 @@ fn clock(s: &str) -> Option<u64> {
     }
 }
 
-/// Text with every `<…>` and `{…}` removed and the words joined by one space.
-fn plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut close = None;
-    for c in text.chars() {
-        match close {
-            Some(end) => {
-                if c == end {
-                    close = None;
-                }
-            }
-            None => match c {
-                '<' => close = Some('>'),
-                '{' => close = Some('}'),
-                _ => out.push(c),
-            },
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Text with the words joined by one space: line breaks and runs of spaces do
+/// not count.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// (start, end, top, plain text) for each cue with text.
+/// `text` without the spans that start with `open` and end at the next `close`.
+/// A span with no closer is left as it is.
+fn cut(text: &str, open: &str, close: char) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(open) {
+        let Some(j) = rest[i..].find(close) else {
+            break;
+        };
+        out.push_str(&rest[..i]);
+        rest = &rest[i + j + close.len_utf8()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// ffmpeg's output without the style markup it writes: `<i>`, `<b>`, `<u>` and
+/// `<font …>` (with their closers) and `{\an…}`. Any other `<…>` or `{…}` is
+/// the file's text and stays, so it is compared as text.
+fn strip_style(text: &str) -> String {
+    let mut out = text.to_owned();
+    for tag in ["<i>", "</i>", "<b>", "</b>", "<u>", "</u>", "</font>"] {
+        out = out.replace(tag, "");
+    }
+    words(&cut(&cut(&out, "<font ", '>'), "{\\an", '}'))
+}
+
+/// (start, end, top, text) for each cue with text.
 type Shown = (u64, u64, bool, String);
 
 /// Cues of ffmpeg's SRT output, read by a parser of its own: the output has
@@ -627,7 +701,7 @@ fn reference(srt: &str) -> Vec<Shown> {
             let top = ["{\\an7}", "{\\an8}", "{\\an9}"]
                 .iter()
                 .any(|tag| raw.contains(tag));
-            Some((clock(from)?, clock(to)?, top, plain(&raw)))
+            Some((clock(from)?, clock(to)?, top, strip_style(&raw)))
         })
         .filter(|cue| !cue.3.is_empty())
         .collect()
@@ -635,7 +709,7 @@ fn reference(srt: &str) -> Vec<Shown> {
 
 fn ours(cues: &[Cue]) -> Vec<Shown> {
     cues.iter()
-        .map(|c| (c.start_ms, c.end_ms, c.top, plain(&text_of(c))))
+        .map(|c| (c.start_ms, c.end_ms, c.top, words(&text_of(c))))
         .filter(|cue| !cue.3.is_empty())
         .collect()
 }

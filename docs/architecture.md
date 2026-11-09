@@ -687,9 +687,12 @@ are in `CLAUDE.md`.
     the end time are dropped, which is `Position` (once per cue). `<i> <b> <u>` and their
     `{\i1}`-style forms are kept; `{\an7}` to `{\an9}` make a top cue. `<font>`
     keeps its text and is `Styling`; other tags are dropped with their text
-    kept. `{\pos}` and `{\move}` are `Position`, `{\k}` is `Karaoke`, a
-    non-zero `{\p}` is `Drawing` (its text is dropped), and any other
-    `{\...}` block is `Styling`.
+    kept. A `<` opens a tag only when its name (up to a space or `>`) holds
+    letters, digits, `_` or `/` and starts with a letter, and no `<` comes
+    before the `>`; any other `<` is text, so a URL or an address stays.
+    `{\pos}` and `{\move}` are `Position`, `{\k}` is `Karaoke`, a non-zero
+    `{\p}` is `Drawing` (its text is dropped), and any other `{\...}` block is
+    `Styling`.
   - **WebVTT** follows the W3C file parsing algorithm: the `WEBVTT` signature
     (a byte order mark is allowed) and the header are read, and `NOTE` blocks
     are not reported. A `STYLE` or `REGION` block makes every later cue
@@ -715,7 +718,8 @@ are in `CLAUDE.md`.
 - The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
   a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
   `<i> <b> <u>` are kept. The SRT reader has no escapes, so a `<` that would
-  open a tag for it (`<` then a letter, or `</` then a letter) is written as
+  open a tag for it (`<` or `</`, a letter, then letters, digits, `_` or `/`
+  up to a space or `>`; the same test the reader uses) is written as
   U+FF1C, and a `{` that would open an override block (`{\`) as U+FF5B, both
   look-alikes, counted once per cue as `Brackets`; the `{\an8}` the writer
   puts before a top cue is not text and is kept. A text line that the reader

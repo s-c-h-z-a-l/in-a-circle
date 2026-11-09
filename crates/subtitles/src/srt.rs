@@ -11,7 +11,9 @@
 //! - Markup: `<i> <b> <u>` and their `{\i1}`-style forms (`0` switches them
 //!   off), `{\an7}`/`{\an8}`/`{\an9}` for a top cue, `<font>` (its text stays,
 //!   the styling is reported), other `<…>` tags (dropped, text kept), and other
-//!   `{\…}` blocks (their effect is reported).
+//!   `{\…}` blocks (their effect is reported). A `<` opens a tag only when its
+//!   name (up to a space or `>`) holds letters, digits, `_` or `/` and starts
+//!   with a letter, and no `<` comes before the `>`; any other `<…` is text.
 //! - A cue that cannot be used (bad timing, ends before it starts, 100 hours
 //!   or more) is skipped, and the rest of the file converts.
 //! - Text outside any cue (a title, stray lines between cues) is a block of
@@ -397,17 +399,22 @@ fn emit(
     Ok(())
 }
 
-/// Length of a tag starting at `tail`: `<`, an optional `/`, an ASCII letter,
-/// then up to and including the next `>`.
+/// Length of a tag starting at `tail`: a `<` that `opens_tag`, then up to and
+/// including the next `>`. Another `<` before that `>` makes this one text, and
+/// the later `<` is the one that can open a tag (ffmpeg reads it so too).
 fn tag_len(tail: &str, scan: &mut Scan) -> Option<usize> {
     if scan.no_gt || !opens_tag(tail) {
         return None;
     }
-    let len = tail.find('>').map(|i| i + 1);
-    if len.is_none() {
-        scan.no_gt = true;
+    let rest = &tail[1..];
+    match rest.find(['<', '>']) {
+        Some(i) if rest.as_bytes()[i] == b'>' => Some(i + 2),
+        Some(_) => None,
+        None => {
+            scan.no_gt = true;
+            None
+        }
     }
-    len
 }
 
 /// Length of an override block starting at `tail`: `{\` up to the next `}`.
@@ -439,14 +446,7 @@ fn tag(inner: &str, open: &mut Open) {
     if inner.ends_with('/') {
         return;
     }
-    let (closing, body) = match inner.strip_prefix('/') {
-        Some(b) => (true, b),
-        None => (false, inner),
-    };
-    let name = body
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .next()
-        .unwrap_or_default();
+    let (closing, name) = split_tag(inner);
     if name.eq_ignore_ascii_case("i") {
         open.style.italic = !closing;
     } else if name.eq_ignore_ascii_case("b") {
@@ -456,6 +456,17 @@ fn tag(inner: &str, open: &mut Open) {
     } else if name.eq_ignore_ascii_case("font") && !closing {
         open.lose(Loss::Styling);
     }
+}
+
+/// Splits a tag without its angle brackets into whether it closes (a leading
+/// `/`) and its name: the text up to the first space, so `font color="red"` is
+/// `font` and `i_x` is one name, not `i`.
+fn split_tag(inner: &str) -> (bool, &str) {
+    let (closing, body) = match inner.strip_prefix('/') {
+        Some(b) => (true, b),
+        None => (false, inner),
+    };
+    (closing, body.split(' ').next().unwrap_or_default())
 }
 
 /// `inner` is an override block without its braces: `\i1\b1`, `\an8` and so

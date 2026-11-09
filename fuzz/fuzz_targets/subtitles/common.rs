@@ -44,7 +44,12 @@ fn look_alike(text: &str) -> String {
         .collect()
 }
 
-fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
+/// The shape of `cues`. `original` is set for the cues the writer was given:
+/// their look-alikes are the writer's rule. A read-back text is compared as it
+/// is, because the rule judges the line as written, before the reader trims
+/// its ends: a `<` the writer left (a bare name ending in white space, as
+/// `<u` before a vertical tab) is text the reader keeps, and it has no `>`.
+fn shape(cues: &[Cue], voice_prefix: bool, original: bool) -> Shape {
     cues.iter()
         .filter_map(|cue| {
             let lines: Vec<String> = cue
@@ -61,12 +66,12 @@ fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
                         // back; the writers replace it (both formats).
                         text.push_str(&run.text.replace('\0', "\u{fffd}"));
                     }
-                    // SRT: the look-alikes are the writer's, and FF1E is read as
-                    // `>`: an arrow the writer rewrote (a timing-shaped text line)
-                    // reads back as FF1E and is compared as the `-->` it was. A
-                    // split cue is still caught by the shape.
+                    // SRT: FF1E is read as `>`: an arrow the writer rewrote (a
+                    // timing-shaped text line) reads back as FF1E and is compared
+                    // as the `-->` it was. A split cue is still caught by the shape.
                     let text = if voice_prefix {
-                        look_alike(&text).replace('\u{ff1e}', ">")
+                        let text = if original { look_alike(&text) } else { text };
+                        text.replace('\u{ff1e}', ">")
                     } else {
                         text
                     };
@@ -148,7 +153,7 @@ fn assert_usable(parsed: &Parsed) {
 fn round_trip(cues: &[Cue]) {
     let mut srt = Vec::new();
     write_srt(cues, &mut srt).expect("writing to memory");
-    let want = shape(cues, true);
+    let want = shape(cues, true, true);
     if want.is_empty() {
         assert_eq!(read_srt(&srt), Err(ReadError::NoCues), "empty SRT output");
     } else {
@@ -159,12 +164,12 @@ fn round_trip(cues: &[Cue]) {
         );
         let mut back = back.cues;
         sort_cues(&mut back);
-        assert_eq!(shape(&back, true), want, "SRT round trip");
+        assert_eq!(shape(&back, true, false), want, "SRT round trip");
     }
 
     let mut vtt = Vec::new();
     write_vtt(cues, &mut vtt).expect("writing to memory");
-    let want = shape(cues, false);
+    let want = shape(cues, false, true);
     if want.is_empty() {
         assert_eq!(
             read_vtt(&vtt),
@@ -180,6 +185,6 @@ fn round_trip(cues: &[Cue]) {
         );
         let mut back = back.cues;
         sort_cues(&mut back);
-        assert_eq!(shape(&back, false), want, "WebVTT round trip");
+        assert_eq!(shape(&back, false, false), want, "WebVTT round trip");
     }
 }

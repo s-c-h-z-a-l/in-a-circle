@@ -352,6 +352,36 @@ fn nul_is_written_as_the_replacement_character() {
     assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\u{fffd}y\n\n");
 }
 
+/// Text the SRT reader keeps as text gets no look-alike: a `<` followed by a
+/// URL or an address is not a tag for the reader, so nothing is written
+/// differently and no `Brackets` loss is reported.
+#[test]
+fn angle_text_that_is_not_a_tag_is_written_as_it_is() {
+    let cues = [cue(
+        0,
+        1_000,
+        vec![plain("Sync by <www.addic7ed.com> <a-b> <3")],
+    )];
+    let (s, losses) = srt(&cues);
+    assert!(
+        s.contains("Sync by <www.addic7ed.com> <a-b> <3\r\n"),
+        "{s:?}"
+    );
+    assert!(losses.is_empty());
+}
+
+/// A bare name that ends a line, with white space after it, is text: the
+/// reader trims the line's end, so no `>` follows the name. It is written as it
+/// is and reads back as the same text (the fuzz seed `fuzz/corpus/srt/97e6a1052bcc3c2ebcf1ea77a059f14908ea946b` is this case).
+#[test]
+fn bare_angle_name_before_trailing_space_reads_back_as_text() {
+    let cues = [cue(0, 1_000, vec![plain("a <u\u{b}")])];
+    let (s, losses) = srt(&cues);
+    assert!(losses.is_empty());
+    let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+    assert_eq!(back.cues[0].lines[0].runs[0].text, "a <u");
+}
+
 /// Text that the SRT reader would take for a tag is written with a look-alike
 /// (U+FF1C), so the file reads back with the text and no markup. The VTT text
 /// `a &lt;b&gt; c` holds the literal `<b>`.

@@ -2,17 +2,24 @@
 //! oracle use them (the oracle includes this file), so each rule has one
 //! source.
 
-/// Whether a `<` at the start of `tail` opens a tag for the SRT reader: `<`,
-/// then an optional `/`, then an ASCII letter. The reader also needs a `>` later
-/// in the line, and a `<` without one is text. The writer does not look for the
-/// `>` (it writes the line in pieces), so it treats every `<` that opens a tag
-/// as one: a look-alike for a `<` that was only text is harmless.
+/// Whether a `<` at the start of `tail` opens a tag for the SRT reader: `<`, an
+/// optional `/`, then an ASCII letter, and the tag name (up to the first space
+/// or `>`) holds only ASCII letters, digits, `_` and `/`. Any other `<` is
+/// text: a URL, an address or a dotted name stays (ffmpeg agrees on these).
+/// The reader also needs a `>` before any other `<`, and a `<` without one is
+/// text. The writer does not look for the `>` (it writes the line in pieces),
+/// so it treats every `<` that opens a tag as one: a look-alike for a `<` that
+/// was only text is harmless.
 pub(crate) fn opens_tag(tail: &str) -> bool {
     let Some(body) = tail.strip_prefix('<') else {
         return false;
     };
     let body = body.strip_prefix('/').unwrap_or(body);
     body.starts_with(|c: char| c.is_ascii_alphabetic())
+        && body
+            .bytes()
+            .take_while(|&b| b != b' ' && b != b'>')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'/')
 }
 
 /// Whether a `{` at the start of `tail` opens an override block for the SRT
