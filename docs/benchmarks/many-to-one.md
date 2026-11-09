@@ -118,18 +118,32 @@ stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
 | 1,024 images x 128 KiB to one CBZ, peak `VmHWM` | 3,232 kB |
 | `inacircle` file (x86_64) | 1,160,024 B |
 | `inacircle-pages` file / `.text` (x86_64) | 503,712 B / 403,267 B |
-| Drop to stage 2 with PNG/JPEG, p95, reference desktop | pending (manual run) |
-| Drop to stage 2 with PNG/JPEG, p95, second machine | pending (manual run) |
+| Drop to stage 2, 1 JPEG to Book, p95, reference desktop | 159 us (N=50) |
+| Drop to stage 2, 30 JPEG to Book, p95, reference desktop | 160 us (N=50) |
+| Drop to stage 2, text to Document, `main` vs this branch, p95 | 167 us vs 166 us (-0.6%) |
+| Drop to stage 2, second machine | not measured (reported, not gated) |
 | `main` to exit CPU, warm cache, p95 | pending (two-machine run) |
 
-The two timing rows are the user's manual drag runs (50 or more valid
-observations per condition, nearest-rank p95); nothing is recorded for
-them yet and no value is implied.
+**Drop to stage 2.** Hand-made drags on the reference desktop (kernel
+7.3.1, `INACIRCLE_MEASURE=1`, release builds: A is `main` 12992781, B is
+this branch), 50 valid drops per condition, p95 by nearest rank. One log
+per condition; the order the series were run in was not recorded.
 
-**Verdict.** Memory and sizes are inside their bounds (peak memory 3.2 MB
-for the largest accepted workload; `inacircle` under 1.5 MB, `.text` of
-`inacircle-pages` under 1 MB). The timing verdict stays open until the
-two rows above are filled.
+| Condition | Build | Valid | p50 (us) | mean (us) | p95 (us) | max (us) | stdev (us) |
+|---|---|---|---|---|---|---|---|
+| text to Document | A | 50 | 156 | 155 | 167 | 174 | 8 |
+| text to Document | B | 50 | 156 | 154 | 166 | 167 | 8 |
+| 1 JPEG to Book | B | 50 | 150 | 149 | 159 | 164 | 7 |
+| 30 JPEG to Book | B | 50 | 150 | 149 | 160 | 163 | 8 |
+
+Wheel PSS peaked at 3,044 kB (gate 5,000 kB). The branch costs the text
+path -0.6% p95 (investigation threshold 10%). The p95 is at most 17% of the
+1,000 us budget and the standard deviation 5% of the p50, so the
+small-sample rule of [acceptance.md](acceptance.md#sample-and-percentile-rule)
+would have accepted 10 drops; 50 were taken before that rule existed. The
+second machine was not measured: it is outside the reference timing gate.
+The `main` to exit row needs its own run and stays open. Raw logs are kept
+privately with the plan's reports.
 
 **Reproduce.**
 
