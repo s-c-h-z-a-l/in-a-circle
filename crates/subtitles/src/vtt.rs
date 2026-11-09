@@ -51,7 +51,8 @@ const TOP_ROW: u64 = 4;
 
 /// A `line:` percentage up to this value places the cue at the top. 33 % is
 /// the top third of the picture, as with [`TOP_ROW`]; a cue lower down cannot
-/// be carried over, so it is a `Position` loss.
+/// be carried over, so it is a `Position` loss. A fraction past it is lower
+/// (33.4 % is not top), and a fraction of zero is not.
 const TOP_PERCENT: u64 = 33;
 
 /// Reads a whole WebVTT text (byte order mark already removed). `None` when
@@ -381,26 +382,45 @@ fn setting(token: &str, open: &mut Open) {
     }
 }
 
-/// The `line:` value: `None` when it is not a number or percentage, else
-/// whether it is in the top third.
+/// The `line:` value: `None` when it is not valid, else whether it is in the
+/// top third. The value is a number or a percentage, optionally followed by
+/// `,start`, `,center` or `,end`; the alignment does not move the cue.
 fn line_value(value: &str) -> Option<bool> {
-    if let Some(percent) = value.strip_suffix('%') {
-        return number(percent).map(|p| p <= TOP_PERCENT);
+    let position = match value.split_once(',') {
+        Some((position, align)) => {
+            if !matches!(align, "start" | "center" | "end") {
+                return None;
+            }
+            position
+        }
+        None => value,
+    };
+    if let Some(percent) = position.strip_suffix('%') {
+        let (whole, fraction) = decimal(percent)?;
+        // Exact: 33.0 % is the top edge, 33.4 % is past it, with no float.
+        let at_edge = whole == TOP_PERCENT && fraction.is_none_or(|f| f.bytes().all(|b| b == b'0'));
+        return Some(whole < TOP_PERCENT || at_edge);
     }
-    let (negative, digits) = match value.strip_prefix('-') {
+    let (negative, digits) = match position.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, value),
+        None => (false, position),
     };
-    let (whole, fraction) = match digits.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (digits, None),
-    };
-    let whole = number(whole)?;
-    if fraction.is_some_and(|f| number(f).is_none()) {
-        return None;
-    }
+    let (whole, fraction) = decimal(digits)?;
     // A negative row counts from the bottom, so only -0 is a top row.
     Some(fraction.is_none() && whole <= TOP_ROW && (!negative || whole == 0))
+}
+
+/// `digits` or `digits.digits`: the whole part as a number, and the fraction's
+/// digits when there is a point. An empty part, or any other character, is
+/// `None`.
+fn decimal(s: &str) -> Option<(u64, Option<&str>)> {
+    match s.split_once('.') {
+        Some((whole, fraction)) => {
+            number(fraction)?;
+            Some((number(whole)?, Some(fraction)))
+        }
+        None => Some((number(s)?, None)),
+    }
 }
 
 /// Search state for one line. Once a search for `>` fails, no later `<` on

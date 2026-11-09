@@ -218,6 +218,46 @@ fn line_zero_is_top_line_fifty_percent_is_not() {
 }
 
 #[test]
+fn line_value_with_alignment_or_decimal_percentage() {
+    // `line:<number>[,<align>]` and `line:<percentage>[,<align>]`, where the
+    // percentage may have a fraction. The top test is the same as for a plain
+    // value; the alignment does not move the cue. Each case is (top, Position
+    // losses) for a cue with that one setting.
+    let placed = |setting: &str| {
+        let parsed = read(&format!(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000 {setting}\ntext\n"
+        ));
+        (
+            parsed.cues[0].top,
+            parsed.losses.get(&Loss::Position).copied().unwrap_or(0),
+        )
+    };
+    assert_eq!(placed("line:0,start"), (true, 0));
+    assert_eq!(placed("line:4,center"), (true, 0));
+    assert_eq!(placed("line:10.5%"), (true, 0));
+    assert_eq!(placed("line:33.0%"), (true, 0));
+    assert_eq!(placed("line:90%,end"), (false, 1));
+    assert_eq!(placed("line:100%,start"), (false, 1));
+    assert_eq!(placed("line:33.4%"), (false, 1));
+    assert_eq!(placed("line:-1"), (false, 1));
+    assert_eq!(placed("line:0%"), (true, 0));
+    assert_eq!(placed("line:100%"), (false, 1));
+    // Not valid: ignored, with no top and no loss.
+    for invalid in [
+        "line:abc",
+        "line:,start",
+        "line:0,",
+        "line:0,middle",
+        "line:0,start,end",
+        "line:10.%",
+        "line:.5%",
+        "line:-5%",
+    ] {
+        assert_eq!(placed(invalid), (false, 0), "{invalid}");
+    }
+}
+
+#[test]
 fn voice_tag_sets_the_line_voice() {
     let parsed = read(
         "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Anna>hi</v>\n\n00:00:03.000 --> 00:00:04.000\n<v Bob Smith>one\ntwo</v>\n\n00:00:05.000 --> 00:00:06.000\n<v Cy>hello</v> there\n",
