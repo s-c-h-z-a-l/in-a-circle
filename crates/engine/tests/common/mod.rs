@@ -220,6 +220,10 @@ pub fn run(
     exec::run(route, inputs.to_vec(), &mut obs, &tok);
     let end = Instant::now();
     let from = sent.map_or(start, |h| h.join().unwrap());
+    // Dropping the token unblocks SIGTERM, and one still pending (the sender
+    // above can fire after the run ended) would kill the whole test binary.
+    // Consume it first, as the token's contract asks of its caller.
+    tok.is_cancelled();
     (obs, end.saturating_duration_since(from))
 }
 
@@ -229,7 +233,12 @@ pub fn run_with(route: &[&Action], inputs: &[PathBuf], obs: &mut dyn Observer) -
     let tok = CancelToken::install().unwrap();
     let start = Instant::now();
     exec::run(route, inputs.to_vec(), obs, &tok);
-    start.elapsed()
+    let took = start.elapsed();
+    // As in `run`: a cancel an observer raised after the run's last check
+    // must not outlive the token (its drop would deliver it and kill the
+    // test binary), so consume it.
+    tok.is_cancelled();
+    took
 }
 
 pub fn failed(r: &Ran) -> Vec<(PathBuf, String)> {
