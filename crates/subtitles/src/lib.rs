@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+mod ass;
 mod srt;
 mod time;
 mod vtt;
@@ -32,6 +33,19 @@ pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
 pub fn read_vtt(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
     let parsed = vtt::parse(text).ok_or(ReadError::NoCues)?;
+    if parsed.cues.is_empty() {
+        return Err(ReadError::NoCues);
+    }
+    Ok(parsed)
+}
+
+/// Reads an ASS or SSA file for its text, its times and the styling that
+/// carries over. The limits and the byte order mark are as in [`read_srt`]. A
+/// file with no usable dialogue is refused with [`ReadError::NoCues`]. See
+/// `ass.rs` for the rules and the choices made where the format leaves room.
+pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
+    let text = text_of(bytes)?;
+    let parsed = ass::parse(text);
     if parsed.cues.is_empty() {
         return Err(ReadError::NoCues);
     }
