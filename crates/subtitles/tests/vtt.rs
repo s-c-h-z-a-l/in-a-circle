@@ -485,6 +485,54 @@ fn end_at_100_hours_is_skipped_and_99_59_59_999_is_kept() {
 }
 
 #[test]
+fn timing_line_ends_an_ignored_block_without_a_blank_line() {
+    // A STYLE, REGION or NOTE block runs to a blank line. Without one, a valid
+    // timing line still starts a cue, so the cue's text is not lost (a
+    // deliberate deviation from the standard's block rule). The block's own
+    // lines keep their meaning: STYLE and REGION are Settings, NOTE is silent.
+    let style = read(
+        "WEBVTT\n\nSTYLE\n::cue { color: lime }\n00:00:01.000 --> 00:00:02.000\nhello\n\n00:00:03.000 --> 00:00:04.000\nworld\n",
+    );
+    assert_eq!(texts(&style), vec!["hello", "world"]);
+    assert_eq!(style.losses, losses(&[(Loss::Settings, 2)]));
+    assert_eq!(style.skipped, Skipped::default());
+
+    let region = read(
+        "WEBVTT\n\nREGION\nid:r1\n00:00:01.000 --> 00:00:02.000\nhello\n\n00:00:03.000 --> 00:00:04.000\nworld\n",
+    );
+    assert_eq!(texts(&region), vec!["hello", "world"]);
+    assert_eq!(region.losses, losses(&[(Loss::Settings, 2)]));
+
+    let note = read(
+        "WEBVTT\n\nNOTE a comment\n00:00:01.000 --> 00:00:02.000\nhello\n\n00:00:03.000 --> 00:00:04.000\nworld\n",
+    );
+    assert_eq!(texts(&note), vec!["hello", "world"]);
+    assert!(note.losses.is_empty());
+    assert_eq!(note.skipped, Skipped::default());
+
+    // A `-->` in the block that is no timing line is part of the block: it
+    // counts as nothing, and the block's cue after the blank line is read.
+    let arrow_css = read(
+        "WEBVTT\n\nSTYLE\n::cue { color: lime } --> x\n\n00:00:01.000 --> 00:00:02.000\nhello\n",
+    );
+    assert_eq!(texts(&arrow_css), vec!["hello"]);
+    assert_eq!(arrow_css.losses, losses(&[(Loss::Settings, 1)]));
+    assert_eq!(arrow_css.skipped, Skipped::default());
+
+    // A block already reported (here a bad header line) does not swallow the
+    // timing line after it either.
+    let reported = read("WEBVTT\nbad --> x\n00:00:01.000 --> 00:00:02.000\nhello\n");
+    assert_eq!(texts(&reported), vec!["hello"]);
+    assert_eq!(
+        reported.skipped,
+        Skipped {
+            count: 1,
+            first: Some((2, "bad timestamp")),
+        }
+    );
+}
+
+#[test]
 fn id_block_without_timing_is_text_outside_any_cue() {
     // A block whose first line has no `-->` is not a broken cue: it is text
     // outside any cue, reported as such when its block ends.

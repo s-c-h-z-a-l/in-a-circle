@@ -11,7 +11,11 @@
 //!   is metadata and is ignored silently. A timing line in it starts a cue.
 //! - `NOTE` blocks are comments and are not reported. `STYLE` and `REGION`
 //!   blocks are not cues; every cue after one loses its styling, reported as
-//!   `Settings`.
+//!   `Settings`. A valid timing line inside a `NOTE`, `STYLE` or `REGION`
+//!   block, or in a block already reported, ends that block and starts a cue.
+//!   The standard keeps such a line in the block; we do not, because a missing
+//!   blank line must not swallow a cue's text. Any other line of the block is
+//!   not read, and a `-->` that is no timing line stays in the block.
 //! - A cue is a timing line, after an optional identifier line, then its text.
 //!   A line with `-->` ends the text of a cue, as in the standard: a timing
 //!   line there starts the next cue. Any other such line is dropped, and the
@@ -95,7 +99,8 @@ enum Block {
     /// the timing line. Holds the block's first line number.
     Dropped(usize),
     /// Nothing more is read from this block: a comment, a style or region,
-    /// or a block already reported.
+    /// or a block already reported. A valid timing line in it still starts a
+    /// cue (see `line`).
     Ignored,
 }
 
@@ -183,7 +188,13 @@ impl Reader {
                     None => self.block = Block::Ignored,
                 }
             }
-            Block::Ignored => {}
+            // A valid timing line ends an ignored block, so a missing blank
+            // line does not swallow the cue after it. Any other line is not read.
+            Block::Ignored => {
+                if let Some(t) = timing(line) {
+                    self.start(n, t);
+                }
+            }
         }
         Ok(())
     }

@@ -698,7 +698,10 @@ are in `CLAUDE.md`.
   - **WebVTT** follows the W3C file parsing algorithm: the `WEBVTT` signature
     (a byte order mark is allowed) and the header are read, and `NOTE` blocks
     are not reported. A `STYLE` or `REGION` block makes every later cue
-    `Settings`. A `line:` setting in the top third makes a top cue; any other
+    `Settings`. A valid timing line inside a `NOTE`, `STYLE` or `REGION` block,
+    or in a block already reported, starts a cue: the standard keeps it in the
+    block, but a missing blank line must not swallow a cue's text (a deliberate
+    deviation). A `line:` setting in the top third makes a top cue; any other
     placement is `Position`. `<c.class>` is `Styling`, a timestamp tag is
     `Karaoke` (its text stays), `<v Name>` is the speaker (its classes are not
     part of the name), and other tags are dropped with their text kept. The
