@@ -122,6 +122,17 @@ pub enum UndoReason {
 }
 
 impl UndoReason {
+    /// Whether the cause can pass without the user touching the group: an
+    /// undo that kept a group for it is not the job's last word (a retry
+    /// may move it). `Changed` and the like stay as the user left them.
+    pub fn retryable(self) -> bool {
+        use UndoReason::*;
+        matches!(
+            self,
+            NoTrash | NameTaken | HistoryNotWritten(_) | InfoNotWritten(_) | MoveRefused(_)
+        )
+    }
+
     /// The record name.
     pub fn name(self) -> &'static str {
         use UndoReason::*;

@@ -2866,13 +2866,11 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
         .iter()
         .filter(|o| matches!(o, GroupOutcome::MovedToTrash { .. }))
         .count();
-    // Nothing undone (every group kept, e.g. no safe Trash today): no
-    // closing record, so the user can try again once the cause is fixed.
-    if res
-        .groups
-        .iter()
-        .all(|o| matches!(o, GroupOutcome::Kept { .. }))
-    {
+    // A group kept for a passing reason (no safe Trash today, a name
+    // taken): no closing record, so the user can try again once the cause
+    // is fixed. The retry reports the finished groups as recorded and
+    // moves only the kept ones (`Recovery::Closed` above).
+    if res.groups.iter().all(is_kept) || res.groups.iter().any(is_retryable) {
         return Ok(res);
     }
     let l = Line::new("undo")
@@ -2885,6 +2883,15 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
             .push(format!("history: the undo was not recorded: {e}"));
     }
     Ok(res)
+}
+
+fn is_kept(o: &GroupOutcome) -> bool {
+    matches!(o, GroupOutcome::Kept { .. })
+}
+
+/// A group kept for a cause that can pass (see [`UndoReason::retryable`]).
+fn is_retryable(o: &GroupOutcome) -> bool {
+    matches!(o, GroupOutcome::Kept { reason, .. } if reason.retryable())
 }
 
 #[cfg(test)]
@@ -6007,6 +6014,35 @@ mod tests {
             };
             assert_eq!(location.path_at_check, None, "no place is made up");
             assert!(moved.join(f[0].file_name().unwrap()).exists());
+        });
+    }
+
+    /// hardening-2 #3: a group kept for a passing reason (its move was
+    /// refused) must not close the job. The second undo reports the
+    /// finished group as recorded (nothing moves twice) and moves the one
+    /// that was kept.
+    #[test]
+    fn a_group_kept_for_a_passing_reason_does_not_close_the_job() {
+        let t = Tmp::new("partial");
+        t.env(|| {
+            let job = new_job_id();
+            let f = job_of(&t, &job, &[("a", "da"), ("b", "db")]);
+            {
+                // The second move into the Trash is refused.
+                let mut n = 0;
+                let _f = fault(move |p| {
+                    n += (p == Point::Rename) as u32;
+                    (p == Point::Rename && n == 2).then_some(libc::EPERM)
+                });
+                let r = undo(&job).unwrap();
+                assert_eq!(kept(&r), [UndoReason::MoveRefused(libc::EPERM)], "{r:?}");
+            }
+            assert!(fs::symlink_metadata(&f[0]).is_err(), "a is in the Trash");
+            let r = undo(&job).unwrap();
+            assert!(all_moved(&r, &f), "{:?}", r.groups);
+            assert_eq!(r.groups.len(), 2);
+            // Every group is final now: the job is closed.
+            assert_eq!(undo(&job).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         });
     }
 
