@@ -1976,6 +1976,33 @@ pub(crate) fn reap_group(pgid: libc::pid_t, until: Instant) -> io::Result<bool> 
 }
 
 /// Sets the mtime (and atime) of `path` to now.
+/// A periodic timer on `CLOCK_BOOTTIME`, which keeps counting while the
+/// machine is suspended (`CLOCK_MONOTONIC`, which `poll` and `Instant`
+/// use, does not): it fires at the resume if its time passed asleep.
+/// `None` if the kernel refuses; the monotonic deadline still refreshes.
+fn refresh_timer(every: Duration) -> Option<OwnedFd> {
+    // SAFETY: timerfd_create takes plain integers.
+    let fd = unsafe {
+        libc::timerfd_create(libc::CLOCK_BOOTTIME, libc::TFD_CLOEXEC | libc::TFD_NONBLOCK)
+    };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd is a fresh timerfd we own.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let t = libc::timespec {
+        tv_sec: every.as_secs() as libc::time_t,
+        tv_nsec: every.subsec_nanos() as _,
+    };
+    let spec = libc::itimerspec {
+        it_interval: t,
+        it_value: t,
+    };
+    // SAFETY: fd is a timerfd; spec is a valid itimerspec; no old value.
+    let r = unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, std::ptr::null_mut()) };
+    (r == 0).then_some(fd)
+}
+
 fn touch(path: &Path) {
     if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
         // SAFETY: c is a valid NUL-terminated path; NULL times means now.
@@ -2101,6 +2128,7 @@ impl<'a> Supervisor<'a> {
     /// The poll loop, until the child has exited (it stays unreaped).
     fn run(&mut self, sink: &mut Sink) {
         let mut next_refresh = Instant::now() + REFRESH_EVERY;
+        let tick = refresh_timer(REFRESH_EVERY);
         loop {
             let now = Instant::now();
             let mut deadline = next_refresh;
@@ -2141,6 +2169,7 @@ impl<'a> Supervisor<'a> {
             let err_at = self.stderr.as_ref().map(|s| push(s.as_raw_fd()));
             let sig_at = (!self.cancelled).then(|| push(self.cancel.fd.as_raw_fd()));
             let pid_at = self.pidfd.as_ref().map(|p| push(p.as_raw_fd()));
+            let tick_at = tick.as_ref().map(|t| push(t.as_raw_fd()));
             let wake_fd_at = wake_fd.map(push);
             // SAFETY: fds is a valid array of fds.len() pollfds.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
@@ -2157,7 +2186,15 @@ impl<'a> Supervisor<'a> {
             }
             let ready = |at: Option<usize>| at.is_some_and(|i| fds[i].revents != 0);
             let now = Instant::now();
-            if now >= next_refresh {
+            // The timer counts suspended time, `Instant` does not: after a
+            // long suspend the folder's mtime is refreshed at the resume.
+            let ticked = ready(tick_at);
+            if ticked {
+                let mut count = [0u8; 8];
+                // SAFETY: tick is an open timerfd; count is 8 writable bytes.
+                unsafe { libc::read(fds[tick_at.unwrap()].fd, count.as_mut_ptr().cast(), 8) };
+            }
+            if now >= next_refresh || ticked {
                 touch(self.root);
                 next_refresh = now + REFRESH_EVERY;
             }
@@ -4429,6 +4466,25 @@ pub(crate) mod tests {
         ] {
             assert!(done_index(bad, 2).is_err(), "{bad} accepted");
         }
+    }
+
+    /// hardening-2 #9: the refresh timer is a pollable fd that fires (a
+    /// short period stands in for the hour). That it counts suspended time
+    /// is the kernel's contract for `CLOCK_BOOTTIME`: not testable here.
+    #[test]
+    fn the_refresh_timer_fires_on_a_pollable_fd() {
+        let fd = refresh_timer(Duration::from_millis(20)).expect("a timerfd");
+        let mut p = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: p is one valid pollfd.
+        assert_eq!(unsafe { libc::poll(&mut p, 1, 5000) }, 1, "no tick");
+        let mut count = [0u8; 8];
+        // SAFETY: fd is a timerfd; count is 8 writable bytes.
+        let n = unsafe { libc::read(fd.as_raw_fd(), count.as_mut_ptr().cast(), 8) };
+        assert_eq!((n, u64::from_ne_bytes(count) >= 1), (8, true));
     }
 
     #[test]
