@@ -371,6 +371,20 @@ until they end (see [architecture.md](architecture.md), Invocation)
 ([sandbox-hardening.md](benchmarks/sandbox-hardening.md)). That limits how
 long a runaway tree lives, not how much memory it takes meanwhile.
 
+## Subtitles
+
+The subtitle family (SRT, WebVTT, ASS) reads one file into cues and writes
+one file. Its size limits are the text family's, so one number bounds both
+families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| input | 8 MiB | the text family's input budget; checked before any parsing, so `subtitle file is larger than 8 MiB` and nothing is read |
+| output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file; past it the action fails and nothing is left behind |
+| time | 99:59:59.999 | both formats write the hour as two digits, so a later cue has no time code to be written with; the reader skips that cue (with a warning) and converts the rest |
+| cues | none of their own | the input limit bounds the count; a cue needs bytes of input |
+| warnings | at most 7 lines | one per kind of loss (six kinds) and one for skipped cues, far below the engine's cap of 16 per input |
+
 ## The engine's own memory at the input limits
 
 The input limits (1024 paths, 1 MiB of paths) are also what the engine
