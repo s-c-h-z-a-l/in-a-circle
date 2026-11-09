@@ -1,0 +1,43 @@
+file	count	start_ms	end_ms	text	note
+arrows	6	0	1000	text0	
+comment-in-cue-text	2	0	1000	NOTE text	
+header-garbage	1	0	1000	text	
+header-regions	10	0	2500	"no region"	
+header-space	1	0	1000	text	
+header-tab	1	0	1000	text	
+header-timings	1	0	1000	text	a timing line right after the signature is a cue
+ids	5	0	1000	text0	
+ids-across-region-block	1	0	1000	text	
+ids-across-style-block	1	0	1000	text	
+newlines	4	0	1000	text0	
+nulls	7	0	1000	text0	
+regions-edge-case	4	0	1000	text	
+regions-id	4	0	1000	valid	
+regions-lines	11	0	1000	text	
+regions-old	2	0	1000	text0	
+regions-regionanchor	20	0	1000	text	
+regions-scroll	6	0	1000	text	
+regions-viewportanchor	20	0	1000	text	
+settings-align	13	0	1000	text0	
+settings-line	47	0	1000	valid0	
+settings-multiple	2	0	1000	text0	
+settings-position	25	0	1000	text0	
+settings-region	9	0	1000	text0	
+settings-size	16	0	1000	text0	
+settings-vertical	8	0	1000	text0	
+signature-bom	0				
+signature-no-newline	0				
+signature-space	0				
+signature-space-no-newline	0				
+signature-tab	0				
+signature-tab-no-newline	0				
+signature-timings	0			the rest of the signature line is not a cue	
+stylesheets	2	0	1000	text	no WPT count (it checks that no stylesheet applies); the foo and bar blocks are the cues
+timings-60	2	0	216001000	text1	
+timings-eof	0				
+timings-garbage	0				
+timings-negative	1	0	0	text0	WPT: 4. A cue that ends before it starts is skipped, as in the SRT reader
+timings-omitted-hours	3	0	1000	text0	
+timings-too-long	2	0	1000	text0	
+timings-too-short	2	0	1000	text0	
+whitespace-chars	3	0	1000	   text0	

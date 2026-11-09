@@ -33,14 +33,14 @@ const MS_PER_HOUR: u64 = 60 * MS_PER_MINUTE;
 
 /// Why a cue cannot be used. The messages are what the user sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fault {
+pub(crate) enum Fault {
     Format,
     Late,
     Order,
 }
 
 impl Fault {
-    fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             Fault::Format => "bad timestamp",
             Fault::Late => "time is 100 hours or more",
@@ -60,7 +60,7 @@ pub(crate) fn parse(text: &str) -> Parsed {
 
 /// Lines split at LF, CRLF or a lone CR. A final line break ends the last
 /// line; it does not start an empty one.
-fn lines(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn lines(text: &str) -> impl Iterator<Item = &str> {
     let mut rest = text;
     std::iter::from_fn(move || {
         if rest.is_empty() {
@@ -104,7 +104,7 @@ struct Stray {
 
 /// Reason for a stray block. It is counted once per block, so a file with
 /// text the conversion cannot carry says so instead of dropping it silently.
-const STRAY: &str = "text outside any cue";
+pub(crate) const STRAY: &str = "text outside any cue";
 
 impl<'a> Reader<'a> {
     /// `line` is trimmed; `n` is its 1-based line number.
@@ -254,10 +254,10 @@ impl Open {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct Style {
-    italic: bool,
-    bold: bool,
-    underline: bool,
+pub(crate) struct Style {
+    pub(crate) italic: bool,
+    pub(crate) bold: bool,
+    pub(crate) underline: bool,
 }
 
 /// Search state for one line. Once a search for a closer fails, no later
@@ -311,7 +311,7 @@ fn time(s: &str) -> Result<u64, Fault> {
 
 /// Decimal digits, non-empty. Saturates instead of overflowing, so an absurd
 /// field reads as a value past the limit.
-fn number(s: &str) -> Option<u64> {
+pub(crate) fn number(s: &str) -> Option<u64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -456,7 +456,7 @@ fn block(inner: &str, open: &mut Open) {
 
 /// Appends text in `style`, merging it into the last run when the style is
 /// the same, so a line has one run per style change.
-fn push_text(runs: &mut Vec<Run>, style: Style, text: &str) {
+pub(crate) fn push_text(runs: &mut Vec<Run>, style: Style, text: &str) {
     if text.is_empty() {
         return;
     }

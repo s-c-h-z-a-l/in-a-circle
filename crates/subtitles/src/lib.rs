@@ -7,6 +7,7 @@ use std::fmt;
 
 mod srt;
 mod time;
+mod vtt;
 mod write;
 
 pub use write::{write_srt, write_vtt};
@@ -16,17 +17,37 @@ pub use write::{write_srt, write_vtt};
 /// [`ReadError::NoCues`] when no cue in it is usable. A byte order mark is
 /// skipped. Everything else is read leniently: see `srt.rs` for the rules.
 pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
+    let text = text_of(bytes)?;
+    let parsed = srt::parse(text);
+    if parsed.cues.is_empty() {
+        return Err(ReadError::NoCues);
+    }
+    Ok(parsed)
+}
+
+/// Reads a WebVTT file as a browser would. The limits and the byte order mark
+/// are as in [`read_srt`]. A file without the `WEBVTT` signature is not WebVTT,
+/// so it has no cues and is refused with [`ReadError::NoCues`], as is one whose
+/// cues are all unusable. See `vtt.rs` for the rules.
+pub fn read_vtt(bytes: &[u8]) -> Result<Parsed, ReadError> {
+    let text = text_of(bytes)?;
+    let parsed = vtt::parse(text).ok_or(ReadError::NoCues)?;
+    if parsed.cues.is_empty() {
+        return Err(ReadError::NoCues);
+    }
+    Ok(parsed)
+}
+
+/// The input as text: refused past [`INPUT_BYTES`], refused when it is not
+/// UTF-8, and without its byte order mark.
+fn text_of(bytes: &[u8]) -> Result<&str, ReadError> {
     if bytes.len() > INPUT_BYTES {
         return Err(ReadError::TooLarge);
     }
     let text = std::str::from_utf8(bytes).map_err(|e| ReadError::NotUtf8 {
         at: e.valid_up_to(),
     })?;
-    let parsed = srt::parse(text.strip_prefix('\u{feff}').unwrap_or(text));
-    if parsed.cues.is_empty() {
-        return Err(ReadError::NoCues);
-    }
-    Ok(parsed)
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(text))
 }
 
 /// Largest subtitle input, in bytes. 8 MiB is the text family's input budget
