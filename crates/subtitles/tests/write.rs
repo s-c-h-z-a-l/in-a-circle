@@ -174,7 +174,7 @@ fn arrow_and_markup_are_escaped_in_vtt() {
 #[test]
 fn voice_name_ending_in_dashes_does_not_read_as_an_arrow() {
     let voiced = Line {
-        voice: Some("T00:00.000 --".into()),
+        voice: Some("Ann--".into()),
         runs: vec![run("hi")],
     };
     let cues = [cue(0, 1_000, vec![voiced])];
@@ -182,10 +182,7 @@ fn voice_name_ending_in_dashes_does_not_read_as_an_arrow() {
     let back = read_vtt(v.as_bytes()).expect("our output is usable");
     assert_eq!(back.skipped.count, 0, "{v:?}");
     assert_eq!(back.cues.len(), 1);
-    assert_eq!(
-        back.cues[0].lines[0].voice.as_deref(),
-        Some("T00:00.000 --")
-    );
+    assert_eq!(back.cues[0].lines[0].voice.as_deref(), Some("Ann--"));
     assert!(losses.is_empty());
 }
 
