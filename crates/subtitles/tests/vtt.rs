@@ -279,6 +279,16 @@ fn entities_are_decoded() {
 }
 
 #[test]
+fn nul_in_cue_text_is_the_replacement_character() {
+    // The standard replaces each NUL in cue text with U+FFFD. The WPT table
+    // checks first cues only, so the rule is pinned here on a later cue.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst\n\n00:00:03.000 --> 00:00:04.000\n\u{0}text\u{0}2\n",
+    );
+    assert_eq!(texts(&parsed)[1], "\u{fffd}text\u{fffd}2");
+}
+
+#[test]
 fn bad_cue_in_the_middle_is_skipped_rest_converts() {
     // 100 cues of three lines each (timing, text, empty), after the header and
     // its empty line. Cue 40 has `;` for the dot (a bad timestamp), cue 60
