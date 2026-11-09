@@ -122,7 +122,7 @@ stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
 | Drop to stage 2, 30 JPEG to Book, p95, reference desktop | 160 us (N=50) |
 | Drop to stage 2, text to Document, `main` vs this branch, p95 | 167 us vs 166 us (-0.6%) |
 | Drop to stage 2, second machine | not measured (reported, not gated) |
-| `main` to exit CPU, warm cache, p95 | pending (two-machine run) |
+| `main` to exit CPU of `run`, warm cache, p95, reference desktop | 1,432 us (`main`: 1,422 us), +0.7%; over 1,000 us on both builds, see below |
 
 **Drop to stage 2.** Hand-made drags on the reference desktop (kernel
 7.3.1, `INACIRCLE_MEASURE=1`, release builds: A is `main` 12992781, B is
@@ -142,8 +142,31 @@ path -0.6% p95 (investigation threshold 10%). The p95 is at most 17% of the
 small-sample rule of [acceptance.md](acceptance.md#sample-and-percentile-rule)
 would have accepted 10 drops; 50 were taken before that rule existed. The
 second machine was not measured: it is outside the reference timing gate.
-The `main` to exit row needs its own run and stays open. Raw logs are kept
-privately with the plan's reports.
+Raw logs are kept privately with the plan's reports.
+
+**`main` to exit (`inacircle run`).** Headless, 50 valid runs per series on
+the reference desktop, warm cache (one discarded run per build first, the
+catalog cache filled), a fresh input copy per run, private state per
+build, A and B alternating in swapped order. The metric is `self_cpu_us`
+minus `start_abs_cpu_us` (our CPU from `main` to exit; the ~0.6 ms before
+`main` is not in it), with the `main` to action-entry share as the second
+metric. The action's own CPU is a child's and is not counted.
+
+| Series | main to exit p50 / p95 / max (us) | main to action entry p50 / p95 (us) |
+|---|---|---|
+| A, text (`main`) | 1,309 / 1,422 / 1,534 | 321 / 363 |
+| B, text | 1,317 / 1,432 / 1,623 | 330 / 360 |
+| B, 1 JPEG to CBZ | 1,495 / 1,602 / 1,651 | 333 / 388 |
+| B, 30 JPEG to CBZ | 5,625 / 5,843 / 6,032 | 717 / 823 |
+
+The branch moves the text path +0.7% p95 (no regression). Standard
+deviation is 4-5% of the p50. **Absolute overrun:** the whole-run figure
+is over the 1,000 us target on `main` as well (p95 1,422 us); the share
+the target names for the wheel, `main` to starting the action, is 360-388
+us for one input. Almost all of the rest is the `exec` phase (sandbox and
+child setup, ~1 ms), not this branch's work. The 30-image run scales with
+the input count (per-input work, reported and not budgeted). Peak
+`VmHWM` 3,788 kB. Method: private script kept with the plan's reports.
 
 **Reproduce.**
 
