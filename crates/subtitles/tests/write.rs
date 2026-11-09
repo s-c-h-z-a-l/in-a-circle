@@ -498,3 +498,84 @@ fn plain_brace_is_left_alone() {
     );
     assert!(losses.is_empty());
 }
+
+/// A text line the SRT reader would take for a timing line starts a cue on
+/// read back, and its text is lost. The writer writes the `>` of its `-->` as
+/// U+FF1E, so the text reads back, in one cue. The SRT input holds the text
+/// behind a tag, which the reader keeps as text.
+#[test]
+fn timing_shaped_text_line_is_not_read_back_as_a_cue() {
+    let parsed =
+        read_srt(b"1\n00:00:01,000 --> 00:00:02,000\n<font>1:2:3,599 --> 99:59:59,999</font>\n\n")
+            .expect("the input has a cue");
+    let mut out = Vec::new();
+    let losses = write_srt(&parsed.cues, &mut out).expect("writing to a Vec cannot fail");
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+    let back = read_srt(&out).expect("the SRT output reads back");
+    assert_eq!(back.skipped.count, 0);
+    assert_eq!(back.cues.len(), 1);
+    assert_eq!(
+        back.cues[0].lines,
+        vec![Line {
+            voice: None,
+            runs: vec![run("1:2:3,599 --\u{ff1e} 99:59:59,999")],
+        }]
+    );
+    // The writer's own timing line is not rewritten.
+    assert!(
+        String::from_utf8(out)
+            .expect("UTF-8")
+            .contains("\r\n00:00:01,000 --> 00:00:02,000\r\n")
+    );
+}
+
+/// A cue with several timing-shaped text lines counts once, as the other
+/// look-alikes do; each cue counts once.
+#[test]
+fn timing_shaped_text_counts_one_loss_per_cue() {
+    let cues = [
+        cue(
+            0,
+            1_000,
+            vec![
+                plain("1:2:3,599 --> 99:59:59,999"),
+                plain("00:00:05,000 --> 00:00:06,000"),
+            ],
+        ),
+        cue(1_000, 2_000, vec![plain("00:00:07,000 --> 00:00:08,000")]),
+    ];
+    let (_, losses) = srt(&cues);
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 2)]));
+}
+
+/// Text that is not a timing line keeps its arrows, and so does a text line
+/// that a top cue's `{\an8}` marker makes non-timing: the marker is part of the
+/// line the reader gets.
+#[test]
+fn ordinary_arrow_text_is_left_alone() {
+    let cues = [cue(
+        0,
+        1_000,
+        vec![
+            plain("a --> b"),
+            plain("00:00:01,000"),
+            plain("-->"),
+            plain("00:00:01,000 -->"),
+        ],
+    )];
+    let (s, losses) = srt(&cues);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na --> b\r\n00:00:01,000\r\n-->\r\n00:00:01,000 -->\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+
+    let mut top = cue(0, 1_000, vec![plain("1:2:3,599 --> 99:59:59,999")]);
+    top.top = true;
+    let (s, losses) = srt(&[top]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{\\an8}1:2:3,599 --> 99:59:59,999\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+}

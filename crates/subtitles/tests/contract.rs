@@ -39,7 +39,7 @@ fn loss_messages_are_the_user_text() {
     );
     assert_eq!(
         Loss::Brackets.message(),
-        "brackets in text written as look-alikes"
+        "characters that look like markup written as look-alikes"
     );
 }
 

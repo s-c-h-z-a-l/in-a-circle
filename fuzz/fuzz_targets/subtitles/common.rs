@@ -61,8 +61,12 @@ fn shape(cues: &[Cue], voice_prefix: bool) -> Shape {
                         // back; the writers replace it (both formats).
                         text.push_str(&run.text.replace('\0', "\u{fffd}"));
                     }
+                    // SRT: the look-alikes are the writer's, and FF1E is read as
+                    // `>`: an arrow the writer rewrote (a timing-shaped text line)
+                    // reads back as FF1E and is compared as the `-->` it was. A
+                    // split cue is still caught by the shape.
                     let text = if voice_prefix {
-                        look_alike(&text)
+                        look_alike(&text).replace('\u{ff1e}', ">")
                     } else {
                         text
                     };

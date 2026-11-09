@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::rc::Rc;
 
+use crate::srt::is_timing_line;
 use crate::tag::look_alike_at;
 use crate::time::write_time;
 use crate::{Cue, Line, Loss, Run, has_text};
@@ -109,6 +110,35 @@ fn srt_safe(line: &Line) -> Cow<'_, Line> {
     Cow::Owned(Line { voice, runs })
 }
 
+/// Writes one text line of an SRT cue, its `{\an8}` marker first when it is the
+/// top cue's first line. The line is rendered first, so the reader's own timing
+/// test sees what the file will hold (marker, speaker and tags included). A
+/// line the reader would take for a timing line starts a cue on read back, so
+/// the `>` of each `-->` in it is written as U+FF1E, a look-alike. Returns
+/// whether it did that.
+fn write_srt_line(out: &mut impl Write, line: &Line, top: bool) -> io::Result<bool> {
+    let mut buf = Vec::new();
+    if top {
+        buf.extend_from_slice(b"{\\an8}");
+    }
+    if let Some(name) = &line.voice {
+        write_text(&mut buf, name, false)?;
+        buf.extend_from_slice(b": ");
+    }
+    write_runs(&mut buf, line, false)?;
+    // Everything in `buf` was written from a `&str` or is ASCII, so it is
+    // UTF-8 and the lossy conversion never changes a byte.
+    let text = String::from_utf8_lossy(&buf);
+    let timing = is_timing_line(text.trim());
+    if timing {
+        out.write_all(text.replace("-->", "--\u{ff1e}").as_bytes())?;
+    } else {
+        out.write_all(&buf)?;
+    }
+    out.write_all(b"\r\n")?;
+    Ok(timing)
+}
+
 /// Writes cues as SRT: a BOM, CRLF, numbers from 1 over the cues written, a
 /// speaker as a `Name: ` prefix, and `{\an8}` before the first line of a top
 /// cue. Cues are written in the given order. Cues with no text write nothing,
@@ -136,17 +166,8 @@ pub fn write_srt(cues: &[Cue], out: &mut impl Write) -> io::Result<BTreeMap<Loss
         for (i, line) in cue.lines.iter().filter(|l| has_text(l)).enumerate() {
             let safe = srt_safe(line);
             looked |= matches!(safe, Cow::Owned(_));
-            let line = &*safe;
-            if cue.top && i == 0 {
-                out.write_all(b"{\\an8}")?;
-            }
-            if let Some(name) = &line.voice {
-                has_voice = true;
-                write_text(out, name, false)?;
-                out.write_all(b": ")?;
-            }
-            write_runs(out, line, false)?;
-            out.write_all(b"\r\n")?;
+            has_voice |= safe.voice.is_some();
+            looked |= write_srt_line(out, &safe, cue.top && i == 0)?;
         }
         out.write_all(b"\r\n")?;
         voiced += usize::from(has_voice);

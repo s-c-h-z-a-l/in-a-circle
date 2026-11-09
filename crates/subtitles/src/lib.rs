@@ -175,7 +175,7 @@ impl Loss {
             Loss::Drawing => "drawings removed",
             Loss::Settings => "style and region blocks ignored",
             Loss::VoiceNames => "speaker names written as 'Name:' prefixes",
-            Loss::Brackets => "brackets in text written as look-alikes",
+            Loss::Brackets => "characters that look like markup written as look-alikes",
         }
     }
 }

@@ -50,6 +50,15 @@ impl Fault {
     }
 }
 
+/// Whether a trimmed line is a timing line inside a cue: it has `-->` and its
+/// start parses as a time. A time past the limit or out of order still counts
+/// (its cue is skipped); a line with no timing shape is cue text. The reader
+/// starts a cue at such a line, and the SRT writer rewrites the arrows of a
+/// text line this test would take, so a text line is never read as a cue.
+pub(crate) fn is_timing_line(line: &str) -> bool {
+    line.contains("-->") && !matches!(span(line), Err(Fault::Format))
+}
+
 /// Reads a whole SRT text (BOM already removed). Cues come out in file order.
 pub(crate) fn parse(text: &str, budget: &mut Budget) -> Result<Parsed, ReadError> {
     let mut reader = Reader::default();
@@ -123,7 +132,7 @@ impl<'a> Reader<'a> {
             } else {
                 self.add_stray(n, line);
             }
-        } else if line.contains("-->") && !matches!(span(line), Err(Fault::Format)) {
+        } else if is_timing_line(line) {
             // Inside a cue only a well-formed timing line starts the next
             // one. `a --> b` and a broken timing are text.
             self.index = None;
