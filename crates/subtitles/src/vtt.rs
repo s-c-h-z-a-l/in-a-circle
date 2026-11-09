@@ -25,9 +25,12 @@
 //!   setting is a `Position` loss. Unknown setting names are ignored.
 //! - Cue text: `<i> <b> <u>` as in SRT. `<v Name>` gives the line its
 //!   speaker (`<v.class Name>` too: the classes are not part of the name), and
-//!   `</v>` ends it, so text after `</v>` on a line is a line of its own. `<c.class>` is `Styling`, a timestamp tag is `Karaoke` (its text
-//!   stays). Other tags are dropped and their text kept. `&amp;`, `&lt;`,
-//!   `&gt;`, `&lrm;`, `&rlm;` and `&nbsp;` are decoded; a NUL is U+FFFD.
+//!   `</v>` ends it, so text after `</v>` on a line is a line of its own.
+//!   `<c.class>` is `Styling`, a timestamp tag is `Karaoke` (its text stays).
+//!   Other tags are dropped and their text kept. `&amp;`, `&lt;`, `&gt;`,
+//!   `&quot;`, `&apos;`, `&lrm;`, `&rlm;` and `&nbsp;` are decoded, and so are
+//!   numeric references (`&#N;`, `&#xH;`) to any valid character but NUL and
+//!   the line breaks; any other `&name;` is text. A NUL is U+FFFD.
 //!
 //! Standard library only. Every loop moves forward, so the work is linear in
 //! the input: a `<` with no `>` later in its line is text, and the failed
@@ -430,23 +433,52 @@ struct Scan {
     no_gt: bool,
 }
 
-/// The named entities the standard decodes. The two marks and the no-break
-/// space are the ones that change how text is laid out.
-const ENTITIES: [(&str, &str); 6] = [
-    ("&amp;", "&"),
-    ("&lt;", "<"),
-    ("&gt;", ">"),
-    ("&lrm;", "\u{200e}"),
-    ("&rlm;", "\u{200f}"),
-    ("&nbsp;", "\u{a0}"),
+/// The named entities the reader decodes: the markup characters, the two
+/// quotes, the two marks and the no-break space. Any other `&name;` is text as
+/// written; the full HTML table is not needed for subtitles.
+const ENTITIES: [(&str, char); 8] = [
+    ("&amp;", '&'),
+    ("&lt;", '<'),
+    ("&gt;", '>'),
+    ("&quot;", '"'),
+    ("&apos;", '\''),
+    ("&lrm;", '\u{200e}'),
+    ("&rlm;", '\u{200f}'),
+    ("&nbsp;", '\u{a0}'),
 ];
 
-/// The entity at the start of `tail`, with its text and its length in bytes.
-fn entity(tail: &str) -> Option<(&'static str, usize)> {
-    ENTITIES
-        .iter()
-        .find(|(name, _)| tail.starts_with(name))
-        .map(|&(name, text)| (text, name.len()))
+/// The most digits a numeric reference may have. Eight cover every value up to
+/// U+10FFFF with leading zeros, and fit in `u32`, so the parse cannot overflow.
+/// A longer run is text. It also bounds the work: each `&` reads at most this
+/// many digits, whatever follows it.
+const MAX_REFERENCE_DIGITS: usize = 8;
+
+/// The character the entity at the start of `tail` decodes to, and the
+/// entity's length in bytes. A numeric reference is `&#N;`, `&#xH;` or `&#XH;`
+/// and decodes to a valid character except NUL and the line breaks, which
+/// stay as written: the readers split lines at a line break, and a NUL is not
+/// text.
+fn entity(tail: &str) -> Option<(char, usize)> {
+    if let Some(&(name, c)) = ENTITIES.iter().find(|(name, _)| tail.starts_with(name)) {
+        return Some((c, name.len()));
+    }
+    let body = tail.strip_prefix("&#")?;
+    let (digits, radix) = match body.strip_prefix(['x', 'X']) {
+        Some(hex) => (hex, 16),
+        None => (body, 10),
+    };
+    let len = digits
+        .bytes()
+        .take(MAX_REFERENCE_DIGITS + 1)
+        .take_while(|b| b.is_ascii_digit() || (radix == 16 && b.is_ascii_hexdigit()))
+        .count();
+    if len == 0 || len > MAX_REFERENCE_DIGITS || !digits[len..].starts_with(';') {
+        return None;
+    }
+    let value = u32::from_str_radix(&digits[..len], radix).ok()?;
+    let c = char::from_u32(value).filter(|c| !matches!(c, '\0' | '\n' | '\r'))?;
+    // The text up to the digits (`&#`, and `x` for hex), the digits, the `;`.
+    Some((c, tail.len() - digits.len() + len + 1))
 }
 
 /// `s` with its entities decoded, for voice names.
@@ -457,8 +489,8 @@ fn unescape(s: &str) -> String {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
         let len = match entity(tail) {
-            Some((text, len)) => {
-                out.push_str(text);
+            Some((c, len)) => {
+                out.push(c);
                 len
             }
             None => {
@@ -494,8 +526,9 @@ fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<(), ReadEr
             }
         } else {
             match entity(tail) {
-                Some((text, len)) => {
-                    push(&mut runs, open.style, text, budget)?;
+                Some((c, len)) => {
+                    let mut buf = [0; 4];
+                    push(&mut runs, open.style, c.encode_utf8(&mut buf), budget)?;
                     len
                 }
                 None => {

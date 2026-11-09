@@ -700,8 +700,11 @@ are in `CLAUDE.md`.
     are not reported. A `STYLE` or `REGION` block makes every later cue
     `Settings`. A `line:` setting in the top third makes a top cue; any other
     placement is `Position`. `<c.class>` is `Styling`, a timestamp tag is
-    `Karaoke` (its text stays), `<v Name>` is the speaker, and other tags are
-    dropped with their text kept.
+    `Karaoke` (its text stays), `<v Name>` is the speaker (its classes are not
+    part of the name), and other tags are dropped with their text kept. The
+    entities `&amp; &lt; &gt; &quot; &apos; &nbsp; &lrm; &rlm;` and numeric
+    references (`&#N;`, `&#xH;`) to any valid character but NUL and the line
+    breaks are decoded; any other `&name;` stays as written.
   - **ASS and SSA** follow libass: each section's `Format:` line gives the
     columns, `Dialogue:` lines are cues and `Comment:` lines are dropped
     silently. The style's bold, italic and underline and its alignment (7 to 9

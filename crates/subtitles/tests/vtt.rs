@@ -387,6 +387,44 @@ fn entities_are_decoded() {
 }
 
 #[test]
+fn numeric_character_references_are_decoded() {
+    // Decimal and hex references to a valid character decode, as do the quote
+    // entities. A decoded `<` is text, not a tag.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nIt&#39;s &quot;me&quot; &#x1F600; &#X41; &#60;i&#62; &apos;&#00000065;\n",
+    );
+    assert_eq!(texts(&parsed), vec!["It's \"me\" \u{1f600} A <i> 'A"]);
+    assert!(parsed.cues[0].lines[0].runs.iter().all(|r| !r.italic));
+    // `&amp;` is the one `&` that decodes, so the reference after it is text.
+    let parsed = read("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&amp;#39;\n");
+    assert_eq!(texts(&parsed), vec!["&#39;"]);
+}
+
+#[test]
+fn references_that_are_not_valid_stay_as_written() {
+    // NUL, a surrogate, a value past U+10FFFF, a line break (the readers split
+    // lines at them), a missing digit or `;`, nine digits (past the cap), and a
+    // name that is not in the set: each stays as the text it was.
+    for literal in [
+        "&#0;",
+        "&#xD800;",
+        "&#x110000;",
+        "&#10;",
+        "&#xD;",
+        "&#;",
+        "&#x;",
+        "&#x41",
+        "&#000000065;",
+        "&unknown;",
+    ] {
+        let parsed = read(&format!(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{literal}\n"
+        ));
+        assert_eq!(texts(&parsed), vec![literal], "{literal}");
+    }
+}
+
+#[test]
 fn nul_in_cue_text_is_the_replacement_character() {
     // The standard replaces each NUL in cue text with U+FFFD. The WPT table
     // checks first cues only, so the rule is pinned here on a later cue.
@@ -534,6 +572,13 @@ fn vtt_linear_on_tag_floods() {
         ("timestamp tags on one line", CUE, "x<00:00:01.000>"),
         ("speaker tags on one line", CUE, "x<v A>"),
         ("entities on one line", CUE, "x&amp;"),
+        ("numeric references on one line", CUE, "x&#99999999"),
+        (
+            "numeric references with long digit runs",
+            CUE,
+            "&#9999999999999999999999",
+        ),
+        ("lone ampersands on one line", CUE, "x&"),
         (
             "minimal cues",
             "WEBVTT\n\n",
