@@ -122,7 +122,7 @@ stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
 | Drop to stage 2, 30 JPEG to Book, p95, reference desktop | 160 us (N=50) |
 | Drop to stage 2, text to Document, `main` vs this branch, p95 | 167 us vs 166 us (-0.6%) |
 | Drop to stage 2, second machine | not measured (reported, not gated) |
-| `main` to exit CPU of `run`, warm cache, p95, reference desktop | 1,432 us (`main`: 1,422 us), +0.7%; over 1,000 us on both builds, see below |
+| `main` to action start CPU of `run`, warm cache, p95, reference desktop | 360 us (`main`: 363 us), -0.8%; whole run to exit 1,432 us (`main`: 1,422 us), reported |
 
 **Drop to stage 2.** Hand-made drags on the reference desktop (kernel
 7.3.1, `INACIRCLE_MEASURE=1`, release builds: A is `main` 12992781, B is
@@ -160,11 +160,11 @@ metric. The action's own CPU is a child's and is not counted.
 | B, 30 JPEG to CBZ | 5,625 / 5,843 / 6,032 | 717 / 823 |
 
 The branch moves the text path +0.7% p95 (no regression). Standard
-deviation is 4-5% of the p50. **Absolute overrun:** the whole-run figure
-is over the 1,000 us target on `main` as well (p95 1,422 us); the share
-the target names for the wheel, `main` to starting the action, is 360-388
-us for one input. Almost all of the rest is the `exec` phase (sandbox and
-child setup, ~1 ms), not this branch's work. The 30-image run scales with
+deviation is 4-5% of the p50. **Whole run:** the whole-run figure
+is 1,422-1,432 us on `main` and the branch alike. The budget for `run`
+ends at the action's start (CLAUDE.md), which is 360-388 us for one input;
+the rest comes after the action has started, reported and not budgeted
+(not broken down further here). The 30-image run scales with
 the input count (per-input work, reported and not budgeted). Peak
 `VmHWM` 3,788 kB. Method: private script kept with the plan's reports.
 

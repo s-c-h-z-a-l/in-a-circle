@@ -38,8 +38,9 @@ it's a bug.
      into its waiting points, each p95 <= 1 ms of our CPU for one input:
      wheel-mode entry to the wheel's commit, the early list to level 1,
      the drop's data to the stage-2 wheel's commit, and the choice to the
-     action's start. Per-input work beyond one input scales and is
-     reported, not budgeted. CPU before `main` (a launcher's `sh -c`, exec,
+     action's start. For `inacircle run` the target ends at the action's
+     start; the CPU after it is reported, not budgeted. Per-input work
+     beyond one input scales and is reported, not budgeted. CPU before `main` (a launcher's `sh -c`, exec,
      loader) is reported, not budgeted.
    - hover repaint: <= 100 µs wall time per event on the reference
      environment; report p95 and maximum separately

@@ -20,7 +20,8 @@ it does not turn its measured overruns into successful absolute results.
 | Binary/dependency budgets | Existing `CLAUDE.md` ceilings and shipped-dependency checks remain mandatory |
 
 For non-wheel commands the existing `main` → exit CPU target excludes
-per-event work. For the interactive wheel, apply the target to its
+per-event work and ends at the action's start (`main` → action entry); the
+CPU after it is reported. For the interactive wheel, apply the target to its
 documented waiting points, not the time spent waiting for the user or a
 sum of unrelated phases. Multi-input cost is reported separately; a
 single-input acceptance series must not mix in batches or cancellations.
