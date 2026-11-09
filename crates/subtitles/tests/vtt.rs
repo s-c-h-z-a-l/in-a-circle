@@ -394,6 +394,35 @@ fn id_block_without_timing_is_text_outside_any_cue() {
 }
 
 #[test]
+fn dropped_arrow_line_is_counted_however_its_block_ends() {
+    // A `-->` line that is no timing line drops its block, and the block is one
+    // skip. Whatever ends it counts: a timing line (the cue after it is kept),
+    // a text line, a blank line or the end of the file.
+    let dropped = |line: usize| Skipped {
+        count: 1,
+        first: Some((line, "bad timestamp")),
+    };
+    let timing_after = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\nLook --> there\n00:00:03.000 --> 00:00:04.000\nWorld\n",
+    );
+    assert_eq!(texts(&timing_after), vec!["Hello", "World"]);
+    assert_eq!(timing_after.skipped, dropped(5));
+
+    let text_after =
+        read("WEBVTT\n\nLook --> there\nmore\n\n00:00:03.000 --> 00:00:04.000\nWorld\n");
+    assert_eq!(texts(&text_after), vec!["World"]);
+    assert_eq!(text_after.skipped, dropped(3));
+
+    let blank_after = read("WEBVTT\n\nLook --> there\n\n00:00:03.000 --> 00:00:04.000\nWorld\n");
+    assert_eq!(texts(&blank_after), vec!["World"]);
+    assert_eq!(blank_after.skipped, dropped(3));
+
+    let at_end = read("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\nLook --> there");
+    assert_eq!(texts(&at_end), vec!["Hi"]);
+    assert_eq!(at_end.skipped, dropped(5));
+}
+
+#[test]
 fn dotted_tags_other_than_c_are_not_styling() {
     // Only `<c.class>` is styling. An unknown tag with a dotted name, and a
     // closing `</c.class>`, change nothing and report nothing.

@@ -15,8 +15,8 @@
 //! - A cue is a timing line, after an optional identifier line, then its text.
 //!   A line with `-->` ends the text of a cue, as in the standard: a timing
 //!   line there starts the next cue. Any other such line is dropped, and the
-//!   line after it may be the timing line. So a `-->` in a cue's text is not
-//!   text; the writers escape it.
+//!   line after it may be the timing line. The dropped line is counted as
+//!   skipped. The writers escape `>`, so their output has no such line.
 //! - Timing: `[H+:]MM:SS.mmm`, hours of any length, minutes and seconds 00 to
 //!   59, milliseconds exactly three digits. A cue that ends before it starts,
 //!   or is 100 hours or more, is skipped, as in the SRT reader.
@@ -171,13 +171,14 @@ impl Reader {
                     self.block = Block::Ignored;
                 }
             },
-            Block::Dropped(first) => match timing(line) {
-                Some(t) => self.start(n, t),
-                None => {
-                    self.skip(first, Fault::Format.message());
-                    self.block = Block::Ignored;
+            Block::Dropped(first) => {
+                // Counted here whether or not a timing line follows it.
+                self.skip(first, Fault::Format.message());
+                match timing(line) {
+                    Some(t) => self.start(n, t),
+                    None => self.block = Block::Ignored,
                 }
-            },
+            }
             Block::Ignored => {}
         }
         Ok(())
