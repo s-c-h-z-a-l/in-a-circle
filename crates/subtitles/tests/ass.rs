@@ -120,6 +120,15 @@ fn all_bold(cue: &Cue) -> bool {
     cue.lines.iter().flat_map(|l| &l.runs).all(|r| r.bold)
 }
 
+/// The runs of a cue's first line as (text, italic, bold, underline).
+fn flags(cue: &Cue) -> Vec<(&str, bool, bool, bool)> {
+    cue.lines[0]
+        .runs
+        .iter()
+        .map(|r| (r.text.as_str(), r.italic, r.bold, r.underline))
+        .collect()
+}
+
 #[test]
 fn style_and_override_alignment_set_top() {
     // Alignment 8 is the top row in V4+; 2 is the bottom. An override names a
@@ -295,8 +304,9 @@ fn bold_minus_one_and_weight_values() {
     let bold: Vec<bool> = parsed.cues.iter().map(all_bold).collect();
     assert_eq!(bold, vec![true, false, true, true, false, true, false]);
 
-    // Overrides follow the same rule, and an italic value that is not on or off
-    // is styling the reader cannot carry.
+    // Overrides follow the same rule. An italic value that is neither on nor
+    // off returns to the style, as libass does: `\i-1` and `\i2` on a plain
+    // style leave the text plain.
     let parsed = read(&plain(
         "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\b1}a{\\b700}b{\\b400}c{\\b0}d\n\
          Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\i-1}e{\\i2}f\n",
@@ -310,8 +320,8 @@ fn bold_minus_one_and_weight_values() {
     assert_eq!(runs, vec![("ab".into(), true), ("cd".into(), false)]);
     let italic = &parsed.cues[1].lines[0].runs;
     assert_eq!(italic.len(), 1, "`\\i2` does not change the italic state");
-    assert!(italic[0].italic && italic[0].text == "ef");
-    assert_eq!(parsed.losses, losses(&[(Loss::Styling, 1)]));
+    assert!(!italic[0].italic && italic[0].text == "ef");
+    assert!(parsed.losses.is_empty());
 }
 
 #[test]
@@ -447,6 +457,112 @@ fn bare_bold_italic_underline_return_to_the_style() {
             ("b", false, true, false)
         ])
     );
+}
+
+#[test]
+fn bare_flag_returns_to_the_style_of_the_last_reset() {
+    // `\r<Style>` sets the style a bare `\b`, `\i` or `\u` returns to, as libass
+    // does, not the cue's own style. Checked by rendering with libass:
+    // `{\rAlt}a{\b0\i0}b{\b\i}c` draws the same as `{\rAlt}a{\b0\i0}b{\b1\i1}c`.
+    let styles = format!(
+        "{}{}",
+        style("Default", "0", "0", "0", "2"),
+        style("Alt", "-1", "-1", "0", "2")
+    );
+    let parsed = read(&v4plus(
+        "0",
+        &styles,
+        &dialogue("Default", r"{\rAlt}a{\b0\i0}b{\b\i}c"),
+    ));
+    assert_eq!(
+        flags(&parsed.cues[0]),
+        vec![
+            ("a", true, true, false),
+            ("b", false, false, false),
+            ("c", true, true, false)
+        ]
+    );
+    assert!(parsed.losses.is_empty());
+
+    // A later plain `\r` makes the cue's own style the one a bare flag returns to.
+    let parsed = read(&v4plus(
+        "0",
+        &styles,
+        &dialogue("Default", r"{\rAlt}{\r}{\b1\i1}c{\b\i}d"),
+    ));
+    assert_eq!(
+        flags(&parsed.cues[0]),
+        vec![("c", true, true, false), ("d", false, false, false)]
+    );
+}
+
+#[test]
+fn override_values_ignore_spaces_around_them() {
+    // libass skips the spaces around a value: `{\b }` is the bare form, and
+    // `{\b 1}` and `{\i 1 }` are on. None of it is styling the reader lacks.
+    let parsed = read(&plain(&dialogue("Default", r"{\b1}a{\b }b{\b 1}c{\i 1 }d")));
+    assert_eq!(
+        flags(&parsed.cues[0]),
+        vec![
+            ("a", false, true, false),
+            ("b", false, false, false),
+            ("c", false, true, false),
+            ("d", true, true, false)
+        ]
+    );
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
+fn numeric_values_other_than_on_and_off_return_to_the_style() {
+    // libass reads `\b2`, `\b-1`, `\i-1` and `\u3` as a bare flag: each returns
+    // the flag to the style and switches nothing on or off. Checked by
+    // rendering with libass: `{\b1}a{\b-1}b` draws as `{\b1}a{\b}b`, and on a
+    // bold italic style `{\b0\i0}a{\b2}b{\i3}c` makes `b` bold and `c` bold
+    // and italic. `\b100` is a weight, not on: it is plain.
+    let styles = format!(
+        "{}{}{}",
+        style("Default", "0", "0", "0", "2"),
+        style("Alt", "-1", "-1", "0", "2"),
+        style("Ul", "0", "0", "-1", "2")
+    );
+    let parsed = read(&v4plus(
+        "0",
+        &styles,
+        &[
+            dialogue("Default", r"{\b1}a{\b-1}b{\i1}c{\i-1}d"),
+            dialogue("Alt", r"{\b0\i0}a{\b2}b{\i3}c"),
+            dialogue("Ul", r"{\u0}a{\u2}b{\u3}c"),
+            dialogue("Default", r"{\b1}a{\b100}b"),
+        ]
+        .concat(),
+    ));
+    assert_eq!(
+        flags(&parsed.cues[0]),
+        vec![
+            ("a", false, true, false),
+            ("b", false, false, false),
+            ("c", true, false, false),
+            ("d", false, false, false)
+        ]
+    );
+    assert_eq!(
+        flags(&parsed.cues[1]),
+        vec![
+            ("a", false, false, false),
+            ("b", false, true, false),
+            ("c", true, true, false)
+        ]
+    );
+    assert_eq!(
+        flags(&parsed.cues[2]),
+        vec![("a", false, false, false), ("bc", false, false, true)]
+    );
+    assert_eq!(
+        flags(&parsed.cues[3]),
+        vec![("a", false, true, false), ("b", false, false, false)]
+    );
+    assert!(parsed.losses.is_empty());
 }
 
 #[test]

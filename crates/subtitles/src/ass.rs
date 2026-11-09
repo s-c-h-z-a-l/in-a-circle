@@ -20,8 +20,10 @@
 //!   weight of 600 or more is bold. The alignment is the cue's position: on
 //!   V4+ 7, 8 and 9 are the top row; in `[V4 Styles]` (and `\a`) 5, 6 and 7 are.
 //!   An unknown style name falls back to `Default`, then to no style.
-//! - Overrides: `\i \b \u` switch styling, `\an` and `\a` name a top row,
-//!   `\r` and `\r<Style>` return to a style. A cue is one position, so it is
+//! - Overrides: `\i \b \u` switch styling: `1` is on, `0` is off, and a bare
+//!   flag or any other value returns to the style of the last `\r`, as libass
+//!   does. `\an` and `\a` name a top row, `\r` and `\r<Style>` return to a
+//!   style. A cue is one position, so it is
 //!   top when any part of it is at the top, as in the SRT reader; a bottom
 //!   override does not move a top cue down. `\N`
 //!   breaks the line; `\n` breaks it with `WrapStyle: 2` and is a space
@@ -50,6 +52,11 @@ const MS_PER_CENTISECOND: u64 = 10;
 /// bold weight, and 600 is the usual cut-off of renderers (700 is the usual
 /// bold weight itself).
 const BOLD_WEIGHT: i64 = 600;
+
+/// libass reads a bold override from this value up as a font weight (100 is
+/// thin, 400 regular, 700 bold), so `\b100` is not bold. Smaller values other
+/// than 0 and 1 (`\b2`, `\b-1`) return to the style, as a bare `\b` does.
+const WEIGHT_FROM: i64 = 100;
 
 /// The style a Dialogue names but the file does not define falls back to this.
 const DEFAULT_STYLE: &str = "Default";
@@ -398,23 +405,30 @@ impl<'a> Reader<'a> {
                 self.base(name)
             };
             scene.style = base.style;
+            scene.reset = base.style;
             scene.top |= base.top;
             return;
         }
         let (name, value) = split_name(tag);
         match name {
             "i" | "b" | "u" => {
-                // A bare flag (`\b`) returns to the cue's own style, as libass does.
-                let home = scene.home.style;
-                let (flag, home_flag) = match name {
-                    "i" => (&mut scene.style.italic, home.italic),
-                    "b" => (&mut scene.style.bold, home.bold),
-                    _ => (&mut scene.style.underline, home.underline),
+                // A bare flag, or a value that is neither on nor off, returns to
+                // the style the last `\r` set, as libass does. Spaces around the
+                // value are not part of it.
+                let value = value.trim();
+                let reset = scene.reset;
+                let (flag, reset_flag) = match name {
+                    "i" => (&mut scene.style.italic, reset.italic),
+                    "b" => (&mut scene.style.bold, reset.bold),
+                    _ => (&mut scene.style.underline, reset.underline),
                 };
                 let on = if value.is_empty() {
-                    Some(home_flag)
+                    Some(reset_flag)
                 } else {
-                    switch(value, name == "b")
+                    value
+                        .parse()
+                        .ok()
+                        .map(|v| flag_override(v, name == "b").unwrap_or(reset_flag))
                 };
                 match on {
                     Some(on) => *flag = on,
@@ -457,6 +471,9 @@ impl<'a> Reader<'a> {
 struct Scene {
     /// The cue's own style, which `\r` returns to.
     home: Base,
+    /// The style a bare `\b`, `\i` or `\u` returns to: the one the last `\r`
+    /// set, or the cue's own style before any `\r`.
+    reset: Style,
     wrap: bool,
     style: Style,
     /// The cue is at the top at some point in its text, so it stays top.
@@ -472,6 +489,7 @@ impl Scene {
     fn new(home: Base, wrap: bool) -> Self {
         Self {
             home,
+            reset: home.style,
             wrap,
             style: home.style,
             top: home.top,
@@ -553,6 +571,18 @@ fn switch(value: &str, weight: bool) -> Option<bool> {
         -1 | 1 => Some(true),
         0 => Some(false),
         w if weight => Some(w >= BOLD_WEIGHT),
+        _ => None,
+    }
+}
+
+/// A numeric `\b`, `\i` or `\u` override, as libass reads it: `0` is off and
+/// `1` is on. For bold, a value from [`WEIGHT_FROM`] up is a font weight.
+/// `None` for any other value (`-1`, `2`), which returns the flag to the style.
+fn flag_override(value: i64, weight: bool) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        w if weight && w >= WEIGHT_FROM => Some(w >= BOLD_WEIGHT),
         _ => None,
     }
 }

@@ -715,7 +715,10 @@ are in `CLAUDE.md`.
     columns, `Dialogue:` lines are cues and `Comment:` lines are dropped
     silently. The style's bold, italic and underline and its alignment (7 to 9
     in V4+, 5 to 7 in V4 styles, a top row) set the cue's base; the inline
-    `\i`, `\b`, `\u`, `\an`, `\a` and `\r` change it. `\N` breaks a line; `\n`
+    `\i`, `\b`, `\u`, `\an`, `\a` and `\r` change it. A bare `\i`, `\b` or
+    `\u` returns that flag to the style of the last `\r`, as libass does, and
+    so does any other value, except that a bold weight of 100 or more is a
+    font weight (`\b400` is off, `\b700` on). `\N` breaks a line; `\n`
     breaks it only under `WrapStyle: 2` and is a space otherwise; `\h` is a
     no-break space. `\k` is `Karaoke`; `\p1` to `\p0` is `Drawing` and its
     text is dropped; `\pos`, `\move` and `\org` are `Position`; other tags are
