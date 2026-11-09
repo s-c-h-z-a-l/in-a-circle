@@ -32,7 +32,8 @@
 //!   `TOP_ROW` and `TOP_PERCENT`). Any other valid placement and every other
 //!   setting is a `Position` loss. Unknown setting names are ignored.
 //! - Cue text: `<i> <b> <u>` as in SRT. `<v Name>` gives the line its
-//!   speaker (`<v.class Name>` too: the classes are not part of the name), and
+//!   speaker (`<v.class Name>` too: the classes are not part of the name; the
+//!   name is decoded, then trimmed of ASCII white space only), and
 //!   `</v>` ends it, so text after `</v>` on a line is a line of its own.
 //!   `<c.class>` and `<v.class>` are `Styling`, a timestamp tag is `Karaoke`
 //!   (its text stays).
@@ -644,7 +645,10 @@ fn tag(
                     .map_or("", |i| &classes[i..]),
                 None => annotation,
             };
-            let who = unescape(who.trim());
+            // The standard decodes the references first, then trims ASCII white
+            // space only: a no-break space is part of the name.
+            let who = unescape(who);
+            let who = who.trim_matches(|c: char| c.is_ascii_whitespace());
             (!who.is_empty()).then(|| Rc::from(who))
         };
     } else if name.eq_ignore_ascii_case("c") && !closing && annotation.starts_with('.') {

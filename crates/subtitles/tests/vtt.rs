@@ -412,6 +412,35 @@ fn numeric_character_references_are_decoded() {
     assert_eq!(texts(&parsed), vec!["&#39;"]);
 }
 
+/// The standard decodes a name's references and then trims ASCII white space
+/// only. A no-break space stays part of the name, raw or from `&nbsp;`, so it
+/// reads back as the writer wrote it; a space from `&#32;` is trimmed.
+#[test]
+fn voice_name_trims_only_ascii_space_after_decoding() {
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v \u{a0}Bob>x</v>\n<v &nbsp;Ann>y</v>\n<v &#32;Cy&#9;>z</v>\n",
+    );
+    let voices: Vec<Option<String>> = parsed.cues[0]
+        .lines
+        .iter()
+        .map(|l| l.voice.as_deref().map(String::from))
+        .collect();
+    assert_eq!(
+        voices,
+        vec![
+            Some("\u{a0}Bob".into()),
+            Some("\u{a0}Ann".into()),
+            Some("Cy".into())
+        ]
+    );
+    let mut out = Vec::new();
+    write_vtt(&parsed.cues, &mut out).expect("writing to a Vec cannot fail");
+    assert_eq!(
+        read(std::str::from_utf8(&out).expect("UTF-8")).cues,
+        parsed.cues
+    );
+}
+
 #[test]
 fn references_that_are_not_valid_stay_as_written() {
     // NUL, a surrogate, a value past U+10FFFF, a line break (the readers split

@@ -706,7 +706,8 @@ are in `CLAUDE.md`.
     A `line:` setting in the top third makes a top cue; any other
     placement is `Position`. `<c.class>` and `<v.class>` are `Styling`, a
     timestamp tag is `Karaoke` (its text stays), `<v Name>` is the speaker (its
-    classes are not part of the name), and other tags are dropped with their
+    classes are not part of the name; the name is decoded, then trimmed of
+    ASCII white space only, so a no-break space stays), and other tags are dropped with their
     text kept. The
     entities `&amp; &lt; &gt; &quot; &apos; &nbsp; &lrm; &rlm;` and numeric
     references (`&#N;`, `&#xH;`) to any valid character but NUL and the line
