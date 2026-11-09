@@ -98,8 +98,8 @@ impl Loss {
     }
 }
 
-/// Cues a reader could not use. `first` is the 1-based line of the first one
-/// and why it was refused.
+/// Cues a reader could not use, and blocks of text outside any cue. `first` is
+/// the 1-based line of the first one and why it was refused.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Skipped {
     pub count: usize,

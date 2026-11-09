@@ -14,6 +14,10 @@
 //!   `{\…}` blocks (their effect is reported).
 //! - A cue that cannot be used (bad timing, ends before it starts, 100 hours
 //!   or more) is skipped, and the rest of the file converts.
+//! - Text outside any cue (a title, stray lines between cues) is a block of
+//!   lines up to a blank line or a timing line. It is counted once as skipped,
+//!   never shown and never joined to a cue. A lone number line is a cue index
+//!   and is not counted.
 //!
 //! Standard library only. Every loop moves forward, so the work is linear in
 //! the input; a `<` or `{` with no closer later in its line is text, and a
@@ -85,7 +89,22 @@ struct Reader<'a> {
     /// A line of digits in a cue's text. If a timing line follows it, it was
     /// the next cue's number and is dropped; otherwise it is text.
     index: Option<&'a str>,
+    /// Text outside any cue, between cues, being collected.
+    stray: Option<Stray>,
 }
+
+/// A block of non-blank lines that belongs to no cue.
+struct Stray {
+    first: usize,
+    lines: usize,
+    /// The first line is all digits. Alone, such a block is a cue index whose
+    /// timing never came, and it is not reported.
+    number: bool,
+}
+
+/// Reason for a stray block. It is counted once per block, so a file with
+/// text the conversion cannot carry says so instead of dropping it silently.
+const STRAY: &str = "text outside any cue";
 
 impl<'a> Reader<'a> {
     /// `line` is trimmed; `n` is its 1-based line number.
@@ -93,11 +112,15 @@ impl<'a> Reader<'a> {
         if line.is_empty() {
             self.flush_index();
             self.close();
+            self.flush_stray();
         } else if self.open.is_none() {
             // Between cues a timing line opens a cue, even a broken one, so
-            // it is counted as skipped. Numbers and stray text are ignored.
+            // it is counted as skipped. Any other line is part of a stray block.
             if line.contains("-->") {
+                self.flush_stray();
                 self.start(n, line);
+            } else {
+                self.add_stray(n, line);
             }
         } else if line.contains("-->") && !matches!(span(line), Err(Fault::Format)) {
             // Inside a cue only a well-formed timing line starts the next
@@ -151,7 +174,7 @@ impl<'a> Reader<'a> {
         let (start_ms, end_ms) = match open.span {
             Ok(span) => span,
             Err(fault) => {
-                self.skip(open.at_line, fault);
+                self.skip(open.at_line, fault.message());
                 return;
             }
         };
@@ -169,16 +192,38 @@ impl<'a> Reader<'a> {
         });
     }
 
-    fn skip(&mut self, line: usize, fault: Fault) {
+    /// Text between cues. A block is not a cue, so it is never shown and never
+    /// joined to the previous cue; it is only counted, in `flush_stray`.
+    fn add_stray(&mut self, n: usize, line: &str) {
+        let stray = self.stray.get_or_insert(Stray {
+            first: n,
+            lines: 0,
+            number: number(line).is_some(),
+        });
+        stray.lines += 1;
+    }
+
+    fn flush_stray(&mut self) {
+        let Some(stray) = self.stray.take() else {
+            return;
+        };
+        if stray.lines == 1 && stray.number {
+            return;
+        }
+        self.skip(stray.first, STRAY);
+    }
+
+    fn skip(&mut self, line: usize, reason: &'static str) {
         self.skipped.count += 1;
-        if self.skipped.first.is_none() {
-            self.skipped.first = Some((line, fault.message()));
+        if self.skipped.first.is_none_or(|(first, _)| line < first) {
+            self.skipped.first = Some((line, reason));
         }
     }
 
     fn finish(mut self) -> Parsed {
         self.flush_index();
         self.close();
+        self.flush_stray();
         Parsed {
             cues: self.cues,
             losses: self.losses,

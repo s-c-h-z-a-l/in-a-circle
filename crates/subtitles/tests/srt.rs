@@ -11,10 +11,10 @@
 //!   it. We keep the text (`literal_less_than_is_text`).
 //! - A broken timing line after a blank line: ffmpeg merges its block into the
 //!   previous cue. We skip the block (`broken_timing_skips_its_text_only`).
-//! - A line after a blank line that is neither a number nor a timing (a wrong
-//!   index, stray text): ffmpeg appends it to the previous cue. We ignore it,
-//!   since text that belongs to no cue would show at the wrong time
-//!   (`stray_text_between_cues_is_ignored`).
+//! - A block of text that is neither a number nor a timing (stray text, a
+//!   wrong index, a title): ffmpeg appends it to the previous cue. We count it
+//!   as one skipped item and show nothing, since text that belongs to no cue
+//!   would show at the wrong time (`stray_text_between_cues_is_skipped_and_counted`).
 //! - `<font>` is kept by ffmpeg and dropped by us. The comparison strips tags
 //!   on both sides, so this does not show in it.
 
@@ -133,10 +133,22 @@ fn arrow_and_broken_timing_in_text_are_text() {
 fn wrong_or_missing_index_is_fine() {
     let body = "00:00:01,000 --> 00:00:02,000\nfirst\n\n00:00:03,000 --> 00:00:04,000\nsecond\n";
     let plain = read(body);
-    for index in ["9\n", "x\n", "1\n"] {
+    for index in ["9\n", "1\n"] {
         let other = read(&format!("{index}{body}"));
         assert_eq!(other.cues, plain.cues, "index {index:?}");
+        assert_eq!(other.skipped, Skipped::default(), "index {index:?}");
     }
+    // A text line where the number goes is a stray block: the cues are the
+    // same, and the block is counted once.
+    let text = read(&format!("x\n{body}"));
+    assert_eq!(text.cues, plain.cues);
+    assert_eq!(
+        text.skipped,
+        Skipped {
+            count: 1,
+            first: Some((1, "text outside any cue")),
+        }
+    );
     let numbers_out_of_order = read(
         "9\n00:00:01,000 --> 00:00:02,000\nfirst\n\n7\n00:00:03,000 --> 00:00:04,000\nsecond\n",
     );
@@ -164,14 +176,67 @@ fn short_milliseconds_are_integers() {
 }
 
 #[test]
-fn stray_text_between_cues_is_ignored() {
-    // Neither a number nor a timing line: it belongs to no cue, so it is not
-    // added to the first one.
+fn stray_text_between_cues_is_skipped_and_counted() {
+    // Neither a number nor a timing line: it belongs to no cue. It is not
+    // added to the first one, and it is counted, not dropped silently.
     let parsed = read(
         "1\n00:00:01,000 --> 00:00:02,000\nfirst\n\nx\n00:00:03,000 --> 00:00:04,000\nsecond\n",
     );
     assert_eq!(texts(&parsed), vec!["first", "second"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((5, "text outside any cue")),
+        }
+    );
+}
+
+#[test]
+fn two_stray_blocks_count_twice() {
+    // Block one is two lines after a blank line; block two runs to the end of
+    // the file. A multi-line block is one item, not one per line.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\nfirst\n\nstray one\nstray one more\n\n2\n00:00:03,000 --> 00:00:04,000\nsecond\n\nstray two\n",
+    );
+    assert_eq!(texts(&parsed), vec!["first", "second"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 2,
+            first: Some((5, "text outside any cue")),
+        }
+    );
+}
+
+#[test]
+fn leading_junk_before_first_cue_is_counted() {
+    let parsed = read("Title line\n\n1\n00:00:01,000 --> 00:00:02,000\nfirst\n");
+    assert_eq!(texts(&parsed), vec!["first"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((1, "text outside any cue")),
+        }
+    );
+}
+
+#[test]
+fn lone_index_number_is_silent() {
+    // A number with no timing after it is a cue index, not text: nothing is
+    // counted, whether it is followed by a blank line or the end of the file.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n2\n00:00:03,000 --> 00:00:04,000\nsecond\n\n3\n",
+    );
+    assert_eq!(texts(&parsed), vec!["first", "second"]);
     assert_eq!(parsed.skipped, Skipped::default());
+}
+
+#[test]
+fn only_stray_text_is_no_cues() {
+    // Every block is stray and no cue remains: the file has no subtitles.
+    assert_eq!(read_srt(b"Title only\n\nstray\n"), Err(ReadError::NoCues));
 }
 
 #[test]
