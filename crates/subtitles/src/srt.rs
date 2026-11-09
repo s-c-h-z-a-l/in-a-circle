@@ -10,8 +10,9 @@
 //!   Coordinates after the end time are dropped, a `Position` loss per cue.
 //! - Markup: `<i> <b> <u>` and their `{\i1}`-style forms (`0` switches them
 //!   off), `{\an7}`/`{\an8}`/`{\an9}` for a top cue, `<font>` (its text stays,
-//!   the styling is reported), other `<…>` tags (dropped, text kept), and other
-//!   `{\…}` blocks (their effect is reported). A `<` opens a tag only when its
+//!   the styling is reported), `<br>` (any case, `/` or a space allowed) as a
+//!   line break, other `<…>` tags (dropped, text kept), and other `{\…}` blocks
+//!   (their effect is reported). A `<` opens a tag only when its
 //!   name (up to a space or `>`) holds letters, digits, `_` or `/` and starts
 //!   with a letter, and no `<` comes before the `>`; any other `<…` is text.
 //! - A cue that cannot be used (bad timing, ends before it starts, 100 hours
@@ -181,11 +182,7 @@ impl<'a> Reader<'a> {
 
     fn add(&mut self, line: &str, budget: &mut Budget) -> Result<(), ReadError> {
         if let Some(open) = self.open.as_mut() {
-            let runs = markup(line, open, budget)?;
-            if !runs.is_empty() {
-                budget.charge()?;
-                open.lines.push(Line { voice: None, runs });
-            }
+            markup(line, open, budget)?;
         }
         Ok(())
     }
@@ -356,9 +353,10 @@ fn small(s: &str) -> Option<u64> {
     if s.len() <= 2 { number(s) } else { None }
 }
 
-/// Splits one text line into runs, applying and removing its markup. The
-/// style carries across the lines of a cue, as players do.
-fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<Vec<Run>, ReadError> {
+/// Reads one text line into the cue: its markup is applied and removed, and
+/// each `<br>` ends a line. The style carries across the lines of a cue, as
+/// players do.
+fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<(), ReadError> {
     let mut runs = Vec::new();
     let mut scan = Scan::default();
     let mut rest = line;
@@ -372,7 +370,11 @@ fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<Vec<Run>, 
         };
         match len {
             Some(n) => {
-                apply(&tail[..n], open);
+                if is_break(&tail[..n]) {
+                    end_line(&mut runs, open, budget)?;
+                } else {
+                    apply(&tail[..n], open);
+                }
                 rest = &tail[n..];
             }
             // The opener is text. It is one byte, `<` or `{`.
@@ -383,7 +385,31 @@ fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<Vec<Run>, 
         }
     }
     emit(&mut runs, open, rest, budget)?;
-    Ok(runs)
+    end_line(&mut runs, open, budget)
+}
+
+/// Ends a line of the cue. A line with runs is charged to the budget and kept;
+/// a line with none (a `<br>` at either end, or two in a row) is not kept.
+fn end_line(runs: &mut Vec<Run>, open: &mut Open, budget: &mut Budget) -> Result<(), ReadError> {
+    if !runs.is_empty() {
+        budget.charge()?;
+        open.lines.push(Line {
+            voice: None,
+            runs: std::mem::take(runs),
+        });
+    }
+    Ok(())
+}
+
+/// Whether a whole tag is a line break: `br` in any case, closing or not, with
+/// a `/` or a space after the name (`<br>`, `<BR/>`, `<br />`, `</br>`). `<br/x>`
+/// is not one, as in ffmpeg.
+fn is_break(tag: &str) -> bool {
+    let Some(inner) = tag.strip_prefix('<').and_then(|t| t.strip_suffix('>')) else {
+        return false;
+    };
+    let (_, name) = split_tag(inner);
+    name.eq_ignore_ascii_case("br") || name.eq_ignore_ascii_case("br/")
 }
 
 /// Adds text to the line unless the cue is in drawing mode.

@@ -686,8 +686,9 @@ are in `CLAUDE.md`.
     accepted, and milliseconds are read as an integer); the coordinates after
     the end time are dropped, which is `Position` (once per cue). `<i> <b> <u>` and their
     `{\i1}`-style forms are kept; `{\an7}` to `{\an9}` make a top cue. `<font>`
-    keeps its text and is `Styling`; other tags are dropped with their text
-    kept. A `<` opens a tag only when its name (up to a space or `>`) holds
+    keeps its text and is `Styling`; `<br>` (any case, `</br>` too, a `/` or a
+    space allowed) is a line break, a normal line for the budget; other tags are
+    dropped with their text kept. A `<` opens a tag only when its name (up to a space or `>`) holds
     letters, digits, `_` or `/` and starts with a letter, and no `<` comes
     before the `>`; any other `<` is text, so a URL or an address stays.
     `{\pos}` and `{\move}` are `Position`, `{\k}` is `Karaoke`, a non-zero

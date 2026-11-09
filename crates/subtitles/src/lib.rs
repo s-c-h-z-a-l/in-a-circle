@@ -275,4 +275,19 @@ mod tests {
             Err(ReadError::TooComplex)
         );
     }
+
+    /// A SRT line break is a line: `x<br>y` is one cue, two lines and two runs,
+    /// five items. A budget of four refuses it.
+    #[test]
+    fn srt_line_break_is_charged_as_a_line() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nx<br>y\n";
+        assert_eq!(
+            srt::parse(srt, &mut Budget::new(5)).map(|p| p.cues.len()),
+            Ok(1)
+        );
+        assert_eq!(
+            srt::parse(srt, &mut Budget::new(4)).map(|p| p.cues.len()),
+            Err(ReadError::TooComplex)
+        );
+    }
 }

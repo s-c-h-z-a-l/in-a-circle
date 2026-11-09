@@ -433,6 +433,25 @@ fn unknown_tags_drop_but_keep_their_text() {
 }
 
 #[test]
+fn br_is_a_line_break() {
+    // `<br>`, `<BR/>`, `<br />` and `</br>` end a line, as in ffmpeg. `<br/x>`
+    // is not a break: it is an unknown tag, so it is dropped with no break.
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\nx<br>y<BR/>z<br />w</br>v<br/x>u\n");
+    assert_eq!(texts(&parsed), vec!["x\ny\nz\nw\nvu"]);
+    assert_eq!(parsed.cues[0].lines.len(), 5);
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
+fn br_keeps_the_style_of_its_line() {
+    // A break does not end the style: the italic that began before it runs on.
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n<i>a<br>b</i>\n");
+    let lines = &parsed.cues[0].lines;
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].runs[0].italic && lines[1].runs[0].italic);
+}
+
+#[test]
 fn angle_text_that_is_not_a_tag_is_kept() {
     // A `<` opens a tag only when its name (up to a space or `>`) holds letters,
     // digits, `_` or `/`. A URL, an address or a dotted name is text, as in

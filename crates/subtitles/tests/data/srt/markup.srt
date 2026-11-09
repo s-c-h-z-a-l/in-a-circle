@@ -33,3 +33,7 @@ Sync by <www.addic7ed.com>
 00:00:15,000 --> 00:00:16,000
 mail <name@mail.com> <a-b> <c.yellow>x</c>
 
+9
+00:00:17,000 --> 00:00:18,000
+line one<br>line two<BR>three<br/>four<br />five</br>six<br/x>seven
+
