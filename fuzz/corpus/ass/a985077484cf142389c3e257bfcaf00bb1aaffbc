@@ -1,0 +1,14 @@
+[Script Info]
+; Plain V4+ file00,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, Margin,L MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.0known sd{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:0:00{\b0} and {\u1}unue: 0,0:00:01.00,0:00:02.50,Default,,0*0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0ont {\pos(10,20)}pos {\m,0,,Plain line
+Dialogue: 0,0:00:03.000::0,004.00,Top,,0ont {\pos(10,20)}pos {\move(1,2,3,40}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Mer{\u0}
+Dialogue: 0,0:00:05.00,0:00:0:00{\b0} and {\u1}unue: 0,0:00:01.00,0:00:02.50,Default,,0*0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0ont {\pos(10,20)}pos {\move(1,2,3,40}
+Dialogue: 0,0:00:04.00,0:00:05.00,Missing,,0,0,0,,unknown sd{\der{\u0}
+Dialogue: 0,0:00:05.00,0:00:0:00:12400,0:00:13.00,Default,,0,0,0,,Comma, an\na}ie, commas

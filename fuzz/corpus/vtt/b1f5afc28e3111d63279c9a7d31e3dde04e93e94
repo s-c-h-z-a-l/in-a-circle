@@ -1,0 +1,67 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:0
+
+REGION
+id:1
+regionanchor:0%,0%
+
+REGIO
+id:14
+regionanchor:0%,-0%
+
+REGION
+id:15
+regionanchor:65536%,65536%
+
+N
+id:2[regionanchor:1%
+,E
+%R1GION
+id:3
+regionanchor:100%,0%
+
+REGION
+id:4
+regionanchor:0%,100%
+
+REGION
+id:5
+regionanchor:100%,100%
+
+NOTE invalid
+
+REGION
+id:6,0
+
+REGION
+id:8
+regionanchor:0,0%
+
+RonanchorWEBVTT
+
+NOTE valid
+
+REGION
+id:0
+
+REGION
+id:1
+regionanchor:WEBVTT
+
+NOTE valid
+
+00:00::,1%
+
+REGION
+id01.000 line:-1
+valid0
+
+00:00:00.000 --> 00:00:01.000 line:0
+valid1
+
+0egionanchor:100% ,100%
+reg

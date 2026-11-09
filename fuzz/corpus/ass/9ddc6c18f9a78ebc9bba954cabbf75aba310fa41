@@ -1,0 +1,32 @@
+[Script Info]
+; Plain V4+ file: 0,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Defa,utl,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.0,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b؂`olbed{\b0} and {\u17777777777777777}under{\uDialogsubL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Defa,utl,0,0,0,,not a subtitle
+Dianogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,1,0,0,,{\i1}italic{\i0} and {\b؂`olbed{\b0} and {\u17777777777777777}under{\uDialogsubtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Overla0.00,Default,,0,0,0,,{\k20}Ka{\klt,,0,0,0,,Pla0,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2]d {\b1}bold{\b0} and 00:07.50,00:0:09.00,Default,,0,0,0,,Overlaps the line before
+Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\klt,,0,0,0,,Pla0,0:00:11.00,Default,,00,,0,,{\c&H00F04.20,0:00:05.00,Default,,0,0,0,,{\i:1}italic{\i0} and {\b؂`olbed{\b0} and {\u17777777777777F00&}gree7n{\fs12}, {77}\

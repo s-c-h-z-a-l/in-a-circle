@@ -1,0 +1,7 @@
+[Script Info]
+; Plain V4+ file: every feature0,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR,`MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Defaul
+Dialogue: 0,0:00:03.00,0:00:04.000:00:05.00,Default,,0,0,0,,{\i1}it[Scri,,1,0,e: 0,0:r

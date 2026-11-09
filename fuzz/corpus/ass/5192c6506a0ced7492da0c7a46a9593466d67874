@@ -1,0 +1,12 @@
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spaial,20,&H00FFFFFF,&H000000FF,&H00000000,&Hpacing, Angle, BorderStyle, Outline, Shadow, MarginL, MarginR, MarginV, Encoding
+Style: 9,Top,0,-1,Arial,20,&H00FFFFFF,,100,100,0,0,1,2,0,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:03.00,0:00:04.00,Bottom,,0,0,0,,Italic bottom

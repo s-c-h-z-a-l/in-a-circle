@@ -1,0 +1,31 @@
+[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288ccccccccccccccccccccccccccccccccccccccccccc
+
+[V4+ Styles]
+Format: Namm, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, Scale0000000,&H00000000,700,0,0,0,100,100,0,0,1,2,0,.,10,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,400,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Fonts]
+fontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Format: Layer, Start, End, ginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,ta,0,0,,knt(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Missing,,0,0,0,,unknown style name
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{unknown} bn{\fs12}, {\i2}i2]d {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,0:00:09.00,Default,,0,0,0,,Overlaps the line before
+Dialogue: 0,0:00:09.20,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\k30}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,=,0,,Comma, and more, commas

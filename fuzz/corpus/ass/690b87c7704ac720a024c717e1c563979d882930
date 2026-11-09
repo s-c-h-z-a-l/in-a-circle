@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ StyleS]
+Format: Name, Fo0,10,1
+Style: Ital,Arial,20B&H00FFFFFF,&H000000FF,á&H000FF,á&

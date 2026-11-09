@@ -1,0 +1,33 @@
+FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Evenst]
+Format: Layer, Start, End, Stlic, underline, top
+Dialogue: 0,0:00:03.00,0:0,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, Marg,0,2,10,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H00F,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Evenst]
+Formati Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue0:02.00,Default,,0,0,0,,plain bold {\rItal}italic, underline, toncoding
+2,0,8,10,10,10,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, MarginL, Marg,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarViEng ,ffect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,10,10,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, 3.00,0:0,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:010,10,10,1
+
+[Evenst]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,rmalogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDefault}named again

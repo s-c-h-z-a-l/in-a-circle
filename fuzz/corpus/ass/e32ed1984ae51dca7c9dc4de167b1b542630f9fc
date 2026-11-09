@@ -1,0 +1,12 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsi05,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,plain bold {\qItal}itali﻿c, u Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,plain bold {\rItal}itali﻿c, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,5,0,0,,{\rItal}start {\r}back to boldR
+D00000,-1,0n ,0,100,100,0,0,1ialogue: 0,0:00:05rItal}{\rDefault}named again

@@ -1,0 +1,94 @@
+WEBVTT
+
+NOTE No 
+id:id
+id: foo
+id :bar
+lines:3
+
+ using lines to uniquely identify regions
+
+REGIN
+i
+valid
+
+00:00:00.000 --> 00:00:01.000 region:bar
+valid
+
+00:00:0bar
+lines:3
+
+ using lines to uniquely identify regions
+
+REGIN
+i
+valid
+
+00:00.000 region:bar
+valid
+
+00:00:00.000 --> 00:00:01.000 
+gion:id
+valid
+
+00:00:00.000 --> 00:.0:01.000 region:
+00
+text0
+
+trailing space 
+00:va00:00.000 --> 00:00:01.000
+text1
+
+--00:00.000 --> 00:00:01.000 region:foo
+valid
+
+00:00:0{\0.000 --> 00:00:01.000 region:bar
+valid
+
+00:00:00.000 --> 00:00:01.000 region:id
+valid
+
+00:00:00.000 --> 00:.0:01.000 region:
+00
+text0
+
+trailing space 
+00:va00:00.000 --> 00:00:01.000
+t >
+00:00:00.000 --> 00:00:01.000
+text2
+
+->
+00:00:00.000 --> 00:00:01.000
+text3
+
+ 
+00:00:00.000 -->0.000 --> 00:00:01.000 
+gion:id
+valid
+
+00:00:00.000 --> 00:.0:01.000 region:
+00
+text0
+
+trailing space 
+00:va00:00.000 --00:01.000up region:id
+valid
+
+00:00:00.000 --> 00:.0:01.000 region:
+00
+text0
+
+trailing space 
+00:va00:00.000 --> 00:00:01.000
+t >
+00:00:00.000 --> 00:00:01.000
+text2
+
+->
+00:00:00.000 --> 00:00:01.000
+text3
+
+ 
+00:00:00.000 --> 00:00:0l1.000Jtexidt4
+

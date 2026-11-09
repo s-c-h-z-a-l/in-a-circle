@@ -1,0 +1,21 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionAnchorX":41,"re-> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"rescrollck
+te":"xt
+
+up"}

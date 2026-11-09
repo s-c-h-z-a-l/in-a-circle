@@ -1,0 +1,8 @@
+[Script Info]
+; Plain V4+ file: every fryColour, tOiluneColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, Arial,21,&H00FF
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture:arginV, Effect, TDefaul}{\rItal}{\rDefault}namedalic{\iDefault,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00d\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p00006.00} and {\b1}bold{\b0} and {\u1}u03.00,Default,,0,{\t,,0,0,0,,{\i1}it00,DefauV, Encoding10,10,10,in V4+ 1󬋆
+Style: Dagainf0,0:00:03.00,Defaulte

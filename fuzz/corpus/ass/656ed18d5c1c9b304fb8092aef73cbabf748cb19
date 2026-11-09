@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, ne, Shadow, Alignment, MarginL, MarginR, Margin?V, Encoding
+Style: Default,Arial,20,6

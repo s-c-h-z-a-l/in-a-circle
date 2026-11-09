@@ -1,0 +1,24 @@
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic,eColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, MarginL, F,&H000000FF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+
+[Events]
+Format: Layer, SLayer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default00,0:00:01.00,Default,,0,0,0,,not te soft\nbreak and hard\hspace
+Dialogue2 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}4000xt
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue2 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 {\i-1}italic
+Dialogue: 0,0:00:12.00,0:00:13.00,Defaul}{\02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue2 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2t, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:03.00,0:00:04.00,Bottom,,0,0,0,,Italic bottom

@@ -1,0 +1,26 @@
+[script info]
+Col'our, SecondaryColour, :00:07.00,0:00:08.00,Top7,,0,0,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,0,,bottom bold, the old scheme's 4
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0, the old scd, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s--0,top five 0,,top s--0,,middle nine is not t, 
+Dialogue: 0,0:00:11.*0,0800:12.00,Defaer, Start, End, StylerginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0, the old scd, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top fize 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00II: árvíztűrő
+D, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0, the old scd, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top fize 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00II: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Default,,0,0,0,,{\rMissinult aft%r an unknown name
+this line is text outside any cue in Events

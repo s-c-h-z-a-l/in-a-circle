@@ -1,0 +1,9 @@
+[Script Iitle lineC in otnhare section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:NOTE	.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,`Default,,0,0,0,,hard\Nbreak, soft\nbreak and hd</\h
+Format: Layer, Start, End, Style, Name, Marncoding
+Style: DefaultlA2a,,ir0,H&00FFFFFF,&H000,-1,0,0,100,100:01.00,Default,,0,0,0,,{\k20}k

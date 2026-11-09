@@ -1,0 +1,12 @@
+[Scriptnfo]
+ScriptTysubtitle l6ine,ine, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginBackR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Defaulv,,0,0,0,,not text
+Sound: an0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nxt
+Picture: 0,0:00:00.00,0:00:00.333333300,Default,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\N00,Top5 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0:00:0:00.00,0:00:01.00,D,,0,0,0,

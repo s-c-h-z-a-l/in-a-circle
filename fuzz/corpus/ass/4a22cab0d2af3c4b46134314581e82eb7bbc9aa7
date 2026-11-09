@@ -1,0 +1,6 @@
+[Sc,10,1
+
+[Events]
+Form0:00.00,0:00:01.00,Def
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and }under{\u0}
+Dialogue: 0,0:00:05.00,0:00:060} and {\u,Fir0:00:05.00,Dur,,0,0,0,,Comma, and more, commas

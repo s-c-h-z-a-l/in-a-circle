@@ -1,0 +1,22 @@
+[Script Info]
+; ,-1,0,0,0,100,100,0,0,1,2,0,8,10,10,10,1
+Style: Slanted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,00,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MalginR, MargiUUUUUUUct, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,02,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0itle
+Dialogue: 0,0:00:01.00,5:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:0004.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,D2fault4.00,D,20,&H00FFFFFgreen{\fs12}, {\i1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, NinL, Marere is one that ffmpeg reads the same way.
+Title: ordinary
+Scriping
+Dialogue: 0,0:00:03.00,0:00:04.00,DtT,20

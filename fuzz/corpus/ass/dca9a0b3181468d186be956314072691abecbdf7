@@ -1,0 +1,7 @@
+[ScriptInf+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold0,0,0,1,2,0,10,10,10,1
+Style: 2,Bottom,-1[script info]
+Title: wnr

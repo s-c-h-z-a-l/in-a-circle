@@ -1,0 +1,24 @@
+[Script Inzo]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles 
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Fot a subtitl10,1
+
+[Events]
+Fot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.49,00:0:09.00,Default,,0,,,0,0,0,,{\i1}e
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Defaul,,,00t,0,,Over0,0:00:01.00,Default,,0,\rItal}italic, unde,0:00:03.00rline, top
+D,Default,,0,0,0,,{\p1}m :al00 0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.49,00:0:09.00,Default,,0,,,0,0,0,,{\i1}ital,,0,0,0,,{\p1}m :al00 0 l 1 1\,,0,0,0,,{\p1}m :al00 ialogue: 00,0:00:03.00, l 1 1\N0\bord20:00:)

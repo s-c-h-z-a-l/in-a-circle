@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle
+[Events]
+Formatart, End, Effect, Text
+Dialogue:dv3+ styles ]0:/2.00,Top,,0,?0,0
+For,ma,

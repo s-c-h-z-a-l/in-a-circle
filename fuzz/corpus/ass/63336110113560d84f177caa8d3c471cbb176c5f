@@ -1,0 +1,12 @@
+[scrilt,,0,0,0,,{pz info]
+Titl0,0,0,,not a subtitle
+Dialog0:00:03.00,Def1
+
+[Fonts]
+nmfoanet: example line, iother section
+
+[Events]
+Format: Layer, Start, End, Style,  MaaN,emrginL, MarginR, MarginV, Effect, Text
+Picture: 0ault,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p12},0,on,t text
+SouackColour, Bold, Ite: 0,0:tname: example 1\Nm 2 2{ts

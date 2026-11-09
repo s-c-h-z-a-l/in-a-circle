@@ -1,0 +1,21 @@
+[script info]St00000FF,ction
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginRo]St00000FF,ction
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, QarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01000:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0 l15:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0Default,,0unclosed { brace
+Dialogue: 0,0:00:14.00,0ő:00:15.00,Default,00
+00:01.00,0:00:02.00,Default,,0,0,0,,plaginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,t,,0,0,0,,{\p10m } 0 l15:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0 l 1 1\Nm 2 2{t, QarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01000:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0 l15:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0Default,,0unclosed { brace
+Dialogue: 0,0:00:14.00,0ő:00:15.00,Default,00
+00:01.00,0:00:02.00,Default,,0,0,0,,plaginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,t,,0,0,0,,{\p10m } 0 l15:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p10m } 0 l 1 1\Nm 2 2{ts

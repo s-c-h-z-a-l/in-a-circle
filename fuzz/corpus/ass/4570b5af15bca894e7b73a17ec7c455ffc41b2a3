@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Forma>t: ineCol Encoding
+Style: Debault,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H10000000,-,2,0,06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDefault}named again

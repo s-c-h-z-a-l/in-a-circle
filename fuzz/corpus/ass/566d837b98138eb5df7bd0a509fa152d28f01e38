@@ -1,0 +1,11 @@
+[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Styles]
+Format: Name, 0
+
+[Events]
+Form,at: H!yer, Start, End, Style, Name, MarginL, MarginR, MarganV, Effect, Text
+Dial: 0,0:00:01.00not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

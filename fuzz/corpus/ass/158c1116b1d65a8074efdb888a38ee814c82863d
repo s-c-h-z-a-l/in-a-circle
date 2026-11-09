@@ -1,0 +1,6 @@
+[Script Info]
+ScriptType: vt:2,0,8,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, ctS, Text
+Dialogue:, End, Style& Name, Margin

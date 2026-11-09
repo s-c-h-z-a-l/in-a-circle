@@ -1,0 +1,6 @@
+[Script IAfo]
+ScriptType0,1
+
+[Events]
+Formqt: Layer, Start, End,y brace { open
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an2}bba00,,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an2}b1.00

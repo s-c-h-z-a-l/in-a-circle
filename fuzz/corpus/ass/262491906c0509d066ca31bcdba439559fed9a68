@@ -1,0 +1,11 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, FonarginV0000FF,&H00000000,1,2,0,8,10,10,10,1
+
+[Events]
+For00000,&H00mat: Layer, Start, End, Splain bold {\rItal}italic, underline, top
+Dialogue:  bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0{1,i}\,{\
+rItal}{\rDefault}named again

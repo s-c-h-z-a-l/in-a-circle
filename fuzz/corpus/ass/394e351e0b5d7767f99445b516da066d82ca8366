@@ -1,0 +1,13 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Befault,,0,0,0,,{unknown} block and {hello\i1}i and } stray brace { open
+Dialogue: 0,0:00:06.00,0:00:0coding
+Style: Default,Ar.ial,20,&H00FFFFFF,&H000000FF,&H09551615,&H000it000,-1,0,0,0,10,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0<8,10,10,10,1
+
+[Events]
+FormaText
+Dialogue: 2,0:00:01.00,0:00:02.00,Defaultefault,,0,0,0,,{\p{\rMissing}back to Default after an unknown name
+this line is text outside any cue in Events

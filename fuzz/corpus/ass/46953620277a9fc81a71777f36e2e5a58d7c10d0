@@ -1,0 +1,33 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaL, MarginR, MarginV, EncodinStyle: 0
+
+[V4+ Styles]
+Format: AName, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold,  Spacing, Angle, BorderStyle,  {\r}back to bold
+Dialogueg
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SebondaryColour, OutlineColour, BItalic, Underline, StrikeAOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+
+[V4+ Styles]
+Colour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,  {\r}back to bold
+Dialogueg
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+ult,,0,0,0,,e: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fntosize, PrimaryColour, SecondaryCur, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,  {\r}back to bologreueg
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, I
+0lic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,  {\r}back to bold
+Dialogue: 0,0:00:05.00{\i1}{\rItal}{\rDefault{\}named again

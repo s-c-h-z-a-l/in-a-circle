@@ -1,0 +1,12 @@
+[Sc Styles]
+Format: Name, Fontnamene, 0,&H00FF
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture:arginV, Effect, Text
+Picture: 5,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sounoding
+Style: Default,Arial,40,&H00FF
+[Events]
+Forma Text
+Picture:arginV, Effect, Text
+Picture: 0,0:00:0 ei:13.00,Defaul}{\rItal}{\rDefault}named again

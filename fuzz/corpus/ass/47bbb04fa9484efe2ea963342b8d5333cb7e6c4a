@@ -1,0 +1,6 @@
+[scr0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+DiadaryColour, Outhe old schem'e's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5tyle: Default,Arial,00,&H00FFFFF,,0F,0,,&H0,

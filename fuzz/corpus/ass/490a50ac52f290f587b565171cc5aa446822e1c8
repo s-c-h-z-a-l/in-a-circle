@@ -1,0 +1,14 @@
+[Script Info]
+Wrap,0,1,2,0,8,10,10,10,1
+
+[Events]
+ForminR, MarginV, Encoding
+Style: DefH000000F,0,1,0,0,,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+ForminR, MarginV, ,0:00:04.00,Default,,0,0,0,,{\rIt}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,D@fault,,0,0,10,10,1
+
+[E0:00:04.00,DnR, MarginV, Encoding
+Style: Dagain

@@ -1,0 +1,12 @@
+[Script Info]
+WrapStyle0
+
+: [V4+ Styles]
+Format: Name, Fo,10,10,10,1
+
+[Events]
+F
+Dialogue: 0,0:00:07.50,01:0:09.00,}bold{\b0} and {\u1}{\der{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,,e: 5,0:00:01.00,0:00:02.00,Def,100,0,0,1,2,0,10,10,10,1@󬋆le: 2,Bottom,-1,0,Arial,10,&H00FFFFFF,&H000000FF,&H01,1,2,0,10,10,10,1󬋆le: 2,Bo:tom,-1,0,Arial,20,&H00FFFFFF,&H000000FF,&H0000000{\0,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+
+[EventsentDef,100,0,0,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arial,10,&H00FFFFFF,&H000000FF,&H00,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arin8}explicit top, Name, Italic, Bold, FonrginV, Encoline, Strik0,0,10BBBBBBBBBBB:00:)

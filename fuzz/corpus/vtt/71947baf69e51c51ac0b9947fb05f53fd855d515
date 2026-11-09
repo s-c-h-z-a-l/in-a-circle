@@ -1,0 +1,25 @@
+WEBVTT
+
+STYLE
+::cue(#foo)thout_settings
+{}
+
+00:00:04.000 --> 00:00:05.000 region:region_with_all_settings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:re{
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+
+foo
+00:00:00.007 --> 00:00:01.000
+text
+
+STYLE
+
+00:00:00.000 --> 00:00:01.000
+text

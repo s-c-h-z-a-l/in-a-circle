@@ -1,0 +1,17 @@
+[Script"Info]
+ScriptType: v4.00+
+Wrap4tyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColo Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spacing, AngleMaleY, Spacing, Angle, BorderStyle, Outline, Shadow, MarginL, MarginR, MarginV, Encoding
+Style: 8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,+, Spacing, Angle, BorderStyle, Outline, Shadow, MarginL, MarginR, MarginV, Encoding
+Style: 8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,+,0,1,2,0,10,1[Script Info]
+; Pla[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[Vour, Sec,conda 

@@ -1,0 +1,14 @@
+﻿1
+00:00:01,0000mp; kep as written
+
+5
+00:00:09,000 --> (1:00:10,000
+{\an2}bottom, not top
+<I>upper case</I> <_>not top
+:00:10,000
+{\an2}bottom{\an8}{\p9,000 --> (1:00:10,000
+{\an2}bottom, not top
+<I>upper case</I> <_>not top
+<I>upper case</I> <i>nes,000 --> (1:00:10,000
+{\an2}bottom, not top
+<I>upper case</I> <_>nunclose0:00:11,set 

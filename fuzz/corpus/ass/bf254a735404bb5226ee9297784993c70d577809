@@ -1,0 +1,6 @@
+[scripárvízt, Unnot a subtitle line, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,a hundred hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{\fs12}, {}\2ii2 {\in Events

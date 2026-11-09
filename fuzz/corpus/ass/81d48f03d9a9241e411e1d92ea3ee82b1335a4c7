@@ -1,0 +1,18 @@
+[Script Info]
+WrapStyle0
+
+: [V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+F,2,2,0,2,10,10,10,1
+
+[Events]
+'ormat: Layer, Start, End, Style, Name, MarginL, MaRnrig ,Mar, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,plain bold {\rItal}italic, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\rItal}start8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000FF,&ed H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1󬋆le: 2<Bottom,-1,0,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+
+[Eventsent&H000000FF,&H00000c, unde,0:00:03.00rline, top
+D,Default,,0,0,0,,{\p1}m :al00 ialogue: 00,0:00:03.00, l 1 1\N0\bord20:00:)

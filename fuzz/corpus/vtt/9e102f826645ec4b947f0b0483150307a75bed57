@@ -1,0 +1,35 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text10
+0:
+00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewp]ortAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:0WEBVTT
+
+-->portAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"regionAnchorX":41,"regionAnchorY"ettings w> 00:00:01.000 region:16
+text
+
+00:00:00.000 --> 00:00:on: foo
+inyalid7
+
+00:00:00.000 --> 00:00:01.000 region Y":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floarY":19,"viewportAnchorX":31:<<<<<<,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_!nchor
+{"&regionAncd al<<<<<<<<ign:end <<<<<<a

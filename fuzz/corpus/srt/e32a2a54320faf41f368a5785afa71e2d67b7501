@@ -1,0 +1,16 @@
+7
+00:00:10,5 --> 00:00:11,50
+short milliseconds
+
+9
+0:0:12.7 --> 0:0:13.00 --> 00:00:﻿1
+00:00: -->
+00:00: --> 00:0﻿1
+00:0000:00: -->
+around the arthen timing with no blank line
+5
+00:00:22,004 -->00:00:23,000
+text that holds an arrow: a --> b
+00:00:24,000-->00:00:25,000
+no spaces00:00:25,500 --> 00:00:26,000
+overlap B, starts together with A

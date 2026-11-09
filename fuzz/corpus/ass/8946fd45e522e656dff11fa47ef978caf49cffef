@@ -1,0 +1,5 @@
+[scrcript info],&H00000000,0,1
+
+[Events]
+Format: Layer,0,0,100,100,0,0,2,2,0, S2,10,1tart,0 ,ipt
+Format: Layer,0,0,100,100,0,0,2,2,0, S2,10,1tart,0 ,1

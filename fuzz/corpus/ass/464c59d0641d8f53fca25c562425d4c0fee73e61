@@ -1,0 +1,14 @@
+[script info]
+Title: wild
+WrapStyle: 2
+
+r hard\hs&a000000,0,1
+
+[Events]
+F either
+DialoguE: ;0,0:00:01.00,0:00:02.00,Default,s&a000000,0,1
+
+[Events]
+F either
+Dialogue: 1,0:00:01.00,0:00:02.00,Default,,1,0,0,,hard\Nbreak9 soft\nbreak and hard\hsp-->D
+ialog0,D

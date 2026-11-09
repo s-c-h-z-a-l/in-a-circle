@@ -1,0 +1,8 @@
+[Script Info]
+Scrip
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,.00,0:00:0an00,Defaultold scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five 0,,top s-->n
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,[Script I,tn

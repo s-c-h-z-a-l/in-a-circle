@@ -1,0 +1,12 @@
+[Script Info]
+; Plainia4+ file:ResX: 384
+PyeRY
+la: 288
+
+[V4+ Stylunkn block and {hello\i1}i and } stray brace { open
+Dialogue: 0,0:00:0xple.ttf
+not a subtitle line, in another section
+
+[Events]
+Format,: Layer, Start, End, ,{\p1}m 0 0 l 1 1\Nm 2 eak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,n+\an+form {\{hello\i2}i a0:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2"2{\an:00:07.00,Default,,0,0,0,,{\a+\an+form {\fnArial Black}font :00:06.00,Default,,0,0,0,,{un-->wn} block and {hello\i1}i and } stray \an2}bot0,0,0,,{\tZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.00,&efault[v4+ sty,

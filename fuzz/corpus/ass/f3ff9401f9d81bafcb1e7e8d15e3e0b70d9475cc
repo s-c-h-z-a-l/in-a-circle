@@ -1,0 +1,10 @@
+[st info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormatinL, MarginR, MarginV, Encoding
+Style: Default,ArF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer,0,0,100,100,0,0,2,2,0, S2,10,1tart,0 ,1

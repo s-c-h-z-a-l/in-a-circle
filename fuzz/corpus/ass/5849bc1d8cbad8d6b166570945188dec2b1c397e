@@ -1,0 +1,8 @@
+[script info]
+Wontname: example.ttf
+not a subtitnother section
+
+[Events]
+Format: Layer, Start, End, tSyl ,eName, MarginL, Marg@nR, MarnV, Effect, Text
+Picture:sp-->
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p700}{-i\0i talic{ts

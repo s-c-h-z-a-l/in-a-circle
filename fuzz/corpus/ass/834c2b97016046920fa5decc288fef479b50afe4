@@ -1,0 +1,14 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+Format: Name, Fbtitle line, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picturegue: 0,0:00:1íztűrő
+Dialogue: 0,1:00:16.00
+Dialogue: 1,0:00:17.00,0:00:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default
+O,,0,0,0,,{\p1}m 0 1 l 1 1\Nm 2 2{ts

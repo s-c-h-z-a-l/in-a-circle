@@ -1,0 +1,14 @@
+[Script Info]
+;-1,0,0,0,0,100,0,0,1,2,384
+PlayResY: 288
+
+[V4+ Styles]
+Formatau0,0,1,2,384
+PlayResY: 288
+
+[V4+ Styles]
+Formatault,Arial,20,&H02FFFFFF,&H000000FF,&H00000000,&H00000000,0,t,,0,0,0,,OverlapsyRess]
+Formatault,Arial,2000000,&H,2,0,9,10,10,10,0,0
+
+[Events]
+Format0000000:

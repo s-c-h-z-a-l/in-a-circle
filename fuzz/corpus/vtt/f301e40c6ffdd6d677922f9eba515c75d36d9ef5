@@ -1,0 +1,23 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 align:start
+te~t1
+
+00:00:00.000 --> 00:00:01.000 ali_n:center
+tex.000 align:end align:CENTER
+text7
+
+00:00:00.000 -- >00:00:01.000 align:end align: center
+text8
+
+00:00:00.000 --> 00:00:01.000 align:end align:
+text9
+
+00:00:00.000 --> 00:00:01.000 align:end align:middle
+text10
+
+00:00:00.000 --> 15:00:01.000 align:end align
+text10

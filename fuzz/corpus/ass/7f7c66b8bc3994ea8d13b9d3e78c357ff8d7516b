@@ -1,0 +1,71 @@
+[Script Info]
+Wrav1,0,0,0,100,100,0,00,&&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,10,1
+Style: Ital,Arial,20,&H5.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H0,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:0p
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,ck to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Aryal,20,&&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,10,1
+Style: Ital,Arial,20,&H5.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,ue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,op
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,ck to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,10,1
+Style: Ital,Arial,20,&H00F0,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,100,0ack to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+roFinmR, MarginV, Encoding
+St y:lDaegain

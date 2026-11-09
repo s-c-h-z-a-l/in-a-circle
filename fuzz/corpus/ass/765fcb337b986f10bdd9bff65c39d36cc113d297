@@ -1,0 +1,19 @@
+[script info]
+Title: wild
+WrapStyle:n
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Missing,,0,0,0,,unknown style name
+Di)lo:00:09.00,0:00:08.00,Dialogue: 0,0:00:06.0:0000.02:,Ded hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Mi,0,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 ault,,0,0,0,,{\t(\fs20\bord2)}tran rosfm{\fnArial &}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1gue: 0,0:00:06.0:0000.02:,Ded hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Mi,0,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 ault,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial &}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Mi,0,0,,{\c&H00FF0\i2}i2 ault,00,0,,,,{\t(\fs20\bord2)}transform {\fnArial Black}font {\pos(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:ny cue in Events

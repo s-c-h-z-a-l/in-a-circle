@@ -1,0 +1,28 @@
+﻿1
+00:00:01,000 -->@:0
+2
+00:00:04,000 --> 00:00:06,000
+<i>Ita11,50
+short mill00 l-<u>under</u>0 :01:0
+2
+00:00:04,000 --> 00:00:06,000
+<i>Italic<3/i> and <b>bold</b>
+ic<3/i> and <b>bold</b>
+-> 00ggggggggggggggggggggggggggggg00:00:06,000
+<i>Italic<3/i> and <b>bold</b>
+-> 01:00:11,50
+short mill00 l-<u>under</u>0 :01:0
+2
+00:00:04,000 --> 00:00:06,000
+<i>Italic<3/i> and <b>bold</b:04,000 --> 00:00:06,:00:06,000
+<i>Italic<3/i> and <b>bold</b>
+ic<3/i> and <b>bold>
+ic<3/i> and <b>bold</b>
+-> 00gggggggggggggggggggggggggggggggggggg:00:11,50
+short mill00 l-<u>under</u>-<b>bold</b>
+-> 01:00:11,50
+short mill00 l-<u>under</u>0 :01:0
+2
+00:00:04,000 --> 00:00:06,> >bold</b>
+<u>under</u>
+:0<unknown0:0

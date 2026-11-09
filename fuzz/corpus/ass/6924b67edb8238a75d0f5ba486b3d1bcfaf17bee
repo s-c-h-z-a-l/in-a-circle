@@ -1,0 +1,15 @@
+[Script Info]
+Sc0,0
+
+[Events]
+Format0:08.00,Top7,,0,0,0,,top seven
+Dia:00:06.00,Top6,,0,0,0,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:0":08.00,Top7,,0,0,0,,to,top six
+Dialogue: 0,0:00:07.00,0:0":08.00,Top7,,0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,middle nine is not top
+Dialogue: 0.00,0:00:12.00,Default,,0,0,0,,{\ap6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0,0,,top seven
+Dia:00:06.00,Top6,,0,0,0,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:0":08.00,Top7,,0,0,0,,top sev,,top six
+Dialogue: 0,0:00:07.00,0:0":08.00,Top7,,0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.ogue: 0Fontsize,,

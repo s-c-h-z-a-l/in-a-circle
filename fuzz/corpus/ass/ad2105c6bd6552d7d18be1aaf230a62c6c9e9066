@@ -1,0 +1,22 @@
+[Script Info]
+; Plain V4+ fileone that ffmpeg reads the same way.
+TitlptType: v4.00
+WrapStyle: 0
+
+[V4 Styl;+]
+Form,0,0,,{unk[S!riptM Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Styl;+]
+Format: Name, Fontname, Fontsize, PrimaryColour, Second, OziptM Info]
+ScriptType: v8.00
+WrapStyle: 0
+
+[V4 Styl;+]
+Format: Name, Fontname, !ontsize, PrH002000000,&H0imaryColour, SriptM Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Styl;+]
+Format: Name, Fontn, !oamen0000000,t

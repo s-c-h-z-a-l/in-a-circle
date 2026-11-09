@@ -1,0 +1,12 @@
+[script info]
+Title: w,2,0,8,10,10,10,1
+
+[Fonts]
+fo]tname: exa[[s,0,0,1,
+[Events]
+Format: Layer, Start, End, Style, N+me, MarginL, MarginR, MargifV, Effect, Text
+Dialogue: 0,0:00:d scheme's 2
+Dialogue :0,0:00:03.00,0:0t ei0,0:00:01.00,0:00:02.00,Default
+Dialogue: 0,0:00:0.00,0:00:03.00,Default,,0,Default,,0,0,0,,unclos<<<<<<t
+Sound: 0,0:00:00.00,0:00ot text either
+Dialogue: 5,0:00:01.00,0:00:02.00,Default,,0,0,0,,harf,eult,

@@ -1,0 +1,47 @@
+WEBVTT
+
+00:00:60.000 #-> 00:60.000 #-> 01:00:01.EBVTT
+
+not-an-id
+.REGION
+id:r1
+lines:2
+
+NOTE	:00.000 --> 00:00d:bar
+
+REGION
+id:foo
+
+REGION
+
+lines:2
+
+NOTE	010
+invalid
+
+00:00:00.000 --> 60:00:01.000
+texTT
+
+00:00:60.000 #-> 01:00:01.EBVTT
+
+not-an-id
+REGION
+id:r1
+lines:2
+
+NOTE	:00.000 --> 00:00d:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00> 01:00:01.EBVTT
+REGIONn-id
+REGIlines:2
+
+NOTE	010
+invalid
+
+00:00:00.000 --> -> 00:60.000 #-> 01:00:

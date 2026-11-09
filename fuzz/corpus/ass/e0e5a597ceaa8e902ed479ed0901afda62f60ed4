@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic,MarginR, MarginV, Encoding
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start Default}named again

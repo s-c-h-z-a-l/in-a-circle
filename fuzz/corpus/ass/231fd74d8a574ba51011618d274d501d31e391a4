@@ -1,0 +1,18 @@
+[Scripu Info]
+Scr0,0,1,4,0,7,10,10,10,0,0
+Style: Middle9,Arial,20,16777215,255,0,0,0,0,1,2,0,9,10,10,10,0,0
+
+[Events]
+Format: Layer, Start, End, Styel, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0
+-1,1,2,0,5,1,2,0,7,10,10,10,0,0
+Style: Middle9,Arial,-0,16777215,255,0,0,0,0,1,2,0,9,10,10,10,0,0
+`
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effebt, Text
+Dialogue: 0
+WrapStyle: 0
+
+[V4 Styles]
+,0,,top six0,Middle9,,0,0,0,,middle nine is not top
+Dialog0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

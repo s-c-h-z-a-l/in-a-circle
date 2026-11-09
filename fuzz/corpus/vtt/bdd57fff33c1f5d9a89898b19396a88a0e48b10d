@@ -1,0 +1,55 @@
+WEBVTT FILE
+
+REGION
+id:region_without_settings
+
+REGION
+id:region viewportanchor:32"
+
+00:00:00.000 --> 000:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+on:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 01:00:04.000 region:region_without_settings
+{}
+
+00:00:04.000 --> 00:00:05.000 region:region_with_all_settings
+{"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":20,"viewportAnc0
+
+00:00:01.000 --> 00:00:00.999
+text
+
+100:01:00.000 --> 00:00:59.999
+text2
+
+01:00:00.000 --> 00:59:59.%
+lines:5
+regionanchor:41%,20% viewportanchor:31%,84%
+scroll:up
+
+REGION
+id:region_floating_point_anchor
+regionanchor:41.125%,20.25% viewportanchor:32"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:z00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 -->_with_all_settings width:31WEBVTT.
+00:00:00.000 --> 00:00:00.000
+text0
+
+00:00:01.000 --> 00:00:00.999
+text
+
+100:01:00.000 --> 00:00:59.999
+text2
+
+01:00:00.000 --> 00:59:59.%
+lines:5
+regionanchor:41%,20% viewportaregion:region_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":nchorY":80,"scroll":"up"}

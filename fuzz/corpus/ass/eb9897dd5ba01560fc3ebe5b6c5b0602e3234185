@@ -1,0 +1,5 @@
+[ntsizesection
+
+[Events]
+FOr0:03.00,0:00:04.00,Dce
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,hoursefault,,0,0,0,,{\p1}m

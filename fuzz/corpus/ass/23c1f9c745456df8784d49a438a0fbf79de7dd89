@@ -1,0 +1,20 @@
+[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0e, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+ Info]
+ScriptType: v8.00+
+WrapStyle: 
+4[0V
++ Sty,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0 Plain ,0:00:01.00,0:00:02.00,Default,,0,0,0,,l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04MarginL, MarginR, Marg: 
+4[0V
++ Sty,not t:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0 Plaine
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,4+ f,Commaor, and more, commas

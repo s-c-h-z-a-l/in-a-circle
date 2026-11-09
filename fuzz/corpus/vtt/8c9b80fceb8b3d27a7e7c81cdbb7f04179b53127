@@ -1,0 +1,85 @@
+WEBVTT
+
+sparegionanchor:1%,1%
+
+REGION
+id:3
+regionanchor:100%,0%
+
+REGION
+id:4
+regionanchor:0%,100%
+
+REGION
+id:5
+regionanchor:100%,100%
+
+NOTE invalid
+
+REGION
+id:6
+regionanchor:0,0
+
+REGIONces
+   00:00:00.000    -->  00:00:01.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+teVTT
+
+sparegionanchor:1%,1%
+
+REGION
+id:3
+regionanchor:100%,0%
+
+REGION
+id:4
+regionanchor:0%,100%
+
+REGION
+i%,100%
+
+NOTE invalid
+
+REGION
+id:6
+regionanchor:0,0
+
+REGIONces
+   00:00:00.000    -->  00:00:01.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+teVTT
+
+sparegionanchor:1%,1%
+
+REGION
+id:3
+regionanchor:100%,0%
+
+REGes
+   00:00:00.000    -->  00:00:01.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+text1
+
+form feed
+00:00:00.000-->00:00:01.000
+text2
+
+vertical tab
+xt1
+
+form feed
+00:00:00.000-->00:00:01.000
+text2
+
+vertical tab
+00:00:00.000-->70:00:01.000
+invalid

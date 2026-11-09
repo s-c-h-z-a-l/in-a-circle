@@ -1,0 +1,5 @@
+[Script Info:02,10,10,1em1
+
+[Events]
+le, Name,a subtitle
+Dialogue: 0,0:0:13.00,Default,,0,0,0,,Comma, and more, commas

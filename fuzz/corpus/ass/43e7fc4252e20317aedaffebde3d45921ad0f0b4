@@ -1,0 +1,14 @@
+[Script Info]
+S6cr End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,0,,bottom bold, the old scondaryC07.00,0:0id0:08.00,Top7,,0,0:06.00,Top6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:0id0[08.00,Top7,,0,0,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name0, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 1,0:00:01.00,0:00:0an00,Default,,0,0,0,,nine is not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a-}ssa overri0,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 1,0:00:01.00,0:00:0an00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,topfault,,0,0,0,,{\a-t,,0,0,0,,{\a-}ssa override top

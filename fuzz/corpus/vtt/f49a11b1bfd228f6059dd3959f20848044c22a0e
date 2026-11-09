@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00croll:up
+
+REGION
+i:"up"}
+
+00:00:05.000 --> 00:00:06.000 reg_id
+{"Wi> 00:00:08.0n:
+"no region"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40<<<<<<<<<<<<<<<<<<foo
+i> 00:00:01.000 region:8
+<<<<<<<<<<<<<]<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<foo
+i> 00:00:01.000 region:8
+text
+
+00:WEB--> V00:

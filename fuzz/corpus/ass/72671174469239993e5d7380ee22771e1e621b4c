@@ -1,0 +1,14 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+ylesF
+o ]rmat: Na>me, Fontname, Fontsize, PrimaryColour, Selour, BackColour, BoI,t ldalic, Underline, StrikeOul,20,&H00FFFFFF,&H000000FFher section
+
+[Events]
+FormateL: yar, Sttft\nbreak and hard\h0,0:00:0,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Defiult,,0,0,0,,hazd\Nbreak, soft\nbreak and hard\hs0,0,,non-ASCI{\ árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Defaul2,,0,0,0,,{\rInssing}bayer, Start,on-ASCI{\ árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Defde any cue in Events

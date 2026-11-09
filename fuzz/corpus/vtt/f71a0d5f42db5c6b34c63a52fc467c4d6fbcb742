@@ -1,0 +1,10 @@
+WEBVTT
+
+ leading space
+00:00:00.000 --> 00:00:01.000
+te{\0
+
+trailing space 
+00:00:00.000 --> 00:00:01.000
+te:01.000
+text4

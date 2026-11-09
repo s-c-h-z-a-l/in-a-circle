@@ -1,0 +1,7 @@
+[Script I,0,1,1,2,0,8,1,10,10,1
+
+[Events]
+Formaault,,0ot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain l-->ine
+Dialogue.{ V4+ f\u11}bold,~ {0}
+Di

@@ -1,0 +1,17 @@
+[Script Info]
+ScriptType: v4.00
+
+[V4 Styles]
+Form1
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+0,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo1mat: Layeame, Margin

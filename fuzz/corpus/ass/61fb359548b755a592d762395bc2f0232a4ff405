@@ -1,0 +1,11 @@
+[Script Info]
+ScriptType: v4.00
+WlStyle: Middl,0,0,1,2,0,9,10,10,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Ef,fect, Text
+Dialogue2 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dial0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,middle nine is notel, Encoding
+Style: Default,Arial,20,1,Default,,ipt info]
+Title: verride top

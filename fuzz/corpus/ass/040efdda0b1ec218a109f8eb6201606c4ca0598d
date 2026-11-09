@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle
+[Events]
+FormatartnV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,, aTop style, bold
+Dialogue:e]stl y, IFtorma

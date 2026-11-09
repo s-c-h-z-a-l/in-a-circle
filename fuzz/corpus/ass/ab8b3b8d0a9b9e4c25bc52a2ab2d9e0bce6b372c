@@ -1,0 +1,11 @@
+[Script Info]
+WrapStyle,0,0
+
+[Events]
+Format: Layer, Start, End, Style,lic, Underline, Strik10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Sacifg, Angle, BorderStyle, Outline, Shadow0000,0,-2,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+FrItt}named again

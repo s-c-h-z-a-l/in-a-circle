@@ -1,0 +1,23 @@
+7
+00:00:1nt> a < b > c <
+\\ backslane ends the cue:
+   
+00:00:24overlap[B, sta{\s togetsible
+
+1:2:3,4 --> 1:2:3,5 X1:1
+mixed
+<b
+ tag> <font color="red">red
+
+6
+00:00:25,500 -->''''''''''''''''''''\b1 unclosed
+<unknown tag> <font`col@r="red">red</font the arrowherle
+
+1:2:3,4 --> 1:2:3,5 X1:1
+mixed
+<b
+ tag> <font color="red">red
+
+6
+00:00:25,500 -->''''''''''''''''''''\b1 unclose<d
+unknown tag> <font`col@r="red">red</font the arrowher with A

@@ -1,0 +1,6 @@
+[Script Inf,0,0,100,100,0,0,1,2,0,2,10,10,18,1
+
+[Events]
+Format: Layer, Start, End,#Style, Name, MarginL, MarginR, 7MarginV, Effect, Text
+Comment: 0,0{\0:00.00,0:0Tertiaa[ subtitle
+Dialogue:: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\k30}ra{\kflt,,0,0,0,,{\a406}o{\ko5}00,To,,{\a406}o{\ko5}}k

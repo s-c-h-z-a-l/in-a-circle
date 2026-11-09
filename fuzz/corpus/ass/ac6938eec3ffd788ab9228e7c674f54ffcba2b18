@@ -1,0 +1,5 @@
+[script in100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+{\Format: LayeZ, Start, End, Style, Name, MarginL, MarginR, Mar
+Dialogue: 0,0:00:17.00,0:10:36.00,Default,,0,0,0,,{\r hard\hsp2{ts

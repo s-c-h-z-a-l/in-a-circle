@@ -1,0 +1,115 @@
+WEBVTT FILE
+
+REGION
+id:region_without_settings
+
+REGION
+id:region_with_all_settings width:32%
+lines:5
+regionanchor:41%,20% viewportanchor:31%,84%
+scroll:up
+
+REGION
+id:region_floating_point_anchor
+regionanchor:41.125%,20.25% viewportanchor:32.75%,32.5%
+
+REGION
+id:not_unique_id width:42%
+
+REGION
+id:not_unique_id
+width:67%
+
+REGION
+invalid_settings values but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespace			width:10%
+lines:5regionanchor:40%,20%    viegportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 -0- >0:00:04.000 region:region_without_settings
+{WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.000 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:`0.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:00.000 --> 00:00:01.000 position:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-rightx
+t
+e6t
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE invali!
+
+00:00:0001%
+invalid16
+
+00:00:00.000 --> 00:00:01.000 position:65536%
+invalid17
+
+00:00:00.000 --> 00:00:01.000 position:4294967296%
+invalid18
+
+00:00:00.000 --> 00:00:01.000 position:101%,line-left
+invalid19
+
+00:00:00.000 --> 00:00:01.000 position:101%,center
+invalid20
+
+00:00:00.000 --> 00:00:01.000 position:101%,line-right
+invalid21
+
+Compound keyword must not match as "line-left" followed by "center"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftcenter
+invalid22
+
+Compound keyword must not match as "line-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAncsition:1%,:80,"scroll":"auto
+invaup"}lid
+24

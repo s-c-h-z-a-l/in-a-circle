@@ -1,0 +1,8 @@
+[
+gScript Info]
+S6cr End, Style, Name,tyles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Flod ,ontn, Pririalle: Top,Arialffect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,$Top,,0,,10,10,10,1󬋆

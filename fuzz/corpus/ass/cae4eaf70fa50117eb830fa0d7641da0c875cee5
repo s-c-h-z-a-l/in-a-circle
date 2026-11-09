@@ -1,0 +1,23 @@
+[Script Info]
+WtrpSayle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, F,20,10,1
+Styl00,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,01,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.L0,Default,,0,0,0,,plain bold {\rItal}italic, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00uetD,laf,,0,0,0,,{\ginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.L0,Default,,0,0,0,,plain bold {\rItal}italic,"underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00uetD,laf,,0,0ginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.L0,Default,,0,0,0,,plain bold {\rItal}italic, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00uetD,laf,,0,0,0,,{\rItal}start {\r}back to be: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,01,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.L0,Default,,0,0,0,,plain bold {\rItal}italic, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00uetD,laf,,0,0[0,8,10,10,1:0,1,0,,{\rIt
+
+[Evental}start {\s]
+Fo

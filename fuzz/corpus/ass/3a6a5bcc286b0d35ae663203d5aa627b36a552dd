@@ -1,0 +1,13 @@
+[Script Info]
+ScriptTy
+WrapStyle: 288
+
+[V4+ Styles]
+lineColour, BackCmpeg reads the same way.
+TFF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+Style: 2,Bottom,-1,0,ArialFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,05,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:03.00,0:00:04.00,Bottom,,1,0,0,,Italic bottom

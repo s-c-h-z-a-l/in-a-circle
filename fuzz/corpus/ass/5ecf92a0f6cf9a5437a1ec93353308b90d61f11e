@@ -1,0 +1,6 @@
+[scriptitle line, in another section
+
+[Events]
+Forma
+t: ,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p00006.001}italic{ts

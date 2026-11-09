@@ -1,0 +1,8 @@
+[Script Info]
+ScriptType: v4.00+
+Wev,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+FormatTop,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:03.00,0:00:04.00,Bottom,,0,0,0,,ext
+Dialogue: 0,:000:01.00,0:00:02.00,Top,,0,0,0,,Top style, 1,0,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0 bottom

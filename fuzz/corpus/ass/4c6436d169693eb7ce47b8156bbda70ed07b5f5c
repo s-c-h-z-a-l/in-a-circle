@@ -1,0 +1,12 @@
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, FonimMarginV, Encoding
+Style: 8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+
+[Events]
+Formqt: Layer, Start, End, S{, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:03.0000.00,0:00:01.00,m,,5,0,0,,Italic bottom

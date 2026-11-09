@@ -1,0 +1,12 @@
+[Script Info]
+; Plain V4+ file: 0,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not logue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b؂bolbed{\b0} ontsize, PrimaryColour, SecondaryColour,F,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0t, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Commen0:01.00,tyle, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b؂bolbed{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00ld{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:08}expligit top
+Dialogue: 0,0: commas

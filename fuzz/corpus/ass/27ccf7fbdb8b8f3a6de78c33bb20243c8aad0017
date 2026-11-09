@@ -1,0 +1,9 @@
+inary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Fo2,10,10,10,1
+Style: Top,Arial,20,&H00FFFFFrF,&H000000FF,&H00000000,&H00ialB10,10,10

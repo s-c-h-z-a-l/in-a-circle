@@ -1,0 +1,14 @@
+[scriu info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+Format: Name, F/ntFFFF,&H000,-1,0,)0,100,100,0,0,1,2,0: Name, FontFFFF,&H000,-1,0,)0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[EveFontFFFF,&H000,-1,0,)0,100,100,0,0,1,2,0: Name, FontFFFF,&H000,-1,0,)0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.0á0:00:ahogue: 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,14.00,0:00:15.00,Default,,0,0,0ng
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`0,Default,,ite line, i00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}UUUUUUVs12}, {\i2}i

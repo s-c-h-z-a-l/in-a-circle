@@ -1,0 +1,54 @@
+1
+00old{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+0\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+00:00:11,000 --> 00::00 --> 00:00:04,000
+{\i1}ass italic{\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nest3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>bothin {\}b1bold{\b0}
+ plain0old{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+0\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+00:00:11,000 --> 00::00 --> 00:00:04,000
+{\i1}ass italic{\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nest3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>bothin {\}b1bold{\b0}
+ plain {\b1}bold{\b0}
+
+3
+0 {\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+{\an9}top right

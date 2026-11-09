@@ -1,0 +1,114 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00D.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 regWEBVTT
+Region: id=foo width=40% lines=3 rWEBVTT
+
+NOTE valid
+
+00:00:00.00size:00%
+text3
+
+00:00:00.000 --> 00:00:01.000 size:50% size:100%
+text4
+
+00:00:00.000 --> 00:00:01.000 size:50% size:101%
+text5
+
+00:00:00.000 --> 00:00:01.000 size:1.5%
+text6
+
+0 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 size:1xx size:2%
+text1
+
+00:00:00.000 --> 00:00:01.000 size:0%
+text2
+
+00:00:00.000 --> 00:00:01.000 size:00%
+t/gionanchor=0%,100% viewportanchor=10%,90% scroll=up
+Region: id=bar width=40% lines=3 regionanchor=100%,100% viewprtanchor=90%,90% scroll=up
+
+00:00:00.000 --> 00:00:01.000ext3
+
+00:00:00.000 -->"00:00:01.000 size:50% size:100%
+text4
+
+00:00:00.000 ion:bar
+text1
+
+00:00:00.000 --> 00:00:01.000 region:foo region:bar
+text2
+
+00:00:00.000 --> 00:00:01.000 region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invalid6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00:00:00.000 --> 00:00:01--> 00:00:01.000 size:50% size:101%
+text5
+
+00:00:00.000 --> 00:00:01.000 size:1.5%
+text6
+
+NOTE invalid
+
+00:00:00.000 --> 00:.000 region :foo
+invalid00:01.000 size:
+invalid7
+
+00:00:00.000 --> 00:00:01.000 size:x
+invalid8
+
+00:00:00.000 --> 00:00:01.000 size:%
+invalid9
+
+00:00:00.000 --> 00:00:01.000 size:%%
+invalid10
+
+00:00:00.000 --> 00:00:01.000 size:1%%
+invalid11
+
+00:00:00.000 --> 00:00:01.000 size:1%x
+invalid12
+
+00:00:00.000 --> region:foo
+text0
+
+008
+:00:00.000 --> 00:00:0 00:00:01.000 size:101%
+invali1.000 regiod13
+
+00:00:00.000 --> n:bar
+text00:00:01.000 size:-3%
+invalid14
+
+00:00:00.000 --> 100:00:01.000 size:200%
+inv
+alid15

@@ -1,0 +1,80 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.000 position:100%
+ted=foo width=40% lines=3 regionanchor=0%,100% viewportanchor=10%,90% scroll=up
+Region: id=bar width=40% lines=3 regionanchor=100%,100% viewportanchor=90%xt1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:01.000 --> 00:00:01.000 positin:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-right
+text6
+
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+
+NOTE invalid
+
+00:00:00.000 --> 00:00:01.000 position:1%,middle
+invalid8
+
+00:00:00.000 --> 00:00:01.000 position:1%, center
+invalid9
+
+00:00:00.000 --> 00:00:01.000 position:-1%
+invalid10
+
+00:00:00.000 --> 00:00:ol rwed by /center"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftcenter
+invalid22
+
+Compou@d keyword must not match as "line-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-left, center and line-right; "auto" voids the setting
+00:00:00.000 --> 00:00:01.000 position:1%,a=40% lines=3 regionanchor=0%,100% viewportanchor=10%,90% scroll=up
+Region: id=bar width=40% lines=3 regionanchor=100%,100% viewportanchor=90%xt1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:01.000 --> 00:00:01.000 positin:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-right
+text6
+
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+
+NOTE invalid
+
+00:00:00.000 --> 00:00:01.000 position:1%,middle
+invalid8
+
+00:00:00.000 --> 00:00:01.000 position:1%, center
+invalid9
+
+00:00:00.000 --> 00:00:01.000 positionuto
+invalid24

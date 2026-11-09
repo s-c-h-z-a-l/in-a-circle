@@ -1,0 +1,8 @@
+[Script Info]
+WrapStyle: 0
+Styles]
+]o||,1,2,0,2,10,10,10,1
+
+[Events]
+For0:02.50,Default2,,0,0,0,,Pldin line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top+,0,0,0,,Top style, Eved1}bold{\b0} and {\u1}under{\uColo, A 03

@@ -1,0 +1,12 @@
+c[srnot a s.00,0: section
+
+[Events]
+Format: Layer, Start, End, Style,100,0,0,1,,100,0,0, in another section
+
+[Events]
+Format: Layer, Start, End, Style,100,0,0,1,,100,0,0,1,2,0,2,10,10,10,1
+
+[E100,0,0,1,,,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Oormaialogue:s

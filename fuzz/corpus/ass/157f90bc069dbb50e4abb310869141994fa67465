@@ -1,0 +1,9 @@
+[script info]
+Title: wild
+Wra0000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MavginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.0e
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style,-->ld
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bo[ld{\b0} and {\u1}uSn

@@ -1,0 +1,29 @@
+[Script Inzo]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: NecondaryColour, OutlineColour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles 
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Fot a subtitl10,1
+
+[Events]
+Fot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:08.00,
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.49,00:0Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:01.00ue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.49,00:0:09.00,Default,,0,,,0,0,0,,{\i1}ital,,0,0,0,,{\p1}m :ae italic
+Dialogue: 0,0:00:07.49,00:0:09.00,Default,,0,,,0,0,0,1\N0\bord2)}transform {\fnArial10,10,1
+Style: Ital,ue: 0,0:,D00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:01.00,Default,,00:03.efault,,0,,,0,0,0,,{\i1}e
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Defaul,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Over0,0:00:01.00,Default,,00:03.00, l 1 1\N0\bord20:00:)

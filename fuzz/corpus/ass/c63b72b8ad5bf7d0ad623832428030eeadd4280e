@@ -1,0 +1,16 @@
+[Script Info]
+WrapStyle: 0
+[V4+ Styles]
+Format: Normat: Name, Fontname, Fontsizpe: v4.00
+WrapStyle: 0
+
+[V4 styles]
+Format: Name, Fontname,!!!!!!!! Fontsize, PrimaryColour, SecondaryCaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BordebStyle, Outline, Shadow, Alignment, MargbrL, MarginR, MarginV, AlphaLevel, Encoding
+Styoding
+Style: Default,Arial,20,16777215,255,0,0,-1,0,1,2,0,2,10,10,10ng, Angle, 00000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,plain bold {\rItal}italic, underline, top
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:0.5,000:00:06.00,Default,,0,0,0,,{\i1}eX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, Margi{\rItal}{\rDefault}named again

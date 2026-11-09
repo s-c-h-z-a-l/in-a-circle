@@ -1,0 +1,16 @@
+7
+1}bold{\b
+0
+}3
+00:00:0
+5
+00:00:22,000 --> 00:00:23,000
+tex4 that holds an arrow: a -->&b
+a spaces-only line ends the cue{\   
+00:00:24,000-->00::25,000
+NNces around the ae cue{\   
+00:00:24,000-->00::25,000  
+00:00:24,000-->0 cue{\   
+00:00:24,000-->00::25,000  
+00:00:24,100-->00::25,000
+no sPrts together with A

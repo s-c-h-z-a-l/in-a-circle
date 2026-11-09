@@ -1,0 +1,4 @@
+7
+00:00:10,5 --> 00:00:11,50
+short mil:00:20,000 00:22,000 ->- 00:00:23,000
+text(that holds an arrow: a -- B<<<<<<<<<<<<<<<<<<<<<<<<<<<<, starts together with A

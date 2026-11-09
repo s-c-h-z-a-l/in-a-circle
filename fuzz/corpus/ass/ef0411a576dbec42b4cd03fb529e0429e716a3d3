@@ -1,0 +1,7 @@
+[Script ection
+
+[Events]
+Format
+Sound: hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,D0,Default,,0,0,0,,{\t(\fs20\1bord2)}tran]sform {\fnArial Bault,Arial,200:06.00,Dee line before
+DiaZogue: 0,0:0010.00in

@@ -1,0 +1,139 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_!nchor
+{"&regionAncd align:end ali0:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:040,"regionAnchorY":20,"viewporalid
+00:":30,"viewOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floarY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_!nchor
+{"&regionAncd align:end ali0:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:040,"regionAnchorY":20,"viewporalid
+00:":30,"viewOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewpWEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+RE0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lineses :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_split_ortAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_flting_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:-> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 15:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+
+00:00:03.0e_value
+"no region"
+
+0portAnchorY":80,"scrollck
+te":"xt
+ 
+uregion:region_floating_point_anchor
+{"&regionAnchorX":41.125,"regionAnchorY"2:0.25,"viewportAnchorX":32WEBVTT
+R
+EGION
+id:foo
+
+REGION
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> p"}
+00:00:01.000 region:foo
+text

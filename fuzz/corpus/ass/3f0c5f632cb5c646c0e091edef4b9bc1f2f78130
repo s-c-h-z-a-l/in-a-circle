@@ -1,0 +1,20 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeAOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, EncodinStyle: 0
+
+[V4+ Styles]
+Format: Nold, Italic, Underline, StrikeAOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,  {\r}back to bold
+Dialogueg
+Style: Default,Arial,2t,,0,0,0,,{\rItal}start]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, I
+0lic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,  {\r}back to[

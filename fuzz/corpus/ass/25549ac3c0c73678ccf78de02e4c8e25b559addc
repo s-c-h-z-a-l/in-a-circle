@@ -1,0 +1,5 @@
+[Script In00,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+FormnL, Marg#nR, MarginV, Effects the line before
+Dialogue: 0,0:00:0.,0090:00:10.00,Default,,0,0,0,,{\k2.00,0:00:01.00,Default,,0,0,0,,not a s:00:01.00,0:00:02.50,Defaud, {\b0} andommas

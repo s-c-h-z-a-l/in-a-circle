@@ -1,0 +1,34 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:foo lines:1
+
+-->
+REGION
+tical:lr
+text1
+
+00:000 --> 00:00:01.000
+text5
+
+00:0:00.000 --> 00x:0WEBVTT
+
+00:00croll:up
+
+REGION
+i:"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_poiegion"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_by_ascii_whitWEBVTT
+
+0@0:00:00.000 -->":5,"r)egionAnchorX":40,"regionAnchorY":20,"viewpororX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floatewportAnchorX":31:<<<<<<,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_!nchor
+{"&regionAncd al<<<<<<<<ign:e@0:00:00.nd <<<<0<00< -a->

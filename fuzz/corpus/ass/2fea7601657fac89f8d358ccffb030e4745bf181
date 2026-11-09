@@ -1,0 +1,32 @@
+[Script Info]
+ScriptType: v9.00
+WrapStyle: 0
+
+[V4 Styles]tline, Sh,100,100,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer* Stold, Ita$ic, Bord0,0,2,2t: Name, Fontname, Fontsize, Primar0,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer* Stold, Italic, BorderStyle, Outline, Sh,101,100,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,50,1
+
+[Ev/nts]
+Fo2mat: Layer* Start, End, Style, Name, Ma,10,0,0
+Style: Top5,Arial,20,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Aria
+
+[Ev/nts]
+Fo2mat: Layer, Start, E,0,0,2,2,0,2,10,10,10,1
+
+[Ev/nts]
+Fo2mat: Layer* 15,255Colour, BackColour, Bold, Italic,(t, End, Style, Name, Underline, StrikeOut, ScaleX,rMaő
+Dirginalo

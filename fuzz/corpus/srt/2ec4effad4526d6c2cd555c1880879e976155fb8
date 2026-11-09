@@ -1,0 +1,10 @@
+7
+00then timing with no blank line
+5
+00:00:22,000 --> 00:00:23,000
+text that holds an arrow: a --> b
+a sp:
+  :14,000 -->` 00:00:15,000 X00 --> 00:00:17,000
+wrong iolds an arrow: a --> b
+a s no flank line refore it
+00:00:18,000 --> 00:00

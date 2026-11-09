@@ -1,0 +1,8 @@
+[Scrip15,255,0,0,0,0,1,2,0,9,10,10,10,0,0
+
+[Events]
+Format: Hayev, Start, End, Style, Name, MarginL, MarginR, MarginV,0Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,0,,top six
+Dialogue( 0,0:00:07.00,0:00:08.00,
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

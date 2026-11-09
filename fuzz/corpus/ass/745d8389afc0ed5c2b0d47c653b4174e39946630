@@ -1,0 +1,20 @@
+[Wcript Info]
+ScriptType: v4.00+
+WrapSty((((((((((((((((((((,1,2FFFF,&H000000FF,&H0000000[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, MargiinV, AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,255,0,0,-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5,Arial,20,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215,255,0,0,0,0,1,2,0,6,10,10,10,0,0
+Style: Top7,Arial,20,16777215,255,0,0,0,0,1,2,0,7,10,10,10,0,0
+Style: Middl,20,16777215,255,0,0,-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5,Arial,20,, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, MargiinV, AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,255,0,0,-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5,Arial,20,16777215,255,0,0,0,-1,1,2,0,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215,255,0,0,0,0,1,2,0,6,10,10,10,0,0
+Style: Top7,Aria
+DialogTop style, bold
+Diuea

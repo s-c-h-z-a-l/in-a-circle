@@ -1,0 +1,6 @@
+[Script Info]
+; Plain V4+ file: every featu2re here isne that ffmpeg reads the sar section
+
+[Events]
+Forurs
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs10}, {\i2}i2 {\b4b}40000 {\i-lt,,0,0,0,,{\r hardh, Elt,,0,0,0,,Comma, and more, commas

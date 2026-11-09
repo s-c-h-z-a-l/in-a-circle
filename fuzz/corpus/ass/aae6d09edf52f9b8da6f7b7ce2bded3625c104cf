@@ -1,0 +1,11 @@
+[Sc,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Def
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0:00:07.50,0:00:09.00,Default,,0,0,rapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, , SecondaryColour,,0,0,0,,Comma, and more, commas

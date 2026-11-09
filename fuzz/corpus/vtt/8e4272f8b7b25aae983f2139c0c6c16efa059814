@@ -1,0 +1,28 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:foo lines>
+REGION
+tical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+tttings
+{\"width":32,"lines":5,"regionchAnorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41. vertical:rl
+tttings
+{\"width":32,ސines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnY"orX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAncd align:end ali0:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:040,"regionAnchorY":20,"viewporalid
+00:":30,"viewportAnchorY":80,"scrollck
+te":"xt
+
+up"}

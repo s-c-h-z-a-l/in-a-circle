@@ -1,0 +1,18 @@
+[script info]
+Title: wild
+Wontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Format: L6.00,Default,,0,0,0,,{unknoayer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Delt,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.0ialogue: 0,0:0nL, MarginR, MargifV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:0t either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,,0,0,0,,unclosed { brace
+Di:00:14.00,0:00:15.00,Default,,0,0,0,,non-ASCII: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Default,,0,0 0 l 1 1\Nm 2 2\hspace
+Dialogue: 0,0:00:02.00,0:00:04.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12},_ {\i2}i2 {\b5b}40000 {\i-1}italic{ts

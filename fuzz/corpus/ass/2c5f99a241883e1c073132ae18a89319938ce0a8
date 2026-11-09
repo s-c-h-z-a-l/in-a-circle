@@ -1,0 +1,14 @@
+[Sc[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, Outolour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Cobefore
+Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\klt,,0,0,0,,Pla0,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2]d {\b1}bold{\b0} and {\u1}{\der{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Fiefault,,0,0,0,,Overlaps the line before
+Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\klt,,0,0,0,,Pla0,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2]d {\b1}bold{\b0} and {\u1}{\der{\u0},First line\NSecond0:01.00,0:00:02 lin.

@@ -1,0 +1,58 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --WEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+
+lines:42949region:in
+
+00:00:00.000 --> 00:00:01.000 region :foo
+invalid--> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:58
+ region:ignored_attributer rgion:ignored_attribute_value
+"gion:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:58
+ region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attritbue_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_without_settings
+{"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":20,"viewportAnchorX":31,"viewportAnchor
+Y":84,"scroll":"up"}_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":20,"viewportAnchorX":30,"viewportAnchorY":80,"scroll":"up"}

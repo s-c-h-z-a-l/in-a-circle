@@ -1,0 +1,15 @@
+[Sc Styles]
+Format: Name, Fontname, Fontsize, PrimarySolour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, Default,Arial,20,&H00FF
+[Events] Name, Fontname, Fontsize, PrimarySolour, SecondaryColour, OutlineColour, Backld, IArial,20,&H00FF
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, EfNOTE	fect, Text
+Picture:arginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Defau~lt,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.0,aDef0ult,,0,0,0,,hard\Nbreas
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,ác&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 {\i-1}italic
+Dialogue: 0,0:00:12.00,0:00:13.00,Defaul}{\rItal}{\rDefault}named again
+\hspace
+Dialogue2 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,ác&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 {\i-1}italic
+Dialogue: 0,0:00:12.00,0:00:13.00,Defaul}{\rItal}{\rDefault}nam igndeaa

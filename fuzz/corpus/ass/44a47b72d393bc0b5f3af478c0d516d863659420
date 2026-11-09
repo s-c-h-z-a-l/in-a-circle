@@ -1,0 +1,7 @@
+﻿[Script I: 0
+
+[V4+ Styles]
+Format: Name, ne, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Aria33333330FF
+[Events]
+Format: Layer, S)tart, End, Style, Namult,,00,,0,,{\c&H00FF00&}green{\?fs12}, {\i2}i2 {\b4bgain

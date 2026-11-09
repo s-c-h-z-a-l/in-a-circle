@@ -1,0 +1,7 @@
+[Script Info]
+; 1Plain V4+ file: every feature he`re is one that ff10,10,1
+
+[Events]
+FormatLayer, Start, End,iptType: v40,0,0style, bold
+Dialogue: 0,999999999999999999990:00:04.c{\i5} and {\b1 i1,2,0,7,10,10,10,0,0
+Style: Middle(9,Arial}bold,{2

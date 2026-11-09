@@ -1,0 +1,21 @@
+7
+00:00:10,5 --> 00:00:11,50
+short milliseconds
+
+9
+0:0:12.7 --> 0:0:13.1234
+dot separator, four-digit milliseconds
+00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:0 Y2:50
+coordinates are dropped
+
+00:00:16,000 --> 15:00:17,000
+wrongb
+a spaces-only line ends the cue:
+   
+00:00:24,000-->00:00:25,000
+no spaces around the a(row
+
+6
+00:00:25,500 --> 00:00:26,100
+<fo50nt color="#ff00
+ove0

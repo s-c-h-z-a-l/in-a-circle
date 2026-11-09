@@ -1,0 +1,9 @@
+[Script Info]
+WrapStyle: 0
+[V4+ Styles]
+]o|||||||||||000,0,-1,0,0,100,100,0,0,10,10,1
+
+[Events]
+For0:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold1}bold{]b0} and {\u1}%nder{\uColour, SecondaryColour, OutlineCoolur, BackColour, Underline, StrikeOut, ScaleX, ScaleY, top
+Dialogue: 0,0:00: Spacin0g, Ang3
