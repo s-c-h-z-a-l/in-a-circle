@@ -1,0 +1,13 @@
+W3C XML Conformance Test Suite, version 20130923 (xmlts20130923)
+Source: https://www.w3.org/XML/Test/xmlts20130923.tar.gz
+SHA-256 of the tarball: 9b61db9f5dbffa545f4b8d78422167083a8568c59bd1129f94138f936cf6fc1f
+
+Modified 2026-11-02: only a subset is kept, unchanged. The test catalogs
+of the XML 1.0 and Namespaces 1.0 suites (xmltest, sun, oasis, ibm,
+eduni errata-2e/3e/4e, namespaces 1.0 and errata-1e, misc), and the test
+files of the cases with ENTITIES="none", TYPE valid, invalid or not-wf,
+XML 1.0, the fifth edition's rules and NAMESPACE="yes" (the filter in
+crates/xml/tests/xmlconf.rs). Everything else (XML 1.1, external
+entities, error cases, canonical output files, the Japanese documents)
+is left out. Licence: LICENSE (the W3C Software Notice and License under
+which the suite is distributed).

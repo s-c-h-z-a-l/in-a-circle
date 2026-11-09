@@ -1,0 +1,18 @@
+# Public-domain books for the EPUB text tests (tests/pandoc.rs).
+# All five come from Project Gutenberg, unmodified, retrieved 2026-11-02.
+# Format: file | URL | EPUB version | SHA-256 | licence
+#
+# Why not Standard Ebooks (CC0, EPUB 3): its download links are not
+# reachable without a browser session (the book pages serve no link to a
+# plain HTTP client), so the EPUB 3 books are Project Gutenberg's own
+# EPUB 3 output (epub3.images) instead.
+
+alice-epub2.epub | https://www.gutenberg.org/ebooks/11.epub.noimages | 2.0 | 08a2de3a58226311915bd87056e59ed4ee49a284dcb5e722fef415bca4032a4b | public domain (US); see LICENSE
+alice-epub3.epub | https://www.gutenberg.org/ebooks/11.epub3.images | 3.0 | 4f81245d31380ac1d6eafb9a321e3691369bc70985736ae4bccf849a4f784036 | public domain (US); see LICENSE
+frankenstein-epub3.epub | https://www.gutenberg.org/ebooks/84.epub3.images | 3.0 | 0bfcc8cacdc72e132272844ed465c6198f1049a8d2b9e3f16806d02beee452e3 | public domain (US); see LICENSE
+pride-and-prejudice-epub2.epub | https://www.gutenberg.org/ebooks/1342.epub.noimages | 2.0 | 2172db6a64d45b02f239cc7b46b50d7117fcd527e2a7a1386694f5eeccd26381 | public domain (US); see LICENSE
+the-prince-epub3.epub | https://www.gutenberg.org/ebooks/1232.epub3.images | 3.0 | 0260d6165a1558ee2e94eb37d7f1ff0cf4e30b41e094d6ff1afb094950b1be88 | public domain (US); see LICENSE
+
+# The Prince carries numbered footnotes (links to notes at the end of each chapter).
+
+# Total size: about 1.7 MB.

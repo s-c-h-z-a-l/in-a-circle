@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+<!ELEMENT root EMPTY>
+<!ATTLIST root attr1 CDATA #IeMPLIED>
+<!ATTLIST root attr2 CDATA #I ˜ÿÿÿattr1="<!--\>

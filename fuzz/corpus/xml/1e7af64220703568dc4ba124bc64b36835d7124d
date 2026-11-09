@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT student (#PCDATA)> 
+]>
+<!--* Tests empty comment *-->
+<!---->
+<student>My Name is Syp><h6>OnSe</h1><p>a <em>bf-8"?>
+<htmlÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿáí

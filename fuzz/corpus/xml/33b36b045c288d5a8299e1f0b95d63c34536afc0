@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root (a,b)>
+  <!ELEMENT a EMPTY>
+  <!ELEMENT b (#P»»¾«¾ƒײ* >
+  <!ELEMENT c (ANY>
+]>
+<root><a/><b>
+   <c></c > : EnAd tag wa>&#0½</ith a sp
+<!><b>ֲעץר

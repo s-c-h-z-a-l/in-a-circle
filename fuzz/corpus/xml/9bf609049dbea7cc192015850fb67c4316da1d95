@@ -1,0 +1,15 @@
+<a>&Lt;
+<!--* Tests empty com=ment *-->
+<!---->
+<st_udent>My Name is SnowMan.LEMENT stude—t (#PCDATA)> 
+]>
+<!--* Tests emp<a>ïomm animal [
+<!ELEMENT animal ANY>
+<?ãƒ» an only legal ition char #x03fb
+ in PIanimal ANY>
+<?ãƒ» an oÂnly legal per 5th edition char #x03fb
+ in PITagrein PITent *-->
+<!---->
+<student>My NamTests em$<?nt *-->
+<!---->
+<st_udent>My Name is SnowMan.LEMENT st

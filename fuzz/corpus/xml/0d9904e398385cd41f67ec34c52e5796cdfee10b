@@ -1,0 +1,11 @@
+<?xml version="1. Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leïpard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEM
+<!-$ Above is DTD -->
+<?music "Here is a PI" ?> 
+<a

@@ -1,0 +1,8 @@
+<?xml  version="1.0"?>
+<!-- validCTYPE test
+ ity test for ProducDTD-->
+<!DOCTYPE test
+ PUBLIC[
+ <!ELEMENT t
+"a"> l 
+ <!AT

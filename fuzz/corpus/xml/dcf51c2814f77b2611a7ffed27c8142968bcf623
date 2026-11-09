@@ -1,0 +1,12 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT root (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENTLIST z NT x (#PCDATA)>
+ <!ELEMENT TLISTr (x|y) #IMPLIED>
+ ]>
+<root>
+<x attr= 'Madhu</y>
+</root>

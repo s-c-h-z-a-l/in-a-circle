@@ -11,7 +11,8 @@ action\ttext.md-to-epub\tfamily=text\tin=text/markdown\tout=application/epub+zip
 action\ttext.txt-to-epub\tfamily=text\tin=text/plain\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-to-html\tfamily=text\tin=text/markdown\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
-action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n";
+action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n\
+action\ttext.epub-to-txt\tfamily=text\tin=application/epub+zip\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -1821,4 +1822,855 @@ fn urls_and_encoded_absolute_paths_are_not_files() {
     assert_eq!(images(&es).len(), 2);
     assert_eq!(ch[0].1.matches("<img ").count(), 0, "{}", ch[0].1);
     assert!(ch[0].1.contains("url") && ch[0].1.contains("abs"));
+}
+
+/// `text.epub-to-txt`: EPUB books (built here with `testzip`, independent
+/// of the crate's own ZIP code) to one plain-text file each.
+mod epub_to_txt {
+    use super::*;
+    use testzip::Store::Stored;
+
+    const ID: &str = "text.epub-to-txt";
+    const STYLES: &str = "book styles (fonts, colours, layout) not carried over";
+    const IMAGES: &str = "images replaced by their alt text";
+    const LINKS: &str = "links flattened to text";
+    const MERGED: &str = "merged table cells split";
+    const XHTML: &str = "application/xhtml+xml";
+    const AES: &str = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
+    const IDPF: &str = "http://www.idpf.org/2008/embedding";
+
+    /// One manifest item: its href (relative to `OEBPS/`), media type,
+    /// data (`None`: not in the ZIP), whether the spine names it and
+    /// whether it is linear there.
+    struct Ch {
+        href: String,
+        media: &'static str,
+        data: Option<Vec<u8>>,
+        spine: bool,
+        linear: bool,
+    }
+
+    fn ch(href: &str, body: &str) -> Ch {
+        Ch {
+            href: href.to_string(),
+            media: XHTML,
+            data: Some(xhtml(body)),
+            spine: true,
+            linear: true,
+        }
+    }
+
+    /// An XHTML chapter: the declaration on line 1, `body` on line 2.
+    fn xhtml(body: &str) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" \
+             xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>t</title></head><body>{body}</body></html>"
+        )
+        .into_bytes()
+    }
+
+    const CONTAINER: &str = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+
+    /// A book at `path`: package `OEBPS/content.opf` (EPUB `version`) with
+    /// `meta`, the manifest items `chs` (each named `iN`; those in the
+    /// spine in order, `repeat` itemrefs each) and `extra` entries as
+    /// they are.
+    fn book_at(
+        path: &Path,
+        version: &str,
+        meta: &str,
+        chs: &[Ch],
+        repeat: usize,
+        extra: &[(&str, &[u8])],
+    ) {
+        let manifest: String = chs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                format!(
+                    r#"<item id="i{i}" href="{}" media-type="{}"/>"#,
+                    c.href, c.media
+                )
+            })
+            .collect();
+        let spine: String = chs
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.spine)
+            .map(|(i, c)| {
+                let linear = if c.linear { "" } else { r#" linear="no""# };
+                format!(r#"<itemref idref="i{i}"{linear}/>"#).repeat(repeat)
+            })
+            .collect();
+        let opf = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">{meta}</metadata>
+  <manifest>{manifest}</manifest>
+  <spine>{spine}</spine>
+</package>"#
+        );
+        let names: Vec<String> = chs.iter().map(|c| format!("OEBPS/{}", c.href)).collect();
+        let mut entries: Vec<(&[u8], &[u8], testzip::Store)> = vec![
+            (b"mimetype", b"application/epub+zip", Stored),
+            (b"META-INF/container.xml", CONTAINER.as_bytes(), Stored),
+            (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+        ];
+        for (c, n) in chs.iter().zip(&names) {
+            if let Some(d) = &c.data {
+                entries.push((n.as_bytes(), d, Stored));
+            }
+        }
+        for (n, d) in extra {
+            entries.push((n.as_bytes(), d, Stored));
+        }
+        fs::write(path, testzip::zip(&entries)).unwrap();
+    }
+
+    /// An EPUB 3 book of `chs` at `root/<name>`.
+    fn book(root: &Path, name: &str, meta: &str, chs: &[Ch]) -> PathBuf {
+        let p = root.join(name);
+        book_at(&p, "3.0", meta, chs, 1, &[]);
+        p
+    }
+
+    /// `encryption.xml` listing each `(algorithm, uri)` as `EncryptedData`.
+    fn encryption(list: &[(&str, &str)]) -> Vec<u8> {
+        let data: String = list
+            .iter()
+            .map(|(alg, uri)| {
+                format!(
+                    r#"<enc:EncryptedData><enc:EncryptionMethod Algorithm="{alg}"/><enc:CipherData><enc:CipherReference URI="{uri}"/></enc:CipherData></enc:EncryptedData>"#
+                )
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#">{data}</encryption>"#
+        )
+        .into_bytes()
+    }
+
+    /// Runs the action on one book: its output's text (empty when none),
+    /// the `warn` messages, and the output.
+    fn txt(book: &Path, work: &Path) -> (String, Vec<String>, Output) {
+        let o = run_raw(ID, work, &[book]);
+        let out = stdout(&o);
+        let warns = lines(&out, "warn")
+            .iter()
+            .map(|w| w[2].to_string())
+            .collect();
+        let text = lines(&out, "done")
+            .first()
+            .map(|d| fs::read_to_string(work.join(d[2])).unwrap())
+            .unwrap_or_default();
+        (text, warns, o)
+    }
+
+    /// The input failed with `reason` and nothing is left in `work`.
+    fn fails_alone(o: &Output, work: &Path, reason: &str) {
+        let out = stdout(o);
+        assert_eq!(o.status.code(), Some(1), "{out}");
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 1, "{out}");
+        assert_eq!(fails[0][2], reason, "{out}");
+        assert!(lines(&out, "done").is_empty(), "{out}");
+        let left: Vec<_> = snapshot(work).into_iter().map(|(p, _)| p).collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn manifest_lists_epub_to_txt() {
+        let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
+            .arg("--manifest")
+            .output()
+            .unwrap();
+        assert!(stdout(&o).lines().any(|l| l
+            == "action\ttext.epub-to-txt\tfamily=text\tin=application/epub+zip\t\
+                out=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\t\
+                lossy=yes\tbatch=yes"));
+    }
+
+    /// The title and the authors head the file, then every spine item in
+    /// spine order (`linear="no"` in its place), a blank line between
+    /// chapters; each chapter's own heading is its title, none is added.
+    #[test]
+    fn epub3_to_txt_header_and_order() {
+        let (root, work) = workdir("epub-order");
+        let mut note = ch("notes.xhtml", "<p>Note.</p>");
+        note.linear = false;
+        let b = book(
+            &root,
+            "novel.epub",
+            "<dc:title> The   Book </dc:title><dc:creator>Ann</dc:creator>\
+             <dc:creator>Bob</dc:creator>",
+            &[
+                ch("c1.xhtml", "<h1>One</h1><p>First.</p>"),
+                note,
+                ch("c2.xhtml", "<h1>Two</h1><p>Second.</p>"),
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(
+            text,
+            "The Book\nAnn, Bob\n\nOne\n\nFirst.\n\nNote.\n\nTwo\n\nSecond.\n"
+        );
+        assert_eq!(warns, [STYLES]);
+        let out = stdout(&o);
+        assert_eq!(lines(&out, "done")[0][2], "0/novel.txt");
+    }
+
+    /// What is missing of the header is left out; with neither, the
+    /// header and its blank line are.
+    #[test]
+    fn header_parts_are_left_out_when_missing() {
+        let (root, work) = workdir("epub-header");
+        let body = [ch("c1.xhtml", "<p>Text.</p>")];
+        for (k, (meta, want)) in [
+            ("<dc:title>T</dc:title>", "T\n\nText.\n"),
+            ("<dc:creator>A</dc:creator>", "A\n\nText.\n"),
+            ("<dc:title> </dc:title>", "Text.\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let b = book(&root, &format!("b{k}.epub"), meta, &body);
+            let w = work.join(k.to_string());
+            fs::create_dir_all(&w).unwrap();
+            let (text, _, o) = txt(&b, &w);
+            assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+            assert_eq!(text, want, "{meta}");
+        }
+    }
+
+    /// A real EPUB 2 chapter: the XHTML 1.1 DOCTYPE and HTML named
+    /// characters; the NCX is in the manifest, not read.
+    #[test]
+    fn epub2_to_txt() {
+        let (root, work) = workdir("epub2");
+        let chapter = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+            <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+            \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+            <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>c</title>\
+            <link rel=\"stylesheet\" href=\"s.css\"/></head><body>\
+            <h1>Caf&eacute;</h1><p class=\"x\">Au&nbsp;lait &amp; cr&egrave;me.</p></body></html>";
+        let ncx = Ch {
+            href: "toc.ncx".into(),
+            media: "application/x-dtbncx+xml",
+            data: Some(b"<ncx/>".to_vec()),
+            spine: false,
+            linear: true,
+        };
+        let chapter = Ch {
+            href: "ch.xhtml".into(),
+            media: XHTML,
+            data: Some(chapter.as_bytes().to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let p = root.join("old.epub");
+        book_at(
+            &p,
+            "2.0",
+            "<dc:title>Old</dc:title>",
+            &[ncx, chapter],
+            1,
+            &[],
+        );
+        let (text, warns, o) = txt(&p, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "Old\n\nCaf\u{e9}\n\nAu\u{a0}lait & cr\u{e8}me.\n");
+        assert_eq!(warns, [STYLES]);
+    }
+
+    /// Chapter 29 of 30 is not well-formed: its line stands in its place,
+    /// the rest converts and one counted `warn` says so.
+    #[test]
+    fn bad_late_chapter_marked_in_place() {
+        let (root, work) = workdir("epub-bad29");
+        let chs: Vec<Ch> = (1..=30)
+            .map(|i| {
+                if i == 29 {
+                    ch("c29.xhtml", "<p>broken</b></p>")
+                } else {
+                    ch(&format!("c{i}.xhtml"), &format!("<p>chapter {i}</p>"))
+                }
+            })
+            .collect();
+        let b = book(&root, "b.epub", "", &chs);
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert!(text.starts_with("chapter 1\n\nchapter 2\n"), "{text}");
+        assert!(
+            text.ends_with(
+                "chapter 28\n\n[Chapter 29 could not be read: not well-formed XML (line 2)]\
+                 \n\nchapter 30\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(warns, ["1 chapter(s) could not be read", STYLES]);
+    }
+
+    /// Every chapter's reason in its place: a missing entry, another
+    /// type, an unsupported encoding, a DTD entity, nesting past the XML
+    /// depth, the node budget.
+    #[test]
+    fn chapter_reasons_in_place() {
+        let (root, work) = workdir("epub-reasons");
+        let mut missing = ch("gone.xhtml", "");
+        missing.data = None;
+        let html = Ch {
+            href: "p.html".into(),
+            media: "text/html",
+            data: Some(b"<p>x</p>".to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let mut latin = ch("latin.xhtml", "");
+        latin.data =
+            Some(b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><html><p>x</p></html>".to_vec());
+        let mut entity = ch("ent.xhtml", "");
+        entity.data = Some(b"<!DOCTYPE html [<!ENTITY e \"x\">]><html><p>&e;</p></html>".to_vec());
+        let deep = ch("deep.xhtml", &"<div>".repeat(300));
+        let nodes = ch("nodes.xhtml", &format!("<p>{}</p>", "<b/>".repeat(1 << 19)));
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[
+                ch("ok.xhtml", "<p>fine</p>"),
+                missing,
+                html,
+                latin,
+                entity,
+                deep,
+                nodes,
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(
+            text,
+            "fine\n\n\
+             [Chapter 2 could not be read: missing]\n\n\
+             [Chapter 3 could not be read: unsupported type text/html]\n\n\
+             [Chapter 4 could not be read: unsupported encoding ISO-8859-1]\n\n\
+             [Chapter 5 could not be read: entity declarations are not supported]\n\n\
+             [Chapter 6 could not be read: too large (nesting limit)]\n\n\
+             [Chapter 7 could not be read: too large (nodes limit)]\n"
+        );
+        assert_eq!(warns, ["6 chapter(s) could not be read", STYLES]);
+    }
+
+    #[test]
+    fn all_chapters_bad_is_no_output() {
+        let (root, work) = workdir("epub-allbad");
+        let b = book(
+            &root,
+            "b.epub",
+            "<dc:title>T</dc:title>",
+            &[ch("a.xhtml", "<p>x</b>"), ch("b.xhtml", "<p>y</i>")],
+        );
+        let o = run_raw(ID, &work, &[&b]);
+        fails_alone(&o, &work, "no chapter could be read");
+    }
+
+    #[test]
+    fn drm_book_fails_with_reason() {
+        let (root, work) = workdir("epub-drm");
+        let p = root.join("drm.epub");
+        let enc = encryption(&[(AES, "OEBPS/a.xhtml"), (AES, "OEBPS/b.xhtml")]);
+        book_at(
+            &p,
+            "3.0",
+            "",
+            &[ch("a.xhtml", "<p>x</p>"), ch("b.xhtml", "<p>y</p>")],
+            1,
+            &[("META-INF/encryption.xml", &enc)],
+        );
+        let o = run_raw(ID, &work, &[&p]);
+        fails_alone(&o, &work, "book is DRM-protected");
+    }
+
+    /// One encrypted chapter among readable ones is not DRM: its line
+    /// stands in its place and is counted once.
+    #[test]
+    fn partially_encrypted_chapter_in_place() {
+        let (root, work) = workdir("epub-enc1");
+        let p = root.join("enc.epub");
+        let enc = encryption(&[(AES, "OEBPS/b.xhtml")]);
+        book_at(
+            &p,
+            "3.0",
+            "",
+            &[
+                ch("a.xhtml", "<p>a</p>"),
+                ch("b.xhtml", "<p>b</p>"),
+                ch("c.xhtml", "<p>c</p>"),
+            ],
+            1,
+            &[("META-INF/encryption.xml", &enc)],
+        );
+        let (text, warns, o) = txt(&p, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "a\n\n[Chapter 2 could not be read: encrypted]\n\nc\n");
+        assert_eq!(warns, ["1 chapter(s) could not be read", STYLES]);
+    }
+
+    /// A chapter in UTF-16 (little-endian, with its byte order mark) is
+    /// decoded: its text comes out as UTF-8, characters intact.
+    #[test]
+    fn utf16le_bom_chapter() {
+        let (root, work) = workdir("epub-utf16");
+        let src = String::from_utf8(xhtml("<p>Árvíztűrő tükörfúrógép ✓</p>"))
+            .unwrap()
+            .replace("UTF-8", "UTF-16");
+        let mut data = vec![0xFF, 0xFE];
+        data.extend(src.encode_utf16().flat_map(u16::to_le_bytes));
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[
+                Ch {
+                    href: "u.xhtml".into(),
+                    media: XHTML,
+                    data: Some(data),
+                    spine: true,
+                    linear: true,
+                },
+                ch("a.xhtml", "<p>next</p>"),
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "Árvíztűrő tükörfúrógép ✓\n\nnext\n");
+        assert_eq!(warns, [STYLES]);
+    }
+
+    /// Font obfuscation is not DRM: the book converts and only the styles
+    /// loss is reported.
+    #[test]
+    fn font_obfuscated_book_converts_without_warning() {
+        let (root, work) = workdir("epub-font");
+        let p = root.join("font.epub");
+        let enc = encryption(&[(IDPF, "OEBPS/f.otf")]);
+        book_at(
+            &p,
+            "3.0",
+            "",
+            &[ch("a.xhtml", "<p>x</p>")],
+            1,
+            &[
+                ("META-INF/encryption.xml", &enc),
+                ("OEBPS/f.otf", b"scrambled font"),
+            ],
+        );
+        let (text, warns, o) = txt(&p, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "x\n");
+        assert_eq!(warns, [STYLES]);
+    }
+
+    /// Pictures only (an image page and an SVG page): no text, no file.
+    #[test]
+    fn no_text_book_fails() {
+        let (root, work) = workdir("epub-notext");
+        let svg = Ch {
+            href: "p.svg".into(),
+            media: "image/svg+xml",
+            data: Some(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let b = book(
+            &root,
+            "pics.epub",
+            "<dc:title>Pictures</dc:title>",
+            &[
+                ch("c.xhtml", "<p><img src=\"a.jpg\" alt=\"Cover\"/></p>"),
+                svg,
+            ],
+        );
+        let o = run_raw(ID, &work, &[&b]);
+        fails_alone(&o, &work, "book has no text");
+    }
+
+    /// An SVG page in the spine has no text: it is left out and reported
+    /// as an image loss.
+    #[test]
+    fn svg_page_is_an_image_loss() {
+        let (root, work) = workdir("epub-svg");
+        let svg = Ch {
+            href: "p.svg".into(),
+            media: "image/svg+xml",
+            data: Some(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let b = book(&root, "b.epub", "", &[svg, ch("c.xhtml", "<p>x</p>")]);
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "x\n");
+        assert_eq!(warns, [IMAGES, STYLES]);
+    }
+
+    /// A cover page of one image and the navigation document in the
+    /// spine: the cover is its alt text (an image loss), the table of
+    /// contents a list of text (book-internal links), the book has text.
+    #[test]
+    fn cover_and_toc_pages() {
+        let (root, work) = workdir("epub-cover");
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[
+                ch(
+                    "cover.xhtml",
+                    "<div class=\"cover\"><img src=\"cover.jpg\" alt=\"Cover\"/></div>",
+                ),
+                ch(
+                    "nav.xhtml",
+                    "<nav epub:type=\"toc\"><h1>Contents</h1><ol>\
+                     <li><a href=\"c1.xhtml\">One</a></li>\
+                     <li><a href=\"c1.xhtml#s2\">Two</a></li></ol></nav>",
+                ),
+                ch("c1.xhtml", "<h1>One</h1><p>Text.</p><h1 id=\"s2\">Two</h1>"),
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(
+            text,
+            "Cover\n\nContents\n\n1. One\n2. Two\n\nOne\n\nText.\n\nTwo\n"
+        );
+        assert_eq!(warns, [LINKS, IMAGES, STYLES]);
+    }
+
+    /// A book-internal link is its text only; an external one keeps its
+    /// destination after the text. Either is a links loss.
+    #[test]
+    fn internal_links_are_text_only() {
+        let (root, work) = workdir("epub-links");
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                "<p>See<a href=\"notes.xhtml#fn1\">1</a>, <a href=\"#x\">here</a>, \
+                 <a href=\"../Text/c2.xhtml\">there</a>, \
+                 <a href=\"https://example.org/\">site</a>, \
+                 <a href=\"http://example.org/a\">old</a>, \
+                 <a href=\"//example.org/b\">net</a> and \
+                 <a href=\"mailto:a@example.org\">mail</a>.</p>",
+            )],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(
+            text,
+            "See1, here, there, site (https://example.org/), \
+             old (http://example.org/a), net (//example.org/b) and \
+             mail (mailto:a@example.org).\n"
+        );
+        assert_eq!(warns, [LINKS, STYLES]);
+    }
+
+    /// The chapters to read are over 64 MiB in all (one chapter of
+    /// nearly 8 MiB, nine times in the spine): nothing is read or left.
+    #[test]
+    fn book_too_large_leaves_nothing() {
+        let (root, work) = workdir("epub-toolarge");
+        let p = root.join("big.epub");
+        let body = format!("<p>{}</p>", "word ".repeat((8 << 20) / 5 - 100));
+        book_at(&p, "3.0", "", &[ch("c.xhtml", &body)], 9, &[]);
+        let o = run_raw(ID, &work, &[&p]);
+        fails_alone(&o, &work, "book is too large");
+    }
+
+    /// The text would pass the 32 MiB output budget (a chapter of nearly
+    /// 8 MiB of text, five times in the spine: 40 MiB in, below the 64 MiB
+    /// book limit): the file is removed and the input fails.
+    #[test]
+    fn output_budget_is_book_too_large() {
+        let (root, work) = workdir("epub-outbudget");
+        let p = root.join("big.epub");
+        let para = format!("<p>{}</p>", "word ".repeat(200));
+        let body = para.repeat((8 << 20) / para.len() - 1);
+        book_at(&p, "3.0", "", &[ch("c.xhtml", &body)], 5, &[]);
+        let o = run_raw(ID, &work, &[&p]);
+        fails_alone(&o, &work, "book is too large");
+    }
+
+    /// Past the action's own `RLIMIT_FSIZE` (1 MiB here) the book fails
+    /// with the size copy, nothing of it is left and the next book of the
+    /// batch still converts.
+    #[test]
+    fn output_ceiling_fails_alone() {
+        let (root, work) = workdir("epub-ceiling");
+        let para = format!("<p>{}</p>", "abcdefghi ".repeat(100));
+        let chs: Vec<Ch> = (0..3)
+            .map(|i| ch(&format!("c{i}.xhtml"), &para.repeat(600)))
+            .collect();
+        let big = book(&root, "big.epub", "", &chs);
+        let small = book(&root, "small.epub", "", &[ch("c.xhtml", "<p>x</p>")]);
+        let o = run_with_fsize(ID, &work, &[&big, &small]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(0), "{out}");
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 1, "{out}");
+        assert_eq!(fails[0][1], big.to_str().unwrap());
+        assert_eq!(fails[0][2], "Plain text would be larger than 1 MiB");
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{out}");
+        assert_eq!(done[0][1], small.to_str().unwrap());
+        let left: Vec<_> = snapshot(&work).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(left, [work.join(done[0][2])]);
+    }
+
+    /// A 100 KB encoding name in the package document or in
+    /// `container.xml` fails that book with the name cut to 40 characters
+    /// plus `...`: its `fail` line stays far under the supervisor's 64 KiB
+    /// event-line limit (past it the whole batch would stop), and the next
+    /// book of the batch still converts.
+    #[test]
+    fn long_skeleton_encoding_name_is_cut() {
+        let (root, work) = workdir("epub-long-encoding");
+        let name = "a".repeat(100_000);
+        let decl = format!("<?xml version=\"1.0\" encoding=\"{name}\"?>");
+        let opf = format!("{decl}<package/>");
+        let opf_book = root.join("opf.epub");
+        fs::write(
+            &opf_book,
+            testzip::zip(&[
+                (b"mimetype", b"application/epub+zip", Stored),
+                (b"META-INF/container.xml", CONTAINER.as_bytes(), Stored),
+                (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+            ]),
+        )
+        .unwrap();
+        let container = format!("{decl}<container/>");
+        let container_book = root.join("container.epub");
+        fs::write(
+            &container_book,
+            testzip::zip(&[
+                (b"mimetype", b"application/epub+zip", Stored),
+                (b"META-INF/container.xml", container.as_bytes(), Stored),
+            ]),
+        )
+        .unwrap();
+        let good = book(&root, "good.epub", "", &[ch("c.xhtml", "<p>x</p>")]);
+        let o = run_raw(ID, &work, &[&opf_book, &container_book, &good]);
+        let out = stdout(&o);
+        let forty = "a".repeat(40);
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 2, "{}", &out[..out.len().min(2000)]);
+        assert_eq!(fails[0][1], opf_book.to_str().unwrap());
+        assert_eq!(
+            fails[0][2],
+            format!("not an EPUB (unsupported encoding {forty}... in OEBPS/content.opf)")
+        );
+        assert_eq!(fails[1][1], container_book.to_str().unwrap());
+        assert_eq!(
+            fails[1][2],
+            format!("not an EPUB (unsupported encoding {forty}... in META-INF/container.xml)")
+        );
+        for l in out.lines() {
+            assert!(l.len() < 1024, "line of {} bytes", l.len());
+        }
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{out}");
+        assert_eq!(done[0][1], good.to_str().unwrap());
+        assert_eq!(fs::read_to_string(work.join(done[0][2])).unwrap(), "x\n");
+    }
+
+    /// A book of nothing but picture pages has no text, and it read: the
+    /// failure is "no text", not "no chapter could be read".
+    #[test]
+    fn picture_only_book_has_no_text() {
+        let (root, work) = workdir("epub-svg-only");
+        let svg = Ch {
+            href: "p.svg".into(),
+            media: "image/svg+xml",
+            data: Some(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            spine: true,
+            linear: true,
+        };
+        let b = book(&root, "pics.epub", "", &[svg]);
+        let o = run_raw(ID, &work, &[&b]);
+        fails_alone(&o, &work, "book has no text");
+    }
+
+    /// The whole book is held to the 32 MiB output budget, separators and
+    /// head included: a book of exactly 32 MiB converts, one byte more
+    /// fails (the last chapter alone still fits what was left before its
+    /// separator, so only the file's own check can refuse it). Two
+    /// chapters of 5,592,000 bytes of text, three times each in the
+    /// spine: 3 * 11,184,000 + 5 blank-line separators + the head (title
+    /// of `len` bytes, its line feed and the blank line).
+    #[test]
+    fn output_budget_boundary_is_exact() {
+        const LIMIT: usize = 32 << 20;
+        let (root, work) = workdir("epub-outbudget-exact");
+        for (len, ok) in [(2425usize, true), (2426, false)] {
+            let p = root.join(format!("b{len}.epub"));
+            let para = format!("<p>{}</p>", "a".repeat(5_591_999));
+            let chs = [ch("c0.xhtml", &para), ch("c1.xhtml", &para)];
+            let meta = format!("<dc:title>{}</dc:title>", "t".repeat(len));
+            book_at(&p, "3.0", &meta, &chs, 3, &[]);
+            assert_eq!((len + 2) + 3 * 11_184_000 + 5, LIMIT - 2425 + len);
+            let o = run_raw(ID, &work, &[&p]);
+            if ok {
+                let out = stdout(&o);
+                assert_eq!(o.status.code(), Some(0), "{out}");
+                let done = lines(&out, "done");
+                let size = fs::metadata(work.join(done[0][2])).unwrap().len();
+                assert_eq!(size, LIMIT as u64);
+                fs::remove_file(work.join(done[0][2])).unwrap();
+            } else {
+                fails_alone(&o, &work, "book is too large");
+            }
+        }
+    }
+
+    /// An output of exactly `RLIMIT_FSIZE` bytes is written (the file may
+    /// reach the ceiling); one byte more fails with the size copy.
+    #[test]
+    fn output_of_exactly_the_ceiling_is_written() {
+        const CAP: u64 = 1 << 20;
+        let (root, work) = workdir("epub-ceiling-exact");
+        // One paragraph of `n` bytes is `n + 1` bytes of text; no head.
+        let at = book(
+            &root,
+            "at.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                &format!("<p>{}</p>", "a".repeat(CAP as usize - 1)),
+            )],
+        );
+        let over = book(
+            &root,
+            "over.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                &format!("<p>{}</p>", "a".repeat(CAP as usize)),
+            )],
+        );
+        let o = run_with_fsize_of(ID, &work, &[&at, &over], CAP);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(0), "{out}");
+        let done = lines(&out, "done");
+        assert_eq!(done.len(), 1, "{out}");
+        assert_eq!(done[0][1], at.to_str().unwrap());
+        assert_eq!(fs::metadata(work.join(done[0][2])).unwrap().len(), CAP);
+        let fails = lines(&out, "fail");
+        assert_eq!(fails.len(), 1, "{out}");
+        assert_eq!(fails[0][1], over.to_str().unwrap());
+        assert_eq!(fails[0][2], "Plain text would be larger than 1 MiB");
+    }
+
+    #[test]
+    fn deterministic_output() {
+        let (root, work) = workdir("epub-det");
+        let b = book(
+            &root,
+            "b.epub",
+            "<dc:title>T</dc:title><dc:creator>A</dc:creator>",
+            &[
+                ch(
+                    "a.xhtml",
+                    "<h1>A</h1><p>x <em>y</em></p><table><tr><td>1</td></tr></table>",
+                ),
+                ch("b.xhtml", "<p>z</p>"),
+            ],
+        );
+        let (w1, w2) = (work.join("1"), work.join("2"));
+        fs::create_dir_all(&w1).unwrap();
+        fs::create_dir_all(&w2).unwrap();
+        let (t1, warns1, _) = txt(&b, &w1);
+        let (t2, warns2, _) = txt(&b, &w2);
+        assert!(!t1.is_empty());
+        assert_eq!(t1, t2);
+        assert_eq!(warns1, warns2);
+    }
+
+    /// Losses of several chapters are listed once each, after the one
+    /// counted line for the chapters that could not be read, well under
+    /// the supervisor's 16 `warn` per input.
+    #[test]
+    fn losses_listed_once() {
+        let (root, work) = workdir("epub-losses");
+        let body = "<p><img src=\"i.png\" alt=\"pic\"/> <a href=\"https://x.org/\">x</a></p>\
+                    <table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table>";
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[
+                ch("a.xhtml", body),
+                ch("b.xhtml", "<p>bad</i>"),
+                ch("c.xhtml", body),
+                ch("d.xhtml", "<p>bad</i>"),
+            ],
+        );
+        let (text, warns, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert!(text.contains("pic x (https://x.org/)"), "{text}");
+        assert_eq!(
+            warns,
+            [
+                "2 chapter(s) could not be read",
+                LINKS,
+                IMAGES,
+                STYLES,
+                MERGED
+            ]
+        );
+        assert!(warns.len() <= 16);
+    }
+
+    /// The headerless table of a book (the reader's empty header) is
+    /// written without an empty line over a row of dashes.
+    #[test]
+    fn headerless_table_has_no_empty_header() {
+        let (root, work) = workdir("epub-table");
+        let b = book(
+            &root,
+            "b.epub",
+            "",
+            &[ch(
+                "c.xhtml",
+                "<table><tr><td>apple</td><td>3</td></tr><tr><td>fig</td><td>12</td></tr></table>",
+            )],
+        );
+        let (text, _, o) = txt(&b, &work);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(text, "apple  3\nfig    12\n");
+    }
+
+    /// Not a ZIP at all: the reader's reason, no file.
+    #[test]
+    fn not_an_epub_fails() {
+        let (root, work) = workdir("epub-notzip");
+        let p = root.join("x.epub");
+        fs::write(&p, "just text").unwrap();
+        let o = run_raw(ID, &work, &[&p]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(1), "{out}");
+        assert!(
+            lines(&out, "fail")[0][2].starts_with("damaged EPUB: "),
+            "{out}"
+        );
+        assert!(snapshot(&work).is_empty());
+    }
 }

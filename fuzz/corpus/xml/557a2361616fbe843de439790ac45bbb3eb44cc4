@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ELEMENT root (a,b)>
+  <!ELEMENT a EMPTY>
+  <!ELEMENT b (#PCDATA>
+]>
+<root><a/><b>
+   <c></c > : End tag wit<?xml versih a space inside>
+
+

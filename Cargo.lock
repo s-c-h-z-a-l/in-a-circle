@@ -50,6 +50,7 @@ name = "doc"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+ "xml",
 ]
 
 [[package]]
@@ -66,6 +67,8 @@ name = "epub"
 version = "0.0.0"
 dependencies = [
  "doc",
+ "testzip",
+ "xml",
  "zip",
 ]
 
@@ -162,6 +165,7 @@ dependencies = [
  "manifest",
  "probe",
  "testzip",
+ "xml",
  "zip",
 ]
 
@@ -321,6 +325,10 @@ version = "0.0.0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "xml"
+version = "0.0.0"
 
 [[package]]
 name = "zip"

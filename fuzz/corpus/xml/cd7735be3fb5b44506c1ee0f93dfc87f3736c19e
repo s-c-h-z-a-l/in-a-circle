@@ -1,0 +1,7 @@
+<?l version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT student (#PCDATA)> 
+]>
+<!--* Tests empty comment *-->
+<!---->
+<student>My Name賛様様様様様様様"><h1>OnSe</h1><p>a 様様様様様酪賛様様様様様様様"><h1>On賛様様様様様様様"><h1>OnSe</h1><p>a 様様様様様酪賛様様様様様様様"><h1>OnSe</h1><<e

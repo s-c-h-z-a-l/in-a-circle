@@ -1,0 +1,18 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nametoken namevalue NMTO,KEN "hello">
+  ]>
+<test>
+The def<i><a>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿault est>
+The default valuied for an attribute meets tèe 
+lexical constraints of the declared attNMTOKEN "hello">
+  ]>
+<test>
+Thevalue specified ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<i>aÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xmlns:p=""/>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿalone='yes' ?>
+<!DOecl-aa¢red attribute type.
+</test>
+

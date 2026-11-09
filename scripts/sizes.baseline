@@ -71,6 +71,18 @@
 # (599448 B) stays far under the 1 MiB family limit. inacircle-pages is
 # unchanged. The shipped inacircle still does not link the doc, zip or epub
 # crates.
-inacircle 1181976 911496
-inacircle-text 929424 599448
+# Refreshed after the EPUB reader (EPUB to plain text), same toolchain and
+# profile, built from commit 999793bc (tree clean). inacircle-text grew
+# 190256 B (file, 168491 B of .text), over the 100 KB explanation threshold.
+# The growth is code new to this binary: the first link of the xml crate
+# (parser, namespace handling, the HTML5 entity table, UTF-16 decoding), the
+# EPUB package reader (container, package document, spine, encryption
+# check, ZIP entry limits) and the XHTML reader that builds the document
+# tree, plus the text action around them and the formatting code
+# monomorphised for them. The .text (767939 B) stays under the 1 MiB family
+# limit. inacircle grew 632 B (file, 368 B of .text) from the new action row
+# and preset; inacircle-pages is unchanged. The shipped inacircle still does
+# not link the xml, doc, zip or epub crates.
+inacircle 1182608 911864
+inacircle-text 1119680 767939
 inacircle-pages 504208 403763

@@ -1,0 +1,73 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT n EMPTY>
+ <!ATTLIST aue NMTOKEN "hello2>
+  ]><!DOCTYPE a [<!
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<?xml
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ÿxml vE<!--Y %ELEMENT  <!EEN "hello2>
+  ]><!DOCTYPE a [<!E<!--Y % pe "x">]><a/> for an attribute meets the 
+lexicaeets the 
+lexical constraints of the declared attribute type.
+</test>
+

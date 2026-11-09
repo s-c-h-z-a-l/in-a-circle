@@ -9,7 +9,6 @@
 //! module) with all definitions known.
 
 mod block;
-mod entities;
 mod inline;
 mod punct;
 mod scan;
@@ -217,6 +216,12 @@ fn decoded_len(s: &str, backslashes: bool) -> usize {
     total
 }
 
+/// Highest ordered-list number written: CommonMark reads at most nine
+/// digits as a list marker, so a larger number would not read back as a
+/// list. Readers of other formats clamp to it too; no real book counts
+/// that far.
+pub(crate) const MAX_LIST_NUMBER: u64 = 999_999_999;
+
 /// Longest HTML5 entity name is 31 characters; this bounds the scan.
 const MAX_ENTITY_NAME: usize = 32;
 
@@ -264,11 +269,7 @@ fn char_ref(s: &[u8], i: usize, out: &mut String) -> Option<usize> {
     if n == 0 || n > MAX_ENTITY_NAME || s.get(j + n) != Some(&b';') {
         return None;
     }
-    let name = scan::utf8(&s[j..j + n]);
-    let k = entities::ENTITIES
-        .binary_search_by(|(e, _)| e.cmp(&name))
-        .ok()?;
-    out.push_str(entities::ENTITIES[k].1);
+    out.push_str(xml::entity(scan::utf8(&s[j..j + n]))?);
     Some(j + n + 1)
 }
 
@@ -424,7 +425,7 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                     None => "- ".to_string(),
                     Some(n) => format!(
                         "{}{} ",
-                        n.saturating_add(i as u64).min(999_999_999),
+                        n.saturating_add(i as u64).min(MAX_LIST_NUMBER),
                         if alt { ')' } else { '.' }
                     ),
                 };
@@ -970,15 +971,13 @@ mod tests {
     }
 
     #[test]
-    fn entity_table_is_sorted_and_semicolon_only() {
-        let t = entities::ENTITIES;
-        assert!(t.len() > 2000);
-        assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(t.iter().all(|(n, v)| {
-            n.bytes().all(|c| c.is_ascii_alphanumeric())
-                && n.len() <= MAX_ENTITY_NAME
-                && !v.is_empty()
-        }));
+    fn longest_entity_name_is_read() {
+        // The longest WHATWG name has 31 characters; MAX_ENTITY_NAME must
+        // let the scan reach it (the table's own test is in the xml crate).
+        let name = "CounterClockwiseContourIntegral";
+        assert_eq!(name.len(), 31);
+        assert!(name.len() <= MAX_ENTITY_NAME);
+        assert_eq!(unescape(&format!("&{name};")), "\u{2233}");
     }
 
     fn md(s: &str) -> String {

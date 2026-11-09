@@ -1,0 +1,50 @@
+<?ENT tiger (#PCDATA)ED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIREDÌ>
+]>
+<!-- Above is DTD -->
+<?muÿÿc ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT l:x="urn:1" CDATA #REQUIRED>
+]>
+<!-- Above is DTDTY>
+<!ELEMENT tiger (#…JCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!><x:b xmlns:VVVVVVVVVVVVVVVVVVELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger coloVVVVVVVVVVVVr CDATA #(REQUIRED>
+]>
+<!--LIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above Nis DTD -->
+<?musiÙ ”Here iemants/1.1/"><dc:title>T</dc:title><dc:identifier id="i007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dcÑš“š’ž‘Œs/1.1/ÃÁÃ"><dc:tit<le>T</dgref=<a v="&#26;/spine><  <tiger color="white">This is a white tiger in Mirage!!</tigis a white tiger in M "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>V
+   l’VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVx=š‘t animal -->
+"urn:0
+"/><x:c/></x:a>

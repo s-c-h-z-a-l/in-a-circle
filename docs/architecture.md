@@ -202,9 +202,11 @@ are in `CLAUDE.md`.
   (CommonMark plus tables, strikethrough, task lists and extended
   autolinks). The action writes GFM tables as aligned columns in a full
   line of 80 characters (the prefix of an enclosing list or quote
-  counts): two spaces between columns, a row of dashes under the header,
-  the column alignment kept as padding. When the table is wider, the widest
-  columns give up width one character at a time, none below 10 (a column that is
+  counts): two spaces between columns, a row of dashes under the header
+  (a header whose cells are all empty is left out with its dashes and
+  the empty rows right after it), the column alignment kept as padding.
+  When the table is wider, the widest columns give up width one
+  character at a time, none below 10 (a column that is
   narrower stays as it is) and a cell wraps inside its column, at spaces, a
   longer word at a character boundary. If the minimums and gaps do not fit the
   line, each row becomes `header: cell` lines (`Column <n>` for an empty header)
@@ -245,7 +247,7 @@ are in `CLAUDE.md`.
   `left`, `center` or `right` class, so the output needs no form element and no
   inline style. Every piece counts against the output budget before it is
   appended.
-- The book packer, `crates/epub` (doc and zip, no XML parser), writes a
+- The book packer, `crates/epub` (doc, zip and xml), writes a
   document as an EPUB 3 book through the stored ZIP writer: `mimetype`
   first and stored, `META-INF/container.xml`, `OEBPS/content.opf`,
   `OEBPS/nav.xhtml` (the EPUB 3 table of contents; no NCX),
@@ -283,6 +285,115 @@ are in `CLAUDE.md`.
   name as its alt text, and counts toward the chapter limit. Image bytes are not
   charged to the output budget (the caller bounds each image and the archive is
   bounded by the ZIP writer).
+- The XML reader, `crates/xml` (no dependencies, no `unsafe`, independent of
+  `doc` so other readers can use it), is a non-validating pull parser for
+  XML 1.0 (fifth edition) with Namespaces in XML 1.0, for foreign input.
+  `xml::decode` takes UTF-8 (with or without a byte order mark, borrowed)
+  or UTF-16 with a byte order mark (copied); any other declared encoding
+  is `unsupported encoding <name>` (the name cut to 40 characters, the
+  IANA maximum, plus `...`), a declaration that contradicts the
+  bytes, invalid UTF-8/16 or a second byte order mark is not well-formed. `Reader::next` returns
+  start tags (namespace URIs resolved, declarations applied, not listed),
+  end tags and text (CDATA, references and line-end normalization
+  included); an empty element is a start and an end. It never loads
+  anything: a DOCTYPE's external identifier is only checked for syntax,
+  and the internal subset is skipped lexically (a `]>` in a literal,
+  comment or PI does not end it). No entity is expanded from a DTD: a
+  reference to one the internal subset declares, or that an external
+  subset or parameter entity may declare (unless `standalone="yes"`),
+  is `entity declarations are not supported`, so entity bombs and
+  external entities cannot occur. Known references are the five XML
+  entities, character references to characters XML allows, and, only
+  with `Options::html_entities` (XHTML), the HTML5 named characters
+  (`xml::entity`, the WHATWG table the Markdown reader also uses).
+  Anything not well-formed or not namespace-well-formed is an error with
+  its line; there is no recovery, and attribute defaults from the
+  internal subset are not applied. A namespace name holding a reference
+  or a line break is refused, so names and values borrow from the input
+  and only text or a value that a reference or normalization changes is
+  copied. Elements nest at most `Options::max_depth` (`MAX_DEPTH`, 256)
+  deep, past it `TooDeep`; the open elements are the reader's own stack,
+  not recursion, and the work is linear in the input (a step count of
+  every byte examined, copied, hashed or compared, which the tests and the
+  fuzz target bound per byte): a namespace name is hashed when its
+  declaration comes into and goes out of scope, and attributes are told
+  apart by its id, so a long one costs its length, not its length per
+  attribute.
+- The EPUB reader, `epub::read`, opens a book on disk that is foreign
+  input. `open` reads the ZIP directory (the CBZ reader's limits: 12,000
+  entries, ratio 1032, 512-byte names, no ZIP64), then
+  `META-INF/container.xml` and the first rootfile of type
+  `application/oebps-package+xml`, then that package document (EPUB 2 or
+  3: the spine is the same in both): the first non-empty `dc:title` and
+  every non-empty `dc:creator` in order (whitespace collapsed), the
+  manifest and the spine, and `META-INF/encryption.xml` if there is one.
+  The `mimetype` entry is not required. All three files are plain XML (no
+  HTML entity names), at most 8 MiB and 2^19 XML nodes (elements,
+  attributes and text runs) each. Every `itemref` is kept in spine order,
+  `linear="no"` included, a repeated one as often as it appears, numbered
+  from 1 (the `N` of `Chapter N`); the manifest item it names is resolved
+  and kept once, however often the spine names it, its path at most 512
+  bytes (the longest entry name: a longer one is `missing`) and its media
+  type at most 255 (RFC 6838: a longer one is `unsupported type`). An
+  `href` is relative to the package's folder: the `?query` and `#fragment`
+  are cut, `%XX` decoded, the path normalized lexically
+  (`doc::xhtml::normalize`), and the entry name matched exactly, case
+  included; an href with a URL scheme, an absolute one, or one that climbs
+  above the container root (also once decoded) is `outside the book` and
+  never looked up. A resource `encryption.xml` lists under an
+  `EncryptedData` with a cipher among its own `EncryptionMethod`s (in any
+  order), or with none, is encrypted, and so is a ZIP entry with an
+  encryption flag; font obfuscation (`http://www.idpf.org/2008/embedding`,
+  `http://ns.adobe.com/pdf/enc#RC`) is not, and `rights.xml` decides
+  nothing. When every XHTML spine item in the book is encrypted the book
+  is `book is DRM-protected`; otherwise an encrypted item fails alone,
+  `encrypted`. `Book::chapter` reads one spine item's raw bytes when asked
+  and keeps nothing (media types are compared by `type/subtype`, ASCII
+  case ignored, parameters cut): an XHTML item (`application/xhtml+xml`)
+  up to 8 MiB, an SVG page as nothing (it has no text), anything else is
+  `unsupported type <mime>` (`unsupported type (none)` when the item
+  states none). A broken skeleton fails the whole book (`BookError`, the
+  texts in `docs/resource-limits.md`); a spine item that
+  is missing, outside the book, encrypted, too large, of another type or
+  whose data is damaged fails only itself (`ChapterError`) and the rest of
+  the book reads.
+- The XHTML chapter reader, `doc::xhtml_read`, maps one chapter (decoded by
+  `xml::decode`, then read with the HTML named characters and the XML
+  depth limit) to the document tree; text disappears only with a reported
+  loss. Kept: `p`, `h1`-`h6`, `ul`/`ol` (`start`, at most 999,999,999),
+  `li`, `blockquote`, `pre` (markup inside keeps its text, `br` is a line
+  feed, a block inside is a line of its own, a cell a space), `hr`, `br`,
+  tables, `em`/`i`, `strong`/`b`, `del`/`s`/`strike`, `code`/`kbd`/`samp`,
+  `a href` (a link inside a link is its text), `img` (`src`, `alt`) and
+  `ruby` (base text, each `rt` in parentheses; an `rp` holding only
+  brackets and white space is dropped, any other `rp` text kept). The HTML
+  block containers (`div`, `section`, `aside`, `figure`, `dl`, …) go and
+  end a paragraph, `span` and unknown elements (MathML, `epub:` elements)
+  go without ending one; their content stays. `head`, `script`, `style`,
+  `template` and their content are dropped, inline SVG too (reported as
+  images), and without a loss MathML `annotation`/`annotation-xml`
+  (another encoding of the same formula; in XHTML or no namespace only
+  inside a `math`) and `epub:case` (an `epub:switch` alternative; its
+  `epub:default` is read). Elements in no namespace are read as XHTML
+  (EPUB 2 chapters written without it), names ASCII case-insensitive; any
+  other namespace is transparent. White space collapses as in HTML except
+  in `pre` (whose leading line feed is dropped); a no-break space is text.
+  Inline content at block level becomes a paragraph; a block where only
+  inline content fits (a paragraph in a cell or in emphasis) keeps its text
+  on lines of its own. A table's header is its `thead` row or a first row of
+  `th` cells, else empty; `tfoot` rows come last; a cell spanning columns or
+  rows (clamped as HTML does, 1000 and 65534) is kept once and the cells it
+  covered are empty (`merged table cells split`); a caption is a paragraph
+  before the table. Stylesheets and `style` attributes are never read: every
+  chapter reports `book styles (fonts, colours, layout) not carried over`.
+  Budgets: every element is a node, charged when it starts, and so is every
+  node it builds besides its own (a text run, an implicit paragraph, row or
+  cell, an empty cell a span adds); text is charged by its collapsed bytes;
+  both before the allocation, so a chapter stops at `Exceeded("nodes")` or
+  `Exceeded("owned text")`. The work is linear in the chapter plus the nodes
+  charged (a step count the tests and the fuzz target bound), with the
+  builder's own stacks, no recursion. `has_text` tells whether a document
+  holds any text that is not white space (an image's alt text is not).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
@@ -320,6 +431,33 @@ are in `CLAUDE.md`.
   script and nothing loaded from outside. The losses are those of the
   book. The page is created new too (never overwritten) and checked
   against the output size ceiling before it is written.
+- `text.epub-to-txt` (`in=application/epub+zip`, `group=document`,
+  `lossy=yes`) writes one plain-text file per book, `<stem>.txt`. The book
+  file is read entry by entry (`epub::read`), never whole, so it is not
+  held to the text input budget. The file starts with the book's title
+  and its authors (joined by `, `), one line each, and a blank line; what
+  the book lacks is left out, and with neither, the header too. Then
+  every spine item in spine order (`linear="no"` ones in their place),
+  each with the plain-text writer's block rules, a blank line between
+  chapters; a chapter's title is its own heading, none is added and the
+  navigation document is read as any chapter. One chapter at a time:
+  its bytes, `xml::decode`, `doc::xhtml_read` under fresh text-family
+  budgets, the writer under what is left of the book's output budget,
+  appended to the file; its tree is dropped before the next. A link to
+  a place in the book (no URL scheme, such as `notes.xhtml#fn1` or
+  `#x`) is written as its text alone; one with a scheme, or to another
+  host (`//host/...`), as `text (destination)`; either is reported. An
+  SVG page has no text and is reported as an image. A spine item that cannot be read
+  is the paragraph `[Chapter N could not be read: <reason>]` in its
+  place (the reasons in `docs/resource-limits.md`), and one `warn`,
+  `N chapter(s) could not be read`, counts them; then each loss once
+  (styles always: no stylesheet is read). A book that cannot be read
+  fails with the reader's reason before any file exists; when no
+  chapter could be read (`no chapter could be read`), none holds text
+  (`book has no text`), or the text passes the 32 MiB output budget
+  (`book is too large`) or the output ceiling (`Plain text would be
+  larger than <N> MiB`), the file is cut back to empty and removed and
+  the input fails.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -338,6 +476,7 @@ action	text.txt-to-epub	family=text	in=text/plain	out=application/epub+zip	ext=e
 action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
+action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
@@ -540,6 +679,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   `Comic book`. Only the head already read and the name decide; the engine
   does not open the archive. Any other ZIP stays a label ("ZIP") without a
   type.
+- **EPUB books:** the same rule for the extension `epub` (any case):
+  `application/epub+zip`, label `EPUB`. The `mimetype` entry is not read at
+  classification; the action validates the book.
 - **Images:** a PNG or JPEG signature gives `image/png` or `image/jpeg`
   (the join action `images-to-pdf` takes them). Whether a given file is one
   the action can place (a PNG with alpha, say) is the action's call, not the
@@ -896,14 +1038,18 @@ compositor.
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` south; `pdf` north and `cbz` south in Book; `cbz` has
+  north, `plain-text` (from Markdown) and `plain-text-epub` (from an EPUB)
+  south, so an EPUB lights only Document, with its other slices dim and
+  nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has
   no one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
   files fit both inputs, a preset that can run beats a dim one, then the one
   that takes more of the files holds the slot, then the earlier preset in
   the table, plain text before Markdown, which is also the flat offer's tie
-  order): lit if
+  order; so one EPUB and one Markdown file leave `plain-text` (from Markdown)
+  in the south slot, and more EPUBs than Markdown files give it to
+  `plain-text-epub`): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
   takes (`n`, the count the run would take) is below the number dropped.
@@ -1208,14 +1354,15 @@ inacircle cancel <job-id>
 
 ```
 crates/   wire, dbus, ui, engine, manifest, action, doc, epub, flate,
-          zip, probe, pdf (planned: toml)
+          zip, probe, pdf, xml (planned: toml)
           (wire: the Wayland client, libc only; dbus: the notifications
           client, libc only; ui: the wheel's geometry, rasterizer, damage
           and text; flate, zip, probe, pdf: the CBZ-to-PDF pipeline of
           `inacircle-pages`, zip also writes archives with stored
-          entries only; epub: the EPUB packer of `inacircle-text`; the
-          shipped `inacircle` links wire, dbus, ui, engine, manifest and
-          action, never `doc`, `epub`, `flate`, `zip`, `probe` or `pdf`;
+          entries only; epub: the EPUB packer and reader of `inacircle-text`; xml:
+          the non-validating XML reader; the shipped `inacircle` links
+          wire, dbus, ui, engine, manifest and action, never `doc`,
+          `epub`, `flate`, `zip`, `probe`, `pdf` or `xml`;
           `scripts/check-shipped-deps.sh` enforces it)
 bins/     inacircle, inacircle-text, inacircle-pages,
           inacircle-testaction (test-only)

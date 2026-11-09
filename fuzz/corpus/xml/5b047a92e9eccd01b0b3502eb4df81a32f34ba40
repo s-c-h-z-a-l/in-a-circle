@@ -1,0 +1,30 @@
+<a>&Lt;
+<!--* Tests empty comment *-->
+<!---->
+<student>My Name is Snow version="190" xmlBn
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ÿÿÿÿÿÿÿÿÿÿÿ;ÿÿÿÿÿÿÿxml
+->
+<student>My Name is Sn-->
+<:---->
+<student>My Name is Sn
+</a>

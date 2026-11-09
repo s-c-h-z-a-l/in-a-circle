@@ -1,0 +1,61 @@
+<?xÿşml version="1.0" encoding="utf-8" standalone=
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <smallcat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+ 
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">Tis is a wh
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <smallcat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <small/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element ani/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element animal      <small/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element ani/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element animal --?
+

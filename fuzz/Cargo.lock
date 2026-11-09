@@ -44,6 +44,9 @@ dependencies = [
 [[package]]
 name = "doc"
 version = "0.0.0"
+dependencies = [
+ "xml",
+]
 
 [[package]]
 name = "engine"
@@ -52,6 +55,15 @@ dependencies = [
  "action",
  "libc",
  "manifest",
+]
+
+[[package]]
+name = "epub"
+version = "0.0.0"
+dependencies = [
+ "doc",
+ "xml",
+ "zip",
 ]
 
 [[package]]
@@ -82,11 +94,13 @@ dependencies = [
  "dbus",
  "doc",
  "engine",
+ "epub",
  "flate",
  "libfuzzer-sys",
  "manifest",
  "probe",
  "wire",
+ "xml",
  "zip",
 ]
 
@@ -145,6 +159,10 @@ version = "0.0.0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "xml"
+version = "0.0.0"
 
 [[package]]
 name = "zip"

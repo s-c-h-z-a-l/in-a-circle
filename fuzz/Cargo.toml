@@ -17,6 +17,8 @@ wire = { path = "../crates/wire" }
 flate = { path = "../crates/flate" }
 zip = { path = "../crates/zip" }
 probe = { path = "../crates/probe" }
+xml = { path = "../crates/xml" }
+epub = { path = "../crates/epub" }
 
 # Not part of the root workspace (it is excluded there): the fuzz crate
 # builds on a pinned nightly and must not touch the shipped dependency tree.
@@ -93,6 +95,20 @@ bench = false
 [[bin]]
 name = "image_probe"
 path = "fuzz_targets/image_probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epub_reader"
+path = "fuzz_targets/epub_reader.rs"
 test = false
 doc = false
 bench = false

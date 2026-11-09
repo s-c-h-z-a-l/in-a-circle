@@ -1,0 +1,14 @@
+<!DOCTYPE doc
+[
+<!ELEMENT docq-->
+<!ELEMENT a (doc?)>
+<!ELEMENT b (doc,a)>
+<!ELEMENT c (
+doc
+,
+a
+,
+c?
+)4
+]>
+<d>ÿÿÿoc/>

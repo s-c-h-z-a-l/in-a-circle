@@ -1,0 +1,57 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->nimaNT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first CDATA #REQUIRED
+		  la<?xm->
+<?music ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopŸ›ß¾±¦¹
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopŸ›ß¾±
+			  la<?xml version="0.0" encoding="st  CDATA #IMPLIED UTF->
+]>>8
+?"
+<!-- t
+<doc></doc>F->
+]>
+8"small EMPTY>
+<?>
+<!-- t
+<doc></*d!ENT big EMPTY>
+<!ATTLIST<htmlr color CDATA #REQUIRED>(
+]>
+<!-- Above isoc>n DTDTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopart
+>d ANY>
+<!ELEMENT smal
+l E

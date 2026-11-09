@@ -27,6 +27,9 @@ const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 /// The MIME type of a comic book archive (ZIP of page images, `.cbz`).
 const CBZ_MIME: &str = "application/vnd.comicbook+zip";
 
+/// The MIME type of an EPUB book (a ZIP, `.epub`).
+const EPUB_MIME: &str = "application/epub+zip";
+
 /// Binary signatures: (prefix, mime the engine knows, label). JPEG and PNG
 /// are known because the join action `images-to-pdf` takes them; whether a
 /// given PNG is one it can place (alpha, interlacing) is the action's call.
@@ -78,14 +81,22 @@ pub fn classify(path: &Path) -> io::Result<Classified> {
 
     for (prefix, mime, label) in MAGIC {
         if head.starts_with(prefix) {
-            // A comic book is a ZIP by content and `.cbz` by name: neither
-            // alone. Only the head already read and the extension decide;
-            // the archive itself is the action's business.
-            if *prefix == ZIP_MAGIC && ext.as_deref() == Some("cbz") {
-                return Ok(Classified::File(Kind {
-                    mime: Some(CBZ_MIME.to_owned()),
-                    label: "Comic book".to_owned(),
-                }));
+            // A comic book or an EPUB is a ZIP by content and `.cbz` or
+            // `.epub` by name: neither alone. Only the head already read
+            // and the extension decide; the archive itself is the
+            // action's business.
+            if *prefix == ZIP_MAGIC {
+                let book = match ext.as_deref() {
+                    Some("cbz") => Some((CBZ_MIME, "Comic book")),
+                    Some("epub") => Some((EPUB_MIME, "EPUB")),
+                    _ => None,
+                };
+                if let Some((mime, label)) = book {
+                    return Ok(Classified::File(Kind {
+                        mime: Some(mime.to_owned()),
+                        label: label.to_owned(),
+                    }));
+                }
             }
             return Ok(Classified::File(Kind {
                 mime: mime.map(str::to_owned),
@@ -182,12 +193,30 @@ mod tests {
     }
 
     #[test]
-    fn zip_without_cbz_extension_has_no_type() {
+    fn zip_without_known_extension_has_no_type() {
         let d = Dir::new("zipext");
-        for n in ["a.zip", "a.epub", "a.cbr", "a", "a.cbz.zip"] {
+        for n in ["a.zip", "a.cbr", "a", "a.cbz.zip", "a.epub.zip", "a.epubx"] {
             let p = d.file(n, b"PK\x03\x04rest");
             assert_eq!(kind(&p), is(None, "ZIP"), "{n}");
         }
+    }
+
+    #[test]
+    fn epub_zip_is_an_epub() {
+        let d = Dir::new("epub");
+        for n in ["a.epub", "B.EPUB", "c.Epub"] {
+            let p = d.file(n, b"PK\x03\x04rest");
+            assert_eq!(kind(&p), is(Some("application/epub+zip"), "EPUB"), "{n}");
+        }
+    }
+
+    #[test]
+    fn epub_extension_without_zip_magic_is_not_an_epub() {
+        let d = Dir::new("epubfake");
+        let p = d.file("notes.epub", b"just words\n");
+        assert_eq!(kind(&p), is(None, ".epub text"));
+        let p = d.file("rar.epub", b"Rar!\x1a\x07\x00\x01\x02");
+        assert_eq!(kind(&p), is(None, ".epub file"));
     }
 
     #[test]

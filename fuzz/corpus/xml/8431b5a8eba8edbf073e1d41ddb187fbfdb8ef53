@@ -1,0 +1,14 @@
+<!DOCTYPE doc
+[
+<!ELEMENT dospecifyce or a seq-->
+<!ELEMENT a (doc?)>
+<!ELEMENT b (doc,a)>
+<!ELEMENT c (
+doc
+,
+a
+,
+c?
+)4
+]>
+]<doc/>

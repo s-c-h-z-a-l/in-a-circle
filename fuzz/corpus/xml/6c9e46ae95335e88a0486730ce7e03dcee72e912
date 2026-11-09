@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+<!ELEMENT root EMPTY>
+<!ATTLIST root attr1in EmptyElemTag *-->_

@@ -226,6 +226,75 @@ of 256 chapters of 32 KiB each (8.5 MB of XHTML) peaks at about 0.27 MB of
 heap in the packer (debug build, measured by the test's counting
 allocator), not the sum of the chapters.
 
+A book is read back (`epub::read`) under limits of its own, each checked
+before the bytes are read (on the declared size, which the ZIP reader
+never lets the data exceed) and named when it is hit.
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| book file | 4 GiB - 1 | every offset and size is 32 bits (no ZIP64); `damaged EPUB: ZIP64 archives are not supported` |
+| entries | 12,000 | the CBZ reader's value, so both archive readers accept the same archives; about 200 B per record, 2.4 MB at the limit; `damaged EPUB: too many entries` |
+| ratio | 1032 | the most a deflate stream can reach, the CBZ reader's value; a header claiming more is refused before anything is inflated; `damaged EPUB: an entry's compression ratio is too high` |
+| name | 512 B | the CBZ reader's value; `damaged EPUB: an entry name is too long` |
+| skeleton file | 8 MiB, 524,288 XML nodes | `container.xml`, the package document and `encryption.xml` each, at most the text family's input and node budgets (an element, each attribute and each text run is a node); a real package is tens of KiB; `not an EPUB (package document too large)` |
+| XML depth | 256 | the XML reader's `MAX_DEPTH`; past it `not an EPUB (elements nested too deeply (line L) in <path>)` |
+| chapters | 10,000 | spine items, the CBZ reader's page limit (below the entry limit); a few dozen bytes each, and each manifest item they name is resolved and kept once, at most about 1 KB (the two caps below), however often the spine names it; `book has more than 10000 chapters` |
+| item path | 512 B | the ZIP reader's name limit: a longer resolved path names no entry, the item is `missing`, and only its first 512 B are kept |
+| media type | 255 B | RFC 6838: type and subtype names at most 127 characters each, and the `/` (parameters are cut before the check); a longer one is `unsupported type <its first 255 B>...` |
+| chapter | 8 MiB | uncompressed, the text family's input limit; only that chapter fails, `too large`, the rest of the book reads |
+| book | 64 MiB | the sum of the chapters to read, each as often as the spine has it (a chapter too large alone does not count): twice the 32 MiB text output, since XHTML markup is at least as large as its text; `book is too large`, nothing is read |
+
+These fail the whole book (nothing is written for it), each with its text:
+
+- an archive the ZIP reader refuses at `open`: `damaged EPUB: <reason>`
+  (not a ZIP, truncated, ZIP64, an entry outside the file, overlapping
+  entries, two entries of the same name, the limits above). The whole
+  directory is checked, so any entry fails the book, a font or an image
+  as much as a chapter (a font whose compression ratio is past 1032:
+  `damaged EPUB: an entry's compression ratio is too high`);
+- no `META-INF/container.xml`: `not an EPUB (no META-INF/container.xml)`;
+- no package rootfile, or no package at its path: `not an EPUB (no
+  package document)`;
+- a skeleton file over its size or node limit: `not an EPUB (package
+  document too large)`;
+- a skeleton file that is not well-formed (or nested too deeply): `not an
+  EPUB (<XML error> in <path>)`;
+- a skeleton file the ZIP reader cannot read: `damaged EPUB: <reason>`;
+- no spine, or an empty one: `book has no spine`;
+- more than 10,000 spine items: `book has more than 10000 chapters`;
+- chapters over 64 MiB in all: `book is too large`;
+- every XHTML chapter encrypted: `book is DRM-protected`.
+
+Everything else fails only the chapter it concerns.
+
+`text.epub-to-txt` reads such a book one spine item at a time and holds
+one chapter: its bytes (at most 8 MiB, up to 1.5 times that once UTF-16 is
+decoded), its tree and its text. The heaviest chapter pairs a near-limit
+tree with nearly the whole output budget (240,000 `<p>` inside 30 nested
+`<blockquote>`, 1.9 MB of XHTML, about 29 MiB of text); a chapter after
+others gets only the output budget they left. The measured peaks of these
+and the other shapes (the largest book, three 8 MiB chapters, hostile
+chapters) are on the benchmark page,
+[`epub-read.md`](benchmarks/epub-read.md); all of them are far below the
+`RLIMIT_DATA` net.
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| chapter budgets | the text family's, fresh per chapter | each chapter is read under its own input (8 MiB), node (524,288) and text (32 MiB) budgets, so a book costs one chapter at a time; past one only that chapter fails: `too large`, `too large (nodes limit)`, `too large (text limit)` |
+| XML depth | 256 | the XML reader's `MAX_DEPTH`; that chapter fails, `too large (nesting limit)` |
+| encoding name | 40 characters | the longest name the IANA charset registry allows (RFC 2978); the XML reader (`xml::MAX_ENCODING_NAME`) cuts a longer declared name with `...`, so `unsupported encoding <name>` stays short in a chapter's reason and in a book's `not an EPUB (... in <path>)` for `container.xml` or the package document, and the rest of the batch still converts |
+| text output | 32 MiB | the text family's output budget, for the whole book (header, chapters and their reason lines), checked before each write; each chapter's writer gets only what is left of it, so a late chapter cannot build more text than can still be written; what is left also pays the writer's working memory (a table's cell grid, 24 B per cell), so a book just under 32 MiB whose late chapter holds a large table can fail although its text would fit; `book is too large`, the file is cut back to empty and removed |
+| output ceiling | `RLIMIT_FSIZE` | checked before each write (and `SIGXFSZ` ignored, so a write past it fails with `EFBIG`, not the process); `Plain text would be larger than <N> MiB` (N rounded down, KiB below 1 MiB), the file is cut back to empty and removed, the rest of the batch still converts |
+
+A chapter fails alone, in its place, with one of: `too large`, `too large
+(nodes limit)`, `too large (text limit)`, `too large (nesting limit)`,
+`not well-formed XML (line L)`, `unsupported encoding <name>`, `entity
+declarations are not supported`, `encrypted`, `outside the book`,
+`missing`, `unsupported type <mime>`, `damaged (<ZIP reason>)`. The book
+leaves no file when no chapter could be read (`no chapter could be
+read`) or none holds text (`book has no text`; an image's alt text is
+not text).
+
 ### The machine side
 
 A basic user has 8 GB RAM, a power user 32-96 GB. Spawn-per-use lets several
@@ -317,6 +386,7 @@ the source; the reason column is why that number.
 | Text input (`txt` <-> `md`) | 8 MiB | A book-length text is 1-3 MiB; the longest real text measured was 0.65 MiB. Past it the input fails with its own message. |
 | Text structure nodes | 524,288 | Densest real text 15.9 B/node would hit 131,072 at about 2 MiB, contradicting the input limit; 2^19 holds 8 MiB at that density for about 100-200 MB peak, a fifth of the smallest `RLIMIT_DATA`. |
 | Text owned text, text output | 32 MiB each | Worst-case escape expansion is 5x (one space becomes `&#32;`, 1 -> 5 bytes, from the escaping rule in `crates/doc`). Markdown to text tables expand more and by shape, not by a constant factor: padding to 80 columns and the listed form's repeated headers. Either way a hostile 8 MiB input fails the output budget loudly, never truncated (the node budget usually stops a padded table first). |
+| XML element nesting | 256 elements open at once (`xml::MAX_DEPTH`) | The Markdown reader's nesting limit, so a document converts between the formats without one refusing a depth the other accepts; real XHTML chapters nest a few dozen levels. Past it the document is refused (`TooDeep`), never cut. The reader keeps its own stack (no recursion) and its work is linear in the input, so the depth bounds memory, not time. |
 | Catalog cache file | 256 KiB; 128 binaries, 1024 actions, 1152 records, 32 fields per record, 12,288 fields, 32 KiB per line | A realistic cache is about 160 KB at the maximum shape. Over a limit the cache is rejected loudly and rebuilt. |
 | Action folder scan | 512 entries per folder, 129 binaries held | `cache_bins` x 4 spare; past it the folder is refused whole, loudly, never trimmed. |
 | Manifest | 64 KiB stdout, 256 records, 32 fields per record, 4096 fields, 32 KiB per line | 2.4x the 256-record maximum shape; checked before parsing. |

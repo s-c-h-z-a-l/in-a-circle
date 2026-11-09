@@ -18,6 +18,9 @@
 //! the clock or chance: the identifier is a hash of [`Meta::id_seed`], the
 //! modification time is the caller's, so the same input gives the same
 //! bytes.
+//!
+//! The other direction, a book on disk read back chapter by chapter, is
+//! [`read`].
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -28,6 +31,8 @@ use doc::book::{self, MAX_CHAPTERS};
 use doc::xhtml::{self, Anchors, Chapter};
 use doc::{Block, Document, LimitError, Limits, Loss};
 use zip::{StoreWriter, WriteError};
+
+pub mod read;
 
 /// What the book says about itself.
 #[derive(Debug, Clone)]

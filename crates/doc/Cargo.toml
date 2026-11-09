@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+xml = { path = "../xml" }
 
 [dev-dependencies]
 serde_json = "=1.0.154"

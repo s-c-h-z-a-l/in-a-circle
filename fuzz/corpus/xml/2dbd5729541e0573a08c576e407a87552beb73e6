@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!DOCTYPE studånt [
+	<!ELEMENT student (#PCDATA)> 
+]>
+
+
+<!-- testin inval
+<?MyInstruct 
+<ß–equence  -->
+<?MyInstruct 
+<student>My Name is ?xml version="1.0"==================================================================?>
+<!DOCTYPE studånt [
+	<!ELEMENT student (#PCDATA)> 
+>
+
+
+<!-- testing inval
+<?MyInstructSnowMan. </student>

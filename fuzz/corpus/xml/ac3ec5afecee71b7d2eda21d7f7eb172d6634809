@@ -1,0 +1,15 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT NMTIED>
+ <!ATTLIST z attr (x|y) #IMPLIED>
+ ]>
+<root>
+<x attr= 'Madhu'></x>
+<root
+ [
+ <!ELEMENT root (xuy|z)*>
+ NMTOK<a>4?p:i x<conENS #IMPLIED>
+ <t>!ATTLIST z attr (x|y) #IMPLIED>
+ ]>ut.not.

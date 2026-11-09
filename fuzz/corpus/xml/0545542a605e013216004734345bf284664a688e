@@ -1,0 +1,13 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nametoken e 
+lexical constts of the declared attNMTOKEN "hello">
+  ]>
+<test>
+Thevalue specified ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<i>aÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xmlns:p=""/>ÿÿÿÿÿÿÿÿÿÿÿÿ¢red attribute type.
+</test>
+

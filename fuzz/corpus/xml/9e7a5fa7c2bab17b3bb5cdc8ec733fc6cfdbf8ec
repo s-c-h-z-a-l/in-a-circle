@@ -1,0 +1,13 @@
+<?xml  version="1.0"?>
+<!-- test for Production 54-->
+<!DOCTYPE root
+ [
+ <!ELEMENT oot (x|y|z)*>
+ <!ELEMENT x (#PCDATA)>
+ <!ELEMENT>
+ <!ATTLIST y tr= '0.a.name.token.but.n<y attr= '0.a.name.tokenTLIST y tr= '2.a.name.token.but.n <!ATTLIST z attr (x|y) #IMPLIED>
+ ]>
+<root>
+<x attr= 'Madhu'></x>
+<y attr= '0.not.a.name'></y>
+</r=ot>

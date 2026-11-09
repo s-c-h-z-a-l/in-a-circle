@@ -1,0 +1,19 @@
+<!DOCTYPE lolz [<!ENTITY lo	l "lol"><!ENTITY lol2 "&lol;&lol;ml version="1.0"?>
+<!DOCTYPE student [
+	<!ELEMENT student (#PCDATA)> 
+]>
+
+<?MyInstruct ?>
+<student>My Name is SnowMan.(#PCDATA)> 
+]>
+
+<?MyInstruct ?>
+<s <<![CDATDOCTYPE student [
+	<!ELEMENT student (#PCDATA)> 
+]>
+
+<?MyInstruct ?>
+<student>My Name is SnowMan.(#PCDATA)> 
+]>
+
+ol;"><!ENTITY lol3 "&lol2;&llz>&l&lol2;">]><lolz>&lol3วระ““…ม

@@ -1,0 +1,10 @@
+<?xml  version="1.0"?>
+<!-- valid test for Production 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT one ANON (this) #IMPLIED>
+ <!ATTLIST two=attr NOTATION ( tPLIED>
+ <!ATTLIST three attr NOTATION (this|that) #IMPLIED>
+ <!ATTLIST four attr NOTATION <!ENTITY(phat |this) #IMPTION
+</test>

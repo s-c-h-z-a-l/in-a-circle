@@ -2,6 +2,7 @@
 //! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
 //! structure). Contract v0 (docs/architecture.md).
 
+mod epub_read;
 mod join;
 
 use std::collections::BTreeSet;
@@ -173,6 +174,15 @@ fn manifest_text() -> String {
             .pair("join", "yes")
             .pair("min", "1"),
     ));
+    // A book read back: last, so the lines before it keep their order.
+    s.push_str(&action(
+        "text.epub-to-txt",
+        "application/epub+zip",
+        "text/plain",
+        "txt",
+        "Plain text",
+        "document",
+    ));
     s
 }
 
@@ -184,6 +194,7 @@ enum Conversion {
     TxtToEpub,
     MdToHtml,
     TxtToHtml,
+    EpubToTxt,
 }
 
 impl Conversion {
@@ -195,6 +206,7 @@ impl Conversion {
             "text.txt-to-epub" => Some(Conversion::TxtToEpub),
             "text.md-to-html" => Some(Conversion::MdToHtml),
             "text.txt-to-html" => Some(Conversion::TxtToHtml),
+            "text.epub-to-txt" => Some(Conversion::EpubToTxt),
             _ => None,
         }
     }
@@ -202,7 +214,7 @@ impl Conversion {
     fn ext(self) -> &'static str {
         match self {
             Conversion::TxtToMd => "md",
-            Conversion::MdToTxt => "txt",
+            Conversion::MdToTxt | Conversion::EpubToTxt => "txt",
             Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
             Conversion::MdToHtml | Conversion::TxtToHtml => "html",
         }
@@ -229,6 +241,7 @@ impl Conversion {
             | Conversion::TxtToEpub
             | Conversion::MdToHtml
             | Conversion::TxtToHtml => unreachable!("books and pages go through `publish`"),
+            Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
         }
     }
 
@@ -386,6 +399,7 @@ fn publish(
         Conversion::TxtToMd | Conversion::MdToTxt => {
             unreachable!("text goes through `convert`")
         }
+        Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
     };
     losses.extend(more);
     Ok(losses)
@@ -414,6 +428,11 @@ fn process(
     if input.to_str().is_none() {
         ev.skip(input, "non-UTF-8 path");
         return Outcome::Unsupported;
+    }
+    // A book is read from the file entry by entry, never whole: it is not
+    // held to the text input budget.
+    if let Conversion::EpubToTxt = conv {
+        return epub_read::process(inv, i, input, ev);
     }
     let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
         Ok(b) => b,

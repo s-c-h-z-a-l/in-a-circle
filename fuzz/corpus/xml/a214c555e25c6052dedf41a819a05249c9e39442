@@ -1,0 +1,7 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc ANY>
+<!--NOT whether
+<!ELEMENT a (doc?)>­
+< this is a choice or a seq-->
+<!ELEMENT a (doc?)>­

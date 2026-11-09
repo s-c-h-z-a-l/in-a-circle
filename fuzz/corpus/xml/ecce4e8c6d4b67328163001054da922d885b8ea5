@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT sma­ll EM]PTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>} <?xml version="1.0" encoding="utf-8"?>
+<html xÚlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">a>-a><a<!DOCTYPE html [ <!><!ELEMEN-- a</T 

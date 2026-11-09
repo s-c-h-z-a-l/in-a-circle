@@ -1571,6 +1571,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What the drawn wheels are built from for an EPUB (`wheel::stage2`
+    /// paints a `Menu`'s labels, dim/normal states and hub as they are):
+    /// Document lights and its south slice is lit "Plain text"; north and
+    /// east are dim; Book stays dim with nothing lit in it.
+    #[test]
+    fn epub_menus_offer_plain_text_south() {
+        let mut act = md_catalog().actions.remove(0);
+        act.id = "text.epub-to-txt".into();
+        act.input = "application/epub+zip".into();
+        act.output = "text/plain".into();
+        act.ext = "txt".into();
+        act.label = "Plain text".into();
+        act.group = "document".into();
+        act.lossy = true;
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-epub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("book.epub");
+        std::fs::write(&file, b"PK\x03\x04rest").unwrap();
+        let g = group_menu_for(vec![file], Some(Catalog { actions: vec![act] }));
+        assert_eq!(g.hub, "book.epub");
+        let lit = |k: usize| g.slices[k].as_ref().unwrap().lit;
+        assert!(lit(0), "Document lights");
+        assert!(!lit(2), "Book stays dim");
+        let m = target_menu(&g, "document");
+        assert_eq!(m.hub, "Document");
+        let south = m.slices[4].as_ref().unwrap();
+        assert_eq!(
+            (
+                south.label.as_str(),
+                south.preset.as_str(),
+                south.applicable
+            ),
+            ("Plain text", "plain-text-epub", true)
+        );
+        for k in [0, 2] {
+            assert!(!m.slices[k].as_ref().unwrap().applicable, "slice {k} dim");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The drawn Book wheel for Markdown plus images and for images alone
     /// (what `wheel::stage2` paints): with documents the east slice is a lit
     /// EPUB and the hub counts documents plus images (the text file and the

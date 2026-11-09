@@ -1,0 +1,17 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nametoken namevalue NMTOKEN "hello">
+  ]>
+<test>
+The def<i><a>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿault est>
+The default value specified for an a[tribute meets tèe 
+lexical constraints of the declared attNMTOKEN "hello">
+  ]>
+<test>
+Thevalue specified ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<i>aÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xmlns:p=""/>ÿÿÿÿÁÃ*ÿ>2xxxxxxÿÿÿops"><body><pype.
+</test>
+
