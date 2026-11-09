@@ -2740,6 +2740,7 @@ fn refusal(r: &JobRecords) -> Option<io::Error> {
 struct HistLog<'a> {
     file: &'a mut File,
     lock: &'a File,
+    /// The raw job id: each record escapes it once.
     job: String,
 }
 
@@ -2748,7 +2749,7 @@ impl trash::Log for HistLog<'_> {
         let line = format!(
             "recovery-intent\top={}\tjob={}\tgroup={}\tsource={}\ttarget={}\tinfo_rel={}\tsource_parent_dev={}\tsource_parent_ino={}\ttarget_parent_dev={}\ttarget_parent_ino={}\twrapper_dev={}\twrapper_ino={}\tmount={}\tdeletion_date={}\n",
             hex(i.op.0),
-            self.job,
+            manifest::escape(&self.job),
             hex(i.group.0),
             enc(i.source),
             enc(i.target),
@@ -2844,7 +2845,7 @@ pub fn undo(job: &JobId) -> io::Result<UndoResult> {
     let mut log = HistLog {
         file: &mut file,
         lock: &lock,
-        job: manifest::escape(&job.0),
+        job: job.0.clone(),
     };
     for g in &r.groups {
         let Some(place) = &g.commit else { continue };
@@ -5841,6 +5842,69 @@ mod tests {
             let v = fields(&l, RCLOSE).unwrap();
             assert_eq!(closed_outcome(&l.kind, 5, 9, &v).unwrap(), o, "{line}");
         }
+    }
+
+    /// hardening-2 #19: `HistLog::job` is the raw id; each record escapes
+    /// it exactly once (the intent by hand, the closing line through
+    /// `write_line`), so both read back as the same job.
+    #[test]
+    fn the_intent_and_the_close_write_the_same_job_field() {
+        let t = Tmp::new("jobfield");
+        t.env(|| {
+            let job = JobId("1-2\\x=y\tz".into());
+            job_of(&t, &new_job_id(), &[("a", "a")]);
+            let dir = StateDir::open(&history_dir().unwrap()).unwrap();
+            let mut file = dir
+                .open_file(HISTORY, libc::O_RDWR | libc::O_APPEND, 0)
+                .unwrap();
+            let lock = dir
+                .open_file(INIT_LOCK, libc::O_RDWR | libc::O_CREAT, 0o600)
+                .unwrap();
+            let mut log = HistLog {
+                file: &mut file,
+                lock: &lock,
+                job: job.0.clone(),
+            };
+            let i = trash::Intent {
+                op: OperationId(1),
+                group: GroupId(2),
+                source: b"/s",
+                target: b"/t",
+                info_rel: 0,
+                source_parent: (1, 2),
+                target_parent: (3, 4),
+                wrapper: (5, 6),
+                mount: 7,
+                date: "2026-10-27T10:00:00",
+            };
+            trash::Log::intent(&mut log, &i).unwrap();
+            let loc = LocationEvidence {
+                path_at_check: None,
+                last_unverified_path: None,
+                anchor: AnchorHint {
+                    parent_dev: 1,
+                    parent_ino: 2,
+                    object_dev: 3,
+                    object_ino: 4,
+                    leaf: "a".into(),
+                    op: OperationId(1),
+                },
+                checked_at: CheckPoint::Precheck,
+            };
+            let kept = GroupOutcome::Kept {
+                group: GroupId(2),
+                location: loc,
+                reason: UndoReason::NoTrash,
+            };
+            trash::Log::close(&mut log, OperationId(1), &kept).unwrap();
+            let jobs: Vec<String> = history()
+                .lines()
+                .map(|l| parse_line(l).unwrap())
+                .filter(|l| l.kind == "recovery-intent" || l.kind.starts_with("recovery-"))
+                .filter_map(|l| l.get("job").map(str::to_owned))
+                .collect();
+            assert_eq!(jobs, [job.0.clone(), job.0.clone()], "{jobs:?}");
+        });
     }
 
     /// The Trash spec's `Path=` form of `p`: bytes outside the unreserved
