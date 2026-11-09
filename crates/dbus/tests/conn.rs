@@ -1012,3 +1012,40 @@ fn bind_without_listen(path: &std::path::Path) -> i32 {
         fd
     }
 }
+
+/// A framed message whose body does not decode: a signal with its `u`
+/// signature turned into `d` (8 bytes wanted, 4 sent).
+fn undecodable() -> Vec<u8> {
+    let mut b = dbus::encode(&Message {
+        serial: 9,
+        ..signal("Junk", vec![Value::U32(7)])
+    })
+    .unwrap();
+    let at = b.windows(3).position(|w| w == [1, b'u', 0]).unwrap();
+    b[at + 1] = b'd';
+    assert!(dbus::decode(&b).is_err());
+    b
+}
+
+/// hardening-2 #8: one undecodable frame from a stranger is dropped, not
+/// the end of the connection. The framing was valid, so the stream is in
+/// sync; the call still gets its reply and the next signal is read.
+#[test]
+fn an_undecodable_frame_is_dropped_not_fatal() {
+    let fake = Fake::start(|p| {
+        p.handshake();
+        let m = p.recv();
+        p.write(&undecodable());
+        p.reply(&m, vec![Value::Str("pong".into())]);
+        p.write(&undecodable());
+        p.signal("/a", "a.B", "After", vec![]);
+        p.drain();
+    });
+    let mut c = Conn::connect(&fake.address(), after(300)).unwrap();
+    let r = c.call(call("Ping"), after(500)).unwrap();
+    assert_eq!(r.body, vec![Value::Str("pong".into())]);
+    let s = c.recv(after(300)).unwrap().unwrap();
+    assert_eq!(s.member.as_deref(), Some("After"));
+    drop(c);
+    fake.join();
+}

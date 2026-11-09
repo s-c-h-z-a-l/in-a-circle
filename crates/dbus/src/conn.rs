@@ -119,6 +119,19 @@ pub struct Conn {
     broken: bool,
 }
 
+/// Decodes one complete frame; `None` for a frame whose body does not
+/// decode (or exceeds the value budget). Its framing was valid, so the
+/// stream is still in sync: a stranger's unicast junk is dropped here, not
+/// made the end of the connection. Only a reply of ours would be missed,
+/// and that ends at the call's deadline.
+fn decode_or_skip(frame: &[u8]) -> Result<Option<Message>, Error> {
+    match decode(frame) {
+        Ok(m) => Ok(Some(m)),
+        Err(Error::Malformed(_) | Error::TooLarge) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 impl Conn {
     /// Connects, authenticates and says `Hello`, all before `deadline`.
     pub fn connect(addr: &Address, deadline: Instant) -> Result<Conn, Error> {
@@ -170,7 +183,9 @@ impl Conn {
                 return Err(Error::Timeout);
             }
             let frame = self.read_frame(deadline)?;
-            let r = decode(&frame)?;
+            let Some(r) = decode_or_skip(&frame)? else {
+                continue;
+            };
             match r.kind {
                 Kind::Signal => {
                     let keep = self
@@ -242,8 +257,8 @@ impl Conn {
             if Instant::now() >= deadline {
                 return Ok(None);
             }
-            match self.read_frame(deadline).and_then(|f| decode(&f)) {
-                Ok(m) if m.kind == Kind::Signal => return Ok(Some(m)),
+            match self.read_frame(deadline).and_then(|f| decode_or_skip(&f)) {
+                Ok(Some(m)) if m.kind == Kind::Signal => return Ok(Some(m)),
                 Ok(_) => {}
                 Err(Error::Timeout) => return Ok(None),
                 Err(e) => return self.track(Err(e)),
@@ -278,9 +293,9 @@ impl Conn {
             *frames -= 1;
             match self
                 .try_frame()
-                .and_then(|f| f.map(|f| decode(&f)).transpose())
+                .and_then(|f| f.map(|f| decode_or_skip(&f)).transpose())
             {
-                Ok(Some(m)) if m.kind == Kind::Signal => return Ok(Some(m)),
+                Ok(Some(Some(m))) if m.kind == Kind::Signal => return Ok(Some(m)),
                 Ok(Some(_)) => {}
                 Ok(None) => return Ok(None),
                 Err(e) => return self.track(Err(e)),
