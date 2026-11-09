@@ -1530,8 +1530,9 @@ mod tests {
     /// (`files_of`): `file:///d/a.srt/` is the file `/d/a.srt` in both, so
     /// both spend the shared read-on budget on the same files and agree on
     /// every type. Four all-ASCII subtitles spend the budget; the fifth,
-    /// accented past its head, is then plain text in the wheel as in the
-    /// run, not an 8-bit candidate the run would skip.
+    /// accented past its head, is then an SRT subtitle (its head has the
+    /// cue arrow) in the wheel as in the run, not an 8-bit candidate the
+    /// run would skip.
     #[test]
     fn drop_paths_are_the_runs_paths() {
         let dir = std::env::temp_dir().join(format!("inacircle-drop-norm-{}", std::process::id()));
@@ -1577,7 +1578,7 @@ mod tests {
             .iter()
             .map(|p| named_kind(p, &mut reread).1.label)
             .collect();
-        assert_eq!(run, [".srt text"; 5]);
+        assert_eq!(run, ["SRT subtitles"; 5]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

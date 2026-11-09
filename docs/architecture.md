@@ -888,8 +888,16 @@ Every action runs sandboxed, set up in the child between `fork` and
   gzip) give a label but no type, so no action is offered for them.
 - Text: no magic and valid UTF-8 without NUL bytes means text; the exact
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
-  content cannot tell them apart. Today that is plain text and Markdown;
-  recognising HTML and JSON by content is planned.
+  content cannot tell them apart. Today that is plain text, Markdown and
+  the subtitle types below; recognising HTML and JSON by content is planned.
+- **Subtitles:** a UTF-8 `.srt` whose 4 KiB head has a `-->` cue arrow is
+  `application/x-subrip`, label `SRT subtitles`; a `.vtt` whose head (after
+  an optional byte order mark) opens with `WEBVTT` is `text/vtt`, label
+  `WebVTT subtitles`; a `.ass` or `.ssa` whose head has `[Script Info]` (any
+  case) is `text/x-ssa`, label `ASS subtitles`. The name alone never makes a
+  subtitle: without the head check the file keeps its text label (`.srt
+  text`). A subtitle that is not valid UTF-8 is `text/x-8bit`, decided first
+  as before, and goes to the code page actions.
 - **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
   the code page actions and taken by no other preset. A file is one when
   its extension is on the classifier's text list (`txt`, `text`, `md`,
@@ -905,7 +913,7 @@ Every action runs sandboxed, set up in the child between `fork` and
   for all its files together, after which the head alone decides
   (`text/plain` for an ASCII head). A head that is valid UTF-8 with any
   non-ASCII byte, or a file without an extension, is decided by the head.
-  Every valid UTF-8 file keeps the plain text and Markdown rule above.
+  Every valid UTF-8 file keeps the plain text, Markdown and subtitle rules above.
   The classifier only proposes: the action checks the whole file. A file
   the head decides as plain text or Markdown (a listed text or Markdown
   extension, or none) whose first byte that is not valid UTF-8 lies past
@@ -913,8 +921,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   one reads all of it and skips it, naming that byte and its offset from
   0 (`not UTF-8: byte 0xE9 at 266240`); nothing is published. Valid UTF-8
   with a NUL byte is still skipped as `unsupported` by the plain-text
-  reader. Any other listed extension (`.srt`, `.csv`...) has no type
-  with such a head, so no shipped action takes it.
+  reader. Any other listed extension (`.csv`...), and a `.srt`, `.vtt`,
+  `.ass` or `.ssa` without its subtitle mark, has no type with such a head,
+  so no shipped action takes it.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
