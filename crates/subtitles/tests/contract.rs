@@ -39,7 +39,7 @@ fn loss_messages_are_the_user_text() {
     );
     assert_eq!(
         Loss::Brackets.message(),
-        "angle brackets in text written as look-alikes"
+        "brackets in text written as look-alikes"
     );
 }
 

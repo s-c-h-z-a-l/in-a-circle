@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::rc::Rc;
 
-use crate::tag::opens_tag;
+use crate::tag::look_alike_at;
 use crate::time::write_time;
 use crate::{Cue, Line, Loss, Run, has_text};
 
@@ -62,12 +62,12 @@ fn write_runs(out: &mut impl Write, line: &Line, vtt: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// The line as the SRT reader reads it back. Each `<` that opens a tag (the
-/// reader's own rule, `tag::opens_tag`) becomes U+FF1C, a look-alike that no
-/// reader takes for markup. The decision is made on the line's plain text, the
-/// speaker's `Name: ` prefix included, so a `<` at the end of a run is judged
-/// by the next run's first character, as the reader will see it. The line is
-/// borrowed when no `<` needs changing.
+/// The line as the SRT reader reads it back. Each `<` that opens a tag and each
+/// `{` that opens an override block (the reader's own rules, `tag.rs`) becomes
+/// a look-alike that no reader takes for markup. The decision is made on the
+/// line's plain text, the speaker's `Name: ` prefix included, so a bracket at
+/// the end of a run is judged by the next run's first characters, as the reader
+/// will see them. The line is borrowed when no bracket needs changing.
 fn srt_safe(line: &Line) -> Cow<'_, Line> {
     let mut pieces: Vec<&str> = Vec::new();
     if let Some(name) = &line.voice {
@@ -77,23 +77,17 @@ fn srt_safe(line: &Line) -> Cow<'_, Line> {
     pieces.extend(line.runs.iter().map(|r| r.text.as_str()));
     let plain = pieces.concat();
     if !plain
-        .match_indices('<')
-        .any(|(i, _)| opens_tag(&plain[i..]))
+        .char_indices()
+        .any(|(i, _)| look_alike_at(&plain, i).is_some())
     {
         return Cow::Borrowed(line);
     }
-    // Each piece starts at `at` in the plain text; its `<` are judged there.
+    // Each piece starts at `at` in the plain text; its brackets are judged there.
     let mut at = 0;
     let mut next = |text: &str| {
         let fixed = text
             .char_indices()
-            .map(|(i, c)| {
-                if c == '<' && opens_tag(&plain[at + i..]) {
-                    '\u{ff1c}'
-                } else {
-                    c
-                }
-            })
+            .map(|(i, c)| look_alike_at(&plain, at + i).unwrap_or(c))
             .collect::<String>();
         at += text.len();
         fixed

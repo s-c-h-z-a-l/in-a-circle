@@ -423,3 +423,78 @@ fn srt_writer_reports_brackets_loss_once_per_cue() {
     let (_, losses) = srt(&cues);
     assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 2)]));
 }
+
+/// Text that the SRT reader would take for an override block (`{\` then a
+/// closing `}`) is written with a look-alike (U+FF5B), so the file reads back
+/// with the text and no style applied. The VTT text `a {\b1} c` holds the
+/// literal block.
+#[test]
+fn literal_override_like_text_is_not_read_back_as_override() {
+    let parsed = read_vtt(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\na {\\b1} c\n\n")
+        .expect("the input has a cue");
+    let mut out = Vec::new();
+    let losses = write_srt(&parsed.cues, &mut out).expect("writing to a Vec cannot fail");
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+    let back = read_srt(&out).expect("the SRT output reads back");
+    assert_eq!(back.skipped.count, 0);
+    assert_eq!(
+        back.cues[0].lines,
+        vec![Line {
+            voice: None,
+            runs: vec![run("a \u{ff5b}\\b1} c")],
+        }]
+    );
+}
+
+/// The `{\an8}` that the writer puts before a top cue's first line is its own
+/// marker, not text: it stays. Text that looks like the same marker is written
+/// with the look-alike.
+#[test]
+fn own_top_marker_is_not_rewritten() {
+    let mut top = cue(0, 1_000, vec![plain("x")]);
+    top.top = true;
+    let (s, losses) = srt(&[top]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{\\an8}x\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+
+    let mut literal = cue(0, 1_000, vec![plain("{\\an8}y")]);
+    literal.top = true;
+    let (s, losses) = srt(&[literal]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{\\an8}\u{ff5b}\\an8}y\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+}
+
+/// A cue with both a tag-like `<` and an override-like `{\` counts once, as
+/// one look-alike cue; each cue counts once however many it has.
+#[test]
+fn cue_with_both_brackets_counts_once() {
+    let cues = [
+        cue(0, 1_000, vec![plain("<b"), plain("{\\b1}x")]),
+        cue(1_000, 2_000, vec![plain("{\\i1}")]),
+    ];
+    let (_, losses) = srt(&cues);
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 2)]));
+}
+
+/// A `{` that does not open an override block (no backslash after it) stays,
+/// and so does one with no closing `}` after a backslash only as text.
+#[test]
+fn plain_brace_is_left_alone() {
+    let cues = [cue(
+        0,
+        1_000,
+        vec![plain("{"), plain("{x}"), plain("a { b")],
+    )];
+    let (s, losses) = srt(&cues);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{\r\n{x}\r\na { b\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+}

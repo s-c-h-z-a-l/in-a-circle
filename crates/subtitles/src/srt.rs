@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::tag::opens_tag;
+use crate::tag::{opens_override, opens_tag};
 use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped, has_text};
 
 const MS_PER_SECOND: u64 = 1_000;
@@ -404,7 +404,7 @@ fn tag_len(tail: &str, scan: &mut Scan) -> Option<usize> {
 /// Length of an override block starting at `tail`: `{\` up to the next `}`.
 /// A `{` not followed by a backslash is text.
 fn block_len(tail: &str, scan: &mut Scan) -> Option<usize> {
-    if scan.no_brace || !tail.starts_with("{\\") {
+    if scan.no_brace || !opens_override(tail) {
         return None;
     }
     let len = tail.find('}').map(|i| i + 1);

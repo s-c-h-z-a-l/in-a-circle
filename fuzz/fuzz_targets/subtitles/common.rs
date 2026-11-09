@@ -34,17 +34,13 @@ use subtitles::{
 /// line's ends do not come back; a line of spaces is no text on either side.
 type Shape = Vec<(u64, u64, bool, Vec<String>)>;
 
-/// The SRT writer's look-alike: a `<` that opens a tag for the reader becomes
-/// U+FF1C (the writer judges the same text, the speaker's prefix included).
+/// The SRT writer's look-alikes: a `<` that opens a tag for the reader becomes
+/// U+FF1C and a `{` that opens an override block becomes U+FF5B, through the
+/// same helper the writer uses (`tag::look_alike_at`). The writer judges the
+/// same text, the speaker's prefix included.
 fn look_alike(text: &str) -> String {
     text.char_indices()
-        .map(|(i, c)| {
-            if c == '<' && tag::opens_tag(&text[i..]) {
-                '\u{ff1c}'
-            } else {
-                c
-            }
-        })
+        .map(|(i, c)| tag::look_alike_at(text, i).unwrap_or(c))
         .collect()
 }
 
