@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
 mod ass;
 mod srt;
@@ -14,12 +15,13 @@ mod write;
 pub use write::{write_srt, write_vtt};
 
 /// Reads an SRT file as a media player would. Refused past [`INPUT_BYTES`]
-/// before anything is parsed, refused when it is not UTF-8, and refused with
-/// [`ReadError::NoCues`] when no cue in it is usable. A byte order mark is
-/// skipped. Everything else is read leniently: see `srt.rs` for the rules.
+/// before anything is parsed, refused when it is not UTF-8, refused past
+/// [`ITEM_BUDGET`] items, and refused with [`ReadError::NoCues`] when no cue in
+/// it is usable. A byte order mark is skipped. Everything else is read
+/// leniently: see `srt.rs` for the rules.
 pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
-    let parsed = srt::parse(text);
+    let parsed = srt::parse(text, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
         return Err(ReadError::NoCues);
     }
@@ -32,7 +34,7 @@ pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
 /// cues are all unusable. See `vtt.rs` for the rules.
 pub fn read_vtt(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
-    let parsed = vtt::parse(text).ok_or(ReadError::NoCues)?;
+    let parsed = vtt::parse(text, &mut Budget::new(ITEM_BUDGET))?.ok_or(ReadError::NoCues)?;
     if parsed.cues.is_empty() {
         return Err(ReadError::NoCues);
     }
@@ -45,7 +47,7 @@ pub fn read_vtt(bytes: &[u8]) -> Result<Parsed, ReadError> {
 /// `ass.rs` for the rules and the choices made where the format leaves room.
 pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
-    let parsed = ass::parse(text);
+    let parsed = ass::parse(text, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
         return Err(ReadError::NoCues);
     }
@@ -79,6 +81,36 @@ pub const OUTPUT_BYTES: u64 = 32 << 20;
 /// reader skips it and says so.
 pub const MAX_MS: u64 = 359_999_999;
 
+/// Largest number of items a reader stores: each cue, each line and each run
+/// is one. The readers' memory grows with the items, not with the bytes (a
+/// 2-byte line is a line and a run), so this count is the memory bound. Measured
+/// on the densest 8 MiB inputs, a line and a run cost about 110 B together, so
+/// 2,000,000 items are about 220 MiB, a quarter of the 1 GiB `RLIMIT_DATA` the
+/// sandbox sets at its floor. A real 8 MiB film subtitle has about 10,000 items
+/// (2,000 cues of two lines of two runs): 200 times under the budget. The
+/// densest real 8 MiB file, the smallest SRT cues (27 bytes, three items each),
+/// has about 930,000, so it still fits.
+pub const ITEM_BUDGET: usize = 2_000_000;
+
+/// The items a reader may still store. Each store is charged before it
+/// allocates, so a refused store allocates nothing and the reader stops there.
+pub(crate) struct Budget {
+    left: usize,
+}
+
+impl Budget {
+    pub(crate) fn new(items: usize) -> Self {
+        Self { left: items }
+    }
+
+    /// Charges one item, or refuses it with [`ReadError::TooComplex`], which
+    /// leaves the budget as it was.
+    pub(crate) fn charge(&mut self) -> Result<(), ReadError> {
+        self.left = self.left.checked_sub(1).ok_or(ReadError::TooComplex)?;
+        Ok(())
+    }
+}
+
 /// A run of text with one inline style set. A cue line is a list of runs, so
 /// a style that changes mid-line stays with its own text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +125,9 @@ pub struct Run {
 /// One line of a cue, with the speaker set on it, if the source named one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
-    pub voice: Option<String>,
+    /// Shared by the lines of one speaker. A copy per line would multiply a
+    /// long name by the line count, past the memory bound.
+    pub voice: Option<Rc<str>>,
     pub runs: Vec<Run>,
 }
 
@@ -159,6 +193,9 @@ pub enum ReadError {
     NotUtf8 { at: usize },
     /// The input is larger than [`INPUT_BYTES`].
     TooLarge,
+    /// The input needs more than [`ITEM_BUDGET`] items. Nothing is kept: the
+    /// readers do not truncate, so a partial result is never converted.
+    TooComplex,
     /// The input parsed, but no cue in it is usable.
     NoCues,
 }
@@ -171,6 +208,9 @@ impl fmt::Display for ReadError {
                 "not UTF-8 text (byte at {at}): convert it with Encoding first"
             ),
             ReadError::TooLarge => f.write_str("subtitle file is larger than 8 MiB"),
+            ReadError::TooComplex => {
+                f.write_str("too many lines and styled runs (more than 2,000,000)")
+            }
             ReadError::NoCues => f.write_str("no subtitles found"),
         }
     }
@@ -182,4 +222,43 @@ impl std::error::Error for ReadError {}
 /// the order they had in the file.
 pub fn sort_cues(cues: &mut [Cue]) {
     cues.sort_by_key(|c| c.start_ms);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budget counts exactly. One cue, one line and one run are three
+    /// items, so a budget of three reads the text and a budget of two refuses
+    /// it, for each reader.
+    #[test]
+    fn budget_boundary_is_exact() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nx\n";
+        let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nx\n";
+        let ass = "[Events]\nFormat: Start, End, Text\nDialogue: 0:00:01.00,0:00:02.00,x\n";
+        assert_eq!(
+            srt::parse(srt, &mut Budget::new(3)).map(|p| p.cues.len()),
+            Ok(1)
+        );
+        assert_eq!(
+            srt::parse(srt, &mut Budget::new(2)).map(|p| p.cues.len()),
+            Err(ReadError::TooComplex)
+        );
+        assert_eq!(
+            vtt::parse(vtt, &mut Budget::new(3)).map(|p| p.map(|p| p.cues.len())),
+            Ok(Some(1))
+        );
+        assert_eq!(
+            vtt::parse(vtt, &mut Budget::new(2)).map(|p| p.map(|p| p.cues.len())),
+            Err(ReadError::TooComplex)
+        );
+        assert_eq!(
+            ass::parse(ass, &mut Budget::new(3)).map(|p| p.cues.len()),
+            Ok(1)
+        );
+        assert_eq!(
+            ass::parse(ass, &mut Budget::new(2)).map(|p| p.cues.len()),
+            Err(ReadError::TooComplex)
+        );
+    }
 }

@@ -382,8 +382,26 @@ families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
 | input | 8 MiB | the text family's input budget; checked before any parsing, so `subtitle file is larger than 8 MiB` and nothing is read |
 | output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file. The action counts the bytes as it writes them and refuses the write that would pass 32 MiB (`subtitle output would be larger than 32 MiB`); a write past the process's `RLIMIT_FSIZE` fails the same way, since SIGXFSZ is ignored. Either way the file is removed and nothing is left behind |
 | time | 99:59:59.999 | both formats write the hour as two digits, so a later cue has no time code to be written with; the reader skips that cue (with a warning) and converts the rest |
-| cues | none of their own | the input limit bounds the count; a cue needs bytes of input |
+| items | 2,000,000 (`ITEM_BUDGET`) | each cue, each line and each run is one item, charged before it is stored; the readers' memory is per item, not per byte (a 2-byte line is a line and a run, about 110 B together). Past it the input fails with `too many lines and styled runs (more than 2,000,000)` and nothing is written: nothing is truncated. 2,000,000 items peak at about 220 MiB, a quarter of the 1 GiB `RLIMIT_DATA` floor. A real 8 MiB film subtitle is about 10,000 items (2,000 cues of two lines of two runs), 200 times under the budget; the densest real file, the smallest SRT cues (27 B each, about 310,000 cues of three items), is about 930,000 and still fits |
+| speaker name | shared, one copy | a WebVTT cue's speaker name is one `Rc<str>` shared by the lines of its cue, not a copy per line: one 1 MiB name over 400 lines held 406 MiB as copies, 12 MiB now |
+| cues | none of their own | the item budget bounds the count (a cue is one item) |
 | warnings | at most 7 lines | one per kind of loss (six kinds) and one for skipped cues, far below the engine's cap of 16 per input |
+
+Measured peak RSS (`ru_maxrss` of the child, the test build, the development
+machine; the `dense_8_mib_input_stays_within_the_data_limit` test prints the
+same figures). The five densest 8 MiB shapes, before and after the item budget:
+
+| shape (8 MiB input) | before | after |
+|---|---|---|
+| SRT, about 310,000 cues of 27 B | 138.4 MiB, 1.57 s, kept | 129.0 MiB, 1.73 s, kept |
+| SRT, one cue of 2-byte lines (`x\n`) | 906.3 MiB, 2.58 s, kept | 216.5 MiB, 0.58 s, refused (`TooComplex`) |
+| WebVTT, about 310,000 cues of 27 B | 138.4 MiB, 1.49 s, kept | 129.0 MiB, 1.50 s, kept |
+| ASS, about 180,000 cues of 46 B | 87.2 MiB, 1.04 s, kept | 81.6 MiB, 1.04 s, kept |
+| ASS, one cue of `x\N` lines (3 B each) | 607.8 MiB, 1.56 s, kept | 216.7 MiB, 0.77 s, refused (`TooComplex`) |
+
+The speaker-name probe (`vtt-to-srt`, one 1 MiB name in a cue of 400 lines):
+406.4 MiB before, 12.1 MiB after. Its output is past the 32 MiB ceiling, so it
+still fails, after parsing.
 
 ## The engine's own memory at the input limits
 

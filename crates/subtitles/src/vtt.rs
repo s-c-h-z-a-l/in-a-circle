@@ -35,8 +35,10 @@
 
 use std::collections::BTreeMap;
 
+use std::rc::Rc;
+
 use crate::srt::{Fault, STRAY, Style, lines, number, push_text};
-use crate::{Cue, Line, Loss, MAX_MS, Parsed, Run, Skipped};
+use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped};
 
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
@@ -54,21 +56,23 @@ const TOP_PERCENT: u64 = 33;
 
 /// Reads a whole WebVTT text (byte order mark already removed). `None` when
 /// the text does not start with the signature. Cues come out in file order.
-pub(crate) fn parse(text: &str) -> Option<Parsed> {
+pub(crate) fn parse(text: &str, budget: &mut Budget) -> Result<Option<Parsed>, ReadError> {
     let mut all = lines(text);
-    let signature = all.next()?;
+    let Some(signature) = all.next() else {
+        return Ok(None);
+    };
     let signed = signature == "WEBVTT"
         || signature.starts_with("WEBVTT ")
         || signature.starts_with("WEBVTT\t");
     if !signed {
-        return None;
+        return Ok(None);
     }
     let mut reader = Reader::default();
     for (i, line) in all.enumerate() {
         // The signature is line 1, so the first line after it is line 2.
-        reader.line(i + 2, line);
+        reader.line(i + 2, line, budget)?;
     }
-    Some(reader.finish())
+    reader.finish(budget).map(Some)
 }
 
 /// Where the reader stands in the current block. A block is the lines between
@@ -110,7 +114,7 @@ struct Open {
     style: Style,
     /// The speaker in effect. It carries across the lines of the cue until
     /// `</v>`, as the standard's cue text does.
-    voice: Option<String>,
+    voice: Option<Rc<str>>,
     top: bool,
     /// Losses in this cue, each counted once per cue.
     lost: Vec<Loss>,
@@ -134,21 +138,20 @@ struct Timing<'a> {
 
 impl Reader {
     /// `n` is the 1-based line number and `line` has no line end.
-    fn line(&mut self, n: usize, line: &str) {
+    fn line(&mut self, n: usize, line: &str, budget: &mut Budget) -> Result<(), ReadError> {
         if line.is_empty() {
-            self.blank();
-            return;
+            return self.blank(budget);
         }
         if self.open.is_some() {
             // Cue text. A line with `-->` ends the cue, and is then read as the
             // first line of a block: a timing line starts the next cue.
             if line.contains("-->") {
-                self.close();
+                self.close(budget)?;
                 self.first_line(n, line);
             } else {
-                self.text(line);
+                self.text(line, budget)?;
             }
-            return;
+            return Ok(());
         }
         match self.block {
             Block::Header => {
@@ -177,6 +180,7 @@ impl Reader {
             },
             Block::Ignored => {}
         }
+        Ok(())
     }
 
     /// The first line of a block that is not the header.
@@ -208,9 +212,9 @@ impl Reader {
     }
 
     /// An empty line: it ends the open cue, or the block that was not a cue.
-    fn blank(&mut self) {
+    fn blank(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         if self.open.is_some() {
-            self.close();
+            self.close(budget)?;
         } else {
             match self.block {
                 Block::Id(first) => self.skip(first, STRAY),
@@ -219,6 +223,7 @@ impl Reader {
             }
         }
         self.block = Block::Start;
+        Ok(())
     }
 
     fn start(&mut self, n: usize, t: Timing) {
@@ -241,28 +246,30 @@ impl Reader {
         self.block = Block::Ignored;
     }
 
-    fn text(&mut self, line: &str) {
+    fn text(&mut self, line: &str, budget: &mut Budget) -> Result<(), ReadError> {
         if let Some(open) = self.open.as_mut() {
-            markup(line, open);
+            markup(line, open, budget)?;
         }
+        Ok(())
     }
 
     /// Ends the open cue. A cue with no text is dropped without a report, as
     /// in the SRT reader.
-    fn close(&mut self) {
+    fn close(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         let Some(open) = self.open.take() else {
-            return;
+            return Ok(());
         };
         let (start_ms, end_ms) = match open.span {
             Ok(span) => span,
             Err(fault) => {
                 self.skip(open.at_line, fault.message());
-                return;
+                return Ok(());
             }
         };
         if open.lines.is_empty() {
-            return;
+            return Ok(());
         }
+        budget.charge()?;
         for loss in open.lost {
             *self.losses.entry(loss).or_insert(0) += 1;
         }
@@ -272,6 +279,7 @@ impl Reader {
             top: open.top,
             lines: open.lines,
         });
+        Ok(())
     }
 
     fn skip(&mut self, line: usize, reason: &'static str) {
@@ -281,13 +289,13 @@ impl Reader {
         }
     }
 
-    fn finish(mut self) -> Parsed {
-        self.blank();
-        Parsed {
+    fn finish(mut self, budget: &mut Budget) -> Result<Parsed, ReadError> {
+        self.blank(budget)?;
+        Ok(Parsed {
             cues: self.cues,
             losses: self.losses,
             skipped: self.skipped,
-        }
+        })
     }
 }
 
@@ -444,59 +452,67 @@ fn unescape(s: &str) -> String {
 
 /// Applies the markup of one cue text line to the open cue. A speaker change
 /// ends a line of the output, so each line of the output has one speaker.
-fn markup(line: &str, open: &mut Open) {
+fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<(), ReadError> {
     let mut runs = Vec::new();
     let mut scan = Scan::default();
     let mut rest = line;
     while let Some(i) = rest.find(['<', '&']) {
-        push(&mut runs, open.style, &rest[..i]);
+        push(&mut runs, open.style, &rest[..i], budget)?;
         let tail = &rest[i..];
         let len = if tail.starts_with('<') {
             match tag_len(tail, &mut scan) {
                 Some(len) => {
-                    tag(&tail[..len], open, &mut runs);
+                    tag(&tail[..len], open, &mut runs, budget)?;
                     len
                 }
                 None => {
-                    push(&mut runs, open.style, "<");
+                    push(&mut runs, open.style, "<", budget)?;
                     1
                 }
             }
         } else {
             match entity(tail) {
                 Some((text, len)) => {
-                    push(&mut runs, open.style, text);
+                    push(&mut runs, open.style, text, budget)?;
                     len
                 }
                 None => {
-                    push(&mut runs, open.style, "&");
+                    push(&mut runs, open.style, "&", budget)?;
                     1
                 }
             }
         };
         rest = &tail[len..];
     }
-    push(&mut runs, open.style, rest);
-    flush(&mut runs, open);
+    push(&mut runs, open.style, rest, budget)?;
+    flush(&mut runs, open, budget)
 }
 
 /// Adds text in `style`. A NUL is U+FFFD, as the standard says.
-fn push(runs: &mut Vec<Run>, style: Style, text: &str) {
+fn push(
+    runs: &mut Vec<Run>,
+    style: Style,
+    text: &str,
+    budget: &mut Budget,
+) -> Result<(), ReadError> {
     if text.contains('\0') {
-        push_text(runs, style, &text.replace('\0', "\u{fffd}"));
+        push_text(runs, style, &text.replace('\0', "\u{fffd}"), budget)
     } else {
-        push_text(runs, style, text);
+        push_text(runs, style, text, budget)
     }
 }
 
-/// Ends the current line of the output with the runs collected so far.
-fn flush(runs: &mut Vec<Run>, open: &mut Open) {
+/// Ends the current line of the output with the runs collected so far. The
+/// line is charged before it is stored. The speaker is shared, not copied.
+fn flush(runs: &mut Vec<Run>, open: &mut Open, budget: &mut Budget) -> Result<(), ReadError> {
     if !runs.is_empty() {
+        budget.charge()?;
         open.lines.push(Line {
             voice: open.voice.clone(),
             runs: std::mem::take(runs),
         });
     }
+    Ok(())
 }
 
 /// Length of a tag starting at `tail`: `<`, an optional `/`, a letter or a
@@ -515,7 +531,12 @@ fn tag_len(tail: &str, scan: &mut Scan) -> Option<usize> {
 
 /// Applies one whole tag (`<…>`) to the cue. Tags with no effect on the
 /// output are dropped and their text stays.
-fn tag(markup: &str, open: &mut Open, runs: &mut Vec<Run>) {
+fn tag(
+    markup: &str,
+    open: &mut Open,
+    runs: &mut Vec<Run>,
+    budget: &mut Budget,
+) -> Result<(), ReadError> {
     let inner = &markup[1..markup.len() - 1];
     let (closing, body) = match inner.strip_prefix('/') {
         Some(body) => (true, body),
@@ -523,7 +544,7 @@ fn tag(markup: &str, open: &mut Open, runs: &mut Vec<Run>) {
     };
     if !closing && timestamp(body).is_some_and(|(_, rest)| rest.is_empty()) {
         open.lose(Loss::Karaoke);
-        return;
+        return Ok(());
     }
     let name_end = body
         .find(|c: char| !c.is_ascii_alphanumeric())
@@ -536,14 +557,15 @@ fn tag(markup: &str, open: &mut Open, runs: &mut Vec<Run>) {
     } else if name.eq_ignore_ascii_case("u") {
         open.style.underline = !closing;
     } else if name.eq_ignore_ascii_case("v") {
-        flush(runs, open);
+        flush(runs, open, budget)?;
         open.voice = if closing {
             None
         } else {
             let who = unescape(annotation.trim());
-            (!who.is_empty()).then_some(who)
+            (!who.is_empty()).then(|| Rc::from(who))
         };
     } else if name.eq_ignore_ascii_case("c") && !closing && annotation.starts_with('.') {
         open.lose(Loss::Styling);
     }
+    Ok(())
 }

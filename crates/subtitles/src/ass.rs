@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use crate::srt::{Fault, STRAY, Style, lines, number, push_text};
-use crate::{Cue, Line, Loss, MAX_MS, Parsed, Run, Skipped};
+use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped};
 
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
@@ -155,16 +155,16 @@ struct Base {
 
 /// Reads a whole ASS or SSA text (byte order mark already removed). Cues come
 /// out in file order.
-pub(crate) fn parse(text: &str) -> Parsed {
+pub(crate) fn parse(text: &str, budget: &mut Budget) -> Result<Parsed, ReadError> {
     let mut reader = Reader::new();
     for (i, line) in lines(text).enumerate() {
-        reader.line(i + 1, line.trim());
+        reader.line(i + 1, line.trim(), budget)?;
     }
-    Parsed {
+    Ok(Parsed {
         cues: reader.cues,
         losses: reader.losses,
         skipped: reader.skipped,
-    }
+    })
 }
 
 struct Reader<'a> {
@@ -194,7 +194,7 @@ impl<'a> Reader<'a> {
     }
 
     /// `line` is trimmed; `n` is its 1-based line number.
-    fn line(&mut self, n: usize, line: &'a str) {
+    fn line(&mut self, n: usize, line: &'a str, budget: &mut Budget) -> Result<(), ReadError> {
         if let Some(name) = section_name(line) {
             self.section = section_of(name);
             // Each section starts with its default columns; its own Format line
@@ -211,7 +211,7 @@ impl<'a> Reader<'a> {
                 Section::Events => self.event_columns = EventColumns::of(EVENT_FORMAT),
                 Section::Other | Section::Info => {}
             }
-            return;
+            return Ok(());
         }
         match self.section {
             Section::Info => {
@@ -230,13 +230,14 @@ impl<'a> Reader<'a> {
                 if let Some(format) = after_key(line, "Format") {
                     self.event_columns = EventColumns::of(format);
                 } else if let Some(body) = after_key(line, "Dialogue") {
-                    self.dialogue(n, body);
+                    self.dialogue(n, body, budget)?;
                 } else if !is_known_event_line(line) && !line.is_empty() {
                     self.skip(n, STRAY);
                 }
             }
             Section::Other => {}
         }
+        Ok(())
     }
 
     /// One `Style:` line, read by the section's columns. A field that is not
@@ -266,11 +267,11 @@ impl<'a> Reader<'a> {
     }
 
     /// One `Dialogue:` line. `body` is the text after the key.
-    fn dialogue(&mut self, n: usize, body: &str) {
+    fn dialogue(&mut self, n: usize, body: &str, budget: &mut Budget) -> Result<(), ReadError> {
         let c = self.event_columns;
         if !c.usable() {
             self.skip(n, "unusable Events Format line");
-            return;
+            return Ok(());
         }
         let (mut start, mut end, mut style, mut text) = (None, None, "", None);
         for (i, field) in body.splitn(c.count, ',').enumerate() {
@@ -289,21 +290,22 @@ impl<'a> Reader<'a> {
         }
         let (Some(start), Some(end), Some(text)) = (start, end, text) else {
             self.skip(n, "too few fields");
-            return;
+            return Ok(());
         };
         let (start_ms, end_ms) = match span(start, end) {
             Ok(span) => span,
             Err(fault) => {
                 self.skip(n, fault.message());
-                return;
+                return Ok(());
             }
         };
         let home = self.base(style);
-        let scene = self.scene(text, home);
+        let scene = self.scene(text, home, budget)?;
         // A cue with no text is dropped without a report, as in the SRT reader.
         if scene.lines.is_empty() {
-            return;
+            return Ok(());
         }
+        budget.charge()?;
         for loss in scene.lost {
             *self.losses.entry(loss).or_insert(0) += 1;
         }
@@ -313,6 +315,7 @@ impl<'a> Reader<'a> {
             top: scene.top,
             lines: scene.lines,
         });
+        Ok(())
     }
 
     /// The style a name refers to: the named one, else `Default`, else plain.
@@ -326,13 +329,13 @@ impl<'a> Reader<'a> {
 
     /// Splits the text of one Dialogue line into its lines and runs, applying
     /// its overrides. `home` is the cue's own style, which `\r` returns to.
-    fn scene(&self, text: &str, home: Base) -> Scene {
+    fn scene(&self, text: &str, home: Base, budget: &mut Budget) -> Result<Scene, ReadError> {
         let mut scene = Scene::new(home, self.wrap_newlines);
         // Once a search for `}` fails, no later `{` can close either.
         let mut no_close = false;
         let mut rest = text;
         while let Some(i) = rest.find(['{', '\\']) {
-            scene.emit(&rest[..i]);
+            scene.emit(&rest[..i], budget)?;
             let tail = &rest[i..];
             if let Some(after) = tail.strip_prefix('{') {
                 if !no_close {
@@ -343,7 +346,7 @@ impl<'a> Reader<'a> {
                     }
                     no_close = true;
                 }
-                scene.emit("{");
+                scene.emit("{", budget)?;
                 rest = after;
                 continue;
             }
@@ -352,30 +355,30 @@ impl<'a> Reader<'a> {
             // other backslash is text.
             match tail.as_bytes().get(1) {
                 Some(b'N') => {
-                    scene.break_line();
+                    scene.break_line(budget)?;
                     rest = &tail[2..];
                 }
                 Some(b'n') => {
                     if scene.wrap {
-                        scene.break_line();
+                        scene.break_line(budget)?;
                     } else {
-                        scene.emit(" ");
+                        scene.emit(" ", budget)?;
                     }
                     rest = &tail[2..];
                 }
                 Some(b'h') => {
-                    scene.emit("\u{a0}");
+                    scene.emit("\u{a0}", budget)?;
                     rest = &tail[2..];
                 }
                 _ => {
-                    scene.emit("\\");
+                    scene.emit("\\", budget)?;
                     rest = &tail[1..];
                 }
             }
         }
-        scene.emit(rest);
-        scene.break_line();
-        scene
+        scene.emit(rest, budget)?;
+        scene.break_line(budget)?;
+        Ok(scene)
     }
 
     /// One override tag (without its backslash) applied to the scene.
@@ -463,19 +466,22 @@ impl Scene {
         }
     }
 
-    fn emit(&mut self, text: &str) {
+    fn emit(&mut self, text: &str, budget: &mut Budget) -> Result<(), ReadError> {
         if !self.drawing {
-            push_text(&mut self.runs, self.style, text);
+            push_text(&mut self.runs, self.style, text, budget)?;
         }
+        Ok(())
     }
 
-    fn break_line(&mut self) {
+    fn break_line(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         if !self.runs.is_empty() {
+            budget.charge()?;
             self.lines.push(Line {
                 voice: None,
                 runs: std::mem::take(&mut self.runs),
             });
         }
+        Ok(())
     }
 
     /// Each loss is counted once per cue, so it is recorded once here.

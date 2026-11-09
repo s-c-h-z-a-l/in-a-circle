@@ -227,7 +227,7 @@ fn voice_tag_sets_the_line_voice() {
             .iter()
             .map(|l| {
                 let text: String = l.runs.iter().map(|r| r.text.as_str()).collect();
-                (l.voice.clone(), text)
+                (l.voice.as_deref().map(String::from), text)
             })
             .collect()
     };
@@ -454,4 +454,27 @@ fn spans_are_read_in_file_order() {
     let parsed =
         read("WEBVTT\n\n00:00:05.000 --> 00:00:09.000\nA\n\n00:00:02.000 --> 00:00:03.000\nB\n");
     assert_eq!(spans(&parsed), vec![(5_000, 9_000), (2_000, 3_000)]);
+}
+
+/// The densest line shape: one cue of `x` lines, two bytes each, refused whole
+/// past the item budget (see the SRT test of the same name).
+#[test]
+fn dense_one_cue_of_tiny_lines_is_refused() {
+    let header = "WEBVTT\n\n00:00.000 --> 00:00.001\n";
+    let text = format!("{header}{}", "x\n".repeat((INPUT_BYTES - header.len()) / 2));
+    assert!(text.len() <= INPUT_BYTES);
+    assert_eq!(read_vtt(text.as_bytes()), Err(ReadError::TooComplex));
+}
+
+/// The densest real file: the smallest WebVTT cues, 27 bytes each, about
+/// 310,000 cues of three items. It fits, and every cue is kept.
+#[test]
+fn densest_real_file_still_fits() {
+    let cue = "00:00.000 --> 00:00.001\nx\n\n";
+    let head = "WEBVTT\n\n";
+    let count = (INPUT_BYTES - head.len()) / cue.len();
+    let text = format!("{head}{}", cue.repeat(count));
+    let parsed = read_vtt(text.as_bytes()).expect("the densest real file fits");
+    assert_eq!(parsed.cues.len(), count);
+    assert!(3 * count <= subtitles::ITEM_BUDGET);
 }

@@ -23,6 +23,15 @@ const DATA_LIMIT: u64 = 1 << 30;
 /// The engine's `RLIMIT_FSIZE` floor, 256 MiB.
 const FSIZE_LIMIT: u64 = 256 << 20;
 
+/// The `fail` text of an input over the reader's item budget.
+const TOO_COMPLEX: &str = "too many lines and styled runs (more than 2,000,000)";
+
+/// Peak RSS a run may reach. The item budget bounds the readers at about
+/// 220 MiB (`ITEM_BUDGET`), plus the 8 MiB input and the allocator's slack;
+/// 400 MiB is that with room to spare and far under the 1 GiB net. Past it the
+/// budget no longer bounds memory, so the run fails.
+const PEAK_CEILING: u64 = 400 << 20;
+
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// A unique temporary directory, removed on drop.
@@ -516,12 +525,17 @@ fn output_past_the_file_size_limit_fails_alone() {
 ///
 /// Shapes: the smallest SRT, WebVTT and ASS cues (about 27 B each, so about
 /// 310,000 cues), and the most lines per byte (a single cue of `x` lines, two
-/// bytes each in SRT and WebVTT, three in ASS with `\N`). Measured on the
-/// reference desktop, release and test builds alike (peak RSS, wall): SRT
-/// cues 138 MiB, 0.2 s; SRT lines 906 MiB, 0.4 s; WebVTT cues 138 MiB; ASS
-/// cues 87 MiB; ASS lines 608 MiB, 0.3 s. The line shapes hold one reader
-/// `Line` and one `Vec<Run>` (capacity four) per line, so their peak grows
-/// with the line count, not with the cue count.
+/// bytes each in SRT and WebVTT, three in ASS with `\N`). The cue shapes are
+/// kept; the two line shapes are over the item budget and are refused.
+///
+/// Peak RSS before the item budget (reference desktop, release and test builds
+/// alike, wall): SRT cues 138 MiB, 0.2 s; SRT lines 906 MiB, 0.4 s; WebVTT cues
+/// 138 MiB; ASS cues 87 MiB; ASS lines 608 MiB, 0.3 s. The line shapes hold one
+/// reader `Line` and one `Vec<Run>` (capacity four) per line, so their peak
+/// grows with the line count, not with the cue count.
+///
+/// The same five shapes after the budget, test build on the development
+/// machine (the figures printed by this test): see `docs/resource-limits.md`.
 #[test]
 fn dense_8_mib_input_stays_within_the_data_limit() {
     let root = tmp("dense");
@@ -543,34 +557,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
         "{ass_head}Dialogue: 0,0:00:00.00,0:00:00.01,,,0,0,0,,{}\n",
         "x\\N".repeat((INPUT_BYTES - ass_head.len() - 50) / 3)
     );
-    let shapes: [(&str, &str, Vec<u8>); 5] = [
+    // Each shape says whether its reader keeps it. The two line shapes are
+    // over the item budget and are refused whole, with nothing written.
+    let shapes: [(&str, &str, Vec<u8>, bool); 5] = [
         (
             "subtitles.srt-to-vtt",
             "srt-cues.srt",
             srt_cues.into_bytes(),
+            true,
         ),
         (
             "subtitles.srt-to-vtt",
             "srt-lines.srt",
             srt_lines.into_bytes(),
+            false,
         ),
         (
             "subtitles.vtt-to-srt",
             "vtt-cues.vtt",
             format!("WEBVTT\n\n{vtt_cues}").into_bytes(),
+            true,
         ),
         (
             "subtitles.ass-to-srt",
             "ass-cues.ass",
             format!("{ass_head}{ass_cues}").into_bytes(),
+            true,
         ),
         (
             "subtitles.ass-to-vtt",
             "ass-lines.ass",
             ass_lines.into_bytes(),
+            false,
         ),
     ];
-    for (id, name, mut bytes) in shapes {
+    for (id, name, mut bytes, kept) in shapes {
         assert!(bytes.len() <= INPUT_BYTES, "{name} is {} B", bytes.len());
         // Pad to the limit exactly with blank lines, which end no cue.
         bytes.resize(INPUT_BYTES, b'\n');
@@ -579,15 +600,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
         let (o, peak_kib) = run_measured(id, &work, &input);
         let elapsed: Duration = started.elapsed();
         let out = stdout(&o);
-        assert_eq!(
-            o.status.code(),
-            Some(0),
-            "{name}: {}\n{out}",
-            String::from_utf8_lossy(&o.stderr)
+        if kept {
+            assert_eq!(
+                o.status.code(),
+                Some(0),
+                "{name}: {}\n{out}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            assert_eq!(lines(&out, "done").len(), 1, "{name}: {out}");
+        } else {
+            assert_eq!(o.status.code(), Some(1), "{name}: {out}");
+            assert_eq!(lines(&out, "fail")[0][2], TOO_COMPLEX, "{name}: {out}");
+            assert!(files(&work).is_empty(), "{name}: a refused input wrote");
+        }
+        assert!(
+            peak_kib * 1024 <= PEAK_CEILING,
+            "{name}: peak RSS {peak_kib} KiB is past the ceiling"
         );
-        assert_eq!(lines(&out, "done").len(), 1, "{name}: {out}");
         eprintln!(
-            "dense {name}: {} B in, peak RSS {} KiB ({:.1} MiB), wall {:.2} s",
+            "dense {name}: {} B in, kept {kept}, peak RSS {} KiB ({:.1} MiB), wall {:.2} s",
             bytes.len(),
             peak_kib,
             peak_kib as f64 / 1024.0,
@@ -597,6 +628,76 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
             fs::remove_file(f.0).unwrap();
         }
     }
+}
+
+/// Each format refuses an input over the item budget with `fail`, and leaves
+/// nothing. The VTT line shape is not in the dense test, so it is here.
+#[test]
+fn too_complex_fails_and_leaves_nothing() {
+    let root = tmp("complex");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let srt = format!(
+        "1\n0:00:00,0 --> 0:00:00,1\n{}",
+        "x\n".repeat((INPUT_BYTES - 27) / 2)
+    );
+    let vtt = format!(
+        "WEBVTT\n\n00:00.000 --> 00:00.001\n{}",
+        "x\n".repeat((INPUT_BYTES - 40) / 2)
+    );
+    let ass_head = "[Events]\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:00.01,";
+    let ass = format!(
+        "{ass_head}{}\n",
+        "x\\N".repeat((INPUT_BYTES - ass_head.len() - 1) / 3)
+    );
+    let cases = [
+        ("subtitles.srt-to-vtt", "a.srt", srt),
+        ("subtitles.vtt-to-srt", "b.vtt", vtt),
+        ("subtitles.ass-to-srt", "c.ass", ass),
+    ];
+    for (id, name, text) in cases {
+        assert!(text.len() <= INPUT_BYTES, "{name}");
+        let input = put(&root, name, text.as_bytes());
+        let o = run(id, &work, &[&input]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(1), "{name}: {out}");
+        assert_eq!(lines(&out, "fail")[0][2], TOO_COMPLEX, "{name}: {out}");
+        assert!(lines(&out, "done").is_empty(), "{name}: {out}");
+        assert!(files(&work).is_empty(), "{name}: a refused input wrote");
+    }
+}
+
+/// A speaker's name is shared by the lines of its cue, not copied into each.
+/// Here a 2 MiB name spans 200 lines: a copy per line would hold 400 MiB at
+/// once, and the shared name holds one copy. The output is then past its
+/// ceiling (200 names of 2 MiB), so the run fails after parsing, which is
+/// where the memory is spent.
+#[test]
+fn long_voice_name_is_shared_not_copied() {
+    let root = tmp("voice");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let name = "N".repeat(2 * MIB);
+    let text = format!(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\n<v {name}>\n{}",
+        "x\n".repeat(200)
+    );
+    let input = put(&root, "voice.vtt", text.as_bytes());
+    let (o, peak_kib) = run_measured("subtitles.vtt-to-srt", &work, &input);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "subtitle output would be larger than 32 MiB",
+        "{out}"
+    );
+    assert!(files(&work).is_empty());
+    // One copy is about 2 MiB and the rest is the lines: 100 MiB is far
+    // above that and far below the 400 MiB of a copy per line.
+    assert!(
+        peak_kib < 100 * 1024,
+        "peak RSS {peak_kib} KiB: the voice name was copied per line"
+    );
 }
 
 /// Runs the action with the memory net and the file-size floor the sandbox

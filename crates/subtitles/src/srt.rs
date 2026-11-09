@@ -7,7 +7,7 @@
 //!   comes before it; a line that only contains `-->` is text.
 //! - Timing: `H+:MM:SS,mmm` (`.` also accepted). Minutes and seconds take one
 //!   or two digits; the milliseconds are read as an integer, so `,5` is 5 ms.
-//!   Coordinates after the end time are dropped.
+//!   Coordinates after the end time are dropped, a `Position` loss per cue.
 //! - Markup: `<i> <b> <u>` and their `{\i1}`-style forms (`0` switches them
 //!   off), `{\an7}`/`{\an8}`/`{\an9}` for a top cue, `<font>` (its text stays,
 //!   the styling is reported), other `<…>` tags (dropped, text kept), and other
@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Cue, Line, Loss, MAX_MS, Parsed, Run, Skipped};
+use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped};
 
 const MS_PER_SECOND: u64 = 1_000;
 const MS_PER_MINUTE: u64 = 60 * MS_PER_SECOND;
@@ -50,12 +50,12 @@ impl Fault {
 }
 
 /// Reads a whole SRT text (BOM already removed). Cues come out in file order.
-pub(crate) fn parse(text: &str) -> Parsed {
+pub(crate) fn parse(text: &str, budget: &mut Budget) -> Result<Parsed, ReadError> {
     let mut reader = Reader::default();
     for (i, line) in lines(text).enumerate() {
-        reader.line(i + 1, line.trim());
+        reader.line(i + 1, line.trim(), budget)?;
     }
-    reader.finish()
+    reader.finish(budget)
 }
 
 /// Lines split at LF, CRLF or a lone CR. A final line break ends the last
@@ -108,10 +108,10 @@ pub(crate) const STRAY: &str = "text outside any cue";
 
 impl<'a> Reader<'a> {
     /// `line` is trimmed; `n` is its 1-based line number.
-    fn line(&mut self, n: usize, line: &'a str) {
+    fn line(&mut self, n: usize, line: &'a str, budget: &mut Budget) -> Result<(), ReadError> {
         if line.is_empty() {
-            self.flush_index();
-            self.close();
+            self.flush_index(budget)?;
+            self.close(budget)?;
             self.flush_stray();
         } else if self.open.is_none() {
             // Between cues a timing line opens a cue, even a broken one, so
@@ -126,20 +126,21 @@ impl<'a> Reader<'a> {
             // Inside a cue only a well-formed timing line starts the next
             // one. `a --> b` and a broken timing are text.
             self.index = None;
-            self.close();
+            self.close(budget)?;
             self.start(n, line);
         } else {
-            self.flush_index();
+            self.flush_index(budget)?;
             if number(line).is_some() {
                 self.index = Some(line);
             } else {
-                self.add(line);
+                self.add(line, budget)?;
             }
         }
+        Ok(())
     }
 
     fn start(&mut self, n: usize, line: &str) {
-        self.open = Some(Open {
+        let mut open = Open {
             at_line: n,
             span: span(line),
             style: Style::default(),
@@ -147,40 +148,53 @@ impl<'a> Reader<'a> {
             drawing: false,
             lost: Vec::new(),
             lines: Vec::new(),
-        });
-    }
-
-    fn flush_index(&mut self) {
-        if let Some(line) = self.index.take() {
-            self.add(line);
+        };
+        // Coordinates are the tokens after the end time. They are dropped,
+        // and the loss is counted once per cue when the cue is kept.
+        if line
+            .split_once("-->")
+            .is_some_and(|(_, end)| end.split_whitespace().nth(1).is_some())
+        {
+            open.lose(Loss::Position);
         }
+        self.open = Some(open);
     }
 
-    fn add(&mut self, line: &str) {
+    fn flush_index(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
+        if let Some(line) = self.index.take() {
+            self.add(line, budget)?;
+        }
+        Ok(())
+    }
+
+    fn add(&mut self, line: &str, budget: &mut Budget) -> Result<(), ReadError> {
         if let Some(open) = self.open.as_mut() {
-            let runs = markup(line, open);
+            let runs = markup(line, open, budget)?;
             if !runs.is_empty() {
+                budget.charge()?;
                 open.lines.push(Line { voice: None, runs });
             }
         }
+        Ok(())
     }
 
     /// Ends the open cue. A cue with no text is dropped without a report: it
     /// has nothing to show, and the writers would drop it too.
-    fn close(&mut self) {
+    fn close(&mut self, budget: &mut Budget) -> Result<(), ReadError> {
         let Some(open) = self.open.take() else {
-            return;
+            return Ok(());
         };
         let (start_ms, end_ms) = match open.span {
             Ok(span) => span,
             Err(fault) => {
                 self.skip(open.at_line, fault.message());
-                return;
+                return Ok(());
             }
         };
         if open.lines.is_empty() {
-            return;
+            return Ok(());
         }
+        budget.charge()?;
         for loss in open.lost {
             *self.losses.entry(loss).or_insert(0) += 1;
         }
@@ -190,6 +204,7 @@ impl<'a> Reader<'a> {
             top: open.top,
             lines: open.lines,
         });
+        Ok(())
     }
 
     /// Text between cues. A block is not a cue, so it is never shown and never
@@ -220,15 +235,15 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn finish(mut self) -> Parsed {
-        self.flush_index();
-        self.close();
+    fn finish(mut self, budget: &mut Budget) -> Result<Parsed, ReadError> {
+        self.flush_index(budget)?;
+        self.close(budget)?;
         self.flush_stray();
-        Parsed {
+        Ok(Parsed {
             cues: self.cues,
             losses: self.losses,
             skipped: self.skipped,
-        }
+        })
     }
 }
 
@@ -327,12 +342,12 @@ fn small(s: &str) -> Option<u64> {
 
 /// Splits one text line into runs, applying and removing its markup. The
 /// style carries across the lines of a cue, as players do.
-fn markup(line: &str, open: &mut Open) -> Vec<Run> {
+fn markup(line: &str, open: &mut Open, budget: &mut Budget) -> Result<Vec<Run>, ReadError> {
     let mut runs = Vec::new();
     let mut scan = Scan::default();
     let mut rest = line;
     while let Some(i) = rest.find(['<', '{']) {
-        emit(&mut runs, open, &rest[..i]);
+        emit(&mut runs, open, &rest[..i], budget)?;
         let tail = &rest[i..];
         let len = if tail.starts_with('<') {
             tag_len(tail, &mut scan)
@@ -346,20 +361,26 @@ fn markup(line: &str, open: &mut Open) -> Vec<Run> {
             }
             // The opener is text. It is one byte, `<` or `{`.
             None => {
-                emit(&mut runs, open, &tail[..1]);
+                emit(&mut runs, open, &tail[..1], budget)?;
                 rest = &tail[1..];
             }
         }
     }
-    emit(&mut runs, open, rest);
-    runs
+    emit(&mut runs, open, rest, budget)?;
+    Ok(runs)
 }
 
 /// Adds text to the line unless the cue is in drawing mode.
-fn emit(runs: &mut Vec<Run>, open: &Open, text: &str) {
+fn emit(
+    runs: &mut Vec<Run>,
+    open: &Open,
+    text: &str,
+    budget: &mut Budget,
+) -> Result<(), ReadError> {
     if !open.drawing {
-        push_text(runs, open.style, text);
+        push_text(runs, open.style, text, budget)?;
     }
+    Ok(())
 }
 
 /// Length of a tag starting at `tail`: `<`, an optional `/`, an ASCII letter,
@@ -455,10 +476,16 @@ fn block(inner: &str, open: &mut Open) {
 }
 
 /// Appends text in `style`, merging it into the last run when the style is
-/// the same, so a line has one run per style change.
-pub(crate) fn push_text(runs: &mut Vec<Run>, style: Style, text: &str) {
+/// the same, so a line has one run per style change. A new run is charged to
+/// the budget before its text is copied.
+pub(crate) fn push_text(
+    runs: &mut Vec<Run>,
+    style: Style,
+    text: &str,
+    budget: &mut Budget,
+) -> Result<(), ReadError> {
     if text.is_empty() {
-        return;
+        return Ok(());
     }
     match runs.last_mut() {
         Some(run)
@@ -467,11 +494,15 @@ pub(crate) fn push_text(runs: &mut Vec<Run>, style: Style, text: &str) {
         {
             run.text.push_str(text);
         }
-        _ => runs.push(Run {
-            text: text.to_owned(),
-            italic: style.italic,
-            bold: style.bold,
-            underline: style.underline,
-        }),
+        _ => {
+            budget.charge()?;
+            runs.push(Run {
+                text: text.to_owned(),
+                italic: style.italic,
+                bold: style.bold,
+                underline: style.underline,
+            });
+        }
     }
+    Ok(())
 }

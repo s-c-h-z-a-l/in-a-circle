@@ -650,3 +650,39 @@ fn ffmpeg_agrees_on_times_and_text() {
     // pass, so the floor is the number of agreement files.
     assert!(compared >= 3, "compared {compared} files");
 }
+
+/// The densest line shape: one cue of `x` lines, two bytes each. Every line
+/// is a line and a run, so the input passes the item budget after about a
+/// million lines and is refused whole. Nothing is kept.
+#[test]
+fn dense_one_cue_of_tiny_lines_is_refused() {
+    let header = "1\n0:00:00,0 --> 0:00:00,1\n";
+    let text = format!("{header}{}", "x\n".repeat((INPUT_BYTES - header.len()) / 2));
+    assert!(text.len() <= INPUT_BYTES);
+    assert_eq!(read_srt(text.as_bytes()), Err(ReadError::TooComplex));
+}
+
+/// The densest real file: the smallest SRT cues, 27 bytes each (a timing line,
+/// one line of one run, and a blank line), about 310,000 cues of three items.
+/// That is under the budget, and every cue is kept.
+#[test]
+fn densest_real_file_still_fits() {
+    let cue = "0:00:00,0 --> 0:00:00,1\nx\n\n";
+    let count = INPUT_BYTES / cue.len();
+    let parsed = read_srt(cue.repeat(count).as_bytes()).expect("the densest real file fits");
+    assert_eq!(parsed.cues.len(), count);
+    assert!(3 * count <= subtitles::ITEM_BUDGET);
+}
+
+/// Coordinates after the end time are dropped and reported as `Position`,
+/// once per cue that has them. A cue without them reports nothing.
+#[test]
+fn srt_coordinates_report_position_loss() {
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000 X1:100 X2:200 Y1:10 Y2:20\nhi\nthere\n\n\
+         2\n00:00:03,000 --> 00:00:04,000\nplain\n\n\
+         3\n00:00:05,000 --> 00:00:06,000 X1:5\nlast\n",
+    );
+    assert_eq!(texts(&parsed), vec!["hi\nthere", "plain", "last"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Position, 2)]));
+}

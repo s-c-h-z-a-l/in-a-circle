@@ -667,7 +667,11 @@ are in `CLAUDE.md`.
   `text/vtt` (WebVTT) and `text/x-ssa` (ASS and SSA). All are `cost=10`,
   `lossy=yes` (a drawing is dropped and a speaker's name becomes text) and
   `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
-  is larger than 8 MiB`) before any parsing. A file that is not UTF-8 fails
+  is larger than 8 MiB`) before any parsing. The readers store at most
+  2,000,000 items (each cue, line and run is one), each charged before it is
+  stored; past it the input fails with `too many lines and styled runs (more
+  than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
+  the lines of its cue. A file that is not UTF-8 fails
   with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
   with no usable cue fails with `no subtitles found`. The output is counted as
   it is written: past 32 MiB the input fails with `subtitle output would be
@@ -680,7 +684,7 @@ are in `CLAUDE.md`.
   - **SRT** follows the players (a differential test pins it to ffmpeg): LF,
     CRLF or CR line ends; the cue number is ignored; `H+:MM:SS,mmm` (a `.` is
     accepted, and milliseconds are read as an integer); the coordinates after
-    the end time are dropped without a `warn`. `<i> <b> <u>` and their
+    the end time are dropped, which is `Position` (once per cue). `<i> <b> <u>` and their
     `{\i1}`-style forms are kept; `{\an7}` to `{\an9}` make a top cue. `<font>`
     keeps its text and is `Styling`; other tags are dropped with their text
     kept. `{\pos}` and `{\move}` are `Position`, `{\k}` is `Karaoke`, a

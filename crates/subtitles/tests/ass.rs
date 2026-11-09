@@ -897,3 +897,29 @@ fn overlapping_cues_sorted_stably() {
     // Cues that start together keep their file order: B before D, A before C.
     assert_eq!(texts(&parsed), vec!["B", "D", "A", "C"]);
 }
+
+/// The densest line shape: `x\N` is a run and a line per three bytes, so the
+/// input is over the item budget long before its end and is refused whole.
+#[test]
+fn dense_one_cue_of_tiny_lines_is_refused() {
+    let head = "[Events]\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:00.01,";
+    let text = format!(
+        "{head}{}\n",
+        "x\\N".repeat((INPUT_BYTES - head.len() - 1) / 3)
+    );
+    assert!(text.len() <= INPUT_BYTES);
+    assert_eq!(read_ass(text.as_bytes()), Err(ReadError::TooComplex));
+}
+
+/// The densest real file: the smallest ASS dialogues, 34 bytes each, about
+/// 247,000 cues of three items. It fits, and every cue is kept.
+#[test]
+fn densest_real_file_still_fits() {
+    let head = "[Events]\nFormat: Start, End, Text\n";
+    let cue = "Dialogue: 0:00:00.00,0:00:00.01,x\n";
+    let count = (INPUT_BYTES - head.len()) / cue.len();
+    let text = format!("{head}{}", cue.repeat(count));
+    let parsed = read_ass(text.as_bytes()).expect("the densest real file fits");
+    assert_eq!(parsed.cues.len(), count);
+    assert!(3 * count <= subtitles::ITEM_BUDGET);
+}
