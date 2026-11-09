@@ -1377,9 +1377,9 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, `book` = east, labelled `Book`, and `encoding` = west,
-  labelled `Encoding`; an unknown `group` is not
-  shown, one stderr line per run). A category is **lit** when any dragged
+  `Document`, `book` = east, labelled `Book`, `encoding` = west, labelled
+  `Encoding`, and `subtitles` = south, labelled `Subtitles`; an unknown
+  `group` is not shown, one stderr line per run). A category is **lit** when any dragged
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
@@ -1389,7 +1389,11 @@ compositor.
   and nothing in Book; a file that is not valid UTF-8 text (`text/x-8bit`)
   lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
   `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
-  leaves Encoding dim; `pdf` north and `cbz` south in Book; `cbz` has no
+  leaves Encoding dim; a subtitle lights only Subtitles (south): `vtt-srt`
+  (VTT from SRT) and `vtt-ass` (VTT from ASS) share its north slot, `srt-vtt`
+  (SRT from VTT) and `srt-ass` (SRT from ASS) its south slot, so an SRT
+  offers VTT north only, a VTT SRT south only, and an ASS both; `pdf` north
+  and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped

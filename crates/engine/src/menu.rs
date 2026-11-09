@@ -38,6 +38,9 @@ pub struct Group {
 /// of an action in this group, so the engine's caller shares the id.
 pub const ENCODING_GROUP: &str = "encoding";
 
+/// The id of the Subtitles group (SRT, VTT and ASS conversions).
+pub const SUBTITLES_GROUP: &str = "subtitles";
+
 pub const GROUPS: &[Group] = &[
     Group {
         id: "document",
@@ -49,12 +52,18 @@ pub const GROUPS: &[Group] = &[
         label: "Book",
         direction: 2,
     },
-    // West: the one free direction in the muscle-memory layout (north
-    // Document, east Book); an 8-bit text file lights only this group.
+    // West and south are the free directions of the muscle-memory layout
+    // (north Document, east Book). An 8-bit text file lights only Encoding,
+    // a subtitle file only Subtitles.
     Group {
         id: ENCODING_GROUP,
         label: "Encoding",
         direction: 6,
+    },
+    Group {
+        id: SUBTITLES_GROUP,
+        label: "Subtitles",
+        direction: 4,
     },
 ];
 
@@ -193,6 +202,48 @@ pub const PRESETS: &[Preset] = &[
         group: ENCODING_GROUP,
         join: &[],
         action: Some("text.iso88592-to-utf8"),
+    },
+    // Subtitles: SRT (south) and VTT (north) from either other format; an
+    // ASS file lights both slices. The planner finds each converter.
+    Preset {
+        id: "srt-vtt",
+        input: Some("text/vtt"),
+        output: "application/x-subrip",
+        label: "SRT",
+        direction: 4,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
+    },
+    Preset {
+        id: "srt-ass",
+        input: Some("text/x-ssa"),
+        output: "application/x-subrip",
+        label: "SRT",
+        direction: 4,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
+    },
+    Preset {
+        id: "vtt-srt",
+        input: Some("application/x-subrip"),
+        output: "text/vtt",
+        label: "VTT",
+        direction: 0,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
+    },
+    Preset {
+        id: "vtt-ass",
+        input: Some("text/x-ssa"),
+        output: "text/vtt",
+        label: "VTT",
+        direction: 0,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
     },
 ];
 
@@ -1081,8 +1132,9 @@ mod tests {
         let g = groups(&two_way(), &tally(&[("a.txt", "text/plain")]));
         let s = g[0].as_ref().unwrap();
         assert_eq!((s.group, s.label, s.lit), ("document", "Document", true));
-        // Book is on the wheel too, dim: nothing here is a comic book.
-        assert_eq!(g.iter().flatten().count(), 3);
+        // Book and Subtitles are on the wheel too, dim: nothing here is a
+        // comic book or a subtitle.
+        assert_eq!(g.iter().flatten().count(), 4);
         assert!(!g[2].as_ref().unwrap().lit);
     }
 
@@ -1163,6 +1215,94 @@ mod tests {
         // And an 8-bit file lights no other group.
         let g = groups(&encoding_catalog(), &tally(&[("a.srt", "text/x-8bit")]));
         assert!(!g[0].as_ref().unwrap().lit && !g[2].as_ref().unwrap().lit);
+    }
+
+    /// The four subtitle actions, each in the group its manifest names.
+    fn subtitle_catalog() -> Catalog {
+        let mut cat = Catalog { actions: vec![] };
+        for (id, input, output) in [
+            ("subtitles.srt-to-vtt", "application/x-subrip", "text/vtt"),
+            ("subtitles.vtt-to-srt", "text/vtt", "application/x-subrip"),
+            ("subtitles.ass-to-srt", "text/x-ssa", "application/x-subrip"),
+            ("subtitles.ass-to-vtt", "text/x-ssa", "text/vtt"),
+        ] {
+            let mut a = act(id, input, output, 10, true);
+            a.group = "subtitles".into();
+            cat.actions.push(a);
+        }
+        cat
+    }
+
+    /// The lit targets of a level-2 wheel: (direction, preset). A dim slice
+    /// is drawn but takes no click, so it is not in this list.
+    fn lit_targets(o: &Offer) -> Vec<(usize, &'static str)> {
+        o.slices
+            .iter()
+            .enumerate()
+            .filter_map(|(k, s)| {
+                s.as_ref()
+                    .filter(|s| s.disabled.is_none())
+                    .map(|s| (k, s.preset))
+            })
+            .collect()
+    }
+
+    /// Subtitles is the south category: lit for every subtitle type.
+    #[test]
+    fn subtitles_group_south() {
+        let g = GROUPS.iter().find(|g| g.id == "subtitles").unwrap();
+        assert_eq!((g.label, g.direction), ("Subtitles", 4));
+        let cat = subtitle_catalog();
+        for (name, mime) in [
+            ("Film.srt", "application/x-subrip"),
+            ("Film.vtt", "text/vtt"),
+            ("Film.ass", "text/x-ssa"),
+        ] {
+            let g = groups(&cat, &tally(&[(name, mime)]));
+            let s = g[4].as_ref().unwrap();
+            assert_eq!((s.group, s.label, s.lit), ("subtitles", "Subtitles", true));
+        }
+    }
+
+    /// An SRT lights only VTT (north), a VTT only SRT (south), and an ASS
+    /// both: SRT from ASS in south, VTT from ASS in north.
+    #[test]
+    fn srt_offers_only_vtt_vtt_offers_only_srt_ass_offers_both() {
+        let cat = subtitle_catalog();
+        let srt = offer_group(
+            &cat,
+            &tally(&[("Film.srt", "application/x-subrip")]),
+            "subtitles",
+        );
+        assert_eq!(lit_targets(&srt), [(0, "vtt-srt")]);
+        let s = srt.slices[0].as_ref().unwrap();
+        assert_eq!((s.label.as_str(), s.applicable), ("VTT", 1));
+        let vtt = offer_group(&cat, &tally(&[("Film.vtt", "text/vtt")]), "subtitles");
+        assert_eq!(lit_targets(&vtt), [(4, "srt-vtt")]);
+        let s = vtt.slices[4].as_ref().unwrap();
+        assert_eq!((s.label.as_str(), s.applicable), ("SRT", 1));
+        let ass = offer_group(&cat, &tally(&[("Film.ass", "text/x-ssa")]), "subtitles");
+        assert_eq!(lit_targets(&ass), [(0, "vtt-ass"), (4, "srt-ass")]);
+        let s = ass.slices[4].as_ref().unwrap();
+        assert_eq!((s.label.as_str(), s.applicable), ("SRT", 1));
+    }
+
+    /// UTF-8 text is not a subtitle: Subtitles stays dim and no target
+    /// lights, for a `.srt` the classifier left as plain text too.
+    #[test]
+    fn utf8_text_files_do_not_offer_subtitles() {
+        let cat = subtitle_catalog();
+        for (n, m) in [
+            ("a.srt", "text/plain"),
+            ("a.vtt", "text/plain"),
+            ("a.txt", "text/markdown"),
+            ("a.srt", "text/x-8bit"),
+        ] {
+            let t = tally(&[(n, m)]);
+            assert!(!groups(&cat, &t)[4].as_ref().unwrap().lit, "{n}");
+            let o = offer_group(&cat, &t, "subtitles");
+            assert!(lit_targets(&o).is_empty(), "{n}");
+        }
     }
 
     const fn named(id: &'static str, action: &'static str, direction: u8) -> Preset {
