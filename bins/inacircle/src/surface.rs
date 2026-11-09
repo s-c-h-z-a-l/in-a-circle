@@ -1512,7 +1512,8 @@ fn pollfd(fd: RawFd) -> libc::pollfd {
 
 /// Most globals kept from the registry; past it the compositor is broken.
 const MAX_GLOBALS: usize = 256;
-/// Most MIME types kept per data offer.
+/// Most MIME types kept per data offer (the uri-list one is always kept):
+/// bounds memory against an offer that never stops; a larger one is cut.
 const MAX_MIMES: usize = 64;
 /// Most data offers alive at once (we destroy every one we are done with).
 const MAX_OFFERS: usize = 16;
@@ -1559,10 +1560,10 @@ impl Offers {
         let Some((_, mimes)) = self.0.iter_mut().find(|o| o.0 == id) else {
             return Ok(());
         };
-        if mimes.len() >= MAX_MIMES {
-            return Err(other(format!(
-                "over {MAX_MIMES} MIME types in a data offer"
-            )));
+        // Past the cap only the type the wheel reads is kept (once): the
+        // rest is never looked at, and an offer with many types is normal.
+        if mimes.len() >= MAX_MIMES && (mime != URI_LIST || mimes.contains(&mime)) {
+            return Ok(());
         }
         mimes.push(mime);
         Ok(())
@@ -2879,11 +2880,15 @@ mod tests {
         for k in 0..MAX_MIMES {
             o.mime(id, format!("type/{k}")).unwrap();
         }
-        assert!(
-            o.mime(id, "one/more".into()).is_err(),
-            "too many MIME types"
-        );
+        // Past the cap a type is dropped, not an error: an offer with many
+        // types must not close the wheel (hardening-2 #1).
+        o.mime(id, "one/more".into()).unwrap();
         assert_eq!(o.mimes(id).len(), MAX_MIMES);
+        // The one type the wheel reads survives the cap, once.
+        o.mime(id, URI_LIST.into()).unwrap();
+        o.mime(id, URI_LIST.into()).unwrap();
+        assert_eq!(o.mimes(id).len(), MAX_MIMES + 1);
+        assert!(o.mimes(id).iter().any(|m| m == URI_LIST));
         // A retired offer frees its slot; MIME types for it are ignored.
         assert!(o.retire(id));
         o.mime(id, "late/type".into()).unwrap();
