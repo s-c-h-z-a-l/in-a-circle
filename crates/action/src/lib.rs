@@ -828,9 +828,14 @@ mod tests {
     #[test]
     fn bounded_read_reports_a_failed_reservation_as_out_of_memory() {
         let mut v: Vec<u8> = Vec::new();
-        let e = grow(&mut v, usize::MAX / 2).unwrap_err();
+        // black_box keeps the reservation alive: unobserved, LLVM drops the malloc and reports Ok.
+        let e = grow(
+            std::hint::black_box(&mut v),
+            std::hint::black_box(usize::MAX / 2),
+        )
+        .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::OutOfMemory);
-        assert!(v.is_empty());
+        assert!(std::hint::black_box(&v).is_empty());
     }
 
     #[test]
