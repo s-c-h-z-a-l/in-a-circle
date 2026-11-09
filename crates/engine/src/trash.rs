@@ -784,17 +784,23 @@ fn domain(fd: RawFd) -> io::Result<(u64, u64)> {
 }
 
 /// Filesystems whose rename and ownership semantics are another host's:
-/// NFS, SMB/CIFS (both magics), AFS, Ceph, Coda, FUSE. A group there is
-/// kept rather than trashed under unknown rules.
+/// NFS, SMB/CIFS (both magics), AFS (OpenAFS, kernel kAFS), Ceph, Coda,
+/// FUSE, 9p, and the cluster filesystems GFS2, OCFS2 and Lustre. A group
+/// there is kept rather than trashed under unknown rules.
 const REMOTE_FS: &[u32] = &[
-    0x6969,
-    0x517B,
-    0xFF53_4D42,
-    0xFE53_4D42,
-    0x5346_414F,
-    0x00C3_6400,
-    0x7375_7245,
-    0x6573_5546,
+    0x6969,      // NFS
+    0x517B,      // SMB
+    0xFF53_4D42, // CIFS
+    0xFE53_4D42, // SMB2
+    0x5346_414F, // OpenAFS
+    0x6B41_4653, // kAFS
+    0x00C3_6400, // Ceph
+    0x7375_7245, // Coda
+    0x6573_5546, // FUSE
+    0x0102_1997, // 9p
+    0x0116_1970, // GFS2
+    0x7461_636F, // OCFS2
+    0x0BD0_0BD0, // Lustre
 ];
 
 fn local_fs(fd: RawFd) -> bool {
@@ -2709,6 +2715,17 @@ pub(crate) mod tests {
     fn remote_filesystem_magics_are_refused() {
         for m in REMOTE_FS {
             assert!(remote_magic(*m), "{m:#x}");
+        }
+        // hardening-2 #12: 9p (WSL2 drvfs, QEMU shares), in-kernel kAFS,
+        // and the cluster filesystems GFS2, OCFS2, Lustre.
+        for m in [
+            0x0102_1997,
+            0x6B41_4653,
+            0x0116_1970,
+            0x7461_636F,
+            0x0BD0_0BD0,
+        ] {
+            assert!(remote_magic(m), "{m:#x}");
         }
         for local in [0xEF53, 0x0102_1994, 0x9123_683E, 0x5846_5342, 0x2FC1_2FC1] {
             assert!(!remote_magic(local), "{local:#x}");
