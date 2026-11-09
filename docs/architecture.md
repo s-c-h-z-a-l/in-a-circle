@@ -702,9 +702,10 @@ are in `CLAUDE.md`.
     or in a block already reported, starts a cue: the standard keeps it in the
     block, but a missing blank line must not swallow a cue's text (a deliberate
     deviation). A `line:` setting in the top third makes a top cue; any other
-    placement is `Position`. `<c.class>` is `Styling`, a timestamp tag is
-    `Karaoke` (its text stays), `<v Name>` is the speaker (its classes are not
-    part of the name), and other tags are dropped with their text kept. The
+    placement is `Position`. `<c.class>` and `<v.class>` are `Styling`, a
+    timestamp tag is `Karaoke` (its text stays), `<v Name>` is the speaker (its
+    classes are not part of the name), and other tags are dropped with their
+    text kept. The
     entities `&amp; &lt; &gt; &quot; &apos; &nbsp; &lrm; &rlm;` and numeric
     references (`&#N;`, `&#xH;`) to any valid character but NUL and the line
     breaks are decoded; any other `&name;` stays as written.

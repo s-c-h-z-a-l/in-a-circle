@@ -315,7 +315,19 @@ fn voice_classes_are_not_part_of_the_name() {
         ]
     );
     assert_eq!(texts(&parsed), vec!["It", "It", "It", "It", "styled"]);
-    // Only `<c.class>` is reported as styling; the classes of `<v>` are not.
+    // Classes are styling, on `<v>` as on `<c>`: three classed voice cues and
+    // the `<c.yellow>` cue, one loss per cue.
+    assert_eq!(parsed.losses, losses(&[(Loss::Styling, 4)]));
+}
+
+#[test]
+fn voice_class_is_a_styling_loss_once_per_cue() {
+    // A voice class loses its colour, as `<c.class>` does, and a cue with
+    // several classed voices counts it once. A plain `<v>` loses nothing.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v.a Ann>x</v><v.b Bo>y</v>\n\n00:00:03.000 --> 00:00:04.000\n<v Cy>z</v>\n",
+    );
+    assert_eq!(texts(&parsed), vec!["x\ny", "z"]);
     assert_eq!(parsed.losses, losses(&[(Loss::Styling, 1)]));
 }
 

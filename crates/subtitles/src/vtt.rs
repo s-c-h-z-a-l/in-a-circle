@@ -30,7 +30,8 @@
 //! - Cue text: `<i> <b> <u>` as in SRT. `<v Name>` gives the line its
 //!   speaker (`<v.class Name>` too: the classes are not part of the name), and
 //!   `</v>` ends it, so text after `</v>` on a line is a line of its own.
-//!   `<c.class>` is `Styling`, a timestamp tag is `Karaoke` (its text stays).
+//!   `<c.class>` and `<v.class>` are `Styling`, a timestamp tag is `Karaoke`
+//!   (its text stays).
 //!   Other tags are dropped and their text kept. `&amp;`, `&lt;`, `&gt;`,
 //!   `&quot;`, `&apos;`, `&lrm;`, `&rlm;` and `&nbsp;` are decoded, and so are
 //!   numeric references (`&#N;`, `&#xH;`) to any valid character but NUL and
@@ -624,6 +625,10 @@ fn tag(
         open.style.underline = !closing;
     } else if name.eq_ignore_ascii_case("v") {
         flush(runs, open, budget)?;
+        // A class on a voice is styling, as on `<c.class>`.
+        if !closing && annotation.starts_with('.') {
+            open.lose(Loss::Styling);
+        }
         open.voice = if closing {
             None
         } else {
