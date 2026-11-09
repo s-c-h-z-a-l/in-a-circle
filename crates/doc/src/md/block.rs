@@ -22,13 +22,26 @@ use super::scan::{
 };
 use super::{LinkDef, Refs, decoded_len, inlines, normalize_label, unescape};
 use crate::budget::Meter;
-use crate::{Block, Document};
+use crate::{Align, Block, Document, Inline};
+use crate::{Dialect, ListItem};
 
 const TAB_STOP: usize = 4;
 const CODE_INDENT: usize = 4;
 /// Maximum number of nested block quotes and list items.
 pub(super) const MAX_DEPTH: u32 = 256;
 const ROOT: usize = 0;
+/// Most cells a GFM table row may have: cmark-gfm counts them in a `u16`
+/// and a line with more is not a row (no table opens; an open table ends).
+const MAX_COLUMNS: usize = u16::MAX as usize;
+/// Cells a GFM table may get as padding of short rows before it refuses
+/// further rows: cmark-gfm 0.29.0.gfm.13's `MAX_AUTOCOMPLETED_CELLS`. A
+/// header of many columns over many one-cell rows would otherwise grow the
+/// cells with the product of the two; past it the line ends the table and
+/// starts a paragraph, as in the reference. It equals `Limits::DEFAULT.nodes`
+/// (2^19) and every padded cell charges a node, so under the default limits
+/// the node budget always stops first: the cap only bounds the unbudgeted
+/// `read`/`read_with`, per table.
+const MAX_PADDING_CELLS: usize = 0x80000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Marker {
@@ -71,6 +84,17 @@ enum Kind {
     },
     HtmlBlock(u8),
     ThematicBreak,
+    /// GFM; a paragraph whose next line was a matching delimiter row. Cells
+    /// are raw (pipe escapes taken off, trimmed) until the conversion reads
+    /// their inlines; every row has `align.len()` cells.
+    Table {
+        align: Vec<Align>,
+        head: Vec<String>,
+        rows: Vec<Vec<String>>,
+        /// Cells taken from the input, header included, for the padding
+        /// cap ([`MAX_PADDING_CELLS`]).
+        filled: usize,
+    },
 }
 
 struct Node {
@@ -85,21 +109,28 @@ struct Node {
     start_line: usize,
     /// Block quotes and list items on the path from the root, self included.
     depth: u32,
+    /// GFM: this paragraph already failed to be a table header, and is not
+    /// tried again (as in cmark-gfm), so no paragraph is rescanned per line.
+    table_tried: bool,
 }
 
 /// Parses `text` (valid UTF-8, NUL already replaced) into a document. The
 /// meter is charged while the arena and the tree are built (`Err` is the
 /// first budget that ran out).
-pub(super) fn parse(text: &str, m: &mut Meter) -> Result<Document, crate::LimitError> {
-    let mut p = run(text, m);
+pub(super) fn parse(
+    text: &str,
+    dialect: Dialect,
+    m: &mut Meter,
+) -> Result<Document, crate::LimitError> {
+    let mut p = run(text, dialect, m);
     let blocks = p.convert_children(ROOT);
     p.m.result()?;
     Ok(Document { blocks })
 }
 
 /// The block phase alone: every block closed, definitions collected.
-fn run<'m>(text: &str, m: &'m mut Meter) -> Parser<'m> {
-    let mut p = Parser::new(m);
+fn run<'m>(text: &str, dialect: Dialect, m: &'m mut Meter) -> Parser<'m> {
+    let mut p = Parser::new(dialect, m);
     let mut line = String::new();
     let mut rest = text;
     while !rest.is_empty() && !p.m.failed() {
@@ -133,6 +164,8 @@ struct Parser<'m> {
     /// The budget; the first failure stops the line loop and the
     /// conversion, and `add_child` stops allocating.
     m: &'m mut Meter,
+    /// Which syntax the block and inline phases read.
+    dialect: Dialect,
     nodes: Vec<Node>,
     refs: Refs,
     /// The innermost open block.
@@ -150,9 +183,10 @@ struct Parser<'m> {
 }
 
 impl<'m> Parser<'m> {
-    fn new(m: &'m mut Meter) -> Self {
+    fn new(dialect: Dialect, m: &'m mut Meter) -> Self {
         Parser {
             m,
+            dialect,
             nodes: vec![Node {
                 kind: Kind::Document,
                 parent: ROOT,
@@ -163,6 +197,7 @@ impl<'m> Parser<'m> {
                 last_line_checked: false,
                 start_line: 0,
                 depth: 0,
+                table_tried: false,
             }],
             refs: Refs::new(),
             current: ROOT,
@@ -319,6 +354,8 @@ impl<'m> Parser<'m> {
                     true
                 }
                 Kind::Heading { .. } => false,
+                // Any line that reads as a row of at least one cell.
+                Kind::Table { .. } => scan_row(&b[self.first_nonspace..], |_, _| {}).is_some(),
                 &Kind::HtmlBlock(t) => t <= 5 || !self.blank,
                 Kind::Paragraph => !self.blank,
                 _ => true,
@@ -445,6 +482,8 @@ impl<'m> Parser<'m> {
                     info: String::new(),
                 };
                 *container = self.add_child(*container, kind);
+            } else if self.dialect == Dialect::Gfm && !indented && self.table_line(*container, b) {
+                // The container (now) is the table; the line is consumed.
             } else {
                 break;
             }
@@ -479,7 +518,15 @@ impl<'m> Parser<'m> {
             && !(matches!(node.kind, Kind::Item(_))
                 && node.children.is_empty()
                 && node.start_line == self.line_number);
-        self.nodes[container].last_line_blank = last_line_blank;
+        self.nodes[container].last_line_blank = match &self.nodes[container].kind {
+            // A table line is consumed whole, so the rest is blank. cmark-gfm
+            // marks the row it made: the header row is the table's child
+            // (the table is marked), a body row is the container (the table
+            // is cleared as its parent). So a header-only table loosens the
+            // list it ends an item of; one with body rows does not.
+            Kind::Table { rows, .. } => rows.is_empty(),
+            _ => last_line_blank,
+        };
         let mut t = container;
         while t != ROOT {
             t = self.nodes[t].parent;
@@ -582,6 +629,7 @@ impl<'m> Parser<'m> {
             last_line_checked: false,
             start_line: self.line_number,
             depth,
+            table_tried: false,
         });
         self.nodes[parent].children.push(id);
         id
@@ -746,6 +794,184 @@ impl<'m> Parser<'m> {
         }
     }
 
+    /// GFM: line `b` as a table line of `container`, as cmark-gfm's table
+    /// extension reads it after every other block start failed: the
+    /// delimiter row that turns paragraph `container` into a table, or a
+    /// body row of table `container`. Whether it was one (then the line is
+    /// consumed).
+    fn table_line(&mut self, container: usize, b: &[u8]) -> bool {
+        match self.nodes[container].kind {
+            Kind::Paragraph => self.table_header(container, b),
+            Kind::Table { .. } => !self.blank && self.table_row(container, b),
+            _ => false,
+        }
+    }
+
+    /// The line is a delimiter row and the last line of paragraph `n` a
+    /// header row of as many cells: `n` becomes the table, and the lines
+    /// before the header a paragraph of their own.
+    fn table_header(&mut self, n: usize, b: &[u8]) -> bool {
+        let line = &b[self.first_nonspace..];
+        if self.nodes[n].table_tried || !scan_table_start(line) {
+            return false;
+        }
+        let Some((_, cols)) = scan_row(line, |_, _| {}) else {
+            return false;
+        };
+        let header = scan_row(self.nodes[n].content.as_bytes(), |_, _| {});
+        let Some((start, _)) = header.filter(|&(_, h)| h == cols) else {
+            self.nodes[n].table_tried = true;
+            return false;
+        };
+        // The paragraph node becomes the table; the header row and its
+        // cells are new nodes, and so is the paragraph before it.
+        let prefix = usize::from(start > 0);
+        if !self.m.nodes(1 + cols + prefix) {
+            return false;
+        }
+        let mut align = Vec::new();
+        let mut head = Vec::new();
+        if align.try_reserve_exact(cols).is_err() || head.try_reserve_exact(cols).is_err() {
+            self.m.fail_allocation();
+            return false;
+        }
+        scan_row(line, |s, len| {
+            let cell = trim_cmark_spaces(&line[s..s + len]);
+            align.push(match (cell.first(), cell.last()) {
+                (Some(b':'), Some(b':')) => Align::Center,
+                (Some(b':'), _) => Align::Left,
+                (_, Some(b':')) => Align::Right,
+                _ => Align::None,
+            });
+        });
+        let content = std::mem::take(&mut self.nodes[n].content);
+        let m = &mut *self.m;
+        scan_row(&content.as_bytes()[start..], |s, len| {
+            head.push(own_cell(m, &content[start + s..start + s + len]));
+        });
+        if start > 0 {
+            let text = unescape_pipes(m, content[..start].trim_matches(is_cmark_space));
+            self.insert_paragraph_before(n, text);
+        }
+        if self.m.failed() {
+            return false;
+        }
+        self.nodes[n].kind = Kind::Table {
+            align,
+            head,
+            rows: Vec::new(),
+            filled: cols,
+        };
+        self.advance_offset(b, b.len() - 1 - self.offset, false);
+        true
+    }
+
+    /// A body row of table `n`: the header's number of cells, the missing
+    /// ones empty, the extra ones dropped.
+    fn table_row(&mut self, n: usize, b: &[u8]) -> bool {
+        let line = &b[self.first_nonspace..];
+        let Kind::Table {
+            align,
+            rows,
+            filled,
+            ..
+        } = &self.nodes[n].kind
+        else {
+            return false;
+        };
+        let cols = align.len();
+        let padded = cols.saturating_mul(rows.len() + 1).saturating_sub(*filled);
+        if padded > MAX_PADDING_CELLS {
+            return false;
+        }
+        let Some((_, found)) = scan_row(line, |_, _| {}) else {
+            return false;
+        };
+        // The row and every cell, padding included, before the row exists.
+        if !self.m.nodes(1 + cols) {
+            return false;
+        }
+        let mut row = Vec::new();
+        if row.try_reserve_exact(cols).is_err() {
+            self.m.fail_allocation();
+            return false;
+        }
+        let text = utf8(line);
+        let m = &mut *self.m;
+        scan_row(line, |s, len| {
+            if row.len() < cols {
+                row.push(own_cell(m, &text[s..s + len]));
+            }
+        });
+        // Within the reserved capacity: no allocation.
+        row.resize_with(cols, String::new);
+        if self.m.failed() {
+            return false;
+        }
+        let Kind::Table { rows, filled, .. } = &mut self.nodes[n].kind else {
+            return false;
+        };
+        if rows.try_reserve(1).is_err() {
+            self.m.fail_allocation();
+            return false;
+        }
+        rows.push(row);
+        *filled += found.min(cols);
+        self.advance_offset(b, b.len() - 1 - self.offset, false);
+        true
+    }
+
+    /// Inserts the closed paragraph `text` (its node already charged) just
+    /// before block `n`. Like cmark-gfm's, it is never finalized: its link
+    /// reference definitions stay text.
+    fn insert_paragraph_before(&mut self, n: usize, text: String) {
+        let parent = self.nodes[n].parent;
+        if self.nodes.try_reserve(1).is_err() || self.nodes[parent].children.try_reserve(1).is_err()
+        {
+            self.m.fail_allocation();
+            return;
+        }
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            kind: Kind::Paragraph,
+            parent,
+            children: Vec::new(),
+            open: false,
+            content: text,
+            last_line_blank: false,
+            last_line_checked: false,
+            start_line: self.nodes[n].start_line,
+            depth: self.nodes[n].depth,
+            table_tried: true,
+        });
+        let siblings = &mut self.nodes[parent].children;
+        let at = siblings
+            .iter()
+            .rposition(|&c| c == n)
+            .unwrap_or(siblings.len());
+        siblings.insert(at, id);
+    }
+
+    /// The inlines of each table cell (empty cells need no parsing).
+    fn cell_inlines(&mut self, cells: Vec<String>) -> Vec<Vec<Inline>> {
+        let mut out = Vec::new();
+        if out.try_reserve_exact(cells.len()).is_err() {
+            self.m.fail_allocation();
+            return out;
+        }
+        for c in cells {
+            if self.m.failed() {
+                break;
+            }
+            out.push(if c.is_empty() {
+                Vec::new()
+            } else {
+                inlines(&c, &self.refs, self.dialect, self.m)
+            });
+        }
+        out
+    }
+
     fn convert_children(&mut self, n: usize) -> Vec<Block> {
         let children = std::mem::take(&mut self.nodes[n].children);
         let mut out = Vec::new();
@@ -764,14 +990,14 @@ impl<'m> Parser<'m> {
         match std::mem::replace(&mut self.nodes[n].kind, Kind::Document) {
             Kind::Paragraph => {
                 let raw = content.trim_end_matches([' ', '\t', '\n']);
-                Block::Paragraph(inlines(raw, &self.refs, self.m))
+                Block::Paragraph(inlines(raw, &self.refs, self.dialect, self.m))
             }
             Kind::Heading { level, .. } => {
                 let raw = content.trim_matches([' ', '\t', '\n']);
                 let content = if raw.is_empty() {
                     Vec::new()
                 } else {
-                    inlines(raw, &self.refs, self.m)
+                    inlines(raw, &self.refs, self.dialect, self.m)
                 };
                 Block::Heading { level, content }
             }
@@ -781,6 +1007,24 @@ impl<'m> Parser<'m> {
             },
             Kind::HtmlBlock(_) => Block::HtmlBlock(content),
             Kind::ThematicBreak => Block::ThematicBreak,
+            Kind::Table {
+                align, head, rows, ..
+            } => {
+                let head = self.cell_inlines(head);
+                let mut out = Vec::new();
+                for row in rows {
+                    if self.m.failed() {
+                        break;
+                    }
+                    let row = self.cell_inlines(row);
+                    self.m.push(&mut out, row);
+                }
+                Block::Table {
+                    align,
+                    head,
+                    rows: out,
+                }
+            }
             Kind::BlockQuote => Block::BlockQuote(self.convert_children(n)),
             Kind::List { data, tight } => {
                 let items = std::mem::take(&mut self.nodes[n].children);
@@ -796,8 +1040,9 @@ impl<'m> Parser<'m> {
                             if self.m.failed() {
                                 break;
                             }
+                            let checked = self.task_marker(i);
                             let blocks = self.convert_children(i);
-                            self.m.push(&mut out, blocks);
+                            self.m.push(&mut out, ListItem { checked, blocks });
                         }
                         out
                     },
@@ -807,6 +1052,36 @@ impl<'m> Parser<'m> {
                 unreachable!("documents and items are converted by their parents")
             }
         }
+    }
+
+    /// GFM task list item: the item's first block is a paragraph that
+    /// begins with `[ ]`, `[x]` or `[X]` (spaces before it allowed) and then
+    /// a space or tab. The marker and the whitespace after it are taken off
+    /// the paragraph's raw text; `Some(checked)`, or `None` for any other
+    /// item and in CommonMark. No allocation: the raw text is shifted in
+    /// place.
+    fn task_marker(&mut self, item: usize) -> Option<bool> {
+        if self.dialect != Dialect::Gfm {
+            return None;
+        }
+        let &first = self.nodes[item].children.first()?;
+        let node = &mut self.nodes[first];
+        if !matches!(node.kind, Kind::Paragraph) {
+            return None;
+        }
+        let raw = node.content.trim_end_matches([' ', '\t', '\n']);
+        let at = raw.len() - raw.trim_start_matches([' ', '\t']).len();
+        let checked = match raw.as_bytes().get(at..at + TASK_MARKER + 1)? {
+            [b'[', b' ' | b'\t', b']', b' ' | b'\t'] => false,
+            [b'[', b'x' | b'X', b']', b' ' | b'\t'] => true,
+            _ => return None,
+        };
+        // The paragraph is trimmed at its end, so content follows the
+        // whitespace: the item keeps a non-empty paragraph.
+        let rest = raw[at + TASK_MARKER..].trim_start_matches([' ', '\t', '\n']);
+        let cut = raw.len() - rest.len();
+        node.content.drain(..cut);
+        Some(checked)
     }
 }
 
@@ -956,6 +1231,172 @@ fn parse_list_marker(
         padding: 0,
     };
     Some((end - pos, data))
+}
+
+/// Bytes of a task list item marker: `[`, one character, `]`.
+const TASK_MARKER: usize = 3;
+
+/// cmark-gfm's `spacechar` in table rows.
+fn is_table_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | 0x0b | 0x0c)
+}
+
+/// cmark's `cmark_isspace` (space, tab, line feed, carriage return; not
+/// vertical tab or form feed), which trims header and body cells, delimiter
+/// cells and the paragraph before a table.
+fn is_cmark_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// `b` without leading and trailing [`is_cmark_space`] bytes.
+fn trim_cmark_spaces(b: &[u8]) -> &[u8] {
+    let space = |c: &u8| is_cmark_space(char::from(*c));
+    let start = b.iter().position(|c| !space(c)).unwrap_or(b.len());
+    let end = b.iter().rposition(|c| !space(c)).map_or(start, |e| e + 1);
+    &b[start..end]
+}
+
+fn table_spaces(b: &[u8], i: usize) -> usize {
+    b[i.min(b.len())..]
+        .iter()
+        .take_while(|&&c| is_table_space(c))
+        .count()
+}
+
+fn is_newline(b: &[u8], i: usize) -> bool {
+    peek(b, i) == b'\n' || (peek(b, i) == b'\r' && peek(b, i + 1) == b'\n')
+}
+
+/// A GFM delimiter row (`b` from the first non-space to the line end):
+/// `|? marker (| marker)* |? spaces newline`, a marker being
+/// `spaces :? -+ :? spaces`.
+fn scan_table_start(b: &[u8]) -> bool {
+    let marker = |mut j: usize| -> Option<usize> {
+        j += table_spaces(b, j);
+        j += usize::from(peek(b, j) == b':');
+        let dashes = b[j..].iter().take_while(|&&c| c == b'-').count();
+        if dashes == 0 {
+            return None;
+        }
+        j += dashes;
+        j += usize::from(peek(b, j) == b':');
+        Some(j + table_spaces(b, j))
+    };
+    let Some(mut i) = marker(usize::from(peek(b, 0) == b'|')) else {
+        return false;
+    };
+    while peek(b, i) == b'|' {
+        // A pipe before another marker, or the optional trailing one.
+        if is_newline(b, i + 1 + table_spaces(b, i + 1)) {
+            return true;
+        }
+        match marker(i + 1) {
+            Some(j) => i = j,
+            None => return false,
+        }
+    }
+    is_newline(b, i)
+}
+
+/// Length of the table cell content at `i`: up to a pipe that is not
+/// preceded by a backslash, or the line end (cmark-gfm's `table_cell`,
+/// whose escapes include `\|`).
+fn table_cell(b: &[u8], i: usize) -> usize {
+    let mut j = i;
+    while let Some(&c) = b.get(j) {
+        match c {
+            b'\r' | b'\n' => break,
+            b'|' if j == i || b[j - 1] != b'\\' => break,
+            _ => j += 1,
+        }
+    }
+    j - i
+}
+
+/// A cell separator at `i`: the pipe and the spaces after it.
+fn table_cell_end(b: &[u8], i: usize) -> usize {
+    if peek(b, i) == b'|' {
+        1 + table_spaces(b, i + 1)
+    } else {
+        0
+    }
+}
+
+/// The end of a row at `i`: spaces and a line ending.
+fn table_row_end(b: &[u8], i: usize) -> usize {
+    let ws = table_spaces(b, i);
+    match (peek(b, i + ws), peek(b, i + ws + 1)) {
+        (b'\n', _) => ws + 1,
+        (b'\r', b'\n') => ws + 2,
+        _ => 0,
+    }
+}
+
+/// cmark-gfm's `row_from_string`: `b` read as one table row, lines before
+/// the last one being the paragraph above a header. Calls `cell(start,
+/// len)` for every cell (with the earlier lines' cells too, so callers
+/// that keep cells pass a single line). Returns the start of the row's
+/// line and its number of cells, or `None` if it is no row: something
+/// after the last cell, no cell, or more than [`MAX_COLUMNS`] cells on a
+/// line. One pass over `b`.
+fn scan_row(b: &[u8], mut cell: impl FnMut(usize, usize)) -> Option<(usize, usize)> {
+    let len = b.len();
+    let (mut start, mut n) = (0, 0);
+    let mut offset = table_cell_end(b, 0);
+    let mut more = true;
+    while offset < len && more {
+        let content = table_cell(b, offset);
+        let pipe = table_cell_end(b, offset + content);
+        if content > 0 || pipe > 0 {
+            if n == MAX_COLUMNS {
+                return None;
+            }
+            n += 1;
+            cell(offset, content);
+        }
+        offset += content + pipe;
+        if pipe == 0 {
+            let end = table_row_end(b, offset);
+            offset += end;
+            if end > 0 && offset != len {
+                // Not the last line: a paragraph line, the row starts over.
+                start = offset;
+                n = 0;
+                offset += table_cell_end(b, offset);
+            } else {
+                more = false;
+            }
+        }
+    }
+    (offset == len && n > 0).then_some((start, n))
+}
+
+/// A cell's text: trimmed, pipe escapes taken off, charged before it is
+/// kept.
+fn own_cell(m: &mut Meter, raw: &str) -> String {
+    unescape_pipes(m, raw.trim_matches(is_cmark_space))
+}
+
+/// `s` with every `\|` turned into `|` (left to right, as cmark-gfm's
+/// `unescape_pipes`; also inside code spans, which is how a cell holds a
+/// pipe there), charged before it is built.
+fn unescape_pipes(m: &mut Meter, s: &str) -> String {
+    let len = s.len() - s.matches("\\|").count();
+    let mut out = String::new();
+    if !m.text(len) {
+        return out;
+    }
+    m.reserve_str(&mut out, len);
+    if m.failed() {
+        return out;
+    }
+    let mut rest = s;
+    while let Some(i) = rest.find("\\|") {
+        out.push_str(&rest[..i]);
+        rest = &rest[i + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 const BLOCK_TAGS: &[&[u8]] = &[
@@ -1141,7 +1582,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn parse(md: &str) -> Document {
-        super::parse(md, &mut Meter::new(crate::Limits::UNLIMITED)).unwrap()
+        super::parse(
+            md,
+            Dialect::CommonMark,
+            &mut Meter::new(crate::Limits::UNLIMITED),
+        )
+        .unwrap()
     }
 
     fn html(md: &str) -> String {
@@ -1150,7 +1596,7 @@ mod tests {
 
     fn refs(md: &str) -> Refs {
         let mut m = Meter::new(crate::Limits::UNLIMITED);
-        run(md, &mut m).refs
+        run(md, Dialect::CommonMark, &mut m).refs
     }
 
     fn timed(input: &str) -> (Document, Duration) {
@@ -1202,7 +1648,7 @@ mod tests {
         let mut cur = &d.blocks[..];
         while let [Block::List { items, .. }] = cur {
             depth += 1;
-            cur = &items[0];
+            cur = &items[0].blocks;
         }
         assert_eq!(depth, cap);
         let _ = html::write(&d);
@@ -1389,5 +1835,478 @@ mod tests {
         assert_eq!(html_block_start(b"<DIV/>", true), Some(6));
         assert_eq!(html_block_start(b"<divx>", false), Some(7));
         assert_eq!(html_block_start(b"<a> b", false), None);
+    }
+
+    fn gfm_html(md: &str) -> String {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        html::write(&super::parse(md, Dialect::Gfm, &mut m).unwrap())
+    }
+
+    /// `<table>` HTML of a header row and body rows, no alignment.
+    fn table_html(head: &[&str], rows: &[&[&str]]) -> String {
+        let row = |tag: &str, cells: &[&str]| {
+            let cells: String = cells
+                .iter()
+                .map(|c| format!("<{tag}>{c}</{tag}>\n"))
+                .collect();
+            format!("<tr>\n{cells}</tr>\n")
+        };
+        let mut out = format!("<table>\n<thead>\n{}</thead>\n", row("th", head));
+        if !rows.is_empty() {
+            out.push_str("<tbody>\n");
+            for r in rows {
+                out.push_str(&row("td", r));
+            }
+            out.push_str("</tbody>\n");
+        }
+        out.push_str("</table>\n");
+        out
+    }
+
+    #[test]
+    fn pipes_without_delimiter_row_stay_a_paragraph() {
+        for md in [
+            "a | b\nc | d\n",
+            "| a | b |\n| c | d |\n",
+            "| a |\n|\n",
+            "a|b\n\n| - |\n",
+        ] {
+            assert_eq!(gfm_html(md), html(md), "{md:?}");
+            assert!(!gfm_html(md).contains("<table>"), "{md:?}");
+        }
+    }
+
+    #[test]
+    fn delimiter_row_column_mismatch_is_not_a_table() {
+        assert_eq!(
+            gfm_html("| a | b |\n| - |\n| c |\n"),
+            "<p>| a | b |\n| - |\n| c |</p>\n"
+        );
+        assert_eq!(gfm_html("| a |\n|-|-|\n"), "<p>| a |\n|-|-|</p>\n");
+        // A paragraph is checked once, at its first delimiter-like line (as
+        // cmark-gfm does): the third line would match the second one, but
+        // the paragraph stays one. Rescanning it on every line would also be
+        // quadratic.
+        assert_eq!(gfm_html("a\n-:|-:\n-:|-:\n"), "<p>a\n-:|-:\n-:|-:</p>\n");
+    }
+
+    #[test]
+    fn table_after_multiline_paragraph() {
+        assert_eq!(
+            gfm_html("x\ny\n| a | b |\n| - | - |\n| c | d |\n"),
+            format!("<p>x\ny</p>\n{}", table_html(&["a", "b"], &[&["c", "d"]]))
+        );
+        // As in cmark-gfm, the lines before the header become a paragraph
+        // as they are: pipe escapes are taken off and a link reference
+        // definition among them is not one.
+        assert_eq!(
+            gfm_html("[r]: /u\n`p\\|q`\na\n| h |\n| - |\n\n[r]\n"),
+            format!(
+                "<p>[r]: /u\n<code>p|q</code>\na</p>\n{}<p>[r]</p>\n",
+                table_html(&["h"], &[])
+            )
+        );
+    }
+
+    #[test]
+    fn table_prefix_trims_only_cmark_spaces() {
+        // cmark trims cells and the lines above a header with
+        // `cmark_isspace`: space, tab, line feed and carriage return only. A
+        // form feed alone is a paragraph line, kept as it is.
+        assert_eq!(
+            gfm_html("\x0c\n| a |\n|-|\n"),
+            format!("<p>\x0c</p>\n{}", table_html(&["a"], &[]))
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_vertical_tab_and_form_feed() {
+        // Not `cmark_isspace`: they stay in a cell's text (a leading one
+        // only with no pipe before it, as cmark-gfm's cell separator takes
+        // it like a space).
+        assert_eq!(
+            gfm_html("| a\x0c |\n|-|\n\x0bb |\n"),
+            table_html(&["a\x0c"], &[&["\x0bb"]])
+        );
+    }
+
+    #[test]
+    fn table_alignment_ignores_vertical_tab_and_form_feed() {
+        // They do not count as spaces around the alignment colons: the
+        // reference reads `\x0b:-:` as right and `:-:\x0c` as left aligned.
+        // (After a pipe, cmark-gfm's cell separator takes them like spaces.)
+        assert_eq!(
+            gfm_html("a|b|c\n\x0b:-:|:-:\x0c|:-:\n"),
+            "<table>\n<thead>\n<tr>\n<th align=\"right\">a</th>\n\
+<th align=\"left\">b</th>\n<th align=\"center\">c</th>\n</tr>\n</thead>\n</table>\n"
+        );
+    }
+
+    #[test]
+    fn setext_underline_is_not_a_delimiter_row() {
+        assert_eq!(gfm_html("| a |\n---\n"), "<h2>| a |</h2>\n");
+        assert_eq!(gfm_html("a\n===\n"), "<h1>a</h1>\n");
+        // Not a setext underline: a one-column table.
+        assert_eq!(
+            gfm_html("a\n:--\nb\n"),
+            "<table>\n<thead>\n<tr>\n<th align=\"left\">a</th>\n</tr>\n</thead>\n\
+<tbody>\n<tr>\n<td align=\"left\">b</td>\n</tr>\n</tbody>\n</table>\n"
+        );
+        // A list item and a thematic break come before a delimiter row.
+        assert_eq!(
+            gfm_html("a\n- | -\n"),
+            "<p>a</p>\n<ul>\n<li>| -</li>\n</ul>\n"
+        );
+        assert_eq!(gfm_html("a\n***\n"), "<p>a</p>\n<hr />\n");
+    }
+
+    #[test]
+    fn escaped_pipe_in_code_span() {
+        assert_eq!(
+            gfm_html("| `a\\|b` | c\\|d | e\\\\|f |\n|-|-|-|\n"),
+            table_html(&["<code>a|b</code>", "c|d", "e|f"], &[])
+        );
+        // Outside a table the code span keeps its backslash.
+        assert_eq!(gfm_html("`a\\|b`\n"), "<p><code>a\\|b</code></p>\n");
+    }
+
+    #[test]
+    fn table_ends_at_blank_line_or_block_start() {
+        let t = table_html(&["a"], &[&["b"]]);
+        let head = "| a |\n| - |\n| b |\n";
+        for (next, after) in [
+            ("\nc\n", "<p>c</p>\n"),
+            ("> c\n", "<blockquote>\n<p>c</p>\n</blockquote>\n"),
+            ("# c\n", "<h1>c</h1>\n"),
+            ("```\nc\n```\n", "<pre><code>c\n</code></pre>\n"),
+            ("- c\n", "<ul>\n<li>c</li>\n</ul>\n"),
+            ("***\n", "<hr />\n"),
+            ("    c\n", "<pre><code>c\n</code></pre>\n"),
+            ("<div>\n", "<div>\n"),
+        ] {
+            assert_eq!(
+                gfm_html(&format!("{head}{next}")),
+                format!("{t}{after}"),
+                "{next:?}"
+            );
+        }
+        // Any other line is a row; short rows are padded, long ones cut.
+        assert_eq!(
+            gfm_html("| a | b |\n|-|-|\nc\n| d | e | f |\n"),
+            table_html(&["a", "b"], &[&["c", ""], &["d", "e"]])
+        );
+    }
+
+    #[test]
+    fn table_in_list_and_quote() {
+        let t = table_html(&["a"], &[&["b"]]);
+        assert_eq!(
+            gfm_html("- | a |\n  | - |\n  | b |\n- c\n"),
+            format!("<ul>\n<li>\n{t}</li>\n<li>c</li>\n</ul>\n")
+        );
+        assert_eq!(
+            gfm_html("> | a |\n> | - |\n> | b |\nc\n"),
+            format!("<blockquote>\n{t}</blockquote>\n<p>c</p>\n")
+        );
+        // A delimiter row cannot be a lazy continuation line.
+        assert_eq!(
+            gfm_html("> | a |\n| - |\n"),
+            "<blockquote>\n<p>| a |\n| - |</p>\n</blockquote>\n"
+        );
+        // As in cmark-gfm, a header-only table is followed by its own
+        // (blank) rest of line, so it loosens the list it is in.
+        assert_eq!(
+            gfm_html("- | a |\n  | - |\n- c\n"),
+            format!(
+                "<ul>\n<li>\n{}</li>\n<li>\n<p>c</p>\n</li>\n</ul>\n",
+                table_html(&["a"], &[])
+            )
+        );
+    }
+
+    #[test]
+    fn cm_dialect_reads_no_tables() {
+        let md = "| a | b |\n| - | - |\n| c | d |\n";
+        let d = parse(md);
+        assert_eq!(d, super::super::read(md.as_bytes()).unwrap());
+        assert_eq!(html::write(&d), "<p>| a | b |\n| - | - |\n| c | d |</p>\n");
+    }
+
+    #[test]
+    fn table_nodes_charge_the_budget() {
+        let read = |md: &str, nodes: usize| {
+            let limits = crate::Limits {
+                nodes,
+                ..crate::Limits::DEFAULT
+            };
+            super::super::read_limited_with(md.as_bytes(), limits, Dialect::Gfm)
+        };
+        // The least node budget that reads `md`; one less fails on nodes.
+        let need = |md: &str| {
+            let n = (1..).find(|&n| read(md, n).is_ok()).unwrap();
+            assert_eq!(
+                read(md, n - 1),
+                Err(crate::ReadError::Limit(crate::LimitError::Exceeded(
+                    "nodes"
+                )))
+            );
+            n
+        };
+        let head = format!("{}|\n", "|a".repeat(100));
+        let delim = format!("{}|\n", "|-".repeat(100));
+        // The table, its header row and 100 cells, each body row and its
+        // 100 cells (padding included), and one text node per non-empty
+        // cell.
+        let md = format!("{head}{delim}x\n");
+        assert_eq!(need(&md), 1 + (1 + 100) + (1 + 100) + 101);
+        assert_eq!(need(&format!("{md}y\n")), need(&md) + 1 + 100 + 1);
+        // A paragraph before the table is one more node.
+        assert_eq!(need(&format!("p\n{md}")), need(&md) + 2);
+    }
+
+    /// `checked` of each item of the document's first block, a list.
+    fn checks(md: &str, dialect: Dialect) -> Vec<Option<bool>> {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        match super::parse(md, dialect, &mut m).unwrap().blocks.first() {
+            Some(Block::List { items, .. }) => items.iter().map(|i| i.checked).collect(),
+            other => panic!("not a list: {other:?}"),
+        }
+    }
+
+    const UNCHECKED: &str = "<input disabled=\"\" type=\"checkbox\"> ";
+    const CHECKED: &str = "<input checked=\"\" disabled=\"\" type=\"checkbox\"> ";
+
+    #[test]
+    fn task_markers_read() {
+        assert_eq!(
+            checks("- [ ] a\n- [x] b\n- [X] c\n- [\t] d\n", Dialect::Gfm),
+            [Some(false), Some(true), Some(true), Some(false)]
+        );
+        assert_eq!(
+            gfm_html("1. [x] a\n"),
+            format!("<ol>\n<li>{CHECKED}a</li>\n</ol>\n")
+        );
+        // The marker and the whitespace after it leave the paragraph.
+        assert_eq!(
+            gfm_html("- [ ]   *a*\n"),
+            format!("<ul>\n<li>{UNCHECKED}<em>a</em></li>\n</ul>\n")
+        );
+        assert_eq!(
+            gfm_html("- [ ] \n  a\n"),
+            format!("<ul>\n<li>{UNCHECKED}a</li>\n</ul>\n")
+        );
+        // Loose lists, block quotes, and the item's first line left blank.
+        assert_eq!(
+            gfm_html("- [x] a\n\n- b\n"),
+            format!("<ul>\n<li>\n<p>{CHECKED}a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>\n")
+        );
+        assert_eq!(
+            gfm_html("> - [x] a\n"),
+            format!("<blockquote>\n<ul>\n<li>{CHECKED}a</li>\n</ul>\n</blockquote>\n")
+        );
+        assert_eq!(checks("-\n  [x] a\n", Dialect::Gfm), [Some(true)]);
+    }
+
+    /// A link reference definition is not content: the paragraph that
+    /// remains after it begins the item, so its `[x]` is the marker.
+    #[test]
+    fn task_marker_after_a_link_reference_definition() {
+        assert_eq!(checks("- [foo]: /u\n  [x] a\n", Dialect::Gfm), [Some(true)]);
+    }
+
+    #[test]
+    fn task_marker_only_at_item_start() {
+        // Not the paragraph's start, not the first block, not in a list.
+        assert_eq!(checks("- a [x] b\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- a\n  [x] b\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- > [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- # [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x] a\n  ---\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- `[x] a`\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("-     [x] a\n", Dialect::Gfm), [None]);
+        assert_eq!(gfm_html("[x] a\n"), "<p>[x] a</p>\n");
+        // Only the outer item's paragraph decides for the outer item.
+        assert_eq!(checks("- a\n  - [x] b\n", Dialect::Gfm), [None]);
+        // Other characters between the brackets are text.
+        assert_eq!(
+            checks("- [y] a\n- [] a\n- [xx] a\n", Dialect::Gfm),
+            [None; 3]
+        );
+    }
+
+    #[test]
+    fn task_marker_needs_following_space() {
+        assert_eq!(checks("- [x]a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [ ]a\n- [ ]\n  a\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- [ ]\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x]   \n", Dialect::Gfm), [None]);
+        assert_eq!(gfm_html("- [x]\n"), "<ul>\n<li>[x]</li>\n</ul>\n");
+        // A line end is not the space: the marker stays text.
+        assert_eq!(checks("- [x]\n  a\n", Dialect::Gfm), [None]);
+        assert_eq!(checks("- [x]\ta\n", Dialect::Gfm), [Some(true)]);
+    }
+
+    #[test]
+    fn checked_is_none_without_marker() {
+        assert_eq!(checks("- a\n- b\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- [x] a\n- b\n", Dialect::Gfm), [Some(true), None]);
+        assert_eq!(checks("-\n- b\n", Dialect::Gfm), [None, None]);
+        assert_eq!(checks("- ```\n  [x] a\n  ```\n", Dialect::Gfm), [None]);
+    }
+
+    #[test]
+    fn cm_dialect_has_neither() {
+        for md in ["- [ ] a\n- [x] ~~b~~\n", "1. [X] a\n"] {
+            assert!(checks(md, Dialect::CommonMark).iter().all(Option::is_none));
+            let d = parse(md);
+            assert_eq!(d, super::super::read(md.as_bytes()).unwrap());
+            let out = html::write(&d);
+            assert!(!out.contains("<input") && !out.contains("<del>"), "{out}");
+        }
+        assert_eq!(
+            html::write(&parse("- [x] ~~b~~\n")),
+            "<ul>\n<li>[x] ~~b~~</li>\n</ul>\n"
+        );
+    }
+
+    #[test]
+    fn table_cells_are_bounded() {
+        let d = |md: &str| {
+            let mut m = Meter::new(crate::Limits::UNLIMITED);
+            super::parse(md, Dialect::Gfm, &mut m).unwrap()
+        };
+        let table = |b: &Block| match b {
+            Block::Table { head, rows, .. } => Some((head.len(), rows.len())),
+            _ => None,
+        };
+        // Padding a short row is capped as in cmark-gfm: a header of 1000
+        // columns over 1000 one-cell rows would be a million cells.
+        let md = format!(
+            "{}|\n{}|\n{}",
+            "|a".repeat(1000),
+            "|-".repeat(1000),
+            "x\n".repeat(1000)
+        );
+        let doc = d(&md);
+        let (cols, rows) = table(&doc.blocks[0]).unwrap();
+        assert_eq!(cols, 1000);
+        // Rows are taken while at most MAX_PADDING_CELLS cells were padded.
+        assert_eq!(rows, MAX_PADDING_CELLS / 999 + 1);
+        assert!(matches!(doc.blocks[1], Block::Paragraph(_)));
+        // A row of more cells than a u16 counts is not a row.
+        let wide = |n: usize| d(&format!("{}\n{}\n", "a|".repeat(n), "-|".repeat(n)));
+        assert_eq!(table(&wide(MAX_COLUMNS + 1).blocks[0]), None);
+        assert_eq!(table(&wide(MAX_COLUMNS).blocks[0]), Some((MAX_COLUMNS, 0)));
+    }
+
+    #[test]
+    fn delimiter_row_must_end_at_the_line_end() {
+        // Anything after the last marker, even one byte, is not a table.
+        for md in ["a|b\n-|-x\n", "a|b\n-|-|x\n", "|a|\n|-|y\n", "a|b\n-|- x\n"] {
+            assert_eq!(gfm_html(md), html(md), "{md:?}");
+            assert!(!gfm_html(md).contains("<table>"), "{md:?}");
+        }
+        // A trailing pipe or spaces are part of the row.
+        assert!(gfm_html("a|b\n-|-|  \n").contains("<table>"));
+    }
+
+    #[test]
+    fn crlf_tables() {
+        let want = table_html(&["a", "b"], &[&["c", "d"], &["e", "f"]]);
+        for md in [
+            "a|b\r\n-|-\r\nc|d\r\ne|f\r\n",
+            "a|b  \r\n-|-  \r\nc|d \r\ne|f   \r\n",
+            "| a | b |\r\n| - | - |\r\n| c | d |\r\n| e | f |",
+        ] {
+            assert_eq!(gfm_html(md), want, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn extra_cells_are_dropped() {
+        let md = "a|b\n-|-\n1|2|3|4\n5\n";
+        assert_eq!(
+            gfm_html(md),
+            table_html(&["a", "b"], &[&["1", "2"], &["5", ""]])
+        );
+        // The rows themselves hold exactly the header's cells (a writer
+        // may zip them with the alignments and hide an extra one).
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let doc = super::parse(md, Dialect::Gfm, &mut m).unwrap();
+        let Block::Table { head, rows, .. } = &doc.blocks[0] else {
+            panic!("not a table");
+        };
+        assert_eq!(head.len(), 2);
+        assert!(rows.iter().all(|r| r.len() == 2), "{rows:?}");
+    }
+
+    #[test]
+    fn dropped_cells_are_not_charged() {
+        // Fewest text bytes a read of `md` needs.
+        let need = |md: &str| {
+            (0..)
+                .find(|&text_bytes| {
+                    let limits = crate::Limits {
+                        text_bytes,
+                        ..crate::Limits::UNLIMITED
+                    };
+                    super::parse(md, Dialect::Gfm, &mut Meter::new(limits)).is_ok()
+                })
+                .unwrap()
+        };
+        let long = "x".repeat(64);
+        assert_eq!(
+            need(&format!("a|b\n-|-\n1|2|{long}\n")),
+            need("a|b\n-|-\n1|2\n")
+        );
+    }
+
+    #[test]
+    fn line_end_helpers_take_crlf() {
+        // The block phase hands the table code lines that end in a bare
+        // line feed, so these carriage-return arms are pinned directly.
+        assert!(is_newline(b"\n", 0));
+        assert!(is_newline(b"\r\n", 0));
+        assert!(is_newline(b"x\r\n", 1));
+        assert!(!is_newline(b"\r", 0));
+        assert!(!is_newline(b"\rx", 0));
+        assert!(!is_newline(b"x\n", 0));
+        assert!(!is_newline(b"", 0));
+        assert_eq!(table_row_end(b"abc\n", 3), 1);
+        assert_eq!(table_row_end(b"abc  \n", 3), 3);
+        assert_eq!(table_row_end(b"abc\r\n", 3), 2);
+        assert_eq!(table_row_end(b"abc  \r\n", 3), 4);
+        assert_eq!(table_row_end(b"abc \rx", 3), 0);
+        assert_eq!(table_row_end(b"abc x", 3), 0);
+    }
+
+    #[test]
+    fn scan_row_stops_at_a_stray_carriage_return() {
+        // A carriage return not followed by a line feed is no row end: the
+        // text is no row, and the scan ends instead of looping on it.
+        assert_eq!(scan_row(b"a|b\rc\n", |_, _| {}), None);
+        assert_eq!(scan_row(b"a|b\r", |_, _| {}), None);
+        assert_eq!(scan_row(b"a|b\r\n", |_, _| {}), Some((0, 2)));
+    }
+
+    #[test]
+    fn padding_cap_is_inclusive() {
+        // 513 columns over one-cell rows: before row k (0-based) the table
+        // has padded 512 * k cells, so row 1024 is the one that stands
+        // exactly on the cap, and it is still taken.
+        let cols = 513;
+        assert_eq!((cols - 1) * 1024, MAX_PADDING_CELLS);
+        let md = format!(
+            "{}|\n{}|\n{}",
+            "|a".repeat(cols),
+            "|-".repeat(cols),
+            "x\n".repeat(1100)
+        );
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let doc = super::parse(&md, Dialect::Gfm, &mut m).unwrap();
+        let Block::Table { rows, .. } = &doc.blocks[0] else {
+            panic!("not a table");
+        };
+        assert_eq!(rows.len(), 1025);
     }
 }

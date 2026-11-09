@@ -11,14 +11,31 @@
 //! declaration ends) are memoized, and inactive link openers are tracked by
 //! a counter instead of being walked, so the pass is linear.
 //!
-//! Nesting (emphasis, links, images) deeper than [`MAX_DEPTH`] is flattened
-//! when the arena becomes the [`Inline`] tree: those wrappers are dropped
-//! and their content is kept. This bounds the recursion of every writer.
+//! In the GFM dialect a `~~` run is a delimiter too (strikethrough), with
+//! the emphasis flanking rules and its own search bounds; one tilde or three
+//! or more stay text.
+//!
+//! GFM also reads extended autolinks: `www.`, `http://`, `https://` and
+//! `ftp://` links are found during the pass (at a `w` or the scheme's `:`),
+//! bare email addresses in the finished text, outside links and images.
+//! Each scan is bounded: the domain run is memoized for every start inside
+//! it; whether the trailing-punctuation rule trims into the domain is
+//! decided before the path is read, by a scan that stops at the first byte
+//! the trim keeps, so only a link that is taken reads its path (and counts
+//! its parentheses), once; and an address scan never passes the next `@`.
+//!
+//! The rules follow the GFM spec text. One reading follows cmark-gfm where
+//! the text is open to two: the `www` of `www.` counts as a segment, so
+//! `www.x` (no period after `www.`) is a link, as the reference renders it.
+//!
+//! Nesting (emphasis, strikethrough, links, images) deeper than
+//! [`MAX_DEPTH`] is flattened when the arena becomes the [`Inline`] tree:
+//! those wrappers are dropped and their content is kept. This bounds the recursion of every writer.
 
 use super::scan::{close_tag, link_destination, link_label, link_title, open_tag, utf8};
 use super::{Refs, char_ref, decode, decoded_len, normalize_label, punct::PUNCT, unescape};
-use crate::Inline;
 use crate::budget::Meter;
+use crate::{Dialect, Inline};
 use std::collections::HashMap;
 
 /// Deepest inline nesting kept in the tree.
@@ -37,32 +54,8 @@ const HEAD: usize = 0;
 /// Every node, every owned string and every copy of a reference's
 /// destination and title is charged to `m` before it is made; once `m`
 /// has failed the pass stops and the (partial) result is discarded.
-pub(super) fn parse(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
-    let mut p = Parser {
-        m,
-        s: raw,
-        b: raw.as_bytes(),
-        pos: 0,
-        refs,
-        nodes: vec![Node::new(Kind::Text(String::new()))],
-        tail: HEAD,
-        delims: Vec::new(),
-        last_delim: NONE,
-        brackets: Vec::new(),
-        brackets_made: 0,
-        link_floor: 0,
-        backticks: None,
-        ends: [Memo::default(); 4],
-    };
-    p.run();
-    if p.m.failed() {
-        return Vec::new();
-    }
-    p.process_emphasis(0);
-    let mut out = Vec::new();
-    let first = p.nodes[HEAD].next;
-    p.convert(first, 0, &mut out);
-    out
+pub(super) fn parse(raw: &str, refs: &Refs, dialect: Dialect, m: &mut Meter) -> Vec<Inline> {
+    Parser::new(raw, refs, dialect, m).parse()
 }
 
 enum Kind {
@@ -73,8 +66,17 @@ enum Kind {
     HardBreak,
     Emph,
     Strong,
-    Link { dest: String, title: String },
-    Image { dest: String, title: String },
+    Strikethrough,
+    /// `auto`: a GFM extended autolink.
+    Link {
+        dest: String,
+        title: String,
+        auto: bool,
+    },
+    Image {
+        dest: String,
+        title: String,
+    },
 }
 
 /// Arena node. Siblings form a doubly linked list; containers (emphasis,
@@ -99,7 +101,8 @@ impl Node {
     }
 }
 
-/// A `*` or `_` run that can open or close emphasis. Delimiters live in an
+/// A `*` or `_` run that can open or close emphasis, or (GFM) a `~~` run
+/// that can open or close strikethrough. Delimiters live in an
 /// arena (index = creation order, the spec's stack position) and the live
 /// ones form a doubly linked list.
 struct Delim {
@@ -143,6 +146,8 @@ const ENDS: [&[u8]; 4] = [b"-->", b"?>", b"]]>", b">"];
 
 struct Parser<'a> {
     m: &'a mut Meter,
+    /// Which syntax is read: GFM adds the `~~` strikethrough delimiter.
+    dialect: Dialect,
     s: &'a str,
     b: &'a [u8],
     pos: usize,
@@ -159,7 +164,27 @@ struct Parser<'a> {
     /// first backtick.
     backticks: Option<HashMap<usize, Vec<usize>>>,
     ends: [Memo; 4],
+    /// The last domain run scanned for an extended autolink.
+    domain: Option<DomainRun>,
+    /// Opener candidates looked at by `process_emphasis`, so a test can
+    /// bound the search without timing it.
+    #[cfg(test)]
+    steps: usize,
+    /// Bytes the extended-autolink scans look at, for the same reason.
+    #[cfg(test)]
+    auto_steps: usize,
 }
+
+/// Length of the only tilde run that opens or closes strikethrough: GFM
+/// 0.29 wraps strikethrough "in two tildes"; one tilde ("~5 min") and three
+/// or more stay text. (cmark-gfm also takes one tilde unless its
+/// double-tilde option is set; the spec text is the authority here.)
+const STRIKE_RUN: usize = 2;
+
+/// Slots of `process_emphasis`'s `openers_bottom`: per delimiter char
+/// (`*`, `_`, `~`), whether the closer can also open (2), and the closer's
+/// run length mod 3 (3).
+const OPENER_KEYS: usize = 3 * 2 * 3;
 
 fn is_special(c: u8) -> bool {
     matches!(
@@ -245,6 +270,228 @@ fn scan_email(b: &[u8], i: usize) -> Option<usize> {
     }
 }
 
+/// Schemes of a GFM extended URL autolink (spec: "`http://`, `https://`,
+/// or `ftp://`"); matched without regard to case, as URI schemes are.
+const SCHEMES: [&[u8]; 3] = [b"http", b"https", b"ftp"];
+
+/// Whitespace as the GFM spec (and cmark-gfm's `cmark_isspace`) means it:
+/// space, tab, LF, VT, FF, CR. It ends an extended autolink's path.
+fn is_ascii_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// An extended autolink may follow the start of the text, whitespace, or
+/// one of the delimiting characters `*`, `_`, `~`, `(` (GFM spec).
+fn autolink_boundary(b: &[u8], i: usize) -> bool {
+    i == 0 || is_ascii_space(b[i - 1]) || matches!(b[i - 1], b'*' | b'_' | b'~' | b'(')
+}
+
+/// A character of a domain segment: alphanumeric (Unicode, so an
+/// internationalized name is one), `_` or `-`.
+fn is_domain_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// A character of an email address's local part (GFM spec).
+fn is_local_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_' | b'+')
+}
+
+/// A character of an email address's domain segment (GFM spec).
+fn is_email_domain_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
+}
+
+/// Where the periods and underscores of a domain run fall, as far as the
+/// last segments need them.
+#[derive(Clone, Copy, Default)]
+struct Segments {
+    /// The last period followed by a segment character (a period with a
+    /// segment after it).
+    good_dot: Option<usize>,
+    last_dot: Option<usize>,
+    prev_dot: Option<usize>,
+    /// An underscore after `last_dot` (from the run's start without one).
+    us_last: bool,
+    /// An underscore between `prev_dot` (or the run's start) and `last_dot`.
+    us_prev: bool,
+}
+
+/// A maximal run of domain characters and periods, scanned once from
+/// `start`. Every later start inside it ends at the same `end`, sees the
+/// same last segments and gets the same trimmed link end, so it answers
+/// them all without a rescan.
+#[derive(Clone, Copy)]
+struct DomainRun {
+    start: usize,
+    end: usize,
+    /// The segments of the whole run.
+    full: Segments,
+    /// Just after the run's last character that is not `.` or `_`: where
+    /// the trailing-punctuation rule stops when it eats into the run.
+    cut: usize,
+    /// The segments of `start..cut`: the domain when the link is trimmed
+    /// into the run (`_www.a.b_` links `www.a.b`).
+    at_cut: Segments,
+    /// Whether the trailing-punctuation rule removes the whole path after
+    /// the run ([`path_trims_away`]), once computed. It does not depend on
+    /// where the link starts: the run holds no parenthesis.
+    trims: Option<bool>,
+}
+
+/// Whether the domain of `run` from `d`, with the segments `g` (of the
+/// whole run or of its trimmed part), is valid (GFM spec: segments of
+/// alphanumerics, `_` and `-` separated by periods, at least one period,
+/// no underscore in the last two segments). A period needs a segment after
+/// it to count: `www.` alone is no domain.
+fn valid(run: &DomainRun, g: &Segments, d: usize) -> bool {
+    if d >= run.end || g.good_dot.is_none_or(|p| p < d) {
+        return false;
+    }
+    // The segment before the last period starts at `prev_dot` or at `d`.
+    // A later start than the run's with no `prev_dot` after it is a `www.`
+    // whose period is the last one: its own segment `www` has no
+    // underscore.
+    let us_prev = match g.prev_dot {
+        Some(p) if p >= d => g.us_prev,
+        _ if run.start == d => g.us_prev,
+        _ => {
+            debug_assert_eq!(g.last_dot, Some(d + 3));
+            false
+        }
+    };
+    !g.us_last && !us_prev
+}
+
+/// The length of an extended autolink of `link` after the GFM path
+/// validation: trailing `?!.,:*_~` go, a trailing `&` + alphanumerics + `;`
+/// (an entity look-alike) goes, and a trailing `)` goes while the link has
+/// more `)` than `(`. `opens`/`closes` are the link's parentheses, counted
+/// once by the caller (no `(` is ever removed, so only `closes` changes);
+/// each step removes at least one byte, so the loop is linear in what it
+/// removes.
+fn trim_link(link: &[u8], opens: usize, mut closes: usize, steps: &mut usize) -> usize {
+    let mut n = link.len();
+    while n > 0 {
+        *steps += 1;
+        match link[n - 1] {
+            b'?' | b'!' | b'.' | b',' | b':' | b'*' | b'_' | b'~' => n -= 1,
+            b';' => {
+                let k = link[..n - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .count();
+                *steps += k;
+                // `&` sits at `n - 2 - k`.
+                if k > 0 && n >= k + 2 && link[n - 2 - k] == b'&' {
+                    n -= k + 2;
+                } else {
+                    break;
+                }
+            }
+            b')' if closes > opens => {
+                closes -= 1;
+                n -= 1;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
+/// Whether [`trim_link`] removes the whole path from `i` (the end of a
+/// domain run) to the next whitespace, `<` or the end, so that the trim
+/// reaches into the run. It does when every byte of the path is one of
+/// `?!.,:*_~`, a `)` (with no `(` in the path, every `)` is one too many:
+/// a domain holds none), or part of an entity look-alike `&` alnum+ `;`;
+/// those are exactly what the trim removes, in any order. Stops at the
+/// first other byte, so it never reads into a later candidate: a `www.` or
+/// scheme there needs a letter outside an entity look-alike after a
+/// boundary, and the scan stops at that letter.
+fn path_trims_away(b: &[u8], mut i: usize, steps: &mut usize) -> bool {
+    loop {
+        *steps += 1;
+        match b.get(i) {
+            None => return true,
+            Some(&c) if is_ascii_space(c) || c == b'<' => return true,
+            Some(b'?' | b'!' | b'.' | b',' | b':' | b'*' | b'_' | b'~' | b')') => i += 1,
+            Some(b'&') => {
+                let k = b[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .count();
+                *steps += k;
+                if k == 0 || b.get(i + 1 + k) != Some(&b';') {
+                    return false;
+                }
+                i += k + 2;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The domain of an email address from `j` (after the `@`): segments of
+/// [`is_email_domain_char`] separated by single periods, at least one
+/// period, ending in an alphanumeric. A second `@` right after spoils it
+/// (cmark-gfm: one `@` per address). Its end, or `None`.
+fn email_domain(b: &[u8], j: usize, steps: &mut usize) -> Option<usize> {
+    let (mut k, mut dots) = (j, 0);
+    loop {
+        *steps += 1;
+        match b.get(k) {
+            Some(&c) if is_email_domain_char(c) => k += 1,
+            Some(b'.') if k > j && b.get(k + 1).is_some_and(|&c| is_email_domain_char(c)) => {
+                dots += 1;
+                k += 1;
+            }
+            _ => break,
+        }
+    }
+    let ok = dots > 0 && b[k - 1].is_ascii_alphanumeric() && b.get(k) != Some(&b'@');
+    ok.then_some(k)
+}
+
+impl<'a> Parser<'a> {
+    fn new(raw: &'a str, refs: &'a Refs, dialect: Dialect, m: &'a mut Meter) -> Self {
+        Parser {
+            m,
+            dialect,
+            s: raw,
+            b: raw.as_bytes(),
+            pos: 0,
+            refs,
+            nodes: vec![Node::new(Kind::Text(String::new()))],
+            tail: HEAD,
+            delims: Vec::new(),
+            last_delim: NONE,
+            brackets: Vec::new(),
+            brackets_made: 0,
+            link_floor: 0,
+            backticks: None,
+            ends: [Memo::default(); 4],
+            domain: None,
+            #[cfg(test)]
+            steps: 0,
+            #[cfg(test)]
+            auto_steps: 0,
+        }
+    }
+
+    fn parse(&mut self) -> Vec<Inline> {
+        self.run();
+        if self.m.failed() {
+            return Vec::new();
+        }
+        self.process_emphasis(0);
+        let mut out = Vec::new();
+        let first = self.nodes[HEAD].next;
+        self.convert(first, 0, false, &mut out);
+        out
+    }
+}
+
 impl Parser<'_> {
     fn run(&mut self) {
         while self.pos < self.b.len() && !self.m.failed() {
@@ -265,6 +512,7 @@ impl Parser<'_> {
                 }
                 b']' => self.close_bracket(),
                 b'*' | b'_' => self.delim_run(c),
+                b'~' if self.dialect == Dialect::Gfm => self.delim_run(c),
                 _ => self.text_run(),
             }
         }
@@ -360,12 +608,28 @@ impl Parser<'_> {
 
     fn text_run(&mut self) {
         let start = self.pos;
-        let mut end = start + 1;
-        while let Some(&c) = self.b.get(end) {
-            if is_special(c) && !(c == b'!' && self.b.get(end + 1) != Some(&b'[')) {
-                break;
+        let gfm = self.dialect == Dialect::Gfm;
+        // GFM: an extended www or URL autolink, never inside a link's text
+        // (any open bracket holds them off, as in cmark-gfm). Both start in
+        // a text run: a `w`, or the scheme's letters before a `:`.
+        let auto = gfm && self.brackets.is_empty();
+        let mut end = start;
+        loop {
+            if auto && let Some((from, to)) = self.extended_at(start, end) {
+                if from > start {
+                    self.text(&self.s[start..from]);
+                }
+                self.pos = to;
+                self.extended_link(from, to, self.b[from] == b'w');
+                return;
             }
             end += 1;
+            match self.b.get(end) {
+                Some(&c)
+                    if !((is_special(c) || (gfm && c == b'~'))
+                        && !(c == b'!' && self.b.get(end + 1) != Some(&b'['))) => {}
+                _ => break,
+            }
         }
         self.pos = end;
         let mut t = &self.s[start..end];
@@ -535,6 +799,168 @@ impl Parser<'_> {
         self.text("<");
     }
 
+    /// An extended www or URL autolink at `i` (a `w`, or a `:`) in the text
+    /// run from `start`: the link's start and end. The scheme's letters lie
+    /// in the run: the byte before a run is never a letter.
+    fn extended_at(&mut self, start: usize, i: usize) -> Option<(usize, usize)> {
+        let b = self.b;
+        let (from, d) = match b[i] {
+            b'w' if b[i..].starts_with(b"www.") => (i, i),
+            b':' if b[i + 1..].starts_with(b"//") => {
+                let from = SCHEMES.iter().find_map(|sch| {
+                    let f = i.checked_sub(sch.len()).filter(|&f| f >= start)?;
+                    b[f..i].eq_ignore_ascii_case(sch).then_some(f)
+                })?;
+                (from, i + 3)
+            }
+            _ => return None,
+        };
+        if !autolink_boundary(b, from) {
+            return None;
+        }
+        let mut run = match self.domain {
+            Some(r) if r.start <= d && d < r.end => r,
+            _ => self.scan_domain(d),
+        };
+        if b.get(d) == Some(&b'.') || !(valid(&run, &run.full, d) || valid(&run, &run.at_cut, d)) {
+            self.domain = Some(run);
+            return None;
+        }
+        // Which domain counts (the whole run, or the run trimmed to `cut`)
+        // is decided before the path is scanned, so a candidate that fails
+        // here never scans the path, and a later candidate in that path
+        // never makes it scan again.
+        let trims = match run.trims {
+            Some(t) => t,
+            None => {
+                let mut steps = 0;
+                let t = path_trims_away(b, run.end, &mut steps);
+                self.count(steps);
+                run.trims = Some(t);
+                t
+            }
+        };
+        self.domain = Some(run);
+        if trims {
+            // The trim takes the path, then the run's trailing `.` and
+            // `_`, and stops at `cut`.
+            return valid(&run, &run.at_cut, d).then_some((from, run.cut));
+        }
+        if !valid(&run, &run.full, d) {
+            return None;
+        }
+        let tail = self.link_tail(d, run.end);
+        debug_assert!(tail > run.end);
+        Some((from, tail))
+    }
+
+    /// The end of a link whose domain starts at `d` and ends at `end`: the
+    /// path runs to whitespace or `<` (spec: "`<` immediately ends an
+    /// autolink"), then [`trim_link`]. Its parentheses are counted on the
+    /// way for the trailing-`)` rule (a domain holds none).
+    fn link_tail(&mut self, d: usize, mut end: usize) -> usize {
+        let b = self.b;
+        let (mut opens, mut closes, mut steps) = (0, 0, 0);
+        while let Some(&c) = b.get(end).filter(|&&c| !is_ascii_space(c) && c != b'<') {
+            opens += usize::from(c == b'(');
+            closes += usize::from(c == b')');
+            end += 1;
+            steps += 1;
+        }
+        let n = trim_link(&b[d..end], opens, closes, &mut steps);
+        self.count(steps);
+        d + n
+    }
+
+    fn scan_domain(&mut self, start: usize) -> DomainRun {
+        let mut r = DomainRun {
+            start,
+            end: self.b.len(),
+            full: Segments::default(),
+            cut: start,
+            at_cut: Segments::default(),
+            trims: None,
+        };
+        let mut after_dot = false;
+        let mut steps = 0;
+        let g = &mut r.full;
+        for (off, c) in self.s[start..].char_indices() {
+            steps += 1;
+            let i = start + off;
+            if c == '.' {
+                g.prev_dot = g.last_dot;
+                g.last_dot = Some(i);
+                g.us_prev = g.us_last;
+                g.us_last = false;
+                after_dot = true;
+                continue;
+            }
+            if !is_domain_char(c) {
+                r.end = i;
+                break;
+            }
+            if after_dot {
+                g.good_dot = g.last_dot;
+                after_dot = false;
+            }
+            g.us_last |= c == '_';
+            if c != '_' {
+                r.cut = i + c.len_utf8();
+                r.at_cut = *g;
+            }
+        }
+        self.count(steps);
+        r
+    }
+
+    /// Records the bytes an autolink scan looked at (tests only).
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn count(&mut self, steps: usize) {
+        #[cfg(test)]
+        {
+            self.auto_steps += steps;
+        }
+    }
+
+    /// The extended www or URL autolink `from..to`: its text as written,
+    /// its destination the same with `http://` before a `www.`.
+    fn extended_link(&mut self, from: usize, to: usize, www: bool) {
+        let text = &self.s[from..to];
+        let prefix = if www { "http://" } else { "" };
+        // Two nodes (link, its text) and two strings, charged first.
+        if !self.m.nodes(2)
+            || !self
+                .m
+                .text(text.len().saturating_mul(2).saturating_add(prefix.len()))
+        {
+            return;
+        }
+        let dest = format!("{prefix}{text}");
+        self.push_link(dest, text.to_string(), true);
+    }
+
+    /// Appends a link holding one text node; both are already charged.
+    fn push_link(&mut self, dest: String, text: String, auto: bool) {
+        if self.nodes.try_reserve(2).is_err() {
+            self.m.fail_allocation();
+            return;
+        }
+        let link = self.nodes.len();
+        let mut node = Node::new(Kind::Link {
+            dest,
+            title: String::new(),
+            auto,
+        });
+        node.prev = self.tail;
+        self.nodes.push(node);
+        self.nodes[self.tail].next = link;
+        self.tail = link;
+        let t = self.nodes.len();
+        self.nodes.push(Node::new(Kind::Text(text)));
+        self.nodes[link].first = t;
+        self.nodes[link].last = t;
+    }
+
     fn autolink(&mut self, i: usize, n: usize, email: bool) {
         self.pos = i + n + 1;
         // Two nodes (link, its text); the destination (with `mailto:`) and
@@ -549,10 +975,6 @@ impl Parser<'_> {
         {
             return;
         }
-        if self.nodes.try_reserve(2).is_err() {
-            self.m.fail_allocation();
-            return;
-        }
         // Backslashes are literal in autolinks; references are decoded.
         let text = decode(&self.s[i..i + n], false);
         let dest = if email {
@@ -560,20 +982,7 @@ impl Parser<'_> {
         } else {
             text.clone()
         };
-        // The two nodes are already charged and reserved.
-        let link = self.nodes.len();
-        let mut node = Node::new(Kind::Link {
-            dest,
-            title: String::new(),
-        });
-        node.prev = self.tail;
-        self.nodes.push(node);
-        self.nodes[self.tail].next = link;
-        self.tail = link;
-        let t = self.nodes.len();
-        self.nodes.push(Node::new(Kind::Text(text)));
-        self.nodes[link].first = t;
-        self.nodes[link].last = t;
+        self.push_link(dest, text, false);
     }
 
     /// Raw HTML at `start` (a `<`): its end.
@@ -625,7 +1034,7 @@ impl Parser<'_> {
             (left, right)
         };
         let node = self.text(&self.s[start..self.pos]);
-        if can_open || can_close {
+        if (can_open || can_close) && (ch != b'~' || n == STRIKE_RUN) {
             let d = self.delims.len();
             self.delims.push(Delim {
                 node,
@@ -677,7 +1086,7 @@ impl Parser<'_> {
     fn process_emphasis(&mut self, bottom: usize) {
         // Keyed by delimiter char, whether the closer can also open, and
         // the closer's run length mod 3.
-        let mut openers_bottom = [bottom; 12];
+        let mut openers_bottom = [bottom; OPENER_KEYS];
         let mut closer = NONE;
         let mut d = self.last_delim;
         while d != NONE && d >= bottom {
@@ -690,10 +1099,19 @@ impl Parser<'_> {
                 closer = c.next;
                 continue;
             }
-            let key = usize::from(c.ch == b'_') * 6 + usize::from(c.can_open) * 3 + c.len % 3;
+            let ch = match c.ch {
+                b'*' => 0,
+                b'_' => 1,
+                _ => 2,
+            };
+            let key = ch * 6 + usize::from(c.can_open) * 3 + c.len % 3;
             let mut opener = c.prev;
             let mut found = false;
             while opener != NONE && opener >= openers_bottom[key] {
+                #[cfg(test)]
+                {
+                    self.steps += 1;
+                }
                 let o = &self.delims[opener];
                 if o.can_open
                     && o.ch == c.ch
@@ -722,8 +1140,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Wraps the nodes between `opener` and `closer` in emphasis; returns
-    /// the next closer to look at.
+    /// Wraps the nodes between `opener` and `closer` in emphasis (or, for
+    /// `~~`, strikethrough: both runs are exactly two, so both go whole);
+    /// returns the next closer to look at.
     fn insert_emph(&mut self, opener: usize, closer: usize) -> usize {
         let use_ = if self.delim_count(opener) >= 2 && self.delim_count(closer) >= 2 {
             2
@@ -739,7 +1158,11 @@ impl Parser<'_> {
             d = p;
         }
         let (o_node, c_node) = (self.delims[opener].node, self.delims[closer].node);
-        let kind = if use_ == 1 { Kind::Emph } else { Kind::Strong };
+        let kind = match (self.delims[opener].ch, use_) {
+            (b'~', _) => Kind::Strikethrough,
+            (_, 1) => Kind::Emph,
+            _ => Kind::Strong,
+        };
         self.wrap(o_node, c_node, kind);
         if left_o == 0 {
             self.unlink(o_node);
@@ -802,7 +1225,11 @@ impl Parser<'_> {
         let kind = if image {
             Kind::Image { dest, title }
         } else {
-            Kind::Link { dest, title }
+            Kind::Link {
+                dest,
+                title,
+                auto: false,
+            }
         };
         let prev = self.nodes[opener.node].prev;
         self.unlink(opener.node);
@@ -887,16 +1314,18 @@ impl Parser<'_> {
 
     // ---- output ----
 
-    /// Appends the sibling list from `n` to `out` as inlines, nested at
-    /// `depth`. Adjacent text is merged.
-    fn convert(&mut self, mut n: usize, depth: usize, out: &mut Vec<Inline>) {
+    /// Converts the sibling list from `n` into the empty `out` as inlines,
+    /// nested at `depth`. Adjacent text is merged; in GFM, outside a link
+    /// or image (`in_link`), the merged text is then searched for email
+    /// addresses.
+    fn convert(&mut self, mut n: usize, depth: usize, in_link: bool, out: &mut Vec<Inline>) {
         while n != NONE && !self.m.failed() {
             let next = self.nodes[n].next;
             let first = self.nodes[n].first;
             let kind = std::mem::replace(&mut self.nodes[n].kind, Kind::SoftBreak);
-            let children = |p: &mut Self| {
+            let children = |p: &mut Self, in_link: bool| {
                 let mut c = Vec::new();
-                p.convert(first, depth + 1, &mut c);
+                p.convert(first, depth + 1, in_link, &mut c);
                 c
             };
             let inline = match kind {
@@ -914,22 +1343,89 @@ impl Parser<'_> {
                     n = next;
                     continue;
                 }
-                Kind::Emph => Inline::Emph(children(self)),
-                Kind::Strong => Inline::Strong(children(self)),
-                Kind::Link { dest, title } => Inline::Link {
+                Kind::Emph => Inline::Emph(children(self, in_link)),
+                Kind::Strong => Inline::Strong(children(self, in_link)),
+                Kind::Strikethrough => Inline::Strikethrough(children(self, in_link)),
+                Kind::Link { dest, title, auto } => Inline::Link {
                     dest,
                     title,
-                    content: children(self),
+                    content: children(self, true),
+                    auto,
                 },
                 Kind::Image { dest, title } => Inline::Image {
                     dest,
                     title,
-                    alt: children(self),
+                    alt: children(self, true),
                 },
             };
             self.m.push(out, inline);
             n = next;
         }
+        if self.dialect == Dialect::Gfm && !in_link {
+            self.emails(out);
+        }
+    }
+
+    /// GFM extended email autolinks: every text of `out` that holds an `@`
+    /// is split around the addresses in it. Linear: a local part is found
+    /// by going back from its `@`, never past the previous `@` or the last
+    /// address, and a domain scan stops at the next `@`.
+    fn emails(&mut self, out: &mut Vec<Inline>) {
+        if !out
+            .iter()
+            .any(|i| matches!(i, Inline::Text(t) if t.contains('@')))
+        {
+            return;
+        }
+        let items = std::mem::take(out);
+        for item in items {
+            match item {
+                Inline::Text(t) if t.contains('@') => self.split_emails(&t, out),
+                other => self.m.push(out, other),
+            }
+        }
+    }
+
+    fn split_emails(&mut self, t: &str, out: &mut Vec<Inline>) {
+        let b = t.as_bytes();
+        // `floor`: the start of the text not yet appended.
+        let (mut floor, mut i, mut steps) = (0, 0, 0);
+        while let Some(off) = b[i..].iter().position(|&c| c == b'@') {
+            let at = i + off;
+            steps += off + 1;
+            let mut from = at;
+            while from > floor && is_local_char(b[from - 1]) {
+                from -= 1;
+                steps += 1;
+            }
+            i = at + 1;
+            let Some(end) = email_domain(b, at + 1, &mut steps).filter(|_| from < at) else {
+                continue;
+            };
+            let email = &t[from..end];
+            // Three nodes (the link, its text, the text after it) and the
+            // destination, a second copy of the address with `mailto:`.
+            // The pieces of `t` (before, address, rest) are not charged
+            // again: together they are `t`'s bytes, which are charged, and
+            // `t` is dropped when the caller's item goes, so the copy
+            // briefly holds at most one charged text node twice.
+            if !self.m.nodes(3) || !self.m.text("mailto:".len() + email.len()) {
+                return;
+            }
+            push_text(out, &t[floor..from], self.m);
+            let mut content = Vec::new();
+            push_text(&mut content, email, self.m);
+            let link = Inline::Link {
+                dest: format!("mailto:{email}"),
+                title: String::new(),
+                content,
+                auto: true,
+            };
+            self.m.push(out, link);
+            (floor, i) = (end, end);
+        }
+        push_text(out, &t[floor..], self.m);
+        self.count(steps);
     }
 
     /// Appends the leaves under the sibling list from `n`, without their
@@ -948,7 +1444,11 @@ impl Parser<'_> {
                 Kind::Html(t) => self.m.push(out, Inline::Html(t)),
                 Kind::SoftBreak => self.m.push(out, Inline::SoftBreak),
                 Kind::HardBreak => self.m.push(out, Inline::HardBreak),
-                Kind::Emph | Kind::Strong | Kind::Link { .. } | Kind::Image { .. } => {
+                Kind::Emph
+                | Kind::Strong
+                | Kind::Strikethrough
+                | Kind::Link { .. }
+                | Kind::Image { .. } => {
                     stack.push(self.nodes[n].first);
                 }
             }
@@ -1002,7 +1502,9 @@ mod tests {
     fn inline_depth(is: &[Inline]) -> usize {
         is.iter()
             .map(|i| match i {
-                Inline::Emph(c) | Inline::Strong(c) => 1 + inline_depth(c),
+                Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => {
+                    1 + inline_depth(c)
+                }
                 Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => {
                     1 + inline_depth(c)
                 }
@@ -1081,6 +1583,21 @@ mod tests {
             html::write(&d);
             md::write(&d);
             txt::write(&d);
+        }
+    }
+
+    #[test]
+    fn deep_strikethrough_is_capped() {
+        let n = 1000;
+        let p = format!("{}b{}", "~~a ".repeat(n), " a~~".repeat(n));
+        let quoted = format!("{}{p}", ">".repeat(300));
+        for p in [p, quoted] {
+            let d = md::read_with(p.as_bytes(), Dialect::Gfm).unwrap();
+            assert_eq!(para_depth(&d), MAX_DEPTH);
+            // The flattened wrappers keep their text: every `a` and the `b`.
+            assert_eq!(txt::write(&d).0.matches('a').count(), 2 * n);
+            html::write(&d);
+            md::write(&d);
         }
     }
 
@@ -1169,11 +1686,611 @@ mod tests {
         assert!(html(&md).contains("href=\"/u\""));
     }
 
+    fn gfm(md: &str) -> String {
+        html::write(&md::read_with(md.as_bytes(), Dialect::Gfm).unwrap())
+    }
+
+    #[test]
+    fn single_tilde_is_text() {
+        assert_eq!(gfm("~a~"), "<p>~a~</p>\n");
+        assert_eq!(gfm("~5 min"), "<p>~5 min</p>\n");
+        // A single tilde neither opens nor closes against a double one.
+        assert_eq!(gfm("~a~~"), "<p>~a~~</p>\n");
+        assert_eq!(gfm("~~a~"), "<p>~~a~</p>\n");
+        assert_eq!(gfm("~~a~~"), "<p><del>a</del></p>\n");
+    }
+
+    #[test]
+    fn triple_tilde_is_text() {
+        // (Text first: three tildes at a line start open a code fence.)
+        assert_eq!(gfm("x ~~~a~~~"), "<p>x ~~~a~~~</p>\n");
+        assert_eq!(gfm("x ~~~~a~~~~"), "<p>x ~~~~a~~~~</p>\n");
+        // A longer run is not split into a pair and a rest.
+        assert_eq!(gfm("x ~~~a~~"), "<p>x ~~~a~~</p>\n");
+        assert_eq!(gfm("~~a~~~"), "<p>~~a~~~</p>\n");
+    }
+
+    #[test]
+    fn tilde_follows_the_flanking_rules() {
+        assert_eq!(gfm("~~ a~~"), "<p>~~ a~~</p>\n");
+        assert_eq!(gfm("~~a ~~"), "<p>~~a ~~</p>\n");
+        assert_eq!(gfm("a~~b~~c"), "<p>a<del>b</del>c</p>\n");
+        assert_eq!(gfm("\\~~a~~"), "<p>~~a~~</p>\n");
+        // Unclosed openers stay text; the first closer takes the nearest.
+        assert_eq!(gfm("~~a ~~b~~"), "<p>~~a <del>b</del></p>\n");
+    }
+
+    #[test]
+    fn tilde_and_emphasis_nest() {
+        assert_eq!(gfm("~~*a*~~"), "<p><del><em>a</em></del></p>\n");
+        assert_eq!(gfm("*~~a~~*"), "<p><em><del>a</del></em></p>\n");
+        assert_eq!(
+            gfm("**a ~~b~~**"),
+            "<p><strong>a <del>b</del></strong></p>\n"
+        );
+        assert_eq!(gfm("~~[a](b)~~"), "<p><del><a href=\"b\">a</a></del></p>\n");
+        assert_eq!(gfm("[~~a](b)~~"), "<p><a href=\"b\">~~a</a>~~</p>\n");
+        // Crossing runs: the first closer wins, the other stays text.
+        assert_eq!(gfm("~~a *b~~ c*"), "<p><del>a *b</del> c*</p>\n");
+        // A failed `~~` closer does not hide `*` openers below it.
+        // (The `**` closer has the `~~` closer's run length and flags, so
+        // a search bound shared between the two would stop at the `~~`.)
+        assert_eq!(gfm("*a b~~ c*"), "<p><em>a b~~ c</em></p>\n");
+        assert_eq!(gfm("**a b~~ c**"), "<p><strong>a b~~ c</strong></p>\n");
+    }
+
+    #[test]
+    fn tilde_in_code_span_is_text() {
+        assert_eq!(gfm("`~~a~~`"), "<p><code>~~a~~</code></p>\n");
+        assert_eq!(
+            gfm("~~a `b~~` c~~"),
+            "<p><del>a <code>b~~</code> c</del></p>\n"
+        );
+        assert_eq!(gfm("<~~a~~>"), "<p>&lt;<del>a</del>&gt;</p>\n");
+        assert_eq!(
+            gfm("x <a title=\"~~a~~\">"),
+            "<p>x <a title=\"~~a~~\"></p>\n"
+        );
+    }
+
+    #[test]
+    fn cm_dialect_reads_tildes_as_text() {
+        for md in ["~~a~~", "a ~~b~~ c", "~~*a*~~"] {
+            let cm = md::read_with(md.as_bytes(), Dialect::CommonMark).unwrap();
+            assert_eq!(cm, md::read(md.as_bytes()).unwrap());
+            assert!(!html::write(&cm).contains("<del>"), "{md}");
+        }
+        assert_eq!(
+            md::read(b"~~a~~").unwrap().blocks,
+            vec![Block::Paragraph(vec![Inline::Text("~~a~~".into())])]
+        );
+    }
+
+    #[test]
+    fn strikethrough_is_a_charged_node() {
+        let read = |nodes: usize| {
+            let limits = crate::Limits {
+                nodes,
+                ..crate::Limits::DEFAULT
+            };
+            md::read_limited_with(b"~~a~~", limits, Dialect::Gfm)
+        };
+        let need = (1..).find(|&n| read(n).is_ok()).unwrap();
+        assert_eq!(
+            read(need - 1),
+            Err(crate::ReadError::Limit(crate::LimitError::Exceeded(
+                "nodes"
+            )))
+        );
+        let plain = |nodes: usize| {
+            let limits = crate::Limits {
+                nodes,
+                ..crate::Limits::DEFAULT
+            };
+            md::read_limited_with(b"~~a~~", limits, Dialect::CommonMark).is_ok()
+        };
+        // GFM: the paragraph, two `~~` text nodes, `a`, and the wrapper;
+        // CommonMark reads `~~a~~` as one text node.
+        assert_eq!(need, (1..).find(|&n| plain(n)).unwrap() + 3);
+    }
+
+    /// The paragraph's inlines, GFM.
+    fn gfm_inlines(md: &str) -> Vec<Inline> {
+        match md::read_with(md.as_bytes(), Dialect::Gfm)
+            .unwrap()
+            .blocks
+            .as_slice()
+        {
+            [Block::Paragraph(p)] => p.clone(),
+            b => panic!("not one paragraph: {b:?}"),
+        }
+    }
+
+    fn auto_link(dest: &str, text: &str) -> Inline {
+        Inline::Link {
+            dest: dest.into(),
+            title: String::new(),
+            content: vec![Inline::Text(text.into())],
+            auto: true,
+        }
+    }
+
+    #[test]
+    fn www_gets_http_scheme() {
+        assert_eq!(
+            gfm_inlines("www.commonmark.org"),
+            [auto_link("http://www.commonmark.org", "www.commonmark.org")]
+        );
+        assert_eq!(
+            gfm_inlines("a https://x.y/z b"),
+            [
+                Inline::Text("a ".into()),
+                auto_link("https://x.y/z", "https://x.y/z"),
+                Inline::Text(" b".into()),
+            ]
+        );
+        // Schemes ignore case; the text and destination stay as written.
+        assert_eq!(
+            gfm("HTTP://x.y FTP://x.y"),
+            "<p><a href=\"HTTP://x.y\">HTTP://x.y</a> <a href=\"FTP://x.y\">FTP://x.y</a></p>\n"
+        );
+        // Only at the start of a line, after whitespace or `*_~(`.
+        assert_eq!(gfm("xwww.a.b"), "<p>xwww.a.b</p>\n");
+        assert_eq!(gfm("xhttp://a.b"), "<p>xhttp://a.b</p>\n");
+        assert_eq!(gfm("1https://a.b"), "<p>1https://a.b</p>\n");
+        assert_eq!(gfm("<www.a.b"), "<p>&lt;www.a.b</p>\n");
+        assert_eq!(
+            gfm("a\n*www.a.b* ~~http://a.b~~ _www.a.b_"),
+            "<p>a\n<em><a href=\"http://www.a.b\">www.a.b</a></em> \
+             <del><a href=\"http://a.b\">http://a.b</a></del> \
+             <em><a href=\"http://www.a.b\">www.a.b</a></em></p>\n"
+        );
+        // A valid domain: a period with a segment after it, no underscore
+        // in the last two segments; `http://` needs one too.
+        for no in [
+            "www.",
+            "www..",
+            "www.a_b",
+            "www.a_b.c",
+            "http://a",
+            "http://.a.b",
+            "http://_a.b",
+            "http://",
+            "ftp://a_b.c",
+        ] {
+            assert_eq!(gfm(no), format!("<p>{no}</p>\n"), "{no:?}");
+        }
+        // The `www` of `www.` is a segment (cmark-gfm's reading; the spec
+        // text is open to two): `www.x` is a link.
+        assert_eq!(
+            gfm("www.localhost"),
+            "<p><a href=\"http://www.localhost\">www.localhost</a></p>\n"
+        );
+        assert_eq!(
+            gfm("www.a_b.c.d"),
+            "<p><a href=\"http://www.a_b.c.d\">www.a_b.c.d</a></p>\n"
+        );
+        assert_eq!(
+            gfm("www.bücher.de"),
+            "<p><a href=\"http://www.b%C3%BCcher.de\">www.bücher.de</a></p>\n"
+        );
+        // The path runs to whitespace or `<`, over any other syntax.
+        assert_eq!(
+            gfm("www.a.b/`c`*d*[e]\\f"),
+            "<p><a href=\"http://www.a.b/%60c%60*d*%5Be%5D%5Cf\">www.a.b/`c`*d*[e]\\f</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_excluded() {
+        assert_eq!(
+            gfm("www.a.b?!.,:*_~ x"),
+            "<p><a href=\"http://www.a.b\">www.a.b</a>?!.,:*_~ x</p>\n"
+        );
+        assert_eq!(
+            gfm("http://a.b/c.d."),
+            "<p><a href=\"http://a.b/c.d\">http://a.b/c.d</a>.</p>\n"
+        );
+        // `&` + alphanumerics + `;` looks like an entity and is left out;
+        // any other trailing `;` stays in the link.
+        assert_eq!(
+            gfm("www.a.b/?q&h1;"),
+            "<p><a href=\"http://www.a.b/?q\">www.a.b/?q</a>&amp;h1;</p>\n"
+        );
+        assert_eq!(
+            gfm("www.a.b/c;"),
+            "<p><a href=\"http://www.a.b/c;\">www.a.b/c;</a></p>\n"
+        );
+        assert_eq!(
+            gfm("www.a.b/&;"),
+            "<p><a href=\"http://www.a.b/&amp;;\">www.a.b/&amp;;</a></p>\n"
+        );
+        assert_eq!(
+            gfm("www.a.b&x;&y;."),
+            "<p><a href=\"http://www.a.b\">www.a.b</a>&amp;x;&amp;y;.</p>\n"
+        );
+        // When the trim takes the whole path, it goes on into the domain
+        // and the trimmed domain decides; otherwise the whole one does.
+        for (md, want) in [
+            ("www.a.b_)", "<a href=\"http://www.a.b\">www.a.b</a>_)"),
+            (
+                "www.a.b_&x;.",
+                "<a href=\"http://www.a.b\">www.a.b</a>_&amp;x;.",
+            ),
+            ("www.a.b_?/", "www.a.b_?/"),
+            ("www.a.b_&x", "www.a.b_&amp;x"),
+            ("www.a.b_;", "www.a.b_;"),
+            ("www.a_b.c.?", "www.a_b.c.?"),
+            (
+                "www.a_b.c./",
+                "<a href=\"http://www.a_b.c./\">www.a_b.c./</a>",
+            ),
+        ] {
+            assert_eq!(gfm(md), format!("<p>{want}</p>\n"), "{md:?}");
+        }
+    }
+
+    #[test]
+    fn parens_balanced() {
+        assert_eq!(
+            gfm("www.a.b/(c)"),
+            "<p><a href=\"http://www.a.b/(c)\">www.a.b/(c)</a></p>\n"
+        );
+        assert_eq!(
+            gfm("(www.a.b/c))."),
+            "<p>(<a href=\"http://www.a.b/c\">www.a.b/c</a>)).</p>\n"
+        );
+        assert_eq!(
+            gfm("www.a.b/((c)"),
+            "<p><a href=\"http://www.a.b/((c)\">www.a.b/((c)</a></p>\n"
+        );
+        // Only a trailing `)` is checked.
+        assert_eq!(
+            gfm("www.a.b/c)d"),
+            "<p><a href=\"http://www.a.b/c)d\">www.a.b/c)d</a></p>\n"
+        );
+        // Punctuation and parentheses come off in any order.
+        assert_eq!(
+            gfm("(www.a.b/c.)"),
+            "<p>(<a href=\"http://www.a.b/c\">www.a.b/c</a>.)</p>\n"
+        );
+    }
+
+    #[test]
+    fn email_autolink() {
+        assert_eq!(
+            gfm_inlines("x foo.bar+1@ex-a_m.ple.org."),
+            [
+                Inline::Text("x ".into()),
+                auto_link(
+                    "mailto:foo.bar+1@ex-a_m.ple.org",
+                    "foo.bar+1@ex-a_m.ple.org"
+                ),
+                Inline::Text(".".into()),
+            ]
+        );
+        for no in ["a@b", "@b.c", "a@b.c-", "a@b.c_", "a@.b.c", "a@b+c.d"] {
+            assert_eq!(gfm(no), format!("<p>{no}</p>\n"), "{no:?}");
+        }
+        assert_eq!(
+            gfm("a@b.c1"),
+            "<p><a href=\"mailto:a@b.c1\">a@b.c1</a></p>\n"
+        );
+        // A second `@` spoils the first address; the second can still be one.
+        assert_eq!(
+            gfm("a@b.c@d.e"),
+            "<p>a@<a href=\"mailto:b.c@d.e\">b.c@d.e</a></p>\n"
+        );
+        // Recognised in any text: across emphasis delimiters and entities
+        // that stayed text, after any character.
+        assert_eq!(
+            gfm("a_b@c.d x/e&#64;f.g"),
+            "<p><a href=\"mailto:a_b@c.d\">a_b@c.d</a> x/<a href=\"mailto:e@f.g\">e@f.g</a></p>\n"
+        );
+        assert_eq!(
+            gfm("*a@b.c* a@b.c a@b.c"),
+            "<p><em><a href=\"mailto:a@b.c\">a@b.c</a></em> \
+             <a href=\"mailto:a@b.c\">a@b.c</a> <a href=\"mailto:a@b.c\">a@b.c</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn not_inside_code_or_link() {
+        assert_eq!(
+            gfm("`www.a.b a@b.c`"),
+            "<p><code>www.a.b a@b.c</code></p>\n"
+        );
+        assert_eq!(
+            gfm("[www.a.b a@b.c http://a.b](u)"),
+            "<p><a href=\"u\">www.a.b a@b.c http://a.b</a></p>\n"
+        );
+        assert_eq!(gfm("[x](www.a.b)"), "<p><a href=\"www.a.b\">x</a></p>\n");
+        assert_eq!(
+            gfm("![www.a.b a@b.c](u)"),
+            "<p><img src=\"u\" alt=\"www.a.b a@b.c\" /></p>\n"
+        );
+        // An open bracket that never closes still holds www and URL links
+        // off (as cmark-gfm does); a bare email is found in its text.
+        assert_eq!(gfm("[www.a.b"), "<p>[www.a.b</p>\n");
+        assert_eq!(
+            gfm("<a title=\"www.a.b\"> <x@y.z>"),
+            "<p><a title=\"www.a.b\"> <a href=\"mailto:x@y.z\">x@y.z</a></p>\n"
+        );
+        // A CommonMark `<...>` autolink stays one, not an extended one.
+        assert_eq!(
+            gfm_inlines("<http://a.b>"),
+            [Inline::Link {
+                dest: "http://a.b".into(),
+                title: String::new(),
+                content: vec![Inline::Text("http://a.b".into())],
+                auto: false,
+            }]
+        );
+        // CommonMark reads none of them.
+        let cm = md::read_with(b"www.a.b http://a.b a@b.c", Dialect::CommonMark).unwrap();
+        assert_eq!(html::write(&cm), "<p>www.a.b http://a.b a@b.c</p>\n");
+    }
+
+    #[test]
+    fn extended_autolink_is_charged() {
+        for input in [&b"www.a.b"[..], b"http://a.b", b"a@b.c"] {
+            let read = |nodes: usize, dialect| {
+                let limits = crate::Limits {
+                    nodes,
+                    ..crate::Limits::DEFAULT
+                };
+                md::read_limited_with(input, limits, dialect)
+            };
+            let need = (1..).find(|&n| read(n, Dialect::Gfm).is_ok()).unwrap();
+            assert_eq!(
+                read(need - 1, Dialect::Gfm),
+                Err(crate::ReadError::Limit(crate::LimitError::Exceeded(
+                    "nodes"
+                )))
+            );
+            let plain = (1..)
+                .find(|&n| read(n, Dialect::CommonMark).is_ok())
+                .unwrap();
+            assert!(need > plain, "{input:?}: {need} <= {plain}");
+            // The destination is a second copy of the text: charged too.
+            let text = |text_bytes: usize| {
+                let limits = crate::Limits {
+                    text_bytes,
+                    ..crate::Limits::DEFAULT
+                };
+                md::read_limited_with(input, limits, Dialect::Gfm).is_ok()
+            };
+            let need = (0..).find(|&n| text(n)).unwrap();
+            assert!(need >= 2 * input.len(), "{input:?}: {need}");
+        }
+    }
+
+    /// Bytes the extended-autolink scans look at for `raw` (GFM).
+    fn autolink_steps(raw: &str) -> usize {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let refs = Refs::new();
+        let mut p = Parser::new(raw, &refs, Dialect::Gfm, &mut m);
+        p.parse();
+        assert!(!p.m.failed());
+        p.auto_steps
+    }
+
+    #[test]
+    fn extended_autolinks_stay_linear() {
+        // Step counts, not time: a scan that restarted per candidate (the
+        // domain from each `www.`, the parentheses per trailing `)`, the
+        // address from each `@`) would look at ~n^2/2 bytes here.
+        let n = 2_000;
+        let inputs = [
+            "www.a_".repeat(n),
+            format!("x{}", "_www.a_b".repeat(n)),
+            "www.".repeat(n),
+            format!("www.{}", "a.".repeat(n)),
+            format!("www.a.b/{}", ")".repeat(n)),
+            format!("{}www.a.b/{}", "(".repeat(n), ")".repeat(n)),
+            format!("www.a.b{}", ".,".repeat(n)),
+            format!("www.a.b{}", "&a;".repeat(n)),
+            "http://a.b<".repeat(n),
+            "http://a_b.c_d:".repeat(n),
+            "a@".repeat(n),
+            "a@b.c".repeat(n),
+            format!("{}@", "a.".repeat(n)),
+            format!("a@{}", "b.".repeat(n)),
+            "a@b.c@".repeat(n),
+            "(www.a.b) ".repeat(n),
+        ];
+        for raw in &inputs {
+            assert_linear_steps(raw);
+        }
+    }
+
+    /// Fails unless the autolink scans of `raw` look at no more than four
+    /// times its bytes.
+    fn assert_linear_steps(raw: &str) {
+        let steps = autolink_steps(raw);
+        assert!(
+            steps <= 4 * raw.len(),
+            "{} steps for {} bytes of {:?}...",
+            steps,
+            raw.len(),
+            &raw[..12]
+        );
+    }
+
+    #[test]
+    fn rejected_paths_are_not_rescanned() {
+        // A domain that is valid only when trimmed (or only in full) with a
+        // path that decides against it: a path scan per candidate, each
+        // to the next whitespace, would look at ~n^2/2 bytes. Checked up
+        // to the 8 MiB the default limits accept, where that is hours.
+        let shapes: [fn(usize) -> String; 9] = [
+            |k| "www.a.b_/(".repeat(k),
+            |k| "(http://a.b_/".repeat(k),
+            |k| "www.a.b_*".repeat(k),
+            |k| "www.a.b_~".repeat(k),
+            |k| "www.a.b_)(".repeat(k),
+            |k| "_www.a.b_&a".repeat(k),
+            |k| "(www.a.b_;".repeat(k),
+            |k| "www.a_b.c.*".repeat(k),
+            |k| "(ftp://a.b_)x".repeat(k),
+        ];
+        for size in [16 << 10, 8 << 20] {
+            for shape in &shapes {
+                let raw = shape(size / shape(1).len());
+                assert_linear_steps(&raw);
+            }
+        }
+    }
+
+    /// Opener candidates `process_emphasis` looks at for `raw` in GFM.
+    fn emphasis_steps(raw: &str) -> usize {
+        let mut m = Meter::new(crate::Limits::UNLIMITED);
+        let refs = Refs::new();
+        let mut p = Parser::new(raw, &refs, Dialect::Gfm, &mut m);
+        p.parse();
+        p.steps
+    }
+
+    #[test]
+    fn tilde_runs_stay_linear() {
+        // Step counts, not time: a search that restarted from the top per
+        // closer would look at ~n^2/2 candidates here.
+        let n = 2_000;
+        let inputs = [
+            "~~a ".repeat(n),
+            "a~~ ".repeat(n),
+            "~~".repeat(n),
+            "~".repeat(n),
+            "~~~ ".repeat(n),
+            format!("{}{}", "*a ".repeat(n), "a~~ ".repeat(n)),
+            format!("{}{}", "~~a ".repeat(n), "a* ".repeat(n)),
+            format!("{}{}", "~~a ".repeat(n), "a~~".repeat(n)),
+            "~~a*".repeat(n),
+            "[~~a".repeat(n),
+        ];
+        for raw in &inputs {
+            let steps = emphasis_steps(raw);
+            assert!(steps <= 4 * n, "{} steps for {:?}...", steps, &raw[..12]);
+        }
+    }
+
     #[test]
     fn punct_table_is_sorted() {
         assert!(PUNCT.windows(2).all(|w| w[0].1 < w[1].0));
         assert!(PUNCT.iter().all(|&(lo, hi)| lo <= hi && !lo.is_ascii()));
         assert!(is_punct('€') && is_punct('¡') && is_punct('—') && is_punct('$'));
         assert!(!is_punct('a') && !is_punct('é') && !is_punct(' '));
+    }
+
+    #[test]
+    fn email_charge_is_the_destination_plus_the_address() {
+        // Reading as GFM costs, over CommonMark, exactly the destination
+        // (`mailto:` and the address) per address: 12 for `a@b.c`.
+        for (input, addresses, bytes) in
+            [("a@b.c", 1, 5), ("x a@b.cc y", 1, 6), ("a@b.c a@b.c", 2, 5)]
+        {
+            let need = |dialect| {
+                (0..)
+                    .find(|&text_bytes| {
+                        let limits = crate::Limits {
+                            text_bytes,
+                            ..crate::Limits::DEFAULT
+                        };
+                        md::read_limited_with(input.as_bytes(), limits, dialect).is_ok()
+                    })
+                    .unwrap()
+            };
+            assert_eq!(
+                need(Dialect::Gfm) - need(Dialect::CommonMark),
+                addresses * ("mailto:".len() + bytes),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn autolink_steps_count_what_is_scanned() {
+        // The bound in `extended_autolinks_stay_linear` is only worth
+        // something if the counter counts: pin it on small inputs, each
+        // reaching one of the places that add to it.
+        // The domain run (7 bytes) and one look at the empty path.
+        assert_eq!(autolink_steps("www.a.b"), 8);
+        // The run and the stop byte, then an entity look-alike (`&`, its
+        // three letters) in the path scan.
+        assert_eq!(autolink_steps("www.a.b&amp;"), 13);
+        // A path that stays: scanned once, then trimmed from the end,
+        // an entity look-alike counting its letters.
+        assert_eq!(autolink_steps("www.a.b/x),."), 18);
+        assert_eq!(autolink_steps("www.a.b/x&amp;"), 21);
+        assert_eq!(autolink_steps("http://a.b/p?q=1)."), 16);
+        // Addresses: the bytes up to each `@`, its local part going back,
+        // the domain going forward.
+        assert_eq!(autolink_steps("a@b.c"), 7);
+        assert_eq!(autolink_steps("x a.b@c.de y"), 14);
+        assert_eq!(autolink_steps("a@b@c"), 10);
+        // One opener candidate per closer in emphasis.
+        assert_eq!(emphasis_steps("*a* **b**"), 2);
+    }
+
+    #[test]
+    fn extended_autolink_domain_edges() {
+        let link = |t: &str| format!("<a href=\"http://{t}\">{t}</a>");
+        // A `www.` with no segment after its period is no domain, even
+        // when an earlier period in the same run has one.
+        assert_eq!(gfm("x.y_www."), "<p>x.y_www.</p>\n");
+        assert_eq!(gfm("www.x_www."), "<p>www.x_www.</p>\n");
+        // A second candidate inside a run: its own segment `www` holds no
+        // underscore, whatever the segments before it hold.
+        assert_eq!(
+            gfm("www.x_www.c"),
+            format!("<p>www.x_{}</p>\n", link("www.c"))
+        );
+        assert_eq!(gfm("x.y_www.c"), format!("<p>x.y_{}</p>\n", link("www.c")));
+        // `www.` must be the whole start of a candidate, and `://` must
+        // follow a scheme: neither a bare `w` nor a bare `:` is one.
+        assert_eq!(gfm("w.a.b"), "<p>w.a.b</p>\n");
+        assert_eq!(gfm("http:abc.d.e"), "<p>http:abc.d.e</p>\n");
+        assert_eq!(gfm("ww.a.b.c"), "<p>ww.a.b.c</p>\n");
+        // A trailing entity look-alike of any length goes, the link ending
+        // where its `&` begins.
+        for (entity, tail) in [
+            ("&a;", "&amp;a;"),
+            ("&ab;", "&amp;ab;"),
+            ("&amp;", "&amp;"),
+            ("&abcdefgh;", "&amp;abcdefgh;"),
+        ] {
+            assert_eq!(
+                gfm(&format!("www.a.b/x{entity}")),
+                format!("<p>{}{tail}</p>\n", link("www.a.b/x")),
+                "{entity}"
+            );
+        }
+        // An entity look-alike longer than half of what precedes it still
+        // goes from the end of the link.
+        assert_eq!(
+            gfm("www.a.b&aaaaaaaaaaaa;"),
+            format!("<p>{}&amp;aaaaaaaaaaaa;</p>\n", link("www.a.b"))
+        );
+    }
+
+    #[test]
+    fn closers_of_different_length_mod_3_keep_their_own_search_floor() {
+        // `**` is both-flanking and its run length is 2 mod 3, the closing
+        // `*` is 1 mod 3: the search floors kept per class must not be
+        // shared, or the `*` would give up before it reaches the opener.
+        let want = "<p><em>a**a</em>a</p>\n";
+        assert_eq!(html("*a**a*a"), want);
+        assert_eq!(gfm("*a**a*a"), want);
+    }
+
+    #[test]
+    fn email_autolink_needs_a_clean_domain() {
+        // A character that is neither a letter, digit, hyphen, period nor
+        // the closing bracket ends the scan: no address.
+        assert_eq!(html("<a@b$c>"), "<p>&lt;a@b$c&gt;</p>\n");
+        assert_eq!(
+            html("<a@b.c>"),
+            "<p><a href=\"mailto:a@b.c\">a@b.c</a></p>\n"
+        );
     }
 }

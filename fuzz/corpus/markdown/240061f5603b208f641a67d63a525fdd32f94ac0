@@ -1,0 +1,25 @@
+F
+
+[foo]: /url1
+[bar]:``_
+]
+
+[baz]: ``_
+]
+
+[baz]: /url1
+z]
+
+[baz]: /url1
+ar]
+
+[foo]: /url1
+[bar]:``_
+'
+
+[: ]:`
+[bar]:``_
+]
+
+[baz]: /url0[bar]2
+]: ]:``_

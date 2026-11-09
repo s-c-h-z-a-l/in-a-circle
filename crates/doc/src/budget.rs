@@ -148,6 +148,21 @@ impl Sink {
         }
     }
 
+    /// Charges `n` bytes of transient working memory (no output) to the
+    /// output budget: working data that is a multiple of the output it
+    /// stands for must not outgrow the budget unnoticed. Nothing is
+    /// reserved; on failure the sink is poisoned like any other overrun.
+    pub(crate) fn charge(&mut self, n: usize) -> bool {
+        if self.err.is_some() {
+            return false;
+        }
+        if n > self.limit {
+            self.err = Some(LimitError::Exceeded("output"));
+            return false;
+        }
+        true
+    }
+
     /// Whether `n` more bytes fit in `out`; on success the room is
     /// reserved.
     pub(crate) fn room(&mut self, out: &mut String, n: usize) -> bool {
@@ -166,5 +181,27 @@ impl Sink {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A charge equal to the limit fits; one byte more does not, and the
+    /// failure is sticky.
+    #[test]
+    fn charge_fits_up_to_the_limit() {
+        let limits = Limits {
+            output_bytes: 10,
+            ..Limits::UNLIMITED
+        };
+        let mut sink = Sink::new(limits);
+        assert!(sink.charge(10));
+        assert!(!sink.failed());
+        assert!(sink.charge(0));
+        assert!(!sink.charge(11));
+        assert_eq!(sink.result(), Err(LimitError::Exceeded("output")));
+        assert!(!sink.charge(0));
     }
 }

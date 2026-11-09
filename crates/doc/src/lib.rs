@@ -6,6 +6,48 @@ pub mod html;
 pub mod md;
 pub mod txt;
 
+/// The Markdown syntax a reader accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// CommonMark 0.31.2 only; what `md::read` has always read.
+    #[default]
+    CommonMark,
+    /// CommonMark plus the GitHub extensions: tables, strikethrough, task
+    /// list items and extended autolinks.
+    Gfm,
+}
+
+/// Column alignment of a table, from its delimiter row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+/// A list item: its blocks, and (GFM) the task list state when its first
+/// block is a paragraph that starts with `[ ]`, `[x]` or `[X]` and a space
+/// or tab; the marker is not part of the blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    /// `None`: not a task item; `Some(done)` otherwise.
+    pub checked: Option<bool>,
+    pub blocks: Vec<Block>,
+}
+
+/// Plain (non-task) items from block lists, for test fixtures.
+#[cfg(test)]
+pub(crate) fn plain_items(items: Vec<Vec<Block>>) -> Vec<ListItem> {
+    items
+        .into_iter()
+        .map(|blocks| ListItem {
+            checked: None,
+            blocks,
+        })
+        .collect()
+}
+
 /// A parsed document: a sequence of blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
@@ -29,7 +71,14 @@ pub enum Block {
     List {
         start: Option<u64>,
         tight: bool,
-        items: Vec<Vec<Block>>,
+        items: Vec<ListItem>,
+    },
+    /// A GFM table. `align` has one entry per header cell; every row of
+    /// `rows` has exactly that many cells too.
+    Table {
+        align: Vec<Align>,
+        head: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
     },
     ThematicBreak,
     HtmlBlock(String),
@@ -40,11 +89,16 @@ pub enum Inline {
     Text(String),
     Emph(Vec<Inline>),
     Strong(Vec<Inline>),
+    /// `~~text~~` (GFM).
+    Strikethrough(Vec<Inline>),
     Code(String),
     Link {
         dest: String,
         title: String,
         content: Vec<Inline>,
+        /// `true` only for a GFM extended autolink (`www.x.y`, `http://x.y`,
+        /// a bare email), whose text is its destination as written.
+        auto: bool,
     },
     Image {
         dest: String,
@@ -67,6 +121,9 @@ pub enum Loss {
     HeadingLevels,
     BlankLines,
     Whitespace,
+    Strikethrough,
+    TableLayout,
+    TableWidth,
 }
 
 impl Loss {
@@ -81,6 +138,9 @@ impl Loss {
             Loss::HeadingLevels => "heading levels lost",
             Loss::BlankLines => "blank lines merged or dropped",
             Loss::Whitespace => "runs of spaces or tabs may collapse when rendered",
+            Loss::Strikethrough => "strikethrough removed",
+            Loss::TableLayout => "table too wide; rows listed one by one",
+            Loss::TableWidth => "table columns may be misaligned by wide or combining characters",
         }
     }
 }

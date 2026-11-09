@@ -186,6 +186,31 @@ are in `CLAUDE.md`.
   the spaces of whitespace-only lines count). The planner therefore never
   takes it as a lossless intermediate, and the notice says formatting was
   lost for a run whose output actually lost something.
+- `text.txt-to-md` escapes every tilde of a run of two or more, so that
+  plain text is never read back as strikethrough.
+- `text.md-to-txt` reads a `.md` input as GitHub Flavored Markdown
+  (CommonMark plus tables, strikethrough, task lists and extended
+  autolinks). The action writes GFM tables as aligned columns in a full
+  line of 80 characters (the prefix of an enclosing list or quote
+  counts): two spaces between columns, a row of dashes under the header,
+  the column alignment kept as padding. When the table is wider, the widest columns
+  give up width one character at a time, none below 10 (a column that is
+  narrower stays as it is) and a cell wraps inside its column, at spaces,
+  a longer word at a character boundary. If the minimums and gaps do not
+  fit the line, each row becomes `header: cell` lines (`Column <n>` for an
+  empty header) with a blank line between rows, and the action reports
+  that the table was listed. Widths count characters, so a wide or
+  combining character (East Asian Wide and Fullwidth, emoji, combining
+  marks) or a control character such as a TAB is reported as possible
+  misalignment. Strikethrough loses its
+  marks (reported); a task list item is written with `[x] ` or `[ ] `
+  after the list marker, before its text (no trailing space when the item
+  is empty), and that loses nothing. An extended autolink (a bare
+  `www.`, `http://`, `https://` or `ftp://` URL, or a bare email address)
+  is written as its text, and that loses nothing; a `<...>` autolink is
+  reported as a flattened link, as before. Padding and the repeated
+  headers of the listed form count against the output budget like any
+  other byte.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned

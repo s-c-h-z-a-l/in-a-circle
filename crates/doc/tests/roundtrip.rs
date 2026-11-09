@@ -2,7 +2,7 @@
 //! everything that could be read as structure; these tests prove it on
 //! fixtures and on a deterministic pseudo-random corpus.
 
-use doc::{Block, Document, Inline, Loss, md, txt};
+use doc::{Block, Dialect, Document, Inline, Loss, md, txt};
 use std::collections::BTreeSet;
 
 /// Inline text concatenated, `HardBreak` = "\n"; blocks separated by a blank
@@ -31,6 +31,187 @@ fn inlines(c: &[Inline], out: &mut String) {
     }
 }
 
+/// Every inline list of `doc`, depth first.
+fn inline_lists(blocks: &mut [Block], f: &mut impl FnMut(&mut Vec<Inline>)) {
+    for b in blocks {
+        match b {
+            Block::Paragraph(c) | Block::Heading { content: c, .. } => f(c),
+            Block::BlockQuote(bs) => inline_lists(bs, f),
+            Block::List { items, .. } => {
+                for i in items {
+                    inline_lists(&mut i.blocks, f);
+                }
+            }
+            Block::Table { head, rows, .. } => {
+                head.iter_mut()
+                    .chain(rows.iter_mut().flatten())
+                    .for_each(&mut *f);
+            }
+            Block::CodeBlock { .. } | Block::ThematicBreak | Block::HtmlBlock(_) => {}
+        }
+    }
+}
+
+/// `t` as a CommonMark reader reads its backslash escapes and numeric
+/// character references (the writer writes every `&` of the text as `\&`,
+/// so a named one is never its own), and whether `t` ends in a backslash
+/// with nothing after it to escape.
+fn cm_unescape(t: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut rest = t;
+    while let Some(c) = rest.chars().next() {
+        if c == '\\' {
+            match rest[1..].chars().next() {
+                Some(n) if n.is_ascii_punctuation() => {
+                    out.push(n);
+                    rest = &rest[2..];
+                    continue;
+                }
+                None => return (out + "\\", true),
+                _ => {}
+            }
+        } else if let Some(r) = rest.strip_prefix("&#") {
+            let (hex, digits) = match r.strip_prefix(['x', 'X']) {
+                Some(h) => (true, h),
+                None => (false, r),
+            };
+            let n = digits
+                .bytes()
+                .take_while(|c| {
+                    if hex {
+                        c.is_ascii_hexdigit()
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                })
+                .count();
+            let ch = u32::from_str_radix(&digits[..n], if hex { 16 } else { 10 })
+                .ok()
+                .and_then(char::from_u32);
+            if let Some(ch) = ch.filter(|_| n > 0 && digits[n..].starts_with(';')) {
+                out.push(ch);
+                rest = &digits[n + 1..];
+                continue;
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    (out, false)
+}
+
+/// Whether `block` holds a GFM extended autolink that ends in a writer's
+/// backslash whose escaped character the reader trimmed off the link (a
+/// trailing `_`, `*`, `~` or entity look-alike). That character is then
+/// read outside the link without its escape: as a delimiter it can pair
+/// with another, as an entity it is decoded. What it was is not in the
+/// tree any more, so such a block is not compared.
+fn splits_an_escape(block: &Block) -> bool {
+    fn any(c: &[Inline]) -> bool {
+        c.iter().enumerate().any(|(k, i)| match i {
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => {
+                let dangling = matches!(content.last(), Some(Inline::Text(t)) if cm_unescape(t).1);
+                dangling
+                    && matches!(c.get(k + 1), Some(Inline::Text(n))
+                        if !n.starts_with(char::is_whitespace))
+            }
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => any(c),
+            Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => any(c),
+            _ => false,
+        })
+    }
+    let mut found = false;
+    inline_lists(&mut [block.clone()], &mut |c| found |= any(c));
+    found
+}
+
+/// Whether a GFM extended autolink of `doc` holds a backslash or an `&`:
+/// an escape of the Markdown writer (it writes every `&` of the text as
+/// `\&`, and `&` starts the entities it writes).
+fn has_escaped_autolink(doc: &Document) -> bool {
+    fn any(c: &[Inline]) -> bool {
+        c.iter().any(|i| match i {
+            Inline::Link {
+                auto: true,
+                content,
+                ..
+            } => content
+                .iter()
+                .any(|t| matches!(t, Inline::Text(t) if t.contains(['\\', '&']))),
+            Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) => any(c),
+            Inline::Link { content: c, .. } | Inline::Image { alt: c, .. } => any(c),
+            _ => false,
+        })
+    }
+    let mut found = false;
+    inline_lists(&mut doc.blocks.clone(), &mut |c| found |= any(c));
+    found
+}
+
+/// Replaces every GFM extended autolink by its text, merged with the text
+/// around it. A link that holds a writer escape (see
+/// [`has_escaped_autolink`]) is replaced by what a CommonMark reader makes
+/// of its text ([`cm_unescape`]), so only that link is read differently.
+fn unlink_autolinks(doc: &mut Document) {
+    fn unlink(c: &mut Vec<Inline>) {
+        let mut out: Vec<Inline> = Vec::new();
+        // The last link ended in a backslash with nothing after it: before
+        // a line break that is the writer's hard break, which the link
+        // took.
+        let mut dangling = false;
+        for i in c.drain(..) {
+            let (pieces, ends_in_backslash) = match i {
+                Inline::Link {
+                    auto: true,
+                    content,
+                    ..
+                } => {
+                    let mut end = false;
+                    let pieces = content
+                        .into_iter()
+                        .map(|p| match p {
+                            Inline::Text(t) => {
+                                let (t, d) = cm_unescape(&t);
+                                end = d;
+                                Inline::Text(t)
+                            }
+                            other => other,
+                        })
+                        .collect();
+                    (pieces, end)
+                }
+                Inline::SoftBreak if dangling => {
+                    if let Some(Inline::Text(a)) = out.last_mut() {
+                        a.pop();
+                    }
+                    (vec![Inline::HardBreak], false)
+                }
+                mut other => {
+                    if let Inline::Emph(c) | Inline::Strong(c) | Inline::Strikethrough(c) =
+                        &mut other
+                    {
+                        unlink(c);
+                    }
+                    (vec![other], false)
+                }
+            };
+            for p in pieces {
+                match (out.last_mut(), p) {
+                    (Some(Inline::Text(a)), Inline::Text(b)) => a.push_str(&b),
+                    (_, p) => out.push(p),
+                }
+            }
+            dangling = ends_in_backslash;
+        }
+        *c = out;
+    }
+    inline_lists(&mut doc.blocks, &mut unlink);
+}
+
 /// Whether the text has an interior run of two or more spaces/tabs, the only
 /// thing the Markdown writer may report as `Whitespace`.
 fn has_ws_run(s: &str) -> bool {
@@ -53,34 +234,68 @@ fn has_blank_run(s: &str) -> bool {
 
 /// `None` when the round trip is lossless, else a description.
 fn check(input: &str) -> Option<String> {
+    check_with(input, Dialect::CommonMark).or_else(|| check_with(input, Dialect::Gfm))
+}
+
+fn check_with(input: &str, dialect: Dialect) -> Option<String> {
     let (d1, txt_losses) = txt::read(input.as_bytes()).unwrap();
     let (md_text, md_losses) = md::write(&d1);
-    let d2 = md::read(md_text.as_bytes()).unwrap();
-    let (e1, e2) = (extract(&d1), extract(&d2));
+    check_written(input, &d1, &txt_losses, &md_text, &md_losses, dialect)
+}
+
+/// The checks of [`check_with`] on what the writer made of `d1`.
+fn check_written(
+    input: &str,
+    d1: &Document,
+    txt_losses: &BTreeSet<Loss>,
+    md_text: &str,
+    md_losses: &BTreeSet<Loss>,
+    dialect: Dialect,
+) -> Option<String> {
+    let mut d1 = d1.clone();
+    let mut d2 = md::read_with(md_text.as_bytes(), dialect).unwrap();
+    if dialect == Dialect::Gfm {
+        // A bare URL or address is a GFM extended autolink: the same text,
+        // so it is compared as its text. Known limit of the Markdown
+        // writer (it writes CommonMark): the backslash it puts before a
+        // `_ * & # [ ] < > \` in a bare URL, or the entity it writes for a
+        // space it must keep, lands inside the autolink a GFM reader makes
+        // of it, and shows. Such a link is compared as the text a
+        // CommonMark reader makes of it, the rest of the document as it
+        // is; `known_limit_escapes_inside_a_gfm_autolink` pins it.
+        for (b1, b2) in d1.blocks.iter_mut().zip(&mut d2.blocks) {
+            if splits_an_escape(b2) {
+                (*b1, *b2) = (Block::ThematicBreak, Block::ThematicBreak);
+            }
+        }
+        unlink_autolinks(&mut d2);
+    }
+    let d1 = &d1;
+    let (e1, e2) = (extract(d1), extract(&d2));
     if e1 != e2 {
         return Some(format!(
             "text changed\n  md:   {md_text:?}\n  want: {e1:?}\n  got:  {e2:?}"
         ));
     }
-    if d1 != d2 {
+    if *d1 != d2 {
         return Some(format!(
             "tree changed\n  md:   {md_text:?}\n  want: {d1:?}\n  got:  {d2:?}"
         ));
     }
-    for l in &md_losses {
+    for l in md_losses {
         let allowed = *l == Loss::Whitespace && has_ws_run(input);
         if !allowed {
             return Some(format!("unexpected md loss {l:?} for md {md_text:?}"));
         }
     }
-    for l in &txt_losses {
+    for l in txt_losses {
         let allowed = *l == Loss::BlankLines && has_blank_run(input);
         if !allowed {
             return Some(format!("unexpected txt loss {l:?}"));
         }
     }
     // Writing the re-read tree as text gives the same text again.
-    let (t1, _) = txt::write(&d1);
+    let (t1, _) = txt::write(d1);
     let (t2, _) = txt::write(&d2);
     if t1 != t2 {
         return Some(format!("txt output changed: {t1:?} vs {t2:?}"));
@@ -91,6 +306,76 @@ fn check(input: &str) -> Option<String> {
 fn assert_round_trips(input: &str) {
     if let Some(why) = check(input) {
         panic!("round trip failed for {input:?}: {why}");
+    }
+}
+
+#[test]
+fn tildes_survive_txt_to_md_under_gfm() {
+    for input in [
+        "~5 min",
+        "~~kész~~",
+        "wait ~5 min, then ~~kész~~ and ~~~three~~~ ok",
+        "~~a\n~~b~~\n~",
+        "- ~~x~~\n- ~y",
+    ] {
+        let (d1, _) = txt::read(input.as_bytes()).unwrap();
+        let (md_text, _) = md::write(&d1);
+        let d2 = md::read_with(md_text.as_bytes(), Dialect::Gfm).unwrap();
+        assert_eq!(
+            txt::write(&d2).0,
+            txt::write(&d1).0,
+            "{input:?} via {md_text:?}"
+        );
+        assert_eq!(d1, d2, "{input:?} via {md_text:?}");
+        assert_round_trips(input);
+    }
+}
+
+/// The known limit `check_with` leaves out: in a bare URL the Markdown
+/// writer escapes what CommonMark would read as syntax, and a GFM reader
+/// keeps the backslash inside its autolink. A Markdown writer for GFM
+/// would write the URL as it is.
+#[test]
+fn known_limit_escapes_inside_a_gfm_autolink() {
+    let (d1, _) = txt::read(b"see http://x.y/a_b now").unwrap();
+    let (md_text, _) = md::write(&d1);
+    assert_eq!(md_text, "see http://x.y/a\\_b now\n");
+    let mut d2 = md::read_with(md_text.as_bytes(), Dialect::Gfm).unwrap();
+    assert!(has_escaped_autolink(&d2));
+    // Read as CommonMark would, the escaped link is the text again.
+    unlink_autolinks(&mut d2);
+    assert_eq!(d1, d2);
+    // Without an escape the URL comes back as the same text.
+    let (d1, _) = txt::read(b"see http://x.y/a-b now").unwrap();
+    let mut d2 = md::read_with(md::write(&d1).0.as_bytes(), Dialect::Gfm).unwrap();
+    assert!(!has_escaped_autolink(&d2) && d1 != d2);
+    unlink_autolinks(&mut d2);
+    assert_eq!(d1, d2);
+}
+
+/// An escaped autolink is compared as its CommonMark text; the rest of the
+/// document is still compared under GFM.
+#[test]
+fn escaped_autolink_leaves_the_rest_compared() {
+    // `a_` is an escape the link splits: that paragraph is left out, the
+    // next one still counts.
+    for input in [
+        "see http://x.y/a_b here\n\nnow",
+        "see http://x.y/a_ here\n\nnow",
+        "see www.x.y/a\\b&c#d_ here\n\nnow",
+        "http://x.y/a_b\nnow",
+    ] {
+        let (d1, txt_losses) = txt::read(input.as_bytes()).unwrap();
+        let (md_text, md_losses) = md::write(&d1);
+        let d2 = md::read_with(md_text.as_bytes(), Dialect::Gfm).unwrap();
+        assert!(has_escaped_autolink(&d2), "{md_text:?}");
+        let check = |md_text: &str| {
+            check_written(input, &d1, &txt_losses, md_text, &md_losses, Dialect::Gfm)
+        };
+        assert_eq!(check(&md_text), None, "{input:?}");
+        // The same escaped link with the text around it changed is caught.
+        let changed = md_text.replace("now", "later");
+        assert!(check(&changed).is_some(), "{changed:?}");
     }
 }
 

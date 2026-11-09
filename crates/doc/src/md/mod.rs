@@ -15,7 +15,7 @@ mod punct;
 mod scan;
 
 use crate::budget::{Meter, Sink};
-use crate::{Block, Document, Inline, LimitError, Limits, Loss, ReadError};
+use crate::{Block, Dialect, Document, Inline, LimitError, Limits, Loss, ReadError};
 use std::collections::{BTreeSet, HashMap};
 
 /// Reads CommonMark 0.31.2. NUL characters become U+FFFD; invalid UTF-8
@@ -34,11 +34,26 @@ pub fn read(bytes: &[u8]) -> Result<Document, ReadError> {
     read_limited(bytes, Limits::UNLIMITED)
 }
 
+/// [`read`] in the given dialect. `CommonMark` is exactly [`read`].
+pub fn read_with(bytes: &[u8], dialect: Dialect) -> Result<Document, ReadError> {
+    read_limited_with(bytes, Limits::UNLIMITED, dialect)
+}
+
 /// [`read`] under `limits`: the input size is checked first; the NUL
 /// replacement copy, every block and inline node, every owned string and
 /// every copy of a reference's destination and title is charged before it
 /// is made, so the parse stops at the budget (`ReadError::Limit`).
 pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<Document, ReadError> {
+    read_limited_with(bytes, limits, Dialect::CommonMark)
+}
+
+/// [`read_limited`] in the given dialect; `CommonMark` is exactly
+/// [`read_limited`].
+pub fn read_limited_with(
+    bytes: &[u8],
+    limits: Limits,
+    dialect: Dialect,
+) -> Result<Document, ReadError> {
     if bytes.len() > limits.input_bytes {
         return Err(LimitError::Exceeded("input").into());
     }
@@ -56,9 +71,9 @@ pub fn read_limited(bytes: &[u8], limits: Limits) -> Result<Document, ReadError>
         for c in text.chars() {
             copy.push(if c == '\0' { '\u{fffd}' } else { c });
         }
-        block::parse(&copy, &mut m)?
+        block::parse(&copy, dialect, &mut m)?
     } else {
-        block::parse(text, &mut m)?
+        block::parse(text, dialect, &mut m)?
     };
     Ok(doc)
 }
@@ -78,8 +93,8 @@ pub(crate) type Refs = HashMap<String, LinkDef>;
 /// content: lines joined with `\n`, each line's leading spaces/tabs and the
 /// block's final whitespace removed; interior trailing spaces are kept (they
 /// decide hard breaks). `refs` holds every definition of the document.
-fn inlines(raw: &str, refs: &Refs, m: &mut Meter) -> Vec<Inline> {
-    inline::parse(raw, refs, m)
+fn inlines(raw: &str, refs: &Refs, dialect: Dialect, m: &mut Meter) -> Vec<Inline> {
+    inline::parse(raw, refs, dialect, m)
 }
 
 /// Matching form of a link label: Unicode case fold (approximated as
@@ -308,10 +323,15 @@ fn blocks_to_string(
 fn needs_blank(prev: &Block, next: &Block) -> bool {
     match prev {
         Block::List { .. } | Block::BlockQuote(_) | Block::HtmlBlock(_) => true,
-        Block::Paragraph(_) => match next {
-            Block::Paragraph(_) | Block::HtmlBlock(_) | Block::ThematicBreak => true,
+        // A table is written as paragraph text, so it follows the same rules.
+        Block::Paragraph(_) | Block::Table { .. } => match next {
+            Block::Paragraph(_)
+            | Block::Table { .. }
+            | Block::HtmlBlock(_)
+            | Block::ThematicBreak => true,
             Block::List { start, items, .. } => {
-                !(matches!(start, None | Some(1)) && items.first().is_some_and(|i| !i.is_empty()))
+                !(matches!(start, None | Some(1))
+                    && items.first().is_some_and(|i| !i.blocks.is_empty()))
             }
             _ => false,
         },
@@ -378,7 +398,19 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                         if alt { ')' } else { '.' }
                     ),
                 };
-                let mut body = blocks_to_string(item, !*tight, losses, sink);
+                let mut body = blocks_to_string(&item.blocks, !*tight, losses, sink);
+                if let Some(done) = item.checked {
+                    // The GFM task marker; plain text never starts with an
+                    // unescaped `[`, so it reads back as a marker.
+                    let mark = if done { "[x]" } else { "[ ]" };
+                    let mut marked = String::new();
+                    sink.push_str(&mut marked, mark);
+                    if !body.is_empty() {
+                        sink.push(&mut marked, ' ');
+                        sink.push_str(&mut marked, &body);
+                    }
+                    body = marked;
+                }
                 // "- ---" would be a thematic break, not an item.
                 if marker == "- " && (body == "---" || body.starts_with("---\n")) {
                     body.replace_range(..3, "***");
@@ -406,6 +438,36 @@ fn block_to_string(b: &Block, alt: bool, losses: &mut BTreeSet<Loss>, sink: &mut
                 }
             }
             out
+        }
+        Block::Table { head, rows, .. } => {
+            // Flattened to one line per row, cells separated by a space.
+            // The loss copy ("table too wide; rows listed one by one") speaks
+            // of width, which does not apply here: this writer flattens every
+            // table whatever its width. Accepted for now: trees from text
+            // hold no tables, so no shipped path reaches this arm; the GFM
+            // Markdown writer that replaces it will write tables and drop
+            // this loss.
+            losses.insert(Loss::TableLayout);
+            let mut w = InlineWriter::new(true, false, losses, sink);
+            // A row with no content would be a blank line and split the
+            // block, so it is left out.
+            let all: Vec<&Vec<Vec<Inline>>> = std::iter::once(head)
+                .chain(rows.iter())
+                .filter(|r| r.iter().any(|c| !c.is_empty()))
+                .collect();
+            let n = all.len();
+            for (i, row) in all.into_iter().enumerate() {
+                for (j, cell) in row.iter().enumerate() {
+                    if j > 0 {
+                        w.sink.push(&mut w.out, ' ');
+                    }
+                    w.inlines(cell, i + 1 == n && j + 1 == row.len());
+                }
+                if i + 1 < n {
+                    w.line_break("\n");
+                }
+            }
+            w.out
         }
         Block::ThematicBreak => "---".to_string(),
         Block::HtmlBlock(h) => h.trim_end_matches('\n').to_string(),
@@ -465,6 +527,9 @@ struct InlineWriter<'a> {
     markers: bool,
     /// Line breaks become spaces (headings cannot contain them).
     single_line: bool,
+    /// The delimiter of the `Emph` the inlines being written are inside
+    /// (at any depth), so a nested one at its edge can take the other.
+    in_emph: Option<&'static str>,
 }
 
 impl<'a> InlineWriter<'a> {
@@ -481,6 +546,7 @@ impl<'a> InlineWriter<'a> {
             line_start: true,
             markers,
             single_line,
+            in_emph: None,
         }
     }
 
@@ -499,13 +565,68 @@ impl<'a> InlineWriter<'a> {
                     };
                     self.text(t, eol);
                 }
-                Inline::Emph(c) => self.wrapped("*", c),
+                Inline::Emph(c) => {
+                    // An `Emph` at the edge of an `Emph` would put two
+                    // `*` side by side (`**x**`), which reads back as
+                    // `Strong`. `_` there is the other emphasis
+                    // delimiter; it opens and closes next to `*` and
+                    // punctuation, but not inside a word, so it is used
+                    // only when the neighbouring text is not alphanumeric.
+                    // An inner `Emph` glued to a word inside an outer one
+                    // (`*x*b` as the first child) still cannot be written
+                    // either way; that shape is left as it was.
+                    let alnum = |i: Option<&Inline>, end: bool| match i {
+                        Some(Inline::Text(t)) => {
+                            let c = if end {
+                                t.chars().next_back()
+                            } else {
+                                t.chars().next()
+                            };
+                            c.is_some_and(char::is_alphanumeric)
+                        }
+                        _ => false,
+                    };
+                    let before = idx.checked_sub(1).and_then(|i| items.get(i));
+                    let edge = (before.is_none() && !alnum(next, false))
+                        || (next.is_none() && !alnum(before, true));
+                    let delim = match self.in_emph {
+                        Some("*") if edge => "_",
+                        _ => "*",
+                    };
+                    let outer = self.in_emph.replace(delim);
+                    self.wrapped(delim, c);
+                    self.in_emph = outer;
+                }
                 Inline::Strong(c) => self.wrapped("**", c),
+                Inline::Strikethrough(c) => {
+                    self.losses.insert(Loss::Strikethrough);
+                    self.inlines(c, end_of_line && next.is_none());
+                }
                 Inline::Code(t) => self.code_span(t),
+                // A GFM extended autolink is written as its text, as it
+                // came and unescaped: a GFM reader links it again, where a
+                // backslash (`www.a\_b.c`) would cut it.
+                Inline::Link {
+                    dest,
+                    content,
+                    auto: true,
+                    ..
+                } => {
+                    self.line_start = false;
+                    let email = dest.starts_with("mailto:");
+                    for c in content {
+                        match c {
+                            Inline::Text(t) if email => self.email_text(t),
+                            Inline::Text(t) => self.sink.push_str(&mut self.out, t),
+                            other => self.inlines(std::slice::from_ref(other), false),
+                        }
+                    }
+                }
                 Inline::Link {
                     dest,
                     title,
                     content,
+                    ..
                 } => {
                     self.line_start = false;
                     self.sink.push(&mut self.out, '[');
@@ -548,6 +669,29 @@ impl<'a> InlineWriter<'a> {
         self.sink.push_str(&mut self.out, delim);
         self.inlines(c, false);
         self.sink.push_str(&mut self.out, delim);
+    }
+
+    /// The text of an email autolink. A GFM reader finds addresses after
+    /// emphasis, so an `_` that can open or close emphasis would pair with
+    /// another (`_a@b.c x_@d.e`). Every `_` not between two ASCII
+    /// alphanumerics (where it can do neither) is escaped; the reader
+    /// takes the escape before it looks for the address, so the address
+    /// comes back the same.
+    fn email_text(&mut self, t: &str) {
+        let b = t.as_bytes();
+        let alnum = |i: Option<usize>| {
+            i.and_then(|i| b.get(i))
+                .is_some_and(u8::is_ascii_alphanumeric)
+        };
+        let mut from = 0;
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'_' && !(alnum(i.checked_sub(1)) && alnum(Some(i + 1))) {
+                self.sink.push_str(&mut self.out, &t[from..i]);
+                self.sink.push_str(&mut self.out, "\\_");
+                from = i + 1;
+            }
+        }
+        self.sink.push_str(&mut self.out, &t[from..]);
     }
 
     fn code_span(&mut self, t: &str) {
@@ -683,7 +827,12 @@ impl<'a> InlineWriter<'a> {
                         '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '|' | '!' | '#'
                     ) || (self.line_start
                         && self.markers
-                        && matches!(c, '-' | '+' | '=' | '~'));
+                        && matches!(c, '-' | '+' | '=' | '~'))
+                        // Two tildes make strikethrough for a GFM reader; every
+                        // tilde of a run of two or more is escaped, so no pair
+                        // is left whatever the reader's run rule. A lone tilde
+                        // stays as it was.
+                        || (c == '~' && (rest[1..].starts_with('~') || self.out.ends_with('~')));
                     if escape {
                         self.sink.push(&mut self.out, '\\');
                     }
@@ -809,7 +958,7 @@ mod tests {
         Block::List {
             start,
             tight,
-            items,
+            items: crate::plain_items(items),
         }
     }
 
@@ -823,13 +972,98 @@ mod tests {
     }
 
     #[test]
+    fn existing_escapes_unchanged() {
+        // A single tilde, and a tilde run not at the line start, were never
+        // escaped in the middle of a line; only the pair is new.
+        assert_eq!(md("~5 min"), "\\~5 min\n");
+        assert_eq!(md("a ~ b"), "a ~ b\n");
+        assert_eq!(md("a~b"), "a~b\n");
+        assert_eq!(md("x ~5"), "x ~5\n");
+    }
+
+    #[test]
+    fn tilde_pairs_escaped_inline() {
+        assert_eq!(md("a ~~b~~ c"), "a \\~\\~b\\~\\~ c\n");
+        // Every tilde of a longer run: no pair is left for a reader.
+        assert_eq!(md("a ~~~ b"), "a \\~\\~\\~ b\n");
+    }
+
+    /// The escape looks at what was written, not at one text node: two
+    /// tildes split over adjacent nodes still count as a run (the second is
+    /// escaped, so the reader sees a literal tilde, never a pair), and a tilde
+    /// separated by emphasis or a code span stays alone.
+    #[test]
+    fn tilde_runs_split_over_nodes_and_neighbours() {
+        let inline = |v: Vec<Inline>| write(&doc(vec![Block::Paragraph(v)])).0;
+        assert_eq!(inline(vec![t("~"), t("~")]), "\\~\\~\n");
+        assert_eq!(inline(vec![t("a~"), t("~b")]), "a~\\~b\n");
+        assert_eq!(inline(vec![t("~"), t("~"), t("~")]), "\\~\\~\\~\n");
+        assert_eq!(inline(vec![t("x~"), Inline::Emph(vec![t("~")])]), "x~*~*\n");
+        assert_eq!(inline(vec![Inline::Emph(vec![t("~")]), t("~")]), "*~*~\n");
+        assert_eq!(
+            inline(vec![t("~"), Inline::Code("~".into()), t("~")]),
+            "\\~`~`~\n"
+        );
+        assert_eq!(inline(vec![Inline::Code("~~".into()), t("~")]), "`~~`~\n");
+    }
+
+    /// `Emph` inside `Emph` must not write `**x**` (that reads back as
+    /// `Strong`): the inner one takes `_` at the edge and round-trips.
+    #[test]
+    fn nested_emphasis_round_trips() {
+        let e = |v: Vec<Inline>| Inline::Emph(v);
+        let cases = [
+            vec![e(vec![e(vec![t("x")])])],
+            vec![e(vec![t("a "), e(vec![t("x")])])],
+            vec![e(vec![e(vec![t("x")]), t(" b")])],
+            vec![e(vec![t("a "), e(vec![t("x")]), t(" b")])],
+            vec![e(vec![e(vec![e(vec![t("x")])])])],
+            vec![e(vec![Inline::Strong(vec![e(vec![t("x")])])])],
+        ];
+        for inl in cases {
+            let d = doc(vec![Block::Paragraph(inl)]);
+            let (out, losses) = write(&d);
+            assert!(losses.is_empty());
+            assert_eq!(read(out.as_bytes()).unwrap(), d, "{out:?}");
+        }
+        let (out, _) = write(&doc(vec![Block::Paragraph(vec![e(vec![e(vec![t("x")])])])]));
+        assert_eq!(out, "*_x_*\n");
+    }
+
+    #[test]
+    fn table_in_tight_item_is_separated_from_a_paragraph() {
+        let table = Block::Table {
+            align: vec![crate::Align::None],
+            head: vec![vec![t("h")]],
+            rows: vec![vec![vec![t("c")]]],
+        };
+        let item = list(None, true, vec![vec![para("p"), table.clone(), para("q")]]);
+        let (out, _) = write(&doc(vec![item]));
+        assert_eq!(out, "- p\n\n  h\n  c\n\n  q\n");
+    }
+
+    #[test]
+    fn all_empty_table_row_does_not_split_the_block() {
+        let table = Block::Table {
+            align: vec![crate::Align::None],
+            head: vec![vec![t("h")]],
+            rows: vec![vec![vec![]], vec![vec![t("c")]]],
+        };
+        let (out, _) = write(&doc(vec![table]));
+        let d = read(out.as_bytes()).unwrap();
+        assert_eq!(d.blocks.len(), 1, "{out:?}");
+    }
+
+    #[test]
     fn line_start_list_markers_escaped() {
         assert_eq!(md("- x"), "\\- x\n");
         assert_eq!(md("+ x"), "\\+ x\n");
         assert_eq!(md("1. x"), "1\\. x\n");
         assert_eq!(md("23) x"), "23\\) x\n");
         assert_eq!(md("=== x"), "\\=== x\n");
-        assert_eq!(md("~~~"), "\\~~~\n");
+        // The whole run is escaped now (a pair would be strikethrough).
+        assert_eq!(md("~~~"), "\\~\\~\\~\n");
+        assert_eq!(md("~ x"), "\\~ x\n");
         // Mid-line markers are plain text.
         assert_eq!(md("a - b + c = d ~ 1. e"), "a - b + c = d ~ 1. e\n");
         // Ten digits cannot start a list.
@@ -1084,6 +1318,7 @@ mod tests {
                 dest: "https://x/a(b)".into(),
                 title: "t\"q".into(),
                 content: vec![t("l")],
+                auto: false,
             },
             Inline::Image {
                 dest: "a b".into(),
@@ -1094,6 +1329,7 @@ mod tests {
                 dest: String::new(),
                 title: String::new(),
                 content: vec![],
+                auto: false,
             },
         ])]);
         assert_eq!(
@@ -1103,11 +1339,164 @@ mod tests {
     }
 
     #[test]
+    fn extended_autolink_written_as_its_text() {
+        // An extended autolink is its text as written, unescaped: a GFM
+        // reader links it again; a `\\_` would cut it.
+        for input in [
+            "www.a_b.c.d/x_y*z",
+            "http://a.b/~~c~~d",
+            "a_b@c.d",
+            "x www.a.b.",
+        ] {
+            let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            let (s, l) = write(&d);
+            assert_eq!(s, format!("{input}\n"));
+            assert!(l.is_empty(), "{input:?}: {l:?}");
+            assert_eq!(read_with(s.as_bytes(), Dialect::Gfm).unwrap(), d);
+        }
+        // In an address an `_` that could open or close emphasis is
+        // escaped, so it cannot pair with one in another address; the
+        // reader drops the escape before it finds the address.
+        for (input, written) in [
+            ("\\_a@b.c x_@d.e", "\\_a@b.c x\\_@d.e"),
+            ("a.\\_b@c.d x a\\_.b@c.d", "a.\\_b@c.d x a\\_.b@c.d"),
+        ] {
+            let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+            let Block::Paragraph(p) = &d.blocks[0] else {
+                panic!("{d:?}")
+            };
+            assert_eq!(
+                p.iter()
+                    .filter(|i| matches!(i, Inline::Link { auto: true, .. }))
+                    .count(),
+                2,
+                "{input:?}: {p:?}"
+            );
+            let (s, l) = write(&d);
+            assert_eq!(s, format!("{written}\n"));
+            assert!(l.is_empty(), "{input:?}: {l:?}");
+            assert_eq!(read_with(s.as_bytes(), Dialect::Gfm).unwrap(), d);
+        }
+    }
+
+    #[test]
     fn heading_breaks_become_spaces_and_markers_stay_plain() {
         let d = doc(vec![Block::Heading {
             level: 1,
             content: vec![t("1. a"), Inline::HardBreak, t("b")],
         }]);
         assert_eq!(write(&d).0, "# 1. a b\n");
+    }
+
+    #[test]
+    fn dialect_cm_keeps_old_behaviour() {
+        for input in [
+            "| a | b |\n| - | - |\n| c | d |\n",
+            "~~x~~ www.x.y http://x.y\n",
+            "- [ ] a\n- [x] b\n",
+            "<script>\n",
+        ] {
+            let old = read(input.as_bytes()).unwrap();
+            assert_eq!(
+                read_with(input.as_bytes(), Dialect::CommonMark).unwrap(),
+                old
+            );
+            assert_eq!(
+                read_limited_with(input.as_bytes(), Limits::DEFAULT, Dialect::CommonMark).unwrap(),
+                read_limited(input.as_bytes(), Limits::DEFAULT).unwrap()
+            );
+            assert!(
+                !format!("{old:?}").contains("Table")
+                    && !format!("{old:?}").contains("Strikethrough"),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_item_marker_and_body() {
+        let item = |checked, blocks| crate::ListItem { checked, blocks };
+        let l = Block::List {
+            start: None,
+            tight: true,
+            items: vec![
+                item(Some(true), vec![para("a")]),
+                item(Some(false), vec![]),
+                item(Some(true), vec![]),
+            ],
+        };
+        assert_eq!(write(&doc(vec![l])).0, "- [x] a\n- [ ]\n- [x]\n");
+    }
+
+    #[test]
+    fn table_cells_are_joined_by_a_space() {
+        let table = Block::Table {
+            align: vec![crate::Align::None; 2],
+            head: vec![vec![t("a")], vec![t("b")]],
+            rows: vec![vec![vec![t("c")], vec![t("d")]]],
+        };
+        assert_eq!(write(&doc(vec![table])).0, "a b\nc d\n");
+    }
+
+    /// Only the last cell of the last row ends a rendered line: a space
+    /// there is an entity, a space at the end of any other cell is not.
+    #[test]
+    fn table_trailing_space_only_in_the_last_cell_is_encoded() {
+        let table = Block::Table {
+            align: vec![crate::Align::None; 2],
+            head: vec![vec![t("h")], vec![t("i")]],
+            rows: vec![vec![vec![t("a ")], vec![t("b ")]]],
+        };
+        assert_eq!(write(&doc(vec![table])).0, "h i\na  b&#32;\n");
+    }
+
+    /// An inner emphasis takes `_` only at the edge of the outer one, next
+    /// to something that is not a word character; elsewhere, and in front
+    /// of or behind a word, it keeps `*` (the shape that cannot be
+    /// written either way is left as it was).
+    #[test]
+    fn inner_emphasis_delimiter_by_neighbour() {
+        let e = |v: Vec<Inline>| Inline::Emph(v);
+        for (inner, want) in [
+            (vec![e(vec![t("x")])], "*_x_*\n"),
+            (vec![t("a "), e(vec![t("x")])], "*a _x_*\n"),
+            (vec![e(vec![t("x")]), t(" b")], "*_x_ b*\n"),
+            (vec![t("a "), e(vec![t("x")]), t(" b")], "*a *x* b*\n"),
+            (vec![e(vec![t("x")]), t("b")], "**x*b*\n"),
+            (vec![t("b"), e(vec![t("x")])], "*b*x**\n"),
+        ] {
+            let d = doc(vec![Block::Paragraph(vec![e(inner)])]);
+            assert_eq!(write(&d).0, want);
+        }
+    }
+
+    #[test]
+    fn strikethrough_ends_a_line_only_at_the_end_of_it() {
+        let d = doc(vec![Block::Paragraph(vec![
+            Inline::Strikethrough(vec![t("a ")]),
+            t("b"),
+        ])]);
+        let (out, losses) = write(&d);
+        assert_eq!(out, "a b\n");
+        assert_eq!(losses, BTreeSet::from([Loss::Strikethrough]));
+        let d = doc(vec![Block::Paragraph(vec![
+            t("b"),
+            Inline::Strikethrough(vec![t("a ")]),
+        ])]);
+        assert_eq!(write(&d).0, "ba&#32;\n");
+    }
+
+    /// Only an email address gets its `_` escaped; the text of a web
+    /// autolink is written as it came.
+    #[test]
+    fn web_autolink_underscores_are_not_escaped() {
+        let input = "www.a.b/x_.y";
+        let d = read_with(input.as_bytes(), Dialect::Gfm).unwrap();
+        let Block::Paragraph(p) = &d.blocks[0] else {
+            panic!("{d:?}")
+        };
+        assert!(matches!(p[0], Inline::Link { auto: true, .. }), "{p:?}");
+        assert_eq!(write(&d).0, format!("{input}\n"));
+        assert_eq!(read_with(input.as_bytes(), Dialect::Gfm).unwrap(), d);
     }
 }

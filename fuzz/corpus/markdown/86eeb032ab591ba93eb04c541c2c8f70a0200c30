@@ -1,0 +1,9 @@
+[foo]: /foo-url "foo"
+[bar]: /$ar-url
+  "bar"
+[baz]: /b"
+[bar]: /$ar-url
+  "bar"
+[oo]:-url
+
+/r*

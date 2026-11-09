@@ -124,6 +124,42 @@ fn md_to_txt_warns() {
 }
 
 #[test]
+fn md_to_txt_reads_gfm() {
+    let root = tmp("gfm");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.md");
+    fs::write(&a, "| a | b |\n| - | - |\n| 1 | ~~2~~ |\n\n- [x] done\n").unwrap();
+    let o = run_raw("text.md-to-txt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let warns: Vec<Vec<&str>> = lines(&out, "warn");
+    assert_eq!(
+        warns,
+        vec![vec!["warn", a.to_str().unwrap(), "strikethrough removed"]]
+    );
+    let done = lines(&out, "done");
+    let txt = fs::read_to_string(work.join(done[0][2])).unwrap();
+    assert_eq!(txt, "a    b\n---  ---\n1    2\n\n- [x] done\n");
+}
+
+#[test]
+fn md_to_txt_plain_input_unchanged() {
+    let root = tmp("plain");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.md");
+    fs::write(&a, "# Title\n\nSee ~this~ and a | b\n").unwrap();
+    let o = run_raw("text.md-to-txt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0));
+    let out = stdout(&o);
+    assert!(lines(&out, "warn").is_empty(), "{out}");
+    let done = lines(&out, "done");
+    let txt = fs::read_to_string(work.join(done[0][2])).unwrap();
+    assert_eq!(txt, "Title\n\nSee ~this~ and a | b\n");
+}
+
+#[test]
 fn each_loss_is_warned_once_in_stable_order() {
     let root = tmp("once");
     let work = root.join("work");
