@@ -18,12 +18,12 @@
 //! WebVTT writes it as a tag, which the reader sets as the voice.
 //!
 //! The SRT writer makes two rewrites, both judged by the reader's own rules,
-//! and the oracle expects exactly those. A `<` that opens a tag, or a `{` that
-//! opens an override block, becomes a look-alike (`tag.rs`, included from the
-//! crate, so there is one source). The `>` of each `-->` in a line the reader
-//! would take for a timing line becomes U+FF1E; the timing test (`is_timing`)
-//! is copied here, and a copy that disagrees fails the round trip. Any other
-//! arrow is text and must come back as it was.
+//! and the oracle expects exactly those. A `<` the reader would take as a tag,
+//! or a `{` it would take as an override block, becomes a look-alike (`tag.rs`,
+//! included from the crate, so there is one source). The `>` of each `-->` in
+//! a line the reader would take for a timing line becomes U+FF1E; the timing
+//! test (`is_timing`) is copied here, and a copy that disagrees fails the
+//! round trip. Any other arrow is text and must come back as it was.
 
 // The SRT reader's tag rule, the same file the crate builds with.
 #[path = "../../../crates/subtitles/src/tag.rs"]
@@ -75,14 +75,19 @@ fn styled(line: &Line, srt: bool) -> Vec<Styled> {
     chars
 }
 
-/// The SRT writer's look-alikes (`srt_safe`): a `<` that opens a tag for the
-/// reader becomes U+FF1C and a `{` that opens an override block U+FF5B, judged
-/// on the line's plain text, the speaker's prefix included.
+/// The SRT writer's look-alikes (`srt_safe`): the ones `tag::look_alikes` picks
+/// from the line's plain text, the speaker's prefix included, where the reader
+/// would take a `<` as a tag or a `{` as an override block. The reader's round
+/// trip is what checks them; the rule itself is the crate's, not a copy.
 fn look_alikes(chars: &mut [Styled]) {
     let text: String = chars.iter().map(|c| c.0).collect();
+    let mut looks = tag::look_alikes(&text).into_iter().peekable();
     for (c, (at, _)) in chars.iter_mut().zip(text.char_indices()) {
-        if let Some(look) = tag::look_alike_at(&text, at) {
-            c.0 = look;
+        if let Some(&(look_at, look)) = looks.peek() {
+            if look_at == at {
+                c.0 = look;
+                looks.next();
+            }
         }
     }
 }

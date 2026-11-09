@@ -401,27 +401,38 @@ fn literal_tag_like_text_is_not_read_back_as_markup() {
             runs: vec![run("a \u{ff1c}b> c")],
         }]
     );
-    // A `<` that ends a run is judged with the next run: the next run's `b`
-    // makes `<b` a tag, so the `<` is the look-alike and the `b` stays italic.
-    let split = [cue(
-        0,
-        1_000,
-        vec![Line {
-            voice: None,
-            runs: vec![
-                run("a <"),
-                Run {
-                    italic: true,
-                    ..run("b")
-                },
-            ],
-        }],
-    )];
-    let (s, _) = srt(&split);
+    // A `<` that ends a run is judged on the whole plain text. No `>` follows
+    // it, so it is text, and the next run's `<i>` is the only tag the reader
+    // sees after it: nothing is rewritten and `b` stays italic.
+    let split = |second: &str| {
+        [cue(
+            0,
+            1_000,
+            vec![Line {
+                voice: None,
+                runs: vec![
+                    run("a <"),
+                    Run {
+                        italic: true,
+                        ..run(second)
+                    },
+                ],
+            }],
+        )]
+    };
+    let (s, losses) = srt(&split("b"));
     assert_eq!(
         s,
-        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na \u{ff1c}<i>b</i>\r\n\r\n"
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na <<i>b</i>\r\n\r\n"
     );
+    assert!(losses.is_empty());
+    // With a `>` in the next run, the `<` opens a tag and is the look-alike.
+    let (s, losses) = srt(&split("b>"));
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na \u{ff1c}<i>b></i>\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
 }
 
 /// Only a `<` that opens a tag (`<` then a letter, or `</` then a letter) is
@@ -463,7 +474,7 @@ fn bracket_in_a_later_run_is_judged_at_its_place() {
 fn srt_writer_reports_brackets_loss_once_per_cue() {
     let cues = [
         cue(0, 1_000, vec![plain("<a"), plain("<b>"), plain("c")]),
-        cue(1_000, 2_000, vec![plain("<c")]),
+        cue(1_000, 2_000, vec![plain("<c>")]),
         cue(2_000, 3_000, vec![plain("no brackets")]),
     ];
     let (_, losses) = srt(&cues);
@@ -624,4 +635,130 @@ fn ordinary_arrow_text_is_left_alone() {
         "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{\\an8}1:2:3,599 --> 99:59:59,999\r\n\r\n"
     );
     assert!(losses.is_empty());
+}
+
+/// A `<` with no `>` after it in the line is text for the SRT reader, so the
+/// writer leaves it: VTT `if x&lt;y then` is `if x<y then` in SRT, with no
+/// look-alike and no `Brackets` loss, and it reads back the same.
+#[test]
+fn angle_with_no_closing_bracket_is_not_rewritten() {
+    let parsed = read_vtt(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nif x&lt;y then\n\n")
+        .expect("the input has a cue");
+    let mut out = Vec::new();
+    let losses = write_srt(&parsed.cues, &mut out).expect("writing to a Vec cannot fail");
+    assert!(losses.is_empty());
+    assert!(out.ends_with(b"if x<y then\r\n\r\n"), "{out:?}");
+    let back = read_srt(&out).expect("the SRT output reads back");
+    assert_eq!(back.cues[0].lines[0].runs[0].text, "if x<y then");
+}
+
+/// A `<` before another `<` is text for the reader, and the later `<` that
+/// opens a tag is rewritten. That rewrite leaves the earlier `<` the next
+/// bracket the reader sees, so `<b <c>` rewrites both, and reads back as text.
+#[test]
+fn angle_before_another_angle_is_rewritten_with_the_tag_it_would_join() {
+    let (s, losses) = srt(&[cue(0, 1_000, vec![plain("<b <c>")])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n\u{ff1c}b \u{ff1c}c>\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+    let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+    assert_eq!(back.cues[0].lines[0].runs[0].text, "\u{ff1c}b \u{ff1c}c>");
+}
+
+/// An earlier `<` with a later `<` (and no `>` after that one) is text for the
+/// reader, so nothing in `a <b y< z>` is rewritten.
+#[test]
+fn angle_before_text_with_no_closing_bracket_is_not_rewritten() {
+    let (s, losses) = srt(&[cue(0, 1_000, vec![plain("a <b y< z>")])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na <b y< z>\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+}
+
+/// A `{\` with no `}` after it is text for the reader; a closed one is an
+/// override block and is rewritten.
+#[test]
+fn unclosed_override_is_text_and_a_closed_one_is_rewritten() {
+    let (s, losses) = srt(&[cue(0, 1_000, vec![plain("a {\\x")])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na {\\x\r\n\r\n"
+    );
+    assert!(losses.is_empty());
+    let (s, losses) = srt(&[cue(0, 1_000, vec![plain("a {\\x}")])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\na \u{ff5b}\\x}\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+}
+
+/// Every line of one to six characters over brackets, a slash, `b` and a space
+/// (no timing line can come of it: there is no `-->`), except those the reader
+/// trims. The SRT output reads back as the same text, where each change is a
+/// look-alike for a `<` or `{`, and a line the reader keeps as plain text is
+/// written unchanged with no `Brackets` loss. Covers `<b <b>` and `<b y< z>`.
+#[test]
+fn every_short_line_reads_back_and_only_real_markup_is_rewritten() {
+    const ALPHABET: [char; 8] = ['<', '>', '{', '\\', '}', '/', 'b', ' '];
+    const MAX_CHARS: usize = 6;
+    let mut level = vec![String::new()];
+    let mut lines = Vec::new();
+    for _ in 0..MAX_CHARS {
+        level = level
+            .iter()
+            .flat_map(|s| ALPHABET.iter().map(move |c| format!("{s}{c}")))
+            .collect();
+        lines.extend(level.iter().cloned());
+    }
+    for t in lines
+        .iter()
+        .filter(|t| !t.starts_with(' ') && !t.ends_with(' '))
+    {
+        let (s, losses) = srt(&[cue(0, 1_000, vec![plain(t)])]);
+        let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+        assert_eq!(back.skipped.count, 0, "{t:?}: {s:?}");
+        let [only] = back.cues.as_slice() else {
+            panic!("{t:?}: {s:?}")
+        };
+        let [line] = only.lines.as_slice() else {
+            panic!("{t:?}: {s:?}")
+        };
+        let [run] = line.runs.as_slice() else {
+            panic!("{t:?}: {s:?}")
+        };
+        assert!(!run.italic && !run.bold && !run.underline, "{t:?}: {s:?}");
+        assert_eq!(run.text.chars().count(), t.chars().count(), "{t:?}: {s:?}");
+        let mut rewritten = false;
+        for (want, got) in t.chars().zip(run.text.chars()) {
+            match (want, got) {
+                (w, g) if w == g => {}
+                ('<', '\u{ff1c}') | ('{', '\u{ff5b}') => rewritten = true,
+                _ => panic!("{t:?} reads back as {:?}: {s:?}", run.text),
+            }
+        }
+        assert_eq!(
+            losses.contains_key(&Loss::Brackets),
+            rewritten,
+            "{t:?}: {s:?}"
+        );
+        // The reader's own view of the line as it is: when it keeps the text
+        // whole, the writer has nothing to change.
+        let raw = format!("1\r\n00:00:00,000 --> 00:00:01,000\r\n{t}\r\n\r\n");
+        if let Ok(parsed) = read_srt(raw.as_bytes())
+            && let [only] = parsed.cues.as_slice()
+            && let [line] = only.lines.as_slice()
+            && let [run] = line.runs.as_slice()
+            && run.text == *t
+            && !run.italic
+            && !run.bold
+            && !run.underline
+        {
+            assert!(!rewritten, "{t:?} is plain text to the reader: {s:?}");
+        }
+    }
 }

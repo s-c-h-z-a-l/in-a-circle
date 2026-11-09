@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::tag::{opens_override, opens_tag};
+use crate::tag::{opens_override, takes_tag};
 use crate::{Budget, Cue, Line, Loss, MAX_MS, Parsed, ReadError, Run, Skipped, has_text};
 
 const MS_PER_SECOND: u64 = 1_000;
@@ -427,21 +427,23 @@ fn emit(
     Ok(())
 }
 
-/// Length of a tag starting at `tail`: a `<` that `opens_tag`, then up to and
+/// Length of a tag starting at `tail`: a `<` that `takes_tag`, then up to and
 /// including the next `>`. Another `<` before that `>` makes this one text, and
 /// the later `<` is the one that can open a tag (ffmpeg reads it so too).
 fn tag_len(tail: &str, scan: &mut Scan) -> Option<usize> {
-    if scan.no_gt || !opens_tag(tail) {
+    if scan.no_gt {
         return None;
     }
     let rest = &tail[1..];
-    match rest.find(['<', '>']) {
-        Some(i) if rest.as_bytes()[i] == b'>' => Some(i + 2),
-        Some(_) => None,
-        None => {
-            scan.no_gt = true;
-            None
-        }
+    let found = rest.find(['<', '>']);
+    if found.is_none() {
+        scan.no_gt = true;
+    }
+    let next = found.map(|i| rest.as_bytes()[i]);
+    if takes_tag(tail, next) {
+        found.map(|i| i + 2)
+    } else {
+        None
     }
 }
 

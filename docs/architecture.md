@@ -731,11 +731,14 @@ are in `CLAUDE.md`.
     removed no text, so they are not counted.
 - The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
   a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
-  `<i> <b> <u>` are kept. The SRT reader has no escapes, so a `<` that would
-  open a tag for it (`<` or `</`, a letter, then letters, digits, `_` or `/`
-  up to a space or `>`; the same test the reader uses) is written as
-  U+FF1C, and a `{` that would open an override block (`{\`) as U+FF5B, both
-  look-alikes, counted once per cue as `Brackets`; the `{\an8}` the writer
+  `<i> <b> <u>` are kept. The SRT reader has no escapes, so a `<` the reader
+  would take as a tag (`<` or `</`, a letter, then letters, digits, `_` or `/`
+  up to a space or `>`, and a `>` before any other `<`; the same test the
+  reader uses) is written as U+FF1C, and a `{\` the reader would take as an
+  override block (with a `}` after it) as U+FF5B, both look-alikes, counted
+  once per cue as `Brackets`. A rewritten `<` no longer stops the reader's
+  search for `>`, so the choice runs from the end of the line back; `<` with
+  no `>` after it, `{\` with no `}`, stay text. The `{\an8}` the writer
   puts before a top cue is not text and is kept. A text line that the reader
   would take for a timing line (`-->` with a start that parses as a time, the
   reader's own test on the line as written, marker and tags included) would
