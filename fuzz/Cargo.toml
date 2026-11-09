@@ -18,6 +18,7 @@ flate = { path = "../crates/flate" }
 zip = { path = "../crates/zip" }
 probe = { path = "../crates/probe" }
 xml = { path = "../crates/xml" }
+subtitles = { path = "../crates/subtitles" }
 epub = { path = "../crates/epub" }
 # The `epub_md` target includes the text family's sources, which name these.
 action = { path = "../crates/action" }
@@ -126,6 +127,27 @@ bench = false
 [[bin]]
 name = "codepage"
 path = "fuzz_targets/codepage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "srt"
+path = "fuzz_targets/srt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vtt"
+path = "fuzz_targets/vtt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ass"
+path = "fuzz_targets/ass.rs"
 test = false
 doc = false
 bench = false
