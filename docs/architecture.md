@@ -699,9 +699,11 @@ are in `CLAUDE.md`.
     (a byte order mark is allowed) and the header are read, and `NOTE` blocks
     are not reported. A `STYLE` or `REGION` block makes every later cue
     `Settings`. A valid timing line inside a `NOTE`, `STYLE` or `REGION` block,
-    or in a block already reported, starts a cue: the standard keeps it in the
-    block, but a missing blank line must not swallow a cue's text (a deliberate
-    deviation). A `line:` setting in the top third makes a top cue; any other
+    or in a block already reported, starts a cue, as the standard does: a
+    `-->` line ends such a block and is read again as the next block's first
+    line. The one difference is a `-->` that is no timing line: the standard
+    ends the block at it too, we keep it in the block (neither starts a cue).
+    A `line:` setting in the top third makes a top cue; any other
     placement is `Position`. `<c.class>` and `<v.class>` are `Styling`, a
     timestamp tag is `Karaoke` (its text stays), `<v Name>` is the speaker (its
     classes are not part of the name), and other tags are dropped with their

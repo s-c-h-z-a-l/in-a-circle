@@ -11,11 +11,14 @@
 //!   is metadata and is ignored silently. A timing line in it starts a cue.
 //! - `NOTE` blocks are comments and are not reported. `STYLE` and `REGION`
 //!   blocks are not cues; every cue after one loses its styling, reported as
-//!   `Settings`. A valid timing line inside a `NOTE`, `STYLE` or `REGION`
-//!   block, or in a block already reported, ends that block and starts a cue.
-//!   The standard keeps such a line in the block; we do not, because a missing
-//!   blank line must not swallow a cue's text. Any other line of the block is
-//!   not read, and a `-->` that is no timing line stays in the block.
+//!   `Settings`. In a `NOTE`, `STYLE` or `REGION` block, or in a block already
+//!   reported, a valid timing line starts a cue, as the standard does: a line
+//!   with `-->` ends a block past its second line (or past its first once an
+//!   arrow was seen), and the standard reads that line again as the next
+//!   block's first line. The one difference is a `-->` that is no timing line:
+//!   the standard ends the block at it too, but we keep it in the block. Neither
+//!   reading starts a cue from it, and only the timing lines of the block are
+//!   read.
 //! - A cue is a timing line, after an optional identifier line, then its text.
 //!   A line with `-->` ends the text of a cue, as in the standard: a timing
 //!   line there starts the next cue. Any other such line is dropped, and the

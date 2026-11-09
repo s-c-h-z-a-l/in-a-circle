@@ -523,9 +523,10 @@ fn end_at_100_hours_is_skipped_and_99_59_59_999_is_kept() {
 #[test]
 fn timing_line_ends_an_ignored_block_without_a_blank_line() {
     // A STYLE, REGION or NOTE block runs to a blank line. Without one, a valid
-    // timing line still starts a cue, so the cue's text is not lost (a
-    // deliberate deviation from the standard's block rule). The block's own
-    // lines keep their meaning: STYLE and REGION are Settings, NOTE is silent.
+    // timing line still starts a cue, as the standard has it (a `-->` line
+    // ends the block), so the cue's text is not lost. The block's
+    // own lines keep their meaning: STYLE and REGION are Settings, NOTE is
+    // silent.
     let style = read(
         "WEBVTT\n\nSTYLE\n::cue { color: lime }\n00:00:01.000 --> 00:00:02.000\nhello\n\n00:00:03.000 --> 00:00:04.000\nworld\n",
     );
