@@ -99,6 +99,11 @@ are in `CLAUDE.md`.
   inside its entropy data is not detected and shows as a grey or partial page in
   the reader.
 
+- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT and ASS/SSA to SRT or
+  WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
+  writers are the `crates/subtitles` library (standard library only). The rules
+  are under Manifest, after the text family's.
+
 ## Manifest
 
 - Each family binary describes itself: `<family> --manifest`. The engine
@@ -655,6 +660,64 @@ are in `CLAUDE.md`.
   and inlines, including link reference definitions), 32 MiB of owned
   text (link reference expansion included), 32 MiB of output. Past one,
   the input fails with the budget's own message and the batch goes on.
+- The subtitle family (`inacircle-subtitles`, `family=subtitles`,
+  `group=subtitles`) has four actions, each reading one format and writing one:
+  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and
+  `subtitles.ass-to-vtt`. Their MIME types are `application/x-subrip` (SRT),
+  `text/vtt` (WebVTT) and `text/x-ssa` (ASS and SSA). All are `cost=10`,
+  `lossy=yes` (a drawing is dropped and a speaker's name becomes text) and
+  `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
+  is larger than 8 MiB`) before any parsing. A file that is not UTF-8 fails
+  with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
+  with no usable cue fails with `no subtitles found`. The output is counted as
+  it is written: past 32 MiB the input fails with `subtitle output would be
+  larger than 32 MiB`. SIGXFSZ is ignored, so a write past the process's
+  `RLIMIT_FSIZE` fails the same way and not the batch. A failed input leaves
+  no output file, and an existing output is never overwritten (the file is
+  created new). Cues are written in start order; cues that start together keep
+  the file's order.
+- The readers keep what a player shows and say what they drop.
+  - **SRT** follows the players (a differential test pins it to ffmpeg): LF,
+    CRLF or CR line ends; the cue number is ignored; `H+:MM:SS,mmm` (a `.` is
+    accepted, and milliseconds are read as an integer); the coordinates after
+    the end time are dropped without a `warn`. `<i> <b> <u>` and their
+    `{\i1}`-style forms are kept; `{\an7}` to `{\an9}` make a top cue. `<font>`
+    keeps its text and is `Styling`; other tags are dropped with their text
+    kept. `{\pos}` and `{\move}` are `Position`, `{\k}` is `Karaoke`, a
+    non-zero `{\p}` is `Drawing` (its text is dropped), and any other
+    `{\...}` block is `Styling`.
+  - **WebVTT** follows the W3C file parsing algorithm: the `WEBVTT` signature
+    (a byte order mark is allowed) and the header are read, and `NOTE` blocks
+    are not reported. A `STYLE` or `REGION` block makes every later cue
+    `Settings`. A `line:` setting in the top third makes a top cue; any other
+    placement is `Position`. `<c.class>` is `Styling`, a timestamp tag is
+    `Karaoke` (its text stays), `<v Name>` is the speaker, and other tags are
+    dropped with their text kept.
+  - **ASS and SSA** follow libass: each section's `Format:` line gives the
+    columns, `Dialogue:` lines are cues and `Comment:` lines are dropped
+    silently. The style's bold, italic and underline and its alignment (7 to 9
+    in V4+, 5 to 7 in V4 styles, a top row) set the cue's base; the inline
+    `\i`, `\b`, `\u`, `\an`, `\a` and `\r` change it. `\N` breaks a line; `\n`
+    breaks it only under `WrapStyle: 2` and is a space otherwise; `\h` is a
+    no-break space. `\k` is `Karaoke`; `\p1` to `\p0` is `Drawing` and its
+    text is dropped; `\pos`, `\move` and `\org` are `Position`; other tags are
+    `Styling`.
+  - A cue that cannot be used (a bad timestamp, an end before its start, 100
+    hours or more) is skipped and the rest converts. Text outside any cue is
+    one skipped block per run of lines, counted and never shown.
+- The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
+  a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
+  `<i> <b> <u>` are kept. WebVTT has no byte order mark, LF only, ` line:0` on
+  a top cue, `<v Name>` for a speaker, and `<i> <b> <u>`; in its text `&`, `<`
+  and `>` are escaped. In both, a line break inside a cue becomes a space,
+  a cue with no text is dropped, and a blank line ends a cue.
+- The subtitle `warn` lines, at most seven per input: first the skipped cues
+  (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
+  including text outside any cue), then one line per kind of loss in the order
+  of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
+  drawings; style and region blocks; speaker names written as prefixes), each
+  counted in cues as `(N cues)`. The reader's and the writer's counts of one
+  kind are added together. That is far under the engine's 16 `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
@@ -675,6 +738,10 @@ action	text.iso88592-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
+action	subtitles.srt-to-vtt	family=subtitles	in=application/x-subrip	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.vtt-to-srt	family=subtitles	in=text/vtt	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ass-to-srt	family=subtitles	in=text/x-ssa	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ass-to-vtt	family=subtitles	in=text/x-ssa	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation

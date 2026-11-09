@@ -147,6 +147,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inacircle-subtitles"
+version = "0.0.0"
+dependencies = [
+ "action",
+ "libc",
+ "manifest",
+ "subtitles",
+]
+
+[[package]]
 name = "inacircle-testaction"
 version = "0.0.0"
 dependencies = [

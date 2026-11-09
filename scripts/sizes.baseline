@@ -110,3 +110,8 @@
 inacircle 1195944 922792
 inacircle-text 1267920 901091
 inacircle-pages 504208 403763
+# Added with the subtitle family's first binary, inacircle-subtitles, built from
+# commit b2e797e0 plus the new crate's sources, same toolchain and profile: a
+# new binary, so no growth is measured; its .text (343843 B) is far under the
+# 1 MiB family limit. The other lines are not refreshed here.
+inacircle-subtitles 430776 343843

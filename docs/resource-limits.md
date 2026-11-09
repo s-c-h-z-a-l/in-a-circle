@@ -380,7 +380,7 @@ families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
 | Limit | Value | Why, and what happens past it |
 |---|---|---|
 | input | 8 MiB | the text family's input budget; checked before any parsing, so `subtitle file is larger than 8 MiB` and nothing is read |
-| output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file; past it the action fails and nothing is left behind |
+| output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file. The action counts the bytes as it writes them and refuses the write that would pass 32 MiB (`subtitle output would be larger than 32 MiB`); a write past the process's `RLIMIT_FSIZE` fails the same way, since SIGXFSZ is ignored. Either way the file is removed and nothing is left behind |
 | time | 99:59:59.999 | both formats write the hour as two digits, so a later cue has no time code to be written with; the reader skips that cue (with a warning) and converts the rest |
 | cues | none of their own | the input limit bounds the count; a cue needs bytes of input |
 | warnings | at most 7 lines | one per kind of loss (six kinds) and one for skipped cues, far below the engine's cap of 16 per input |
