@@ -349,6 +349,107 @@ fn reset_to_named_style() {
 }
 
 #[test]
+fn bare_bold_italic_underline_return_to_the_style() {
+    // A bare `\b`, `\i` or `\u` (no value) returns that flag to the cue's own
+    // style, as libass does. Checked by rendering with libass (ffmpeg's
+    // `subtitles` filter, a bold style, `{\b0}HHHH{\b}HHHH`): the frame's ink
+    // matches `{\b1}` over that style (584,990) and not regular text (418,650);
+    // `\i` and `\u` the same way. ffmpeg's own SRT text writer treats a bare
+    // `\b` as off, so its output is not the reference here. A bare flag is
+    // not styling the reader cannot carry, so it is not counted as lost.
+    let plain = style("Default", "0", "0", "0", "2");
+    let bold = style("Default", "-1", "0", "0", "2");
+    let italic = style("Default", "0", "-1", "0", "2");
+    let underline = style("Default", "0", "0", "-1", "2");
+    let cue = |styles: &str, text: &str| {
+        let parsed = read(&v4plus("0", styles, &dialogue("Default", text)));
+        assert!(parsed.losses.is_empty(), "{text}: {:?}", parsed.losses);
+        parsed.cues[0].lines[0]
+            .runs
+            .iter()
+            .map(|r| (r.text.clone(), r.italic, r.bold, r.underline))
+            .collect::<Vec<_>>()
+    };
+    let runs = |list: &[(&str, bool, bool, bool)]| -> Vec<(String, bool, bool, bool)> {
+        list.iter()
+            .map(|&(t, i, b, u)| (t.to_string(), i, b, u))
+            .collect()
+    };
+    // Plain style: a bare flag is off, so `b` is not bold.
+    assert_eq!(
+        cue(&plain, "x{\\b1}a{\\b}b"),
+        runs(&[
+            ("x", false, false, false),
+            ("a", false, true, false),
+            ("b", false, false, false)
+        ])
+    );
+    // Bold style: a bare `\b` after `\b0` brings the bold back; after `\b1` it
+    // changes nothing.
+    assert_eq!(
+        cue(&bold, "x{\\b0}a{\\b}b"),
+        runs(&[
+            ("x", false, true, false),
+            ("a", false, false, false),
+            ("b", false, true, false)
+        ])
+    );
+    assert_eq!(
+        cue(&bold, "x{\\b1}a{\\b}b"),
+        runs(&[("xab", false, true, false)])
+    );
+    assert_eq!(
+        cue(&italic, "x{\\i0}a{\\i}b"),
+        runs(&[
+            ("x", true, false, false),
+            ("a", false, false, false),
+            ("b", true, false, false)
+        ])
+    );
+    assert_eq!(
+        cue(&plain, "x{\\i1}a{\\i}b"),
+        runs(&[
+            ("x", false, false, false),
+            ("a", true, false, false),
+            ("b", false, false, false)
+        ])
+    );
+    assert_eq!(
+        cue(&underline, "x{\\u0}a{\\u}b"),
+        runs(&[
+            ("x", false, false, true),
+            ("a", false, false, false),
+            ("b", false, false, true)
+        ])
+    );
+    assert_eq!(
+        cue(&plain, "x{\\u1}a{\\u}b"),
+        runs(&[
+            ("x", false, false, false),
+            ("a", false, false, true),
+            ("b", false, false, false)
+        ])
+    );
+    // `\r` returns to the cue's own style, as before.
+    assert_eq!(
+        cue(&plain, "x{\\b1}a{\\r}b"),
+        runs(&[
+            ("x", false, false, false),
+            ("a", false, true, false),
+            ("b", false, false, false)
+        ])
+    );
+    assert_eq!(
+        cue(&bold, "x{\\b0}a{\\r}b"),
+        runs(&[
+            ("x", false, true, false),
+            ("a", false, false, false),
+            ("b", false, true, false)
+        ])
+    );
+}
+
+#[test]
 fn unknown_style_falls_back_to_default() {
     // A name the file does not define takes `Default`, both as the cue's style
     // and after `\r`. Our choice: ffmpeg applies no style at all.

@@ -403,14 +403,24 @@ impl<'a> Reader<'a> {
         }
         let (name, value) = split_name(tag);
         match name {
-            "i" | "b" | "u" => match switch(value, name == "b") {
-                Some(on) => match name {
-                    "i" => scene.style.italic = on,
-                    "b" => scene.style.bold = on,
-                    _ => scene.style.underline = on,
-                },
-                None => scene.lose(Loss::Styling),
-            },
+            "i" | "b" | "u" => {
+                // A bare flag (`\b`) returns to the cue's own style, as libass does.
+                let home = scene.home.style;
+                let (flag, home_flag) = match name {
+                    "i" => (&mut scene.style.italic, home.italic),
+                    "b" => (&mut scene.style.bold, home.bold),
+                    _ => (&mut scene.style.underline, home.underline),
+                };
+                let on = if value.is_empty() {
+                    Some(home_flag)
+                } else {
+                    switch(value, name == "b")
+                };
+                match on {
+                    Some(on) => *flag = on,
+                    None => scene.lose(Loss::Styling),
+                }
+            }
             "an" => match value.parse::<u8>() {
                 Ok(a) if NUMPAD.contains(&a) => scene.top |= NUMPAD_TOP.contains(&a),
                 _ => scene.lose(Loss::Styling),
