@@ -27,7 +27,7 @@ const FSIZE_LIMIT: u64 = 256 << 20;
 const TOO_COMPLEX: &str = "too many lines and styled runs (more than 2,000,000)";
 
 /// Peak RSS a run may reach. The item budget bounds the readers at about
-/// 220 MiB (`ITEM_BUDGET`), plus the 8 MiB input and the allocator's slack;
+/// 216 MiB (`ITEM_BUDGET`, 216.5 MiB measured), plus the 8 MiB input and the allocator's slack;
 /// 400 MiB is that with room to spare and far under the 1 GiB net. Past it the
 /// budget no longer bounds memory, so the run fails.
 const PEAK_CEILING: u64 = 400 << 20;

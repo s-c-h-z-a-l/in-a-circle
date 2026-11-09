@@ -84,10 +84,11 @@ pub const MAX_MS: u64 = 359_999_999;
 
 /// Largest number of items a reader stores: each cue, each line and each run
 /// is one. The readers' memory grows with the items, not with the bytes (a
-/// 2-byte line is a line and a run), so this count is the memory bound. Measured
-/// on the densest 8 MiB inputs, a line and a run cost about 110 B together, so
-/// 2,000,000 items are about 220 MiB, a quarter of the 1 GiB `RLIMIT_DATA` the
-/// sandbox sets at its floor. A real 8 MiB film subtitle has about 10,000 items
+/// 2-byte line is a line and a run), so this count is the memory bound. The
+/// densest refused 8 MiB shape (one cue of 2-byte lines) peaked at 216.5 MiB
+/// at this budget, about 113 B per item over the whole process, so the budget
+/// keeps the peak at about a fifth of the 1 GiB `RLIMIT_DATA` the sandbox sets
+/// at its floor. A real 8 MiB film subtitle has about 10,000 items
 /// (2,000 cues of two lines of two runs): 200 times under the budget. The
 /// densest real 8 MiB file, the smallest SRT cues (27 bytes, three items each),
 /// has about 930,000, so it still fits.

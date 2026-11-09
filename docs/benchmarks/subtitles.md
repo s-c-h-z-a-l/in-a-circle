@@ -63,7 +63,7 @@ The budget is 2,000,000 items. A cue, a line and a run are one item each. At
 the budget the densest refused shape peaked at 216.5 MiB, about 113 B per item
 over the whole process (the input buffer and the allocator included). The
 budget keeps the peak at about a fifth of the 1 GiB `RLIMIT_DATA` floor that
-the sandbox sets (the code comment rounds this to a quarter). Scale against real files: a film subtitle is about 10,000
+the sandbox sets. Scale against real files: a film subtitle is about 10,000
 items (2,000 cues of two lines of two runs), and the densest real 8 MiB file,
 the smallest SRT cues (27 B each, about 310,000 cues of three items), is about
 930,000 items. The budget sits above both.
