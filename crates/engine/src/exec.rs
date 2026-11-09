@@ -1120,13 +1120,19 @@ fn handed_sizes(step_in: &StepIn) -> Vec<u64> {
         .collect()
 }
 
+/// The `application/*` output types that are text, checked as UTF-8 like
+/// `text/*`. Listed one by one: most `application/*` types are binary (a PDF,
+/// an EPUB, a comic archive).
+const TEXT_APPLICATIONS: [&str; 1] = [crate::classify::SUBRIP_MIME];
+
 /// How `action`'s outputs are checked as text: every output named with
-/// its extension is when its `out=` is `text/*`; the cap is three times
-/// `handed` (the bytes the engine handed it) for an 8-bit text decoder,
-/// else the text output budget.
+/// its extension is when its `out=` is `text/*` or one of
+/// [`TEXT_APPLICATIONS`]; the cap is three times `handed` (the bytes the
+/// engine handed it) for an 8-bit text decoder, else the text output budget.
 fn text_rule(action: &Action, handed: u64) -> output::TextRule {
     output::TextRule {
-        declared: action.output.starts_with("text/"),
+        declared: action.output.starts_with("text/")
+            || TEXT_APPLICATIONS.contains(&action.output.as_str()),
         cap: if reads_8bit(action) {
             output::TextCap::ThreeTimes(handed)
         } else {
@@ -3750,10 +3756,44 @@ pub(crate) mod tests {
             }]
         );
         assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        // Control: an output type that is not text is published as bytes.
         let mut bytes = same_action(&t);
-        bytes.output = "application/x-subrip".into();
+        bytes.output = "application/octet-stream".into();
         let got = done_paths(&[&bytes], std::slice::from_ref(&input));
         assert_eq!(got, [docs.join("Film.hu/Film.hu.srt")]);
+    }
+
+    /// A subtitle output (`out=application/x-subrip`, a `.srt`) is text like
+    /// a `text/*` one: invalid UTF-8 fails its input and nothing is published,
+    /// valid UTF-8 is published.
+    #[test]
+    fn subrip_outputs_are_checked_as_utf8() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("subrip_outputs_are_checked_as_utf8", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("utf8-subrip");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let mut a = same_action(&t);
+        a.output = "application/x-subrip".into();
+        let bad = docs.join("Bad.srt");
+        fs::write(&bad, b"1\n00:00:01,000 --> 00:00:02,000\nk\xe9s\n").unwrap();
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&a], vec![bad.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: bad.clone(),
+                reason: "cannot publish output: text output is not UTF-8".to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        let good = docs.join("Good.srt");
+        fs::write(&good, "1\n00:00:01,000 --> 00:00:02,000\nk\u{e9}s\n").unwrap();
+        let got = done_paths(&[&a], std::slice::from_ref(&good));
+        assert_eq!(got, [docs.join("Good/Good.srt")]);
     }
 
     /// The contract has no 8-bit output type: an action that declares

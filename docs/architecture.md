@@ -1234,8 +1234,9 @@ In the engine, in one place:
    ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
    changed since the baseline (`BaselineChanged`, "files changed while
    saved"). Other inputs' published results are never taken back.
-   Text outputs: an action whose `out=` is `text/*` has every output
-   named with its extension checked as UTF-8 on the whole stream,
+   Text outputs: an action whose `out=` is `text/*` or `application/x-subrip`
+   (the subtitle format, the one `application/*` type that is text) has every
+   output named with its extension checked as UTF-8 on the whole stream,
    whatever that extension is (`.srt`, `.html`, none with `ext=same`),
    and so its single output always; its other outputs (a Markdown
    file's images) stay bytes. An output named `.txt` or `.md` is checked
