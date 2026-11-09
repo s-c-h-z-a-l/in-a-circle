@@ -121,50 +121,84 @@ refreshed.
 ## Classifier cost
 
 `classify_with` runs on every dropped file before the wheel shows it. The
-subtitle types add a search of the 4 KiB head for `-->` in a `.srt` (for
-`WEBVTT` and `[Script Info]` the check is a prefix or a short search, and it
-runs only for those extensions). This is a CPU micro-measurement on this
-machine, **not** the acceptance measurement of the wheel's budget (drop to
-second wheel, two machines, about 50 manual drags each); that is still open.
+subtitle types add a search of the 4 KiB head: for `-->` in a `.srt`, for
+`[Script Info]` (ASCII case-insensitive) in a `.ass` or `.ssa`; a `.vtt` is a
+prefix check. This is a CPU micro-measurement on this machine, **not** the
+acceptance measurement of the wheel's budget (drop to second wheel, two
+machines, about 50 manual drags each); that is still open.
 
 Method: a throw-away `classify_bench` example, not committed, built in release
-mode from two trees: the base `bdb66403` (`main`) and HEAD `780ad0fe6`. Each
-"drop" is one `Reread::per_drop()` budget and one `classify_with` call per
-file, timed with `Instant`. Files: 300 KiB of ASCII, in two sets of 50. The
-*arrow* set has `00:00:01,000 --> 00:00:02,000` as its first line (classified
-`application/x-subrip` by HEAD, `.srt text` by base). The *no-arrow* set has
-plain lines and no `-->` at all. Each run is 2,000 drops; each tree and case
-ran in two alternating rounds (base then HEAD, then HEAD then base). Median
-is the lower middle, p95 is nearest-rank. The per-drop times include the
-file open and the reads that the read-on performs.
+mode from two trees: the base `bdb66403` (`main`) and the new tree (the commit
+that adds the block search, `classify: a faster head search for the subtitle
+names`). Each "drop" is one `Reread::per_drop()` budget and one `classify_with`
+call per file, timed with `Instant`. Files: 300 KiB of ASCII, in four sets of
+50: *arrow* (`00:00:01,000 --> 00:00:02,000` as the first line of a `.srt`),
+*no arrow* (a `.srt` with no `-->`), and `.ass` files with and without a
+`[Script Info]` header first. Each run is 2,000 drops; each tree and case ran
+in two alternating rounds (base then new, then new then base). Median is the
+lower middle, p95 is nearest-rank. The per-drop times include the file open
+and the reads that the read-on performs.
+
+**The first version was slower.** The first subtitle search was a plain
+`head.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))` scan.
+Measured against base, a `.srt` with no arrow cost +92.7 µs per 50-file drop
+(+54 %), about 1.9 µs per file, because a window with a case-folded compare
+runs at every one of the ~4,000 positions. The search now checks the head in
+128-byte blocks for the needle's first byte (both needles open with a byte
+that is not a letter, so the byte match is exact) with an OR-fold of byte
+compares that the compiler vectorises; only a block that contains the first
+byte is compared in full. Results are unchanged: a differential unit test
+(`in_head_matches_the_naive_scan`) checks it against the old scan.
+
+A throw-away harness on one 4 KiB head with no match: the window scan
+3.5 µs, the block search 0.13 to 0.15 µs. In the wheel's classifier, the
+search itself (measured by timing the build with the search stubbed out)
+costs about 6 µs per 50-file drop. Block sizes of 256 and 512 bytes measured
+within 1 to 2 µs per 50 files of 128 bytes, so 128 stays.
 
 | Case | Tree | median µs (round 1 / 2) | p95 µs (round 1 / 2) |
 |---|---|---|---|
-| arrow, 1 file | base | 21.2 / 20.4 | 22.6 / 21.8 |
-| arrow, 1 file | HEAD | 22.1 / 21.3 | 23.1 / 22.5 |
-| arrow, 50 files | base | 170.8 / 169.5 | 174.7 / 173.0 |
-| arrow, 50 files | HEAD | 169.0 / 172.5 | 171.7 / 175.9 |
-| no arrow, 1 file | base | 20.6 / 20.5 | 20.8 / 21.4 |
-| no arrow, 1 file | HEAD | 23.6 / 24.2 | 25.0 / 25.1 |
-| no arrow, 50 files | base | 172.6 / 168.3 | 178.2 / 171.3 |
-| no arrow, 50 files | HEAD | 265.1 / 261.2 | 270.1 / 271.2 |
+| `.srt` arrow, 1 file | base | 21.2 / 21.1 | 26.4 / 22.4 |
+| `.srt` arrow, 1 file | new | 25.0 / 24.2 | 26.5 / 26.8 |
+| `.srt` arrow, 50 files | base | 170.8 / 168.4 | 174.2 / 172.2 |
+| `.srt` arrow, 50 files | new | 432.2 (see below) / 185.8 | 437.9 / 189.2 |
+| `.srt` no arrow, 1 file | base | 21.3 / 22.3 | 21.9 / 23.4 |
+| `.srt` no arrow, 1 file | new | 24.1 / 24.9 | 30.1 / 25.8 |
+| `.srt` no arrow, 50 files | base | 171.2 / 172.2 | 175.5 / 176.0 |
+| `.srt` no arrow, 50 files | new | 190.6 / 190.2 | 195.4 / 194.0 |
+| `.ass` with `[Script Info]`, 1 file | base | 23.0 / 22.4 | 23.2 / 23.6 |
+| `.ass` with `[Script Info]`, 1 file | new | 29.3 / 26.3 | 31.3 / 26.5 |
+| `.ass` with `[Script Info]`, 50 files | base | 180.5 / 180.3 | 184.5 / 185.1 |
+| `.ass` with `[Script Info]`, 50 files | new | 194.5 / 195.6 | 198.8 / 198.9 |
+| `.ass` without header, 1 file | base | 23.1 / 22.1 | 27.5 / 28.9 |
+| `.ass` without header, 1 file | new | 25.8 / 25.8 | 27.0 / 28.1 |
+| `.ass` without header, 50 files | base | 178.9 / 180.4 | 201.0 / 184.9 |
+| `.ass` without header, 50 files | new | 199.7 / 202.6 | 204.7 / 207.0 |
 
-Difference of the two-round medians, HEAD minus base:
+The round-1 arrow 50-file run of the new tree (432.2 µs median, minimum
+430.2 µs) was a slowdown of the whole run, not a tail of single drops. Three
+repeats of the same command gave medians of 184.0, 186.0 and 183.5 µs; the
+table keeps the first value, and the difference below uses the repeats.
 
-- arrow, 1 file: median +0.9 µs (+4.2 %), p95 +0.6 µs (+2.7 %).
-- arrow, 50 files: median +0.6 µs (+0.3 %), p95 within noise.
-- no arrow, 1 file: median +3.4 µs (+16 %), p95 +4.0 µs.
-- no arrow, 50 files: median +92.7 µs (+54 %), p95 +95.9 µs. About 1.9 µs per
-  file: the head search is a plain `windows(3)` scan over 4 KiB, and a
-  `.srt` with no arrow in its head pays it.
+Difference of the medians (new minus base, mean of the two rounds):
 
-Reading: a real `.srt` has its arrow within its first bytes, so the search
-ends early, and a drop of ordinary subtitles costs under 1 µs more per file.
-The no-arrow case is a broken or non-subtitle `.srt` with a text head, which
-the wheel would classify as text anyway. Even so, 93 µs for a 50-file drop of
-such files is about 9 % of the wheel's 1 ms budget, and it is measured here
-only as a micro-cost. A first-byte scan would cut most of it; that is not
-changed in this page.
+- no arrow, 50 files: +18.7 µs (+10.9 %). Base 171.7 µs, new 190.4 µs.
+  The first version added +92.7 µs (+54 %).
+- arrow, 50 files: about +15 µs (+9 %), using the repeats, with the search
+  exiting in the first block.
+- `.ass` with `[Script Info]`, 50 files: about +15 µs (+8 %).
+- one file: +2.7 to +3.4 µs for arrow and no arrow; +3.2 µs for `.ass`
+  without a header and +5.1 µs for `.ass` with one (the noisiest pair).
+
+Reading: the no-arrow 50-file drop is now about 11 % above base, a little over
+the goal of 10 %. The search accounts for about 6 µs of that (see the method
+above). The rest, about 13 µs per 50 files, also shows up when the search
+exits at its first block (arrow, `[Script Info]` first) and when the search
+is stubbed out of the build, so it comes from the subtitle branch in the
+classifier, not from the scan. I did not find its cause; code layout is the
+likely suspect, and that is not verified. The no-arrow case is a broken or
+non-subtitle `.srt` with a text head, which the wheel would classify as text
+anyway, so this is the worst case of the search, not the common one.
 
 ## Test and verification evidence
 
@@ -241,9 +275,12 @@ Holds on this machine:
   far from the net.
 - `inacircle-subtitles` is 444,176 B (355,091 B of `.text`), under the family
   limit; `inacircle` is 1,199,304 B, under its 1.5 MB limit.
-- The classifier adds under 1 µs per arrow `.srt` file, on this machine, in a
-  micro-measurement. It adds about 93 µs to a drop of 50 arrow-less `.srt`
-  files, a case the wheel would see only for broken or non-subtitle files.
+- The classifier adds about 3 µs per file, on this machine, in a
+  micro-measurement, and about 19 µs to a drop of 50 arrow-less `.srt` files
+  (base 172 µs; the first version added 93 µs). The new head search is a
+  block scan over the first byte, see the classifier section. The
+  arrow-less `.srt` is a case the wheel would see only for broken or
+  non-subtitle files.
 
 Open (not measured here, not recorded as passing):
 
@@ -295,10 +332,11 @@ INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUB
 
 # Classifier micro-measurement: the throw-away example in a copy of each tree
 #   git archive bdb66403 | tar -x -C <base>   # then add crates/engine/examples/classify_bench.rs
-#   git archive 780ad0fe6 | tar -x -C <head>  # the same file
+#   git archive <classify commit> | tar -x -C <head>  # the same file
 #   (cd <tree> && cargo build --release -p engine --example classify_bench)
-# Inputs: two sets of 50 files of 300 KiB ASCII .srt, one with the arrow line
-# first and one with no `-->`; the example takes <drops> <files...> and prints
+# Inputs: 300 KiB ASCII files, 50 per set: .srt with the arrow line first, .srt
+# with no `-->`, and .ass with and without a `[Script Info]` header before the
+# same plain text; the example takes <drops> <files...> and prints
 # the median and p95 of the per-drop time (one Reread::per_drop() and one
 # classify_with per file). Run it under the prefix:
 #   $MEM <tree>/target/release/examples/classify_bench 2000 <files...>
