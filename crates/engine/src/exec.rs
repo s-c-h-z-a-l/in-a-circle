@@ -488,7 +488,8 @@ fn join_order(a: &Path, b: &Path) -> std::cmp::Ordering {
 fn stem_of(p: &Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
+        // `..jpg` has the stem `.`; a dot name cannot be published.
+        .filter(|s| !matches!(s.as_str(), "" | "." | ".."))
         .unwrap_or_else(|| "output".to_owned())
 }
 
@@ -2618,6 +2619,21 @@ pub(crate) mod tests {
     impl Drop for Tmp {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// hardening-2 #5: `..jpg` has the std stem `.`, which `check_part`
+    /// refuses, so such an input could never be published.
+    #[test]
+    fn stem_of_never_gives_a_dot_name() {
+        for (name, want) in [
+            ("..jpg", "output"),
+            ("...png", "output"),
+            ("..", "output"),
+            ("a.txt", "a"),
+            (".hidden", ".hidden"),
+        ] {
+            assert_eq!(stem_of(Path::new(name)), want, "{name}");
         }
     }
 
