@@ -317,10 +317,22 @@ pub fn make_work_dir(target_dir: &Path) -> io::Result<WorkDir> {
             }
             return Err(e);
         }
-        let id = ident(&stat_at(At {
-            dir: parent.0,
-            name: &name,
-        })?);
+        let st = at(Point::WorkStat).and_then(|()| {
+            stat_at(At {
+                dir: parent.0,
+                name: &name,
+            })
+        });
+        let id = match st {
+            Ok(st) => ident(&st),
+            Err(e) => {
+                // No guard exists yet: take back the folder just made (empty
+                // and ours, so rmdir removes nothing else).
+                // SAFETY: name is NUL-terminated; parent is an open dir fd.
+                unsafe { libc::unlinkat(parent.0, name.as_ptr(), libc::AT_REMOVEDIR) };
+                return Err(e);
+            }
+        };
         // Independent of the umask. The WorkDir guard removes the
         // directory again if this fails.
         let dir = WorkDir {
@@ -964,6 +976,8 @@ pub(crate) enum Point {
     SyncStagingAfter,
     /// The target folder's sync after the commit.
     SyncParentAfter,
+    /// The stat of a work folder right after it was made.
+    WorkStat,
 }
 
 /// A test's fault at `p` (an errno), or its race action; nothing outside
@@ -1684,6 +1698,20 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             remove_tree(&self.0);
         }
+    }
+
+    /// hardening-2 #17: a failure between the folder's creation and its
+    /// guard leaves no folder behind.
+    #[test]
+    fn a_work_dir_whose_stat_fails_is_not_left_behind() {
+        let t = Tmp::new("workstat");
+        FAULT.set(Some(Box::new(|p| {
+            (p == Point::WorkStat).then_some(libc::EIO)
+        })));
+        let r = make_work_dir(&t.0);
+        FAULT.set(None);
+        assert_eq!(r.err().and_then(|e| e.raw_os_error()), Some(libc::EIO));
+        assert_eq!(fs::read_dir(&t.0).unwrap().count(), 0);
     }
 
     /// hardening-2 #10: removal reads a bounded batch of names at a time,
