@@ -116,27 +116,44 @@ fn assert_usable(parsed: &Parsed) {
 }
 
 /// Writes the sorted cues as SRT and WebVTT and reads each back. The writers
-/// filter out cues with no text, so the expected shape is taken the same way.
+/// filter out cues with no text (white space is no text), so the expected
+/// shape is taken the same way; when every cue is such a cue, the output has
+/// no cue and reads back as `NoCues`.
 fn round_trip(cues: &[Cue]) {
     let mut srt = Vec::new();
     write_srt(cues, &mut srt).expect("writing to memory");
-    let back = read_srt(&srt).unwrap_or_else(|e| panic!("SRT output does not read back: {e}"));
-    assert_eq!(
-        back.skipped.count, 0,
-        "SRT output has a block the reader skips"
-    );
-    let mut back = back.cues;
-    sort_cues(&mut back);
-    assert_eq!(shape(&back, true), shape(cues, true), "SRT round trip");
+    let want = shape(cues, true);
+    if want.is_empty() {
+        assert_eq!(read_srt(&srt), Err(ReadError::NoCues), "empty SRT output");
+    } else {
+        let back = read_srt(&srt).unwrap_or_else(|e| panic!("SRT output does not read back: {e}"));
+        assert_eq!(
+            back.skipped.count, 0,
+            "SRT output has a block the reader skips"
+        );
+        let mut back = back.cues;
+        sort_cues(&mut back);
+        assert_eq!(shape(&back, true), want, "SRT round trip");
+    }
 
     let mut vtt = Vec::new();
     write_vtt(cues, &mut vtt).expect("writing to memory");
-    let back = read_vtt(&vtt).unwrap_or_else(|e| panic!("WebVTT output does not read back: {e}"));
-    assert_eq!(
-        back.skipped.count, 0,
-        "WebVTT output has a block the reader skips"
-    );
-    let mut back = back.cues;
-    sort_cues(&mut back);
-    assert_eq!(shape(&back, false), shape(cues, false), "WebVTT round trip");
+    let want = shape(cues, false);
+    if want.is_empty() {
+        assert_eq!(
+            read_vtt(&vtt),
+            Err(ReadError::NoCues),
+            "empty WebVTT output"
+        );
+    } else {
+        let back =
+            read_vtt(&vtt).unwrap_or_else(|e| panic!("WebVTT output does not read back: {e}"));
+        assert_eq!(
+            back.skipped.count, 0,
+            "WebVTT output has a block the reader skips"
+        );
+        let mut back = back.cues;
+        sort_cues(&mut back);
+        assert_eq!(shape(&back, false), want, "WebVTT round trip");
+    }
 }
