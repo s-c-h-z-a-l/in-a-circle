@@ -261,13 +261,24 @@ fn subtitle(ext: Option<&str>, head: &[u8]) -> Option<Kind> {
     let unbom = head.strip_prefix(b"\xef\xbb\xbf").unwrap_or(head);
     let (mime, label) = match ext? {
         "srt" if in_head(head, b"-->") => (SUBRIP_MIME, "SRT subtitles"),
-        "vtt" if unbom.starts_with(b"WEBVTT") => (WEBVTT_MIME, "WebVTT subtitles"),
+        "vtt" if webvtt_signature(unbom) => (WEBVTT_MIME, "WebVTT subtitles"),
         "ass" | "ssa" if in_head(head, b"[Script Info]") => (SSA_MIME, "ASS subtitles"),
         _ => return None,
     };
     Some(Kind {
         mime: Some(mime.into()),
         label: label.into(),
+    })
+}
+
+/// Whether `head` opens with the WebVTT signature as a word of its own: a
+/// space, a tab, a line end, or the head's end must follow it (W3C WebVTT).
+/// `WEBVTTX` is not a signature, so a file that only starts with those
+/// letters is not a WebVTT subtitle.
+fn webvtt_signature(head: &[u8]) -> bool {
+    head.strip_prefix(b"WEBVTT").is_some_and(|rest| {
+        rest.first()
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
     })
 }
 
@@ -961,6 +972,32 @@ mod tests {
         let p = d.file("b.vtt", b"\nWEBVTT\n");
         assert_eq!(kind(&p), is(None, ".vtt text"));
         let p = d.file("c.vtt", b" WEBVTT\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+    }
+
+    #[test]
+    fn webvtt_signature_must_end_at_a_separator() {
+        let d = Dir::new("vtt-sep");
+        // The signature is a word of its own: a letter or a dash after it is not.
+        let p = d.file("a.vtt", b"WEBVTTX\n\n00:00.000 --> 00:01.000\nHi\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        let p = d.file("b.vtt", b"WEBVTT-foo\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        // A space, a tab, a line end, or the file's end after it: WebVTT.
+        let ok: [&[u8]; 6] = [
+            b"WEBVTT\n",
+            b"WEBVTT - title\n",
+            b"WEBVTT\tt\n",
+            b"WEBVTT\r\n",
+            b"WEBVTT",
+            b"\xef\xbb\xbfWEBVTT - title\n",
+        ];
+        for (i, body) in ok.iter().enumerate() {
+            let p = d.file(&format!("ok{i}.vtt"), body);
+            assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"), "{i}");
+        }
+        // The BOM variant is judged the same way.
+        let p = d.file("bom.vtt", b"\xef\xbb\xbfWEBVTTX\n");
         assert_eq!(kind(&p), is(None, ".vtt text"));
     }
 

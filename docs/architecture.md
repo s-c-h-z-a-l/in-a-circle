@@ -892,8 +892,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   the subtitle types below; recognising HTML and JSON by content is planned.
 - **Subtitles:** a UTF-8 `.srt` whose 4 KiB head has a `-->` cue arrow is
   `application/x-subrip`, label `SRT subtitles`; a `.vtt` whose head (after
-  an optional byte order mark) opens with `WEBVTT` is `text/vtt`, label
-  `WebVTT subtitles`; a `.ass` or `.ssa` whose head has `[Script Info]` (any
+  an optional byte order mark) opens with `WEBVTT` followed by a space, a
+  tab, a line end or the head's end (`WEBVTTX` is not a signature) is
+  `text/vtt`, label `WebVTT subtitles`; a `.ass` or `.ssa` whose head has `[Script Info]` (any
   case) is `text/x-ssa`, label `ASS subtitles`. The name alone never makes a
   subtitle: without the head check the file keeps its text label (`.srt
   text`). A subtitle that is not valid UTF-8 is `text/x-8bit`, decided first
