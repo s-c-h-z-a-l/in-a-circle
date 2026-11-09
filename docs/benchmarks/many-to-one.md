@@ -118,18 +118,55 @@ stage 2 uses `INACIRCLE_MEASURE=1`, as in the section above.
 | 1,024 images x 128 KiB to one CBZ, peak `VmHWM` | 3,232 kB |
 | `inacircle` file (x86_64) | 1,160,024 B |
 | `inacircle-pages` file / `.text` (x86_64) | 503,712 B / 403,267 B |
-| Drop to stage 2 with PNG/JPEG, p95, reference desktop | pending (manual run) |
-| Drop to stage 2 with PNG/JPEG, p95, second machine | pending (manual run) |
-| `main` to exit CPU, warm cache, p95 | pending (two-machine run) |
+| Drop to stage 2, 1 JPEG to Book, p95, reference desktop | 159 us (N=50) |
+| Drop to stage 2, 30 JPEG to Book, p95, reference desktop | 160 us (N=50) |
+| Drop to stage 2, text to Document, `main` vs this branch, p95 | 167 us vs 166 us (-0.6%) |
+| Drop to stage 2, second machine | not measured (reported, not gated) |
+| `main` to action start CPU of `run`, warm cache, p95, reference desktop | 360 us (`main`: 363 us), -0.8%; whole run to exit 1,432 us (`main`: 1,422 us), reported |
 
-The two timing rows are the user's manual drag runs (50 or more valid
-observations per condition, nearest-rank p95); nothing is recorded for
-them yet and no value is implied.
+**Drop to stage 2.** Hand-made drags on the reference desktop (kernel
+7.3.1, `INACIRCLE_MEASURE=1`, release builds: A is `main` 12992781, B is
+this branch), 50 valid drops per condition, p95 by nearest rank. One log
+per condition; the order the series were run in was not recorded.
 
-**Verdict.** Memory and sizes are inside their bounds (peak memory 3.2 MB
-for the largest accepted workload; `inacircle` under 1.5 MB, `.text` of
-`inacircle-pages` under 1 MB). The timing verdict stays open until the
-two rows above are filled.
+| Condition | Build | Valid | p50 (us) | mean (us) | p95 (us) | max (us) | stdev (us) |
+|---|---|---|---|---|---|---|---|
+| text to Document | A | 50 | 156 | 155 | 167 | 174 | 8 |
+| text to Document | B | 50 | 156 | 154 | 166 | 167 | 8 |
+| 1 JPEG to Book | B | 50 | 150 | 149 | 159 | 164 | 7 |
+| 30 JPEG to Book | B | 50 | 150 | 149 | 160 | 163 | 8 |
+
+Wheel PSS peaked at 3,044 kB (gate 5,000 kB). The branch costs the text
+path -0.6% p95 (investigation threshold 10%). The p95 is at most 17% of the
+1,000 us budget and the standard deviation 5% of the p50, so the
+small-sample rule of [acceptance.md](acceptance.md#sample-and-percentile-rule)
+would have accepted 10 drops; 50 were taken before that rule existed. The
+second machine was not measured: it is outside the reference timing gate.
+Raw logs are kept privately with the plan's reports.
+
+**`main` to exit (`inacircle run`).** Headless, 50 valid runs per series on
+the reference desktop, warm cache (one discarded run per build first, the
+catalog cache filled), a fresh input copy per run, private state per
+build, A and B alternating in swapped order. The metric is `self_cpu_us`
+minus `start_abs_cpu_us` (our CPU from `main` to exit; the ~0.6 ms before
+`main` is not in it), with the `main` to action-entry share as the second
+metric. The action's own CPU is a child's and is not counted.
+
+| Series | main to exit p50 / p95 / max (us) | main to action entry p50 / p95 (us) |
+|---|---|---|
+| A, text (`main`) | 1,309 / 1,422 / 1,534 | 321 / 363 |
+| B, text | 1,317 / 1,432 / 1,623 | 330 / 360 |
+| B, 1 JPEG to CBZ | 1,495 / 1,602 / 1,651 | 333 / 388 |
+| B, 30 JPEG to CBZ | 5,625 / 5,843 / 6,032 | 717 / 823 |
+
+The branch moves the text path +0.7% p95 (no regression). Standard
+deviation is 4-5% of the p50. **Whole run:** the whole-run figure
+is 1,422-1,432 us on `main` and the branch alike. The budget for `run`
+ends at the action's start (CLAUDE.md), which is 360-388 us for one input;
+the rest comes after the action has started, reported and not budgeted
+(not broken down further here). The 30-image run scales with
+the input count (per-input work, reported and not budgeted). Peak
+`VmHWM` 3,788 kB. Method: private script kept with the plan's reports.
 
 **Reproduce.**
 
