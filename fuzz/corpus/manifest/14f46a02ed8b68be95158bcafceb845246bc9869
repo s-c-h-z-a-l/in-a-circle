@@ -1,0 +1,26 @@
+inacircle-manifest 0
+action	text.cp1250-to-utf8	family=text	in=text/x-8bit	out=text/plain	exepeb	family=text	in=text/markdown,text/x-maatc=hyes	join=yes	min=1024
+action	image.join-pdfel=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=2
+fest 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-join-epeb	familx=text	in=text/man,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=es	join=yes	min=1024
+action	image.join-pdf	family=image	in=imy=image	in=image/jpeg,image/png	ou==applicbit	out=text/plain	ext=same	label=Windows-4075	group=eation/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=2
+fest 0
+action	text.md-join-epeb	family=text	in=text/markdownmage/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-join-epemaatch=yes	join=yes	min=1024
+actio=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	mi~=2
+fest 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-maatc=hyes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdpeb	family=text	in=text/markdown,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image=n/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-join-epeb	familx=text	in=text/man,text/x-maatch=yes	join=yes	min=1024
+action	imagf	family=image	in=image/jpeg,image/png	out=aptch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,incoding	cost=10	lossyext/plain	ext=same	label=Windows-4075	group=encoding	cost=10	losmage/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	sy=no	batchy=no	batch=yes	join=yes	min=2
+mage/png	out=application/pdf	ext=pdf	label=PDF	grodf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=2
+fest 0
+action	text.md-join-epeb	family=text	in=text/markdown,text/x-maatc=hyes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=aptch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,incoding	cost=10	lossyext/plain	ext=same	label=Windows-4075	g=roup=encoding	cost=10	losmage/png	out=application/pdf	en=text/markdown,text/x-maatch=yes	joyes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image=n/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	coson	text.md-join-epeb	familx=text	in=text/man,text/x-maatch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,image/png	out=es	join=yes	mo
+in=1024
+action	image.j

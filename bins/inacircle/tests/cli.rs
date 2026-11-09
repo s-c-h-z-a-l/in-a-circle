@@ -505,6 +505,135 @@ fn txt_to_md_end_to_end() {
     );
 }
 
+/// A `.txt` whose first accent lies past the classifier's 256 KiB window
+/// is classified as plain text, so the wheel offers Markdown; the action
+/// then says which byte is not UTF-8 and where, and nothing is published.
+#[test]
+fn late_accent_beyond_the_window_is_named_by_the_action() {
+    // 260 KiB: past the classifier's 256 KiB window.
+    const AT: usize = 260 << 10;
+    let e = Env::new("late-accent");
+    let mut body = vec![b'a'; AT];
+    body.extend_from_slice(b"\xe9\n");
+    body.extend_from_slice(&[b'b'; 40 << 10]);
+    let txt = e.file("late.txt", &body);
+    let srt = e.file("late.srt", &body);
+    let o = e.run(&["run", "markdown", "late.txt", "late.srt"]);
+    assert_eq!(o.code, Some(3), "{}{}", o.stdout, o.stderr);
+    // The `.srt` has no type of its own past the window, so no text action
+    // takes it: the engine skips it, the action never sees it.
+    let why = format!("not UTF-8: byte 0xE9 at {AT}");
+    let mut skips = o.pairs("skip");
+    skips.sort();
+    assert_eq!(
+        skips,
+        [(srt.clone(), "unsupported".to_owned()), (txt.clone(), why)],
+        "{}",
+        o.stdout
+    );
+    assert!(o.pairs("done").is_empty(), "{}", o.stdout);
+    assert!(!e.files().join("late").exists());
+    assert_eq!(fs::read(&txt).unwrap(), body);
+}
+
+/// A Windows-1250 subtitle (accents in the first lines) converts to
+/// UTF-8 with the `.srt` byte order mark, in its own folder; the history
+/// records the action, and Undo moves the folder to the Trash.
+#[test]
+fn cli_cp1250_srt_to_utf8() {
+    let e = Env::new("cp1250");
+    // "Příliš žluťoučký kůň" in Windows-1250, then the quotes „…” (0x84,
+    // 0x94), so the file is not valid UTF-8 and has no control byte.
+    let cp1250: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nP\xf8\xedli\x9a \x9eslu\x9d\
+        ou\xe8k\xfd k\xf9\xf2 \x84ok\x94\r\n";
+    let src = e.file("Film.hu.srt", cp1250);
+    let o = e.run(&["run", "cp1250", "Film.hu.srt"]);
+    if skip_unsandboxed("cli_cp1250_srt_to_utf8", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film.hu/Film.hu.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nP\u{159}\u{ed}li\u{161} \
+        \u{17e}slu\u{165}ou\u{10d}k\u{fd} k\u{16f}\u{148} \u{201e}ok\u{201d}\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), cp1250, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("text.cp1250-to-utf8")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film.hu").exists());
+    assert!(src.exists());
+}
+
+/// An ISO-8859-2 subtitle converts to UTF-8 with the `.srt` byte order
+/// mark; the history records the ISO action, and Undo moves the folder.
+#[test]
+fn cli_iso88592_to_utf8() {
+    let e = Env::new("iso88592");
+    // "šaž čaša" in ISO-8859-2 (0xb9 š, 0xbe ž, 0xe8 č): not valid UTF-8.
+    let iso: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\n\xb9a\xbe \xe8a\xb9a\r\n";
+    let src = e.file("Film.srt", iso);
+    let o = e.run(&["run", "iso88592", "Film.srt"]);
+    if skip_unsandboxed("cli_iso88592_to_utf8", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\n\u{161}a\u{17e} \u{10d}a\u{161}a\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), iso, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("text.iso88592-to-utf8")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
+}
+
+/// A Windows-1250 file run as ISO-8859-2 fails (its `„` byte is a control
+/// code there) and the message points to the right code page; nothing is
+/// published, so there is nothing to undo.
+#[test]
+fn cli_iso_on_cp1250_fails_with_the_hint() {
+    let e = Env::new("iso-on-cp1250");
+    let src = e.file("Film.srt", b"1\r\n\x84ok\x94 \xe8\r\n");
+    let o = e.run(&["run", "iso88592", "Film.srt"]);
+    if skip_unsandboxed("cli_iso_on_cp1250_fails_with_the_hint", &o) {
+        return;
+    }
+    assert_eq!(o.summary(), (0, 0, 1), "{}", o.stdout);
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{}", o.stdout);
+    assert_eq!(fails[0].0, src);
+    assert_eq!(fails[0].1, "byte 0x84 at 3: this looks like Windows-1250");
+    assert!(!e.files().join("Film").exists());
+    assert_eq!(fs::read(&src).unwrap(), b"1\r\n\x84ok\x94 \xe8\r\n");
+}
+
 /// A preset that matches no input still names its run after the 1:1 route
 /// it would have taken (the history's `action=`), not after the preset.
 #[test]
@@ -1702,9 +1831,25 @@ fn many_long_paths_stay_within_the_pss_budget() {
         .and_then(Path::file_name)
         .is_some_and(|d| d == "release");
     let e = Env::new("longpaths");
+    // Folders of at most 240 bytes (under NAME_MAX) fill what the temp
+    // directory's own length leaves of `LONG_PATH`, so every path is
+    // exactly `LONG_PATH` bytes and the list stays within 1 MiB whatever
+    // TMPDIR is.
     let mut dir = e.files();
-    for c in ['a', 'b', 'c', 'd'] {
-        dir = dir.join(c.to_string().repeat(240));
+    let name = "/0000.txt".len();
+    let base = dir.as_os_str().len();
+    assert!(
+        base + name < LONG_PATH,
+        "temp dir of {base} bytes leaves no room for {LONG_PATH}-byte paths"
+    );
+    let mut left = LONG_PATH - base - name;
+    for c in ('a'..='z').cycle() {
+        if left < 2 {
+            break;
+        }
+        let n = (left - 1).min(240);
+        dir = dir.join(c.to_string().repeat(n));
+        left -= n + 1;
     }
     fs::create_dir_all(&dir).unwrap();
     let mut paths = Vec::with_capacity(MANY_INPUTS);
@@ -1712,6 +1857,7 @@ fn many_long_paths_stay_within_the_pss_budget() {
         let plen = dir.join(format!("{i:04}.txt")).as_os_str().len();
         let pad = LONG_PATH.saturating_sub(plen);
         let p = dir.join(format!("{i:04}{}.txt", "_".repeat(pad)));
+        assert_eq!(p.as_os_str().len(), LONG_PATH, "{}", p.display());
         fs::write(&p, "w\n").unwrap();
         paths.push(p);
     }
@@ -1827,18 +1973,18 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\nhub\tx.bin\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\tx.bin\n"
     );
     // The plain offer output is unchanged and `--groups` needs files.
     let o = e.run(&["offer", "--groups"]);

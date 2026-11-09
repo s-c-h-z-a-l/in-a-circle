@@ -169,6 +169,22 @@ are in `CLAUDE.md`.
   (`lossy=` describes the text content, text and line breaks, not how it
   renders); required external tool (`requires=`, checked on `PATH` at
   start; missing means a greyed-out slice that says what to install).
+- `ext=same` names no extension: the output keeps its input's
+  as it is (the last one, its case kept: `Film.hu.srt` gives
+  `Film.hu/Film.hu.srt`, `a.SRT` gives `a/a.SRT`, `a.tar.gz` gives
+  `a.tar/a.tar.gz`; an input without one gives an output without one,
+  and so does a trailing dot, an empty extension: `Film.` gives
+  `Film/Film`). A name is written as UTF-8: bytes of the extension that
+  are not UTF-8 become U+FFFD, as those of the stem already do in every
+  output name (`a.b\xff` gives `a/a.b\u{FFFD}`). Only a plugin can meet
+  this: the shipped `ext=same` actions take only listed ASCII extensions.
+  It is valid on every one-to-one action, `batch=yes` and `batch=no`; a
+  join's one output has no single input to take it from, so `join=yes`
+  with `ext=same` rejects the line. Any other value is still the
+  extension itself (`ext=SAME` is `.SAME`). A line without it means what
+  it did before, and the catalog cache keeps its format and version. An
+  engine older than this rule reads `same` as an extension and names the
+  output `x.same`.
 - A join action turns many inputs into one output (`join=yes`; absent
   means `no`). It may take a set of input types: `in=` is then a
   comma-separated MIME set of at most 16 members (the roadmap's image
@@ -190,6 +206,10 @@ are in `CLAUDE.md`.
   rejects the line. A line without `assets=` means what it did before,
   and the catalog cache (stored lines, checked again on load) keeps its
   format and version.
+- 8-bit text (`text/x-8bit`) is decoded one file to one copy, its output
+  capped by that one file (see the Output policy), so like `ext=same` it
+  is valid only on a one-to-one action: a join with it among its `in=`
+  or `assets=` types rejects the line.
 - `text.txt-to-md` is `lossy=yes`: runs of blank lines merge into one
   paragraph break (and runs of spaces may collapse when rendered), and
   the action reports it (blank lines at the start or end of the text and
@@ -586,6 +606,50 @@ are in `CLAUDE.md`.
   `text.md-join-epub`, make a book again when it is within the EPUB
   writer's limits (1024 chapters, one document's budgets); a larger
   book's md is still written but cannot be joined back in one piece.
+- `text.cp1250-to-utf8` and `text.iso88592-to-utf8` (`in=text/x-8bit`,
+  `out=text/plain`, `ext=same`, `group=encoding`, `lossy=no`) decode a
+  Windows-1250 or ISO-8859-2 file to a UTF-8 copy under the input's own
+  name; the label is the code page the file is read as, the target is
+  always UTF-8. The upper 128 bytes map by the Unicode Consortium's
+  mapping files (`VENDORS/MICSFT/WINDOWS/CP1250.TXT`,
+  `ISO8859/8859-2.TXT`), built into the binary and checked byte for byte
+  against copies of the files and against glibc's `iconv` by the tests.
+  The file is streamed in 64 KiB reads, so it has no size limit of its
+  own (the engine's 3 x cap bounds the output). Strict, never `U+FFFD`:
+  each error gives no output, with the byte's offset from 0. A byte
+  Windows-1250 leaves undefined (`0x81 0x83 0x88 0x90 0x98`) is `byte
+  0x81 at N is not Windows-1250`. ISO-8859-2 `0x80-0x9F` are C1 controls
+  (in the mapping file and in glibc, but never in a text file), so they
+  are refused: one Windows-1250 assigns (its quotes, dashes, `Š`...) is
+  `byte 0x84 at N: this looks like Windows-1250`, one it does not is
+  `byte 0x81 at N is not ISO-8859-2`. NUL or a C0 control other than
+  TAB, LF, FF and CR is `not text: control byte at N`; one Ctrl-Z
+  (`0x1A`) as the very last byte is allowed and kept. Line ends are kept
+  byte for byte and no byte order mark is written, except for a `.srt`
+  input (any case), whose copy starts with one (players on old TVs and
+  Windows read a subtitle without it as the local code page). A file
+  that is already UTF-8 (valid, with at least one multi-byte character)
+  is skipped, `already UTF-8`; one that is mostly UTF-8 fails with
+  `looks like UTF-8 with damaged bytes (first at N)` instead of turning
+  every `é` into `Ă©`. Mostly UTF-8 is: over the whole file, as many
+  valid UTF-8 sequences of Latin letters, punctuation or symbols
+  (U+0080-U+024F, U+2000-U+206F, U+20A0-U+214F) as bytes outside valid
+  UTF-8, or more; or a UTF-8 byte order mark first and any byte outside
+  valid UTF-8 after it. Real 8-bit text almost never forms such a
+  sequence: a lower-case accent is followed by ASCII, and most pairs
+  capitals form by accident (`ŁÓŻKO` holds `D3 AF`) decode to Cyrillic,
+  Hebrew, Arabic or Armenian letters, which do not count. The residue:
+  a capital `Â Ă Ä Ĺ Ć Ç Č` before any byte `0x80-0xBF` (or `É` before
+  `0x80-0x8F`) decodes into the Latin range, so one-line all-caps Slovak
+  or Czech such as `DĹŽKA`, `PÄŤ` or `ČŠ` is refused; lower-case text or
+  more lines outweigh it. These two verdicts win over a refused byte
+  (`Á` in UTF-8 is `C3 81`) and need the whole file: the copy is
+  written as the input streams and, on any failure, cut back to empty
+  and removed. A pure ASCII file converts to itself. A converted input
+  gets one `warn`, `converted from Windows-1250 to UTF-8` (or
+  `ISO-8859-2`): the contract has no other line for a note on a
+  converted input; a route without a lossy action does not count it as
+  a loss.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -606,6 +670,8 @@ action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=H
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
 action	text.epub-to-md	family=text	in=application/epub+zip	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=no
+action	text.cp1250-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=Windows-1250	group=encoding	cost=10	lossy=no	batch=yes
+action	text.iso88592-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=ISO-8859-2	group=encoding	cost=10	lossy=no	batch=yes
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
@@ -824,6 +890,31 @@ Every action runs sandboxed, set up in the child between `fork` and
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
   content cannot tell them apart. Today that is plain text and Markdown;
   recognising HTML and JSON by content is planned.
+- **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
+  the code page actions and taken by no other preset. A file is one when
+  its extension is on the classifier's text list (`txt`, `text`, `md`,
+  `markdown`, `mdown`, `mkd`, `srt`, `vtt`, `ass`, `ssa`, `sub`, `csv`,
+  `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; not
+  `nfo`, usually CP437 art) or it has none, what is read has no NUL and no
+  C0 control byte other than TAB, LF, CR and FF (one Ctrl-Z, `0x1A`, as the
+  file's very last byte is allowed), and it is not valid UTF-8. A file with
+  a listed extension whose 4 KiB head is all ASCII is read on, on the same
+  handle, up to its first 256 KiB, stopping at the read that finds the
+  first byte that is not valid UTF-8, or a control byte (valid UTF-8
+  accents do not stop it); one wheel invocation reads on at most 1 MiB
+  for all its files together, after which the head alone decides
+  (`text/plain` for an ASCII head). A head that is valid UTF-8 with any
+  non-ASCII byte, or a file without an extension, is decided by the head.
+  Every valid UTF-8 file keeps the plain text and Markdown rule above.
+  The classifier only proposes: the action checks the whole file. A file
+  the head decides as plain text or Markdown (a listed text or Markdown
+  extension, or none) whose first byte that is not valid UTF-8 lies past
+  the window, or past a spent budget, is offered the text actions; each
+  one reads all of it and skips it, naming that byte and its offset from
+  0 (`not UTF-8: byte 0xE9 at 266240`); nothing is published. Valid UTF-8
+  with a NUL byte is still skipped as `unsupported` by the plain-text
+  reader. Any other listed extension (`.srt`, `.csv`...) has no type
+  with such a head, so no shipped action takes it.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
@@ -836,7 +927,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   wheel offers): curated defaults, replaceable by the user.
 - For each preset the planner finds a route: a direct edge, or **at most
   two steps** through a lossless intermediate. No route means a greyed-out
-  slice with the reason.
+  slice with the reason. A preset may instead name its action
+  (`Preset.action`, an action id) where two actions share its input and
+  output types and only the id tells them apart (two code pages to
+  UTF-8): it then runs exactly that one-to-one action, never another
+  route. Not installed, a join, or not of the preset's types, it greys
+  the slice out ("no action installed"); a missing tool says what to
+  install, as for a route. A preset without a name finds its route as
+  before.
 - **Eight fixed directions.** A target always sits in the same direction,
   whatever the input; unused directions are dimmed. Muscle memory is the
   point. The actual layout is a design decision.
@@ -887,9 +985,14 @@ Every action runs sandboxed, set up in the child between `fork` and
   [Output policy](#output-policy)), and its one result is published once,
   as one group, by the same staging and no-replace rename as any other
   output. A two-step route runs both steps in the same temp dir; only the
-  last step's outputs are placed. Step 1's outputs are checked again once
-  its whole group is gone (a regular file, no symlink on the way), so an
-  action cannot swap one for a link before step 2 reads it.
+  last step's outputs are placed, named after the user's input (with
+  `ext=same` its extension too, never that of step 1's output). Step 1's
+  outputs are checked again once its whole group is gone (a regular
+  file, no symlink on the way), so an action cannot swap one for a link
+  before step 2 reads it. When step 1 makes several parts of one input,
+  the input is still all or nothing: a part that either step fails,
+  skips or leaves unreported settles the input (failed or skipped,
+  once), and none of its other parts is handed on or placed.
 - The supervisor is a single-threaded `poll` loop over the action's
   pipes, a cancel `signalfd` and the child's pidfd; its only timers are an
   hourly refresh of the temp dir's mtime and the grace after `SIGTERM`.
@@ -930,7 +1033,11 @@ Every action runs sandboxed, set up in the child between `fork` and
   same text is the CLI's stderr warning. Cancelled: `Cancelled`,
   `<n> done, <r> not converted`. An output whose lossy action reported a
   loss (a `warn` for an input that has an output) starts the body with
-  `Formatting was lost.`; a run that lost nothing does not say it. A join
+  `Formatting was lost.`; a run that lost nothing does not say it. A run
+  of an Encoding-group action that has an output adds the body line
+  `converted from <code page> to UTF-8` (the action's label, for one input
+  and for several; no line for a run without output or a cancelled one);
+  it comes from the action's group, not from an event. A join
   run that published its result: the result's file name, then `<taken> /
   <total> files` (the inputs in the result, of every file of the run) and
   the same problem lines, plus the Downloads line when its anchor folder
@@ -992,14 +1099,20 @@ In the engine, in one place:
    folder, and the notification says so.
 2. Same base name, new extension. When the format stays the same, a fixed
    suffix, English and Latin-only by default (`-small`, `-compressed`),
-   configurable.
+   configurable. The exception is an `ext=same` action (a re-encoding,
+   such as a subtitle to UTF-8): its output keeps the input's name
+   exactly, with no suffix (`Film.hu.srt` gives `Film.hu/Film.hu.srt`;
+   only a trailing dot is dropped, `Film.` gives `Film/Film`),
+   because the wrapper folder already tells the two apart and players
+   pair a subtitle with its film by the name.
 3. Every input gets its own folder, a single output too (`a.txt` gives
    `a/a.md`; several outputs keep their names, `doc/doc-01.png`, …).
    Never overwrite: `name (1)/`, `name (2)/`, without asking.
 4. Per input, all or nothing: the outputs are copied into fresh files in a
    private 0700 staging folder on the target's filesystem (`.inacircle-
-   <random>/`), checked (regular files, unchanged while copied, TXT/MD
-   valid UTF-8 up to 32 MiB, validated on the stream that is written),
+   <random>/`), checked (regular files, unchanged while copied, text
+   valid UTF-8 within its cap, validated on the stream that is written:
+   see the text outputs below),
    given their final modes as `cp` would (0666 and 0777 minus the umask,
    but the owner always keeps rw on files and rwx on the folder, and a
    setgid target's S_ISGID is kept) while still inside the private folder,
@@ -1013,6 +1126,27 @@ In the engine, in one place:
    ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
    changed since the baseline (`BaselineChanged`, "files changed while
    saved"). Other inputs' published results are never taken back.
+   Text outputs: an action whose `out=` is `text/*` has every output
+   named with its extension checked as UTF-8 on the whole stream,
+   whatever that extension is (`.srt`, `.html`, none with `ext=same`),
+   and so its single output always; its other outputs (a Markdown
+   file's images) stay bytes. An output named `.txt` or `.md` is checked
+   for any action, as before. A text output may be 32 MiB (the text
+   output budget), except an 8-bit text decoder's (`in=text/x-8bit`):
+   three times the bytes the engine handed it, plus 3 for a byte order
+   mark, taken from the input's size when the action starts, never from
+   anything the action reports (on a two-step route, the size of the
+   intermediate file that made the output). Past its cap, or not UTF-8,
+   the input fails ("text output is not UTF-8", "text output larger than
+   ...") and nothing of it is published. An 8-bit text decoder makes one
+   UTF-8 copy of one file, so it may publish exactly one output per
+   input: a second one fails the input ("8-bit text action made more
+   than one output") and nothing of it is published. The engine
+   publishes text only as UTF-8: the contract has no 8-bit output type.
+   `text/x-8bit` is an input type the classifier gives; an action that
+   declares it as its `out=` (an encoder from UTF-8 to a code page) is
+   checked like any `text/*`, so every output byte past ASCII fails its
+   input as not UTF-8.
 5. Extraction: the extracted files go, flattened, into one folder named
    after the archive; a single top-level folder inside the archive is not
    kept as such. (Every input gets its wrapper folder, also a single
@@ -1162,7 +1296,8 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, and `book` = east, labelled `Book`; an unknown `group` is not
+  `Document`, `book` = east, labelled `Book`, and `encoding` = west,
+  labelled `Encoding`; an unknown `group` is not
   shown, one stderr line per run). A category is **lit** when any dragged
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
@@ -1170,7 +1305,10 @@ compositor.
   (from plain text) and `markdown-epub` (from an EPUB) north, `plain-text`
   (from Markdown) and `plain-text-epub` (from an EPUB) south, so an EPUB
   lights only Document (Markdown north, Plain text south, HTML east dim)
-  and nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has no
+  and nothing in Book; a file that is not valid UTF-8 text (`text/x-8bit`)
+  lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
+  `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
+  leaves Encoding dim; `pdf` north and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
@@ -1236,9 +1374,11 @@ compositor.
 - Only `file://` URIs with an empty or `localhost` host count. `%XX`
   decodes to bytes; a non-`file` URI, another host, a bad escape or a
   `%00` drops that entry alone. A raw `?query` or `#fragment` is cut off.
-  Paths are kept as given (`..` and non-UTF-8 bytes stay, as on the
-  command line). CRLF and LF both end a line; lines starting with `#` are
-  comments. If nothing is left, the hub says `Nothing to do`.
+  Paths are made what the command line makes them (`.` components and
+  trailing slashes dropped; `..` and non-UTF-8 bytes stay), so the wheel
+  classifies the same files the run it starts is given. CRLF and LF both
+  end a line; lines starting with `#` are comments. If nothing is left,
+  the hub says `Nothing to do`.
 - Choosing: only an applicable target is clickable (left button); that
   is the choice. The URI bytes are freed before classification, and the
   files are tallied per type (count and the first name), not kept per file.

@@ -1,0 +1,7 @@
+=================fevreecle-manifest 0
+action	text.mdb-join-epub	fami=text/markdown,text/x-markmily=te{t	in=text/markdoup=book	cost=10	lossy=yes	batch=yes	join=yes	min=0421
+action	image.join-pdf	family=image	in=image/jptch=yes	join=yes	majoin=yes	min=0421
+action	im|||||||f	family=image	in=image/jpeg,imwnation/epub+zlabel=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=0421
+action	image.join-pdf	family=image	in=image/jpeg,image/png	outok	costE10	lossy=yes	batch=yes	join=yes	majoin=yes	min=0421
+action	im|||||||1
+Gamily=

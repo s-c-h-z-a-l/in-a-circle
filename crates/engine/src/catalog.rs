@@ -268,6 +268,20 @@ impl Join {
     }
 }
 
+/// The `ext=` value that keeps the input's own extension instead of naming
+/// one: `a.srt` gives `a.srt`, `a.SRT` gives `a.SRT`, `a` gives `a`. Only
+/// a one-to-one action may take it: a join's one output has no single
+/// input to take it from.
+pub const EXT_SAME: &str = "same";
+
+impl Action {
+    /// Whether the output keeps the input's extension (`ext=same`) rather
+    /// than taking `ext`.
+    pub fn keeps_ext(&self) -> bool {
+        self.ext == EXT_SAME
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Catalog {
     pub actions: Vec<Action>,
@@ -700,6 +714,12 @@ fn parse_action(l: &Line) -> Option<Action> {
         if assets.iter().any(|a| types.contains(a)) {
             return None;
         }
+        // 8-bit text is decoded one file to one copy, capped by that one
+        // file's size: a join's one output has no single input to cap it.
+        let x8 = |t: &String| t == crate::classify::X8BIT_MIME;
+        if types.iter().chain(&assets).any(x8) {
+            return None;
+        }
         Some(Join { types, min, assets })
     } else if l.get("min").is_some() || l.get("assets").is_some() || input.contains(',') {
         // `min`, `assets` and a MIME set are meaningful only for a join
@@ -708,6 +728,11 @@ fn parse_action(l: &Line) -> Option<Action> {
     } else {
         None
     };
+    let ext = text("ext")?;
+    // `ext=same` names the output after its input: a join has no one input.
+    if join.is_some() && ext == EXT_SAME {
+        return None;
+    }
     // A join action's `input` is the set's first member, for display only.
     let input = match &join {
         Some(j) => j.types[0].clone(),
@@ -719,7 +744,7 @@ fn parse_action(l: &Line) -> Option<Action> {
         bin: PathBuf::new(),
         input,
         output: text("out")?,
-        ext: text("ext")?,
+        ext,
         label: text("label")?,
         group: text("group")?,
         cost: l.get("cost")?.parse().ok()?,
@@ -1342,6 +1367,14 @@ fn fuzz_check_action(a: &Action, line: Option<&Line>) {
             assert!(j.assets.iter().all(|t| !t.is_empty()) && distinct(&j.assets));
             assert!(!j.assets.iter().any(|t| j.types.contains(t)));
             assert!(j.min >= 1 && j.min as usize <= action::INPUT_COUNT);
+            assert!(!a.keeps_ext(), "ext=same on a join");
+            assert!(
+                !j.types
+                    .iter()
+                    .chain(&j.assets)
+                    .any(|t| t == crate::classify::X8BIT_MIME),
+                "8-bit text on a join"
+            );
             if let Some(l) = line {
                 assert_eq!(l.get("join"), Some("yes"));
                 assert_eq!(j.assets.is_empty(), l.get("assets").is_none());
@@ -3365,6 +3398,79 @@ pub(crate) mod tests {
         let text = manifest::write_line(&l);
         let back = manifest::parse_line(text.trim_end_matches('\n')).unwrap();
         assert_eq!(parse_action(&back), parse_action(&l));
+    }
+
+    // ---- ext=same ----
+
+    const SAME_LINE: &str = "action\ttext.cp1250-to-utf8\tfamily=text\tin=text/x-8bit\tout=text/plain\text=same\tlabel=Windows-1250\tgroup=encoding\tcost=10\tlossy=no\tbatch=yes";
+
+    /// `ext=same` is taken on a one-to-one action, `batch=yes` and
+    /// `batch=no` alike, and the cache keeps its line verbatim: written and
+    /// read back it is the same line and the same action.
+    #[test]
+    fn ext_same_parses_and_round_trips_the_cache() {
+        let a = parsed(SAME_LINE).unwrap();
+        assert!(a.keeps_ext());
+        assert_eq!(a.ext, "same");
+        assert!(a.join.is_none());
+        let one = parsed(&SAME_LINE.replace("batch=yes", "batch=no")).unwrap();
+        assert!(one.keeps_ext() && !one.batch);
+        // Any other value is an extension of its own, as before.
+        let md = parsed(&SAME_LINE.replace("ext=same", "ext=md")).unwrap();
+        assert!(!md.keeps_ext());
+        assert!(
+            !parsed(&SAME_LINE.replace("ext=same", "ext=SAME"))
+                .unwrap()
+                .keeps_ext()
+        );
+        let text = format!("{CACHE_OK}{SAME_LINE}\n");
+        assert_eq!(check_cache(text.as_bytes()), Ok(()));
+        let entries = parse_cache(text.as_bytes()).unwrap();
+        assert_eq!(cache_text(&entries), text);
+        let c = Catalog::of(&entries);
+        let back = c.get("text.cp1250-to-utf8").unwrap();
+        assert!(back.keeps_ext());
+        assert_eq!(back.bin, Path::new("/a/one"));
+    }
+
+    /// A join has no one input to take the extension from: its line with
+    /// `ext=same` is refused whole, from a manifest and from the cache.
+    #[test]
+    fn ext_same_rejected_on_a_join() {
+        let join = PDF_LINE.replace("ext=pdf", "ext=same");
+        assert!(parsed(&join).is_none(), "{join}");
+        let assets = EPUB_LINE.replace("ext=epub", "ext=same");
+        assert!(parsed(&assets).is_none(), "{assets}");
+        // Control: the same lines with their own extension are taken.
+        assert!(parsed(PDF_LINE).is_some() && parsed(EPUB_LINE).is_some());
+        let text = format!("{CACHE_OK}{join}\n{SAME_LINE}\n");
+        let c = Catalog::of(&parse_cache(text.as_bytes()).unwrap());
+        let ids: Vec<&str> = c.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["text.cp1250-to-utf8"]);
+    }
+
+    /// 8-bit text is read one file to one copy, like `ext=same`: a join
+    /// with `text/x-8bit` among its document or asset types is refused
+    /// whole, from a manifest and from the cache.
+    #[test]
+    fn x8bit_rejected_on_a_join() {
+        let first = PDF_LINE.replace("in=image/jpeg,", "in=text/x-8bit,");
+        let later = PDF_LINE.replace(",image/png", ",text/x-8bit");
+        let asset = EPUB_LINE.replace("assets=image/jpeg,", "assets=text/x-8bit,");
+        for l in [&first, &later, &asset] {
+            assert_ne!(l.as_str(), PDF_LINE);
+            assert_ne!(l.as_str(), EPUB_LINE);
+            assert!(parsed(l).is_none(), "{l}");
+        }
+        // Control: the same lines with another type are taken.
+        for l in [&first, &later] {
+            assert!(parsed(&l.replace("text/x-8bit", "text/plain")).is_some());
+        }
+        assert!(parsed(&asset.replace("text/x-8bit", "text/plain")).is_some());
+        let text = format!("{CACHE_OK}{later}\n{SAME_LINE}\n");
+        let c = Catalog::of(&parse_cache(text.as_bytes()).unwrap());
+        let ids: Vec<&str> = c.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["text.cp1250-to-utf8"]);
     }
 
     // ---- join actions with assets ----

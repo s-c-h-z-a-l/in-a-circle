@@ -1,0 +1,8 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	famill	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text	join=yes	mi/png	out=application/epub+zip	ext=epub	label=Elication/epub+zip	ext=epub	on/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	joi
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=applicati-epub	family=text	in=text/markdown	assets=image/jpeg,image?/png	out=application/epub+zip	ext=epub	label=Elication/epub+zip	ext=epub	on/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zipub	=text/plain	out=applit=application/pdf	ext=	batch=yes
+action	j.]	family=f	in=text/plain	out=applit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{s{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	loss{1	lossy=no	batch=yes	join=no

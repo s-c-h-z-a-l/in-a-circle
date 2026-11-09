@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/b	label=L	group=g	cost=+	lossy=no	be=7	buil	family=f	in=text/plain	out=application/pdf	extf	ext=pdf	labh=yes	join=no

@@ -1,0 +1,12 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/mar&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&	cost=1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f		j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	groussy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	loes	jxt	mtime=5el=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxt	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdb+zip	ext=epub	label=L	gr=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	outssy=no	batch=yes	jxt	mtime=5	size=7	builtin=yes
+action	j.a	faiily=f	in=text/markdown,text/x-markdb+zip	ext=epub	labelain	out=application/pdf	ext=pdf	label=L	groussy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxt	mtime=5	size=7	builtin=yes
+action	j.a	faiily=f	in=text/markdown,text/x-markdb+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yeq	join=no

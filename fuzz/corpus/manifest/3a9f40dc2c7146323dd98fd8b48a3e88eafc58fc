@@ -1,0 +1,3 @@
+infest 0
+action	text.cp1250-to-utf8	family=text	in=text/x)8bit	out=text/plain	ext=same	label=Windows-1250	group=encoding	cost=10	lossy=no	batch=yes
+action	text.cp1250-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=Windows-1250	group=eocoding	cost=10	lossy=no	batch=no

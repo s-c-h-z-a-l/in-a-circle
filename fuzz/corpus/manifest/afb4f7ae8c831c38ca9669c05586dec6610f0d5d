@@ -1,0 +1,2 @@
+r%cle-manifest 0
+action	teacction-pdf	family=image	in=image/ng	out=ion/pdf	ext=pdf	label=PDF	group=dec	cost=10	lossy=so

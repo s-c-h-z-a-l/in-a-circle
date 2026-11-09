@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	text.md--epub	family=text	in=text/markdown,textge/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=10	join=yes	min=2

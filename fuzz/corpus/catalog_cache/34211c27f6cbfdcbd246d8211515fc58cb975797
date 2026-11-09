@@ -1,0 +1,10 @@
+inacircle-catalog 1
+bin	path=/b/tex|	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/p-catalog 1
+bin	path=/b/tex|	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=te/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.ayes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/mp=g	cost=1	lossy=no	batch=yes	join=no

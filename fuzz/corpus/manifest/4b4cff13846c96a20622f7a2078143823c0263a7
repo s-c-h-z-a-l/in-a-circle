@@ -1,0 +1,5 @@
+=================inacircle-manifest 0
+action	text.md	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=ah=yes	join=yes	min=1024
+actiifest 0
+action	text.md-jot	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=applic:ation/epuEPUB	group=book	cost=10	lossy=ye=yes	join=yes	min=1024
+action	image.join-pdf	family=oin-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jng	out=apepub	label=EPUB	group=bost=11	lossy=batch=yes	join=yes	min=2

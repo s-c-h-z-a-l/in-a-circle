@@ -1,0 +1,1 @@
+action	tex	in=text/markdown,text/x-mimage		join=yes	min=2

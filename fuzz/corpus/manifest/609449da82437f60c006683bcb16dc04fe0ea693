@@ -1,0 +1,5 @@
+inkinacircle-4####mmanifest 0
+action	text.md-join-epeoc	cosonpeb	family=text	in=textmr/kadown,text/x-maatch=yes	join=yes	min=102424
+action	image.join-pdf	fam	lext	in=text/markdown,text/yes	join=yes	min=102424
+action	image.join-pdf	family=imangei	ageimage/png	out=applic=text	in=text/markdown,text/x-maatch=yes	join=yes	min=102424
+actio	

@@ -1,8 +1,10 @@
-//! `inacircle-text`: the text family. Both directions are lossy and report
-//! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
-//! structure). Contract v0 (docs/architecture.md).
+//! `inacircle-text`: the text family. The document conversions are lossy
+//! and report what they dropped (txt -> md may merge blank-line runs,
+//! md -> txt drops structure); the two code page decoders are not (a byte
+//! they cannot keep fails the input). Contract v0 (docs/architecture.md).
 
 mod base;
+mod codepage;
 mod epub_md;
 mod epub_read;
 mod join;
@@ -15,6 +17,7 @@ use std::process::ExitCode;
 use std::time::UNIX_EPOCH;
 
 use action::{Command, Events, Invocation, parse_args};
+use codepage::{Codepage, CodepageError};
 use doc::xhtml::{Anchors, Chapter, Mode};
 use doc::{Dialect, Document, LimitError, Loss};
 
@@ -46,6 +49,21 @@ fn input_too_large() -> String {
         "This text file is larger than {} MiB.",
         mib(LIMITS.input_bytes)
     )
+}
+
+/// The `skip` reason of an input a text reader refused as not text: its
+/// first non-UTF-8 byte and that byte's offset (0-based), so a file whose
+/// late accent the classifier's window did not reach says where it is.
+/// Valid UTF-8 refused for a NUL byte (plain text only) keeps the generic
+/// `unsupported`.
+fn not_text_reason(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Err(e) => {
+            let at = e.valid_up_to();
+            format!("not UTF-8: byte 0x{:02X} at {at}", bytes[at])
+        }
+        Ok(_) => "unsupported".to_string(),
+    }
 }
 
 /// The `fail` reason of a budget error (copies of the shipped budgets).
@@ -165,6 +183,27 @@ fn manifest_text() -> String {
             .pair("lossy", "yes")
             .pair("batch", "no"),
     ));
+    // The code page decoders: an 8-bit text file to a UTF-8 copy under its
+    // own name (`ext=same`). Not lossy: a byte that has no character in
+    // the code page fails the input instead of being dropped or replaced.
+    for (id, label) in [
+        ("text.cp1250-to-utf8", Codepage::Cp1250.name()),
+        ("text.iso88592-to-utf8", Codepage::Iso88592.name()),
+    ] {
+        s.push_str(&manifest::write_line(
+            &manifest::Line::new("action")
+                .bare(id)
+                .pair("family", "text")
+                .pair("in", "text/x-8bit")
+                .pair("out", "text/plain")
+                .pair("ext", "same")
+                .pair("label", label)
+                .pair("group", "encoding")
+                .pair("cost", "10")
+                .pair("lossy", "no")
+                .pair("batch", "yes"),
+        ));
+    }
     s
 }
 
@@ -178,6 +217,7 @@ enum Conversion {
     TxtToHtml,
     EpubToTxt,
     EpubToMd,
+    Decode(Codepage),
 }
 
 impl Conversion {
@@ -191,6 +231,8 @@ impl Conversion {
             "text.txt-to-html" => Some(Conversion::TxtToHtml),
             "text.epub-to-txt" => Some(Conversion::EpubToTxt),
             "text.epub-to-md" => Some(Conversion::EpubToMd),
+            "text.cp1250-to-utf8" => Some(Conversion::Decode(Codepage::Cp1250)),
+            "text.iso88592-to-utf8" => Some(Conversion::Decode(Codepage::Iso88592)),
             _ => None,
         }
     }
@@ -201,6 +243,7 @@ impl Conversion {
             Conversion::MdToTxt | Conversion::EpubToTxt => "txt",
             Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
             Conversion::MdToHtml | Conversion::TxtToHtml => "html",
+            Conversion::Decode(_) => unreachable!("a decoded copy keeps its input's name"),
         }
     }
 
@@ -228,6 +271,7 @@ impl Conversion {
             Conversion::EpubToTxt | Conversion::EpubToMd => {
                 unreachable!("an EPUB goes through `epub_read` or `epub_md`")
             }
+            Conversion::Decode(_) => unreachable!("8-bit text goes through `decode_input`"),
         }
     }
 
@@ -353,6 +397,7 @@ fn publish(
         Conversion::EpubToTxt | Conversion::EpubToMd => {
             unreachable!("an EPUB goes through `epub_read` or `epub_md`")
         }
+        Conversion::Decode(_) => unreachable!("8-bit text goes through `decode_input`"),
     };
     losses.extend(more);
     Ok(losses)
@@ -381,6 +426,8 @@ fn process(
     match conv {
         Conversion::EpubToTxt => return epub_read::process(inv, i, input, ev),
         Conversion::EpubToMd => return epub_md::process(inv, i, input, ev),
+        // Streamed: 8-bit text has no input size limit.
+        Conversion::Decode(cp) => return decode_input(cp, inv, i, input, ev),
         _ => {}
     }
     let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
@@ -400,7 +447,7 @@ fn process(
     let (text, losses) = match conv.convert(&bytes) {
         Ok(r) => r,
         Err(ConvertError::NotText) => {
-            ev.skip(input, "unsupported");
+            ev.skip(input, &not_text_reason(&bytes));
             return Outcome::Unsupported;
         }
         Err(ConvertError::Limit(e)) => {
@@ -430,6 +477,82 @@ fn process(
     Outcome::Done
 }
 
+/// One 8-bit text file to `<work>/<i>/<its own name>` in UTF-8 (the
+/// engine names the result after the input, `ext=same`), with a byte
+/// order mark for a `.srt`; a `warn` line says which code page it was read
+/// as, the one place the contract has for a note on a converted input.
+/// Nothing is created before the input opens; on any later failure the
+/// file is cut back to empty and removed, so nothing is left to publish.
+/// An input that is already UTF-8 is skipped.
+fn decode_input(
+    cp: Codepage,
+    inv: &Invocation,
+    i: usize,
+    input: &Path,
+    ev: &mut Events<impl Write>,
+) -> Outcome {
+    let mut file = match epub_read::open_input(input) {
+        Ok(f) => f,
+        Err(e) => {
+            ev.fail(input, &format!("cannot read input: {e}"));
+            return Outcome::Failed;
+        }
+    };
+    let dir = inv.work.join(i.to_string());
+    let name = input.file_name().unwrap_or("output".as_ref());
+    let path = dir.join(name);
+    let out = fs::create_dir_all(&dir)
+        .and_then(|()| OpenOptions::new().write(true).create_new(true).open(&path));
+    let mut out = match out {
+        Ok(f) => f,
+        Err(e) => {
+            ev.fail(input, &format!("cannot create output: {e}"));
+            return Outcome::Failed;
+        }
+    };
+    // SIGXFSZ would kill the process (and the batch) at the first byte
+    // past `RLIMIT_FSIZE`; ignored, that write fails with EFBIG and only
+    // this input fails. The engine's ceiling (16 x the input, at least
+    // 256 MiB) is above the decoder's 3 x + 3 B, so this is a net.
+    // SAFETY: `signal` with SIG_IGN installs no handler code and touches
+    // no Rust state; SIGXFSZ is a valid signal number.
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
+    let srt = input
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("srt"));
+    let e = match codepage::decode(cp, &mut file, &mut out, srt) {
+        Ok(_) => {
+            ev.done(input, path.strip_prefix(&inv.work).unwrap_or(&path));
+            ev.warn(input, &format!("converted from {} to UTF-8", cp.name()));
+            return Outcome::Done;
+        }
+        Err(e) => e,
+    };
+    let _ = out.set_len(0);
+    drop(out);
+    let _ = fs::remove_file(&path);
+    match e {
+        CodepageError::AlreadyUtf8 => {
+            ev.skip(input, &e.to_string());
+            Outcome::Unsupported
+        }
+        CodepageError::Io(io) if io.raw_os_error() == Some(libc::EFBIG) => {
+            let reason = match too_large("The text") {
+                ConvertError::Other(r) => r,
+                _ => "The text would be too large".to_string(),
+            };
+            ev.fail(input, &reason);
+            Outcome::Failed
+        }
+        e => {
+            ev.fail(input, &e.to_string());
+            Outcome::Failed
+        }
+    }
+}
+
 /// One input to an EPUB or an HTML page. The output is removed on any
 /// error, so a half book never stays for the engine to publish.
 fn document(
@@ -446,7 +569,7 @@ fn document(
         Err(e) => {
             match e {
                 ConvertError::NotText => {
-                    ev.skip(input, "unsupported");
+                    ev.skip(input, &not_text_reason(bytes));
                     return Outcome::Unsupported;
                 }
                 ConvertError::Limit(l) => ev.fail(input, &limit_reason(l)),

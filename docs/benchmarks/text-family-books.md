@@ -101,13 +101,40 @@ By hand: the 30 files made one EPUB of 30 chapters and the Markdown with
 its images made one of 3 documents and 30 images, both with 0 errors and
 0 warnings from `epubcheck`.
 
+### Drop to stage 2, EPUB and 8-bit text
+
+An EPUB on the Document slice and a Windows-1250 `.srt` on the Encoding
+slice, on the reference desktop: hand-made drags, `INACIRCLE_MEASURE=1`,
+Esc on the second wheel. `main` at the end of plan 14 offers nothing for
+either, so there is no baseline; the figures are checked against the
+budget and the small-sample rule of [acceptance.md](acceptance.md).
+
+| Series | Valid | p50 | p95 | max | sd |
+|---|---|---|---|---|---|
+| `.epub` (1.2 MB) to Document | 10 | 162 us | 165 us | 165 us | 3 us |
+| `.srt`, first accent at the start | 13 | 166 us | 174 us | 174 us | 3 us |
+| `.srt`, first accent after 4 KiB | 15 | 166 us | 176 us | 176 us | 4 us |
+
+The largest p95 is 18% of the 1,000 us budget (limit 25%) and the spread
+at most 2% of the p50. The second machine was not measured.
+
+By hand: an EPUB 3 novel became plain text with its title and author
+header, six chapters in order and the three warnings (links flattened,
+images replaced by alt text, styles dropped); an EPUB 2 novel became
+Markdown with its three images beside it, and that Markdown with the
+images became an EPUB again (ten documents, three images, `epubcheck`
+clean); both subtitles came out as UTF-8 with a byte order mark and
+correct accents. A UTF-8 subtitle gets no Encoding slice. An EPUB 2 to
+plain text run was not made by hand; the suite covers it.
+
 ## Verdict
 
 Memory: the largest accepted input peaks at about 105 MiB of RSS, far
 below the smallest `RLIMIT_DATA` net (1 GiB), so the limits and the net
 agree. Size: inside the budgets, with the growth explained. The drop to
-stage 2 holds its budget on the reference desktop (p95 178-190 us against
-1,000 us); the second machine was not measured.
+stage 2 holds its budget on the reference desktop (p95 165-190 us against
+1,000 us across the Markdown, EPUB and
+subtitle drops); the second machine was not measured.
 
 ## Reproduce
 

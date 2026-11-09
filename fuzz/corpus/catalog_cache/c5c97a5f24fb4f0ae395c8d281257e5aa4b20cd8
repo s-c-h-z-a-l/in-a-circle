@@ -1,0 +1,44 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/mar&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&kdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=0lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=fze=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=amily=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	pub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	familyL	group=g	costf	ext=pdf	label	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&kdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=0lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	ta
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=0	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=amily=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	jip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=amily=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	familyL	group=g	costf	ext=pdf	label	cost=1	lossy=no	ba&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&kdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=0lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	ta
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=0	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=amily=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	jip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=application/epub+zip	ext=epub	label=amily=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=es
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	assets=image/png	out=a1	lossy=no	batch=yes	jxt	mtime=5el=L	group=g	cost=1	lossy=t	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=iext/markdown,text/x-markdown	'ssets=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	join=yes	min=1024
+action	j.b	familyL	group=g	costf	ext=pdf	label	cost=1	lossy=no	batch=yes	join=yes	min=10assets=image/png	out=application/epub+zip	ext=epgn=yes
+action	j.a	famildf	label=L	group=g	cost=1	lossy=no	batch=yes	join=no

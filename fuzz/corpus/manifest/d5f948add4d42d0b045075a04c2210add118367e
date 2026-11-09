@@ -1,0 +1,3 @@
+inacircle-manifest 0
+action	te	assets=is=image/j,eg,imassets=image/png,t=~ext/markdowd	out=applizip	ext=epub	label=L	group=g	cost=1	locsy	text.md-jepub	family=text	in=text/maup=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+actiost=04	lossy=b

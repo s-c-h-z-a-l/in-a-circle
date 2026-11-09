@@ -1,0 +1,6 @@
+inacircle-manifest 0
+action	ext.md-join-epub	fah=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,tein=texxt/x-markdowtext/markdown,text/x-markdown	assets=iown1asse=ssit=image/jpeg,imextsets=iown1asse=ssit=image/jpeg,imext/x-ye,kdoge/png	out=application/epub+plication/epub+zip	ext=epub	label=EPUB	group=book	cost=11	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imext/x-markdowtext/markdown,texoup=book	cost=10	lossy=yes	batch=yes	join=yes	m/png	gout=appli	cost=10	lossy=batch=yes	join=yes	me/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10\#	lossy=batch=yes	joiin=yes	mn=2
+in=2

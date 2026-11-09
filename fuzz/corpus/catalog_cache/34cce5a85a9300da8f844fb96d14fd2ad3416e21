@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	pdf	label=L	group=g	=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=p	ext=pdf	label=L	group=g	cost=0400101	llbatch=yath=/b/text	mtimeno	batch=ye=5	sisze

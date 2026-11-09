@@ -746,6 +746,47 @@ fn wheel_offers_and_runs_md_to_epub() {
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
 }
 
+/// Real `inacircle-text` on the wheel: a dropped Windows-1250 `.srt` (the
+/// accents are in its first bytes) lights Encoding (west); its west slice
+/// is Windows-1250, its east slice ISO-8859-2; clicking the west one writes
+/// the UTF-8 subtitle with the byte order mark next to the source in its
+/// wrapper folder, as one history group that Undo trashes. The drawn
+/// wheels (Encoding west lit, then Windows-1250 west and ISO-8859-2 east
+/// lit) are pinned by `encoding_menus_offer_the_two_code_pages` in the
+/// binary's unit tests.
+#[test]
+fn wheel_offers_and_runs_cp1250() {
+    // "Příliš žluťoučký kůň" and the quotes „…” in Windows-1250.
+    let cp1250: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nP\xf8\xedli\x9a \x9eslu\x9d\
+        ou\xe8k\xfd k\xf9\xf2 \x84ok\x94\r\n";
+    let root = Root::new("cp1250");
+    root.real_action_cached("inacircle-text", ("primer.srt", cp1250), "cp1250");
+    // The flat offer names both code pages for this file, lit.
+    let src = root.0.join("f/Film.hu.srt");
+    fs::write(&src, cp1250).unwrap();
+    let offer = root.cmd().arg("offer").arg(&src).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    for (dir, preset, label) in [(6, "cp1250", "Windows-1250"), (2, "iso88592", "ISO-8859-2")] {
+        let line = format!(
+            "slice\tgroup=encoding\tdir={dir}\tpreset={preset}\tlabel={label}\tapplicable=1"
+        );
+        assert!(
+            offer.contains(&line) && !offer.contains(&format!("{line}\tdisabled")),
+            "{offer}"
+        );
+    }
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Encoding is west of the center, Windows-1250 is its west slice.
+    let code = choose_on_the_wheel(&root, &list, (810, 540), (810, 540));
+    assert_eq!(code, Some(0));
+    let out = fs::read(root.0.join("f/Film.hu/Film.hu.srt")).expect("no subtitle written");
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nP\u{159}\u{ed}li\u{161} \
+        \u{17e}slu\u{165}ou\u{10d}k\u{fd} k\u{16f}\u{148} \u{201e}ok\u{201d}\r\n";
+    assert_eq!(out, want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), cp1250, "the source changed");
+    assert_one_group_and_undo(&root, "Film.hu", "Film.hu.srt");
+}
+
 /// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document
 /// (north); its south slice is Plain text; clicking it writes the book's
 /// text next to the source in its wrapper folder, as one history group
@@ -1167,11 +1208,13 @@ fn the_pss_gate_rejects_missing_or_zero_evidence() {
 fn the_largest_drop_stays_within_the_memory_budget() {
     // `late`: the early read is left unanswered and the list comes with
     // the drop; the run ends at level 1. Else it ends at stage 2.
-    let peak = |name: &str, largest: bool, late: bool| -> (Vec<(String, u64)>, u64) {
+    // `slash`: every path of the largest list ends in `/`, so the wheel
+    // rebuilds each one when it normalizes them.
+    let peak = |name: &str, largest: bool, late: bool, slash: bool| -> (Vec<(String, u64)>, u64) {
         let root = Root::new(name);
         root.markdown_action_cached();
         let list = if largest {
-            root.largest_list().1
+            root.largest_list(slash).1
         } else {
             root.files(1)
         };
@@ -1209,10 +1252,11 @@ fn the_largest_drop_stays_within_the_memory_budget() {
         (obs, anon)
     };
     let runs = [
-        (1, peak("rss1a", false, false)),
-        (1, peak("rss1b", false, false)),
-        (2, peak("rss-largest", true, false)),
-        (2, peak("rss-largest-late", true, true)),
+        (1, peak("rss1a", false, false, false)),
+        (1, peak("rss1b", false, false, false)),
+        (2, peak("rss-largest", true, false, false)),
+        (2, peak("rss-largest-late", true, true, false)),
+        (2, peak("rss-largest-slash", true, false, true)),
     ];
     for (_, (obs, anon)) in &runs {
         for (label, kb) in obs {
@@ -2478,10 +2522,12 @@ impl Root {
     /// files under `f/`, each line `LARGEST_LINE` bytes, so the list is
     /// `action::INPUT_LIST_BYTES` to the byte (the wheel's own limit, which
     /// a unit test keeps equal). Every path component stays within
-    /// `NAME_MAX` whatever the temp root's length. The files' directory
-    /// and the list.
-    fn largest_list(&self) -> (PathBuf, Vec<u8>) {
+    /// `NAME_MAX` whatever the temp root's length. `slash`: each name is
+    /// one byte shorter and its URI ends in `/` (same list length), a path
+    /// the wheel must normalize. The files' directory and the list.
+    fn largest_list(&self, slash: bool) -> (PathBuf, Vec<u8>) {
         let path_len = LARGEST_LINE - "file://".len() - "\r\n".len();
+        let path_len = path_len - usize::from(slash);
         let mut dir = self.0.join("f");
         assert!(dir.as_os_str().len() + 1 + SHORTEST_NAME <= path_len);
         loop {
@@ -2500,7 +2546,8 @@ impl Root {
             let p = dir.join(format!("{i:04}{pad}.txt"));
             fs::write(&p, "w\n").unwrap();
             assert!(p.components().all(|c| c.as_os_str().len() <= NAME_MAX));
-            list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+            let end = if slash { "/" } else { "" };
+            list.extend_from_slice(format!("file://{}{end}\r\n", p.display()).as_bytes());
         }
         assert_eq!(list.len(), action::INPUT_LIST_BYTES);
         (dir, list)
@@ -2624,7 +2671,7 @@ const RUN_EXIT: Duration = Duration::from_secs(120);
 fn the_largest_drop_through_the_choice_stays_within_the_budget() {
     let root = Root::new("through1024");
     root.real_action_cached("inacircle-text", ("primer.txt", b"words\n"), "markdown");
-    let (dir, list) = root.largest_list();
+    let (dir, list) = root.largest_list(false);
     let (mut c, mut child) = start(&root, false);
     let pid = child.id();
     let sampler = PssSampler::start(pid);

@@ -1,0 +1,3 @@
+ncl
+action	text.mxt	in=text/x-maatc~=yes	join=yes	min
+action	image.oin-pdf	family=image	in=image/jpeg,imas	join=yes	mia	n=2

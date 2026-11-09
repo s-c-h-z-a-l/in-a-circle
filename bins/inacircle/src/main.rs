@@ -64,7 +64,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use engine::catalog::{Action, Catalog, missing_tools};
-use engine::classify::{Classified, Kind, classify};
+use engine::classify::{Classified, Kind, Reread, classify_with};
 use engine::exec::{
     self, CancelToken, Durability, LocationEvidence, Observer, Outcome, OutputGroup, Wake,
 };
@@ -413,10 +413,12 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     mark("catalog");
     // Classify once: the preset choice needs the selection's types, and the
     // per-input verdicts below reuse the result.
+    // One read-on budget for the whole run's inputs.
+    let mut reread = Reread::per_drop();
     let classified: Vec<(PathBuf, io::Result<Classified>)> = files
         .into_iter()
         .map(|f| {
-            let c = classify(&f);
+            let c = classify_with(&f, &mut reread);
             (f, c)
         })
         .collect();
@@ -445,7 +447,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
                 None => {
                     let planned = p
                         .input
-                        .and_then(|i| menu::route(&cat, i, p.output))
+                        .and_then(|i| menu::route_for(&cat, p, i))
                         .unwrap_or_default();
                     (
                         p.input.into_iter().collect(),
@@ -528,11 +530,17 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
         let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(
+        let n = Notifier::new(
             label,
             steps.iter().any(|a| a.lossy),
             inputs.len() + assets.len(),
-        )
+        );
+        // An Encoding-group action's label is the code page it reads; the
+        // final notice says so (no event of its own).
+        match steps.last().filter(|a| a.group == menu::ENCODING_GROUP) {
+            Some(a) => n.converting_from(&a.label),
+            None => n,
+        }
     });
 
     mark("classify");
@@ -745,13 +753,15 @@ fn cmd_offer(mut args: Vec<OsString>) -> u8 {
     EXIT_DONE
 }
 
-/// Each file's name and what it is, as the offer needs them.
+/// Each file's name and what it is, as the offer needs them; one read-on
+/// budget for them all.
 fn named_kinds(files: &[PathBuf]) -> Vec<(String, Kind)> {
-    files.iter().map(|p| named_kind(p)).collect()
+    let mut reread = Reread::per_drop();
+    files.iter().map(|p| named_kind(p, &mut reread)).collect()
 }
 
-/// A file's name and what it is.
-fn named_kind(p: &Path) -> (String, Kind) {
+/// A file's name and what it is, charged to the drop's read-on budget.
+fn named_kind(p: &Path, reread: &mut Reread) -> (String, Kind) {
     let name = p
         .file_name()
         .map_or_else(|| lossy(p), |n| lossy(Path::new(n)));
@@ -759,7 +769,7 @@ fn named_kind(p: &Path) -> (String, Kind) {
         mime: None,
         label: label.into(),
     };
-    let kind = match classify(p) {
+    let kind = match classify_with(p, reread) {
         Ok(Classified::File(k)) => k,
         Ok(Classified::NotRegular) if p.is_dir() => unknown("folder"),
         Ok(Classified::NotRegular) if p.is_symlink() && !p.exists() => unknown("broken link"),
@@ -1118,8 +1128,34 @@ fn lock_wheel() -> io::Result<Option<std::fs::File>> {
 /// level 2: no action binary runs while the overlay is up (the cache is
 /// refreshed once the wheel is gone).
 fn group_menu(list: Vec<u8>) -> wheel::GroupMenu {
-    let paths = dedup(uri::parse_uri_list_owned(list));
-    group_menu_for(paths, Catalog::load_cached())
+    group_menu_for(drop_paths(list), Catalog::load_cached())
+}
+
+/// The paths of a dropped `text/uri-list` in the shape `files_of` gives
+/// the run (`.` components and trailing slashes dropped), each file once:
+/// the wheel then classifies, and spends the shared read-on budget on, the
+/// same files in the same order as the run it starts. A `file://` path is
+/// absolute, so none is lost for want of a current directory.
+fn drop_paths(list: Vec<u8>) -> Vec<PathBuf> {
+    let paths = uri::parse_uri_list_owned(list)
+        .into_iter()
+        .filter_map(|p| {
+            if !p.is_absolute() {
+                return None;
+            }
+            // What `absolute` makes of an absolute path, built in a buffer
+            // of the parsed path's size: normalizing never lengthens it, so
+            // the buffer never regrows (a collected one can end up twice its
+            // length), and the parsed path's block, freed next, fits the
+            // following path. The paths stay held once at their own size.
+            let mut n = PathBuf::with_capacity(p.as_os_str().len());
+            for c in p.components() {
+                n.push(c);
+            }
+            Some(n)
+        })
+        .collect();
+    dedup(paths)
 }
 
 /// Level 1 for `paths` (absolute, each once) with catalog `cat` (`None`:
@@ -1148,8 +1184,10 @@ fn group_menu_for(paths: Vec<PathBuf>, cat: Option<Catalog>) -> wheel::GroupMenu
             return gm;
         }
     };
+    // Up to 1024 dropped files share one read-on budget.
+    let mut reread = Reread::per_drop();
     for p in &paths {
-        let (name, kind) = named_kind(p);
+        let (name, kind) = named_kind(p, &mut reread);
         gm.tally.add(&name, &kind);
     }
     for (dir, g) in menu::groups(&cat, &gm.tally).into_iter().enumerate() {
@@ -1331,10 +1369,7 @@ mod tests {
 
     /// Level 1 for a URI list, with `md_catalog`.
     fn groups_of(list: &str) -> wheel::GroupMenu {
-        group_menu_for(
-            dedup(uri::parse_uri_list(list.as_bytes())),
-            Some(md_catalog()),
-        )
+        group_menu_for(drop_paths(list.as_bytes().to_vec()), Some(md_catalog()))
     }
 
     /// A private dir with one plain-text file named `name`.
@@ -1379,9 +1414,11 @@ mod tests {
             (doc.label.as_str(), doc.group.as_str(), doc.lit),
             ("Document", "document", true)
         );
-        // Book is on the wheel too, dim: no dragged file is a comic book.
-        assert_eq!(g.slices.iter().flatten().count(), 2);
+        // Book and Encoding are on the wheel too, dim: no dragged file is a
+        // comic book, and a UTF-8 text has no code page to convert.
+        assert_eq!(g.slices.iter().flatten().count(), 3);
         assert!(!g.slices[2].as_ref().expect("books point east").lit);
+        assert!(!g.slices[6].as_ref().expect("encodings point west").lit);
 
         let none = groups_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
@@ -1436,6 +1473,61 @@ mod tests {
         let g = group_menu_for(vec![file], None);
         assert!(g.paths.is_empty() && g.slices.iter().all(Option::is_none));
         assert_eq!(g.hub, wheel::NO_ACTIONS);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The wheel classifies a drop in the shape the run is given it
+    /// (`files_of`): `file:///d/a.srt/` is the file `/d/a.srt` in both, so
+    /// both spend the shared read-on budget on the same files and agree on
+    /// every type. Four all-ASCII subtitles spend the budget; the fifth,
+    /// accented past its head, is then plain text in the wheel as in the
+    /// run, not an 8-bit candidate the run would skip.
+    #[test]
+    fn drop_paths_are_the_runs_paths() {
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-norm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = b"00:01:02,345 --> 00:01:04,000\r\nSome words here.\r\n\r\n";
+        let ascii: Vec<u8> = line.iter().copied().cycle().take(300 * 1024).collect();
+        let mut list = String::new();
+        let mut want = Vec::new();
+        for n in ["a1.srt", "a2.srt", "a3.srt", "a4.srt"] {
+            std::fs::write(dir.join(n), &ascii).unwrap();
+            list += &format!("file://{}/{n}/\n", dir.display());
+            want.push(dir.join(n));
+        }
+        let mut late = ascii.clone();
+        late[200 * 1024] = 0xf5; // ő in Windows-1250 and ISO-8859-2
+        std::fs::write(dir.join("late.srt"), &late).unwrap();
+        list += &format!("file://{}/late.srt\n", dir.display());
+        want.push(dir.join("late.srt"));
+
+        let paths = drop_paths(list.into_bytes());
+        // `PathBuf` equality ignores a trailing slash; the bytes do not.
+        assert!(
+            paths
+                .iter()
+                .all(|p| !p.as_os_str().as_encoded_bytes().ends_with(b"/")),
+            "{paths:?}"
+        );
+        assert_eq!(paths, want);
+        let args = paths.iter().map(|p| p.clone().into_os_string()).collect();
+        assert_eq!(files_of(args).unwrap(), paths, "the run's paths");
+        let g = group_menu_for(paths, Some(md_catalog()));
+        assert!(
+            !g.tally
+                .types
+                .iter()
+                .any(|(m, ..)| m == engine::classify::X8BIT_MIME),
+            "{:?}",
+            g.tally.types
+        );
+        let mut reread = Reread::per_drop();
+        let run: Vec<_> = g
+            .paths
+            .iter()
+            .map(|p| named_kind(p, &mut reread).1.label)
+            .collect();
+        assert_eq!(run, [".srt text"; 5]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1608,6 +1700,54 @@ mod tests {
         for k in [0, 2] {
             assert!(!m.slices[k].as_ref().unwrap().applicable, "slice {k} dim");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the drawn wheels are built from for a Windows-1250 subtitle:
+    /// Encoding lights in the west and nothing else does; its wheel has
+    /// Windows-1250 west and ISO-8859-2 east, both lit. A UTF-8 subtitle
+    /// leaves Encoding dim.
+    #[test]
+    fn encoding_menus_offer_the_two_code_pages() {
+        let base = md_catalog().actions.remove(0);
+        let act = |id: &str, label: &str| Action {
+            id: id.into(),
+            input: "text/x-8bit".into(),
+            output: "text/plain".into(),
+            ext: engine::catalog::EXT_SAME.into(),
+            label: label.into(),
+            group: "encoding".into(),
+            lossy: false,
+            ..base.clone()
+        };
+        let cat = Catalog {
+            actions: vec![
+                act("text.cp1250-to-utf8", "Windows-1250"),
+                act("text.iso88592-to-utf8", "ISO-8859-2"),
+            ],
+        };
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Film.srt");
+        std::fs::write(&file, b"1\r\nP\xf8\xedli\x9a\r\n").unwrap();
+        let g = group_menu_for(vec![file], Some(cat.clone()));
+        let lit = |k: usize| g.slices[k].as_ref().unwrap().lit;
+        assert_eq!(g.slices[6].as_ref().unwrap().group, "encoding");
+        assert!(lit(6), "Encoding lights, west");
+        assert!(!lit(0) && !lit(2), "Document and Book stay dim");
+        let m = target_menu(&g, "encoding");
+        assert_eq!(m.hub, "Encoding");
+        let slot = |k: usize| {
+            let s = m.slices[k].as_ref().unwrap();
+            (s.label.as_str(), s.preset.as_str(), s.applicable)
+        };
+        assert_eq!(slot(6), ("Windows-1250", "cp1250", true));
+        assert_eq!(slot(2), ("ISO-8859-2", "iso88592", true));
+        // Valid UTF-8 is not a candidate: Encoding is on the wheel, dim.
+        let utf8 = dir.join("Utf.srt");
+        std::fs::write(&utf8, "1\r\nP\u{159}\u{ed}li\u{161}\r\n").unwrap();
+        let g = group_menu_for(vec![utf8], Some(cat));
+        assert!(!g.slices[6].as_ref().unwrap().lit, "Encoding stays dim");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

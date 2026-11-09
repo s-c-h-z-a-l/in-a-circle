@@ -1,0 +1,2 @@
+inacirclxt.md-join-epu 0
+action	text.md/join-epub	family=text	in=text/markdown,text/x-markown	assets=ima/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=no	batch=yes	join=yes	min=2

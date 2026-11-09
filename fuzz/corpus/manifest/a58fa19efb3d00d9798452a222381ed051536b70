@@ -1,0 +1,2 @@
+inai	min=10excsttactiifest 0
+action	text.md-join-epub	family=text	in=textmage/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=04	lossy=yes	batch=yes	midf	requires=

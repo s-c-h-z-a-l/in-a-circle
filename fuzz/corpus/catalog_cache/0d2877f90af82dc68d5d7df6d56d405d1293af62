@@ -1,0 +1,5 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=tex24
+action	j.*b	family=f	in=test/markdown	tng=	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=tea/tpxlin	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	join=no

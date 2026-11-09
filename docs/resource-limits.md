@@ -7,7 +7,8 @@ net `RLIMIT_DATA`. Every number has its reason here and in the code
 ## RLIMIT_FSIZE
 
 16 x the total input size, at least 256 MiB, at most 16 GiB. Per file, not
-the sum.
+the sum. The input sizes are taken once, before the action starts; an
+8-bit text decoder's output cap (below) uses the same sizes.
 
 ## RLIMIT_DATA: the memory net
 
@@ -198,6 +199,23 @@ detected and shows as a grey or partial page in the reader.
 Entries under `__MACOSX/` and files whose name starts with `.` (Finder
 resource forks such as `._1.jpg`) are not pages; they count in the
 `non-image entries left out` warning.
+
+The code page decoders (Windows-1250 and ISO-8859-2 to UTF-8) have no
+input limit: they stream the file in 64 KiB reads and hold that buffer
+and an output buffer of three times it (one byte is at most three UTF-8
+bytes), about 256 KiB whatever the size; the UTF-8 verdict
+(`docs/architecture.md`) is a handful of counters kept as the bytes
+pass. The output is bounded by the engine's cap on an 8-bit text
+decoder (3 x the input + 3 B, below) and
+by `RLIMIT_FSIZE`; SIGXFSZ is ignored, so a write past the ceiling fails
+only that input (`The text would be larger than <N> MiB`), and the copy
+is cut back to empty and removed. Measured peak (`VmHWM`, release
+`inacircle-text`, no sandbox, 2026-11-04): 3,020-3,068 KiB for a 16 MiB
+file, 3,020-3,036 KiB for 200 MiB of Hungarian text (281 MiB out),
+3,212-3,288 KiB for 64 MiB of `0x84` only (`„`, the densest output,
+192 MiB); the debug test build measures 4.3-4.4 MiB and the test's
+ceiling is 8 MiB. Time is linear: each byte is looked at once (200 MiB
+in 0.82 s).
 
 The text family (txt <-> md) is held by structure budgets charged while it
 builds, not after: 8 MiB input, 524,288 nodes, 32 MiB of owned text, 32 MiB
@@ -404,6 +422,7 @@ the source; the reason column is why that number.
 | Text input (`txt` <-> `md`) | 8 MiB | A book-length text is 1-3 MiB; the longest real text measured was 0.65 MiB. Past it the input fails with its own message. |
 | Text structure nodes | 524,288 | Densest real text 15.9 B/node would hit 131,072 at about 2 MiB, contradicting the input limit; 2^19 holds 8 MiB at that density for about 100-200 MB peak, a fifth of the smallest `RLIMIT_DATA`. |
 | Text owned text, text output | 32 MiB each | Worst-case escape expansion is 5x (one space becomes `&#32;`, 1 -> 5 bytes, from the escaping rule in `crates/doc`). Markdown to text tables expand more and by shape, not by a constant factor: padding to 80 columns and the listed form's repeated headers. Either way a hostile 8 MiB input fails the output budget loudly, never truncated (the node budget usually stops a padded table first). |
+| Published text output | 32 MiB; an 8-bit text decoder's (`in=text/x-8bit`): 3 x its input + 3 B | Checked by the engine on every text output (`out=text/*`, and any `.txt`/`.md`) while it is copied, before anything is published. 32 MiB is the text output budget above. A decoder's output is bounded by its input instead: one byte of a single-byte code page is one character of the Basic Multilingual Plane, at most 3 UTF-8 bytes, plus the 3-byte byte order mark a `.srt` gets, so the input itself needs no limit. The input's size is taken when the action starts (on a two-step route, the intermediate file's). A decoder publishes one output per input; a second one fails the input, since the cap bounds one copy. Past the cap the input fails and nothing of it is published. |
 | XML element nesting | 256 elements open at once (`xml::MAX_DEPTH`) | The Markdown reader's nesting limit, so a document converts between the formats without one refusing a depth the other accepts; real XHTML chapters nest a few dozen levels. Past it the document is refused (`TooDeep`), never cut. The reader keeps its own stack (no recursion) and its work is linear in the input, so the depth bounds memory, not time. |
 | Catalog cache file | 256 KiB; 128 binaries, 1024 actions, 1152 records, 32 fields per record, 12,288 fields, 32 KiB per line | A realistic cache is about 160 KB at the maximum shape. Over a limit the cache is rejected loudly and rebuilt. |
 | Action folder scan | 512 entries per folder, 129 binaries held | `cache_bins` x 4 spare; past it the folder is refused whole, loudly, never trimmed. |
@@ -418,4 +437,5 @@ the source; the reason column is why that number.
 | Wheel teardown | 1000 ms wall | Its own bound; the old observer's 5 s and the historic 30 s anomaly say nothing about a 1 s distribution. |
 | Notification | 300 ms connect and `Hello` together, 500 ms per call, 100 ms per progress update; the wheel's start-failure notice: 500 ms to open plus 500 ms for its one call, under a 2 s `alarm` | One shared frame for the whole open; the wait never holds the desktop. |
 | Drop list (wheel) | 1 MiB read, 1024 URIs | The invocation's own limits (`INPUT_LIST_BYTES`, `INPUT_COUNT`): a longer list could not run anyway. Past either, the wheel shows "too many files" with nothing lit, accepts no drop and sends the source a cancel, never a truncated selection. The read is bounded to the limit plus one 4 KiB chunk. Memory at the limit: see the measurement above. |
+| Classifier read-on | 256 KiB per file (the head included), 1 MiB per wheel invocation, read in 16 KiB stack chunks | Telling an 8-bit text from UTF-8 when the 4 KiB head is all ASCII: 256 KiB holds a whole film subtitle (a feature-length `.srt` is 50-150 KiB). The wheel classifies every dropped file (up to 1024) before it shows, so the read-on is a budget shared by the drop: 1 MiB is four whole windows, and 1024 x 256 KiB could not be read without stalling the wheel. Past the window or the budget only the head decides: a plain text or Markdown file goes to its text actions, which read all of it and skip it with its first non-UTF-8 byte and that byte's offset (`not UTF-8: byte 0xE9 at 266240`); another listed extension gets no type and no action. |
 | User waits | 30 s per stage, 500 ms drop pipe, 500 ms soft margin | Unchanged from before; separate from the start clock. |

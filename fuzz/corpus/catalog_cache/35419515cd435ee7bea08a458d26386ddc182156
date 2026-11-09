@@ -1,0 +1,6 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	own	assets=ima@ge/}png	out=application/epub+zipext=epublabel=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxt	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	otime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	mssy=]o	batch=yes	join=no

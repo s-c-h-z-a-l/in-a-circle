@@ -1,0 +1,22 @@
+=================inacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/man	assets=is=image/jpeg,image/png	=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=iatch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,imae/jpeg,image/png	=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=iatch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	ily=text	in=text/markdown,text/x-markdown	assets=is=image/jB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=iatch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	g+zip	ext=epuj	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=iapplicaon	image.join-pdf	family=image	in=image/jpeg,image/png	out=appliclicatn/pdf	ext=pdf	label=PDF	group=doc	cost=10	lossy=batch=yes	join=yes	min=2

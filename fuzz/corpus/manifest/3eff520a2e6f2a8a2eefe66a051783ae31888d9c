@@ -1,0 +1,2 @@
+inac-manifest 
+action	teext	in=text/x-8bit,te=yes	midf		join=yes	min=3

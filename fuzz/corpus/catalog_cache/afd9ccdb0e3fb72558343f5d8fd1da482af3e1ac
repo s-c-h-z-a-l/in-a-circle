@@ -1,0 +1,5 @@
+inacircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epu	family=text	in=text/maepub	join=yes	min=133333333333333ircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/ls	s01y=ysteb	ach=yes	join=yes	min=133333333333<3333333333333333333333333333333333333333333333333

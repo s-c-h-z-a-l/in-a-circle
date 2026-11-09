@@ -1,0 +1,8 @@
+Inacircle-manifest age/jion/epub+zip	ext=epub	label=EPacircle-manifest 0
+action	j.a	family=f	in=~ext/markdowoutn	out=application/epub+zip	ext=epub	l=is=imts=is=epub	label=L	group=g	cost=1y	sn	ocle-manifest 0
+action	j.a	family=f	in=~ext/markdowoutn	out=applizip	ext=epub	label=L	group=g	cost=1y		bat0	lossy=yes	batch=yes	join=yes	min=1024
+action	imagd.join-pdf	family=image	in=miage/jpeg,image/png	outa=n	out=applizip	ext=epub	label=L	group=g	cost=1y		batch=ost=10let 	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	xtm	join=yes	min=1424
+action	image.join-pdf	family=image	in=image/jptn	out=application/epub+zip	ext=epub	label=L	group=g	cost=1y	sn	cost=10let 	lossyt.md-joi.mn-epub`-
+	family=text	in

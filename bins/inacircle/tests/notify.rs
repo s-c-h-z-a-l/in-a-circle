@@ -487,6 +487,58 @@ fn final_notice_says_formatting_was_lost_when_it_was() {
     assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
 }
 
+/// A code-page conversion says which code page it read (the action is
+/// `lossy=no`, so its own `warn` line stays out of the notice).
+#[test]
+fn final_notice_names_the_code_page() {
+    let e = Env::new("final-codepage");
+    e.bytes("a.srt", b"1\r\nP\xf8\xedli\x9a \x84ok\x94\r\n");
+    let seen = Arc::new(Mutex::new(String::new()));
+    let (fake, rx) = server(move |p, g| close(p, g.id));
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "iso88592", "a.srt"],
+    );
+    c.env("INACIRCLE_UNDO_WAIT_MS", "20000");
+    let first = run(c, &seen);
+    fake.join();
+    // 0x84 is a control code in ISO-8859-2: this run fails and its notice
+    // makes no claim of a conversion.
+    assert_eq!(first.lines("summary"), ["done=0\tskipped=0\tfailed=1"]);
+    for n in rx.try_iter() {
+        assert!(!n.body.contains("converted from"), "{:?}", n.body);
+    }
+
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    let (fake, rx) = server(move |p, g| {
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(seen2.lock().unwrap().contains("done\t"));
+        close(p, g.id);
+    });
+    let mut c = e.cmd(
+        Some(&bus_of(&fake)),
+        &["run", "--notify", "cp1250", "a.srt"],
+    );
+    c.env("INACIRCLE_UNDO_WAIT_MS", "20000");
+    let r = run(c, &seen);
+    fake.join();
+    let n: Vec<Got> = rx.try_iter().collect();
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    if r.unavailable() > 0 {
+        return;
+    }
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].summary, "a.srt");
+    assert!(
+        n[0].body
+            .starts_with("converted from Windows-1250 to UTF-8"),
+        "{:?}",
+        n[0].body
+    );
+    assert_eq!(r.lines("summary"), ["done=1\tskipped=0\tfailed=0"]);
+}
+
 /// `pages.cbz-to-pdf` leaves non-image entries out and says so; it is
 /// `lossy=yes`, so that warning reaches the notification (a warning of a
 /// lossless action is recorded and never shown).

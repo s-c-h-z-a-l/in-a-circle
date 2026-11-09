@@ -1,0 +1,4 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	text.cp1250-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	label=Windows-1250	group=encoding	cost=10	lossy=no	batch=yes
+action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=same	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1

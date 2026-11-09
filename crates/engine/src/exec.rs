@@ -654,9 +654,10 @@ fn join_group(
         }
         return None;
     }
+    let sizes = handed_sizes(&step_in);
     // `None`: cancelled, every unsettled input failed.
     let outputs = run_step(
-        action, &step_in, None, &dir, &list, &work.path, cancel, sink,
+        action, &step_in, &sizes, None, &dir, &list, &work.path, cancel, sink,
     )?;
     // The supervisor hands back the one result under each input it took,
     // and only when every condition held (see `Supervisor::settle_join`).
@@ -667,7 +668,20 @@ fn join_group(
         .map(|(j, _)| step_in.origin[j])
         .collect();
     let rel = outputs.into_iter().find(|o| !o.is_empty())?;
-    let p = publish(&dir, &rel, target, stem, &action.ext, &taken, cancel, sink)?;
+    // A join never reads 8-bit text (the catalog refuses it), so its
+    // text cap is the budget and needs no size.
+    let text = text_rule(action, 0);
+    let p = publish(
+        &dir,
+        &rel,
+        target,
+        stem,
+        &action.ext,
+        text,
+        &taken,
+        cancel,
+        sink,
+    )?;
     // `work` is dropped on return: the work dir is removed through its fd.
     Some((taken.len(), p))
 }
@@ -931,10 +945,14 @@ fn run_group(
         let dir = work.path.join(format!("step{}", s + 1));
         let list = work.path.join(format!("step{}.inputs", s + 1));
         let ran = fs::create_dir(&dir).map_err(|e| format!("cannot create work directory: {e}"));
+        // Taken once, before the action starts: they size its limits, and
+        // on the last step cap an 8-bit text action's outputs.
+        let handed = handed_sizes(&step_in);
         let result = match ran {
             Ok(()) => run_step(
                 action,
                 &step_in,
+                &handed,
                 pre.take(),
                 &dir,
                 &list,
@@ -953,7 +971,9 @@ fn run_group(
             return; // cancelled
         };
         if last {
-            place_outputs(action, &step_in, outputs, &dir, target, cancel, sink);
+            place_outputs(
+                action, &step_in, outputs, &handed, &dir, target, cancel, sink,
+            );
             return;
         }
         // Each output was checked when its `done` arrived, but the action
@@ -1025,17 +1045,20 @@ fn run_group(
 /// whose place the postcheck proved; a committed group that cannot be
 /// proved is `PublishedUnknown`, never removed. A cancel is honoured up to
 /// each input's commit.
+#[allow(clippy::too_many_arguments)]
 fn place_outputs(
     action: &Action,
     step_in: &StepIn,
     outputs: Vec<Vec<PathBuf>>,
+    handed: &[u64],
     dir: &Path,
     target: &Path,
     cancel: &CancelToken,
     sink: &mut Sink,
 ) {
-    // Outputs per original input, in order.
-    let mut per: Vec<(usize, Vec<PathBuf>)> = Vec::new();
+    // Outputs per original input, in order, each with the step input
+    // (`j`) that made it.
+    let mut per: Vec<(usize, Vec<(usize, PathBuf)>)> = Vec::new();
     for (j, outs) in outputs.into_iter().enumerate() {
         if outs.is_empty() {
             continue;
@@ -1048,11 +1071,80 @@ fn place_outputs(
                 per.len() - 1
             }
         };
-        per[at].1.extend(outs);
+        per[at].1.extend(outs.into_iter().map(|rel| (j, rel)));
     }
-    for (o, rels) in per {
+    let x8 = reads_8bit(action);
+    for (o, made) in per {
+        if x8 && made.len() > 1 {
+            sink.fail(o, X8BIT_ONE_OUTPUT.to_owned());
+            continue;
+        }
         let stem = stem_of(&sink.inputs[o]);
-        publish(dir, &rels, target, &stem, &action.ext, &[o], cancel, sink);
+        let ext = ext_for(action, &sink.inputs[o]);
+        // An 8-bit text action's one output is capped by the file that
+        // made it (an intermediate one on a two-step route).
+        let bytes = made
+            .first()
+            .and_then(|&(j, _)| handed.get(j))
+            .copied()
+            .unwrap_or(0);
+        let rels: Vec<PathBuf> = made.into_iter().map(|(_, rel)| rel).collect();
+        let text = text_rule(action, bytes);
+        publish(dir, &rels, target, &stem, &ext, text, &[o], cancel, sink);
+    }
+}
+
+/// Why an input of an 8-bit text action fails when the action made more
+/// than one output of it: the action makes one UTF-8 copy of one file, so
+/// a second output is a fault, and the cap ([`text_rule`]) names one
+/// output only (the others would be published unchecked).
+const X8BIT_ONE_OUTPUT: &str = "8-bit text action made more than one output";
+
+/// Whether `action` reads 8-bit text (`in=text/x-8bit`), whose output
+/// [`output::TextCap::ThreeTimes`] caps. Only a one-to-one action can:
+/// the catalog refuses a join with that type.
+fn reads_8bit(action: &Action) -> bool {
+    action.input == crate::classify::X8BIT_MIME
+}
+
+/// The sizes of the files `step_in` hands its action, in its order,
+/// taken once before the action starts, so its `RLIMIT_FSIZE` and an
+/// 8-bit text action's output cap see the same snapshot. A file that
+/// cannot be read counts 0, so the cap fails closed.
+fn handed_sizes(step_in: &StepIn) -> Vec<u64> {
+    step_in
+        .paths
+        .iter()
+        .map(|p| fs::metadata(p).map_or(0, |m| m.len()))
+        .collect()
+}
+
+/// How `action`'s outputs are checked as text: every output named with
+/// its extension is when its `out=` is `text/*`; the cap is three times
+/// `handed` (the bytes the engine handed it) for an 8-bit text decoder,
+/// else the text output budget.
+fn text_rule(action: &Action, handed: u64) -> output::TextRule {
+    output::TextRule {
+        declared: action.output.starts_with("text/"),
+        cap: if reads_8bit(action) {
+            output::TextCap::ThreeTimes(handed)
+        } else {
+            output::TextCap::Document
+        },
+    }
+}
+
+/// The output extension of `action` for the user's input `input`: its own
+/// `ext=`, or with `ext=same` the input's (the last one, case kept; none
+/// when it has none). On a two-step route `input` is still the user's
+/// file, never step 1's intermediate output.
+fn ext_for<'a>(action: &'a Action, input: &'a Path) -> Cow<'a, str> {
+    if action.keeps_ext() {
+        input
+            .extension()
+            .map_or(Cow::Borrowed(""), |e| e.to_string_lossy())
+    } else {
+        Cow::Borrowed(&action.ext)
     }
 }
 
@@ -1069,6 +1161,7 @@ fn publish(
     target: &Path,
     stem: &str,
     ext: &str,
+    text: output::TextRule,
     settle: &[usize],
     cancel: &CancelToken,
     sink: &mut Sink,
@@ -1105,7 +1198,7 @@ fn publish(
             }
             Ok(())
         };
-        output::publish_beneath(dir, rels, target, stem, ext, &mut before)
+        output::publish_text_beneath(dir, rels, target, stem, ext, text, &mut before)
     };
     let p = match published {
         Ok(p) => p,
@@ -1454,11 +1547,13 @@ fn rule_source(has_pre: bool, intermediate: bool) -> RuleSource {
 /// Runs one step's process to its end. Returns the validated outputs
 /// (relative to `dir`) per input, or `None` when cancelled (every
 /// unfinished input is then failed as cancelled). An intermediate step's
-/// ruleset comes as `pre`, already granting its inputs.
+/// ruleset comes as `pre`, already granting its inputs; `sizes` are the
+/// inputs' sizes ([`handed_sizes`]).
 #[allow(clippy::too_many_arguments)]
 fn run_step(
     action: &Action,
     step_in: &StepIn,
+    sizes: &[u64],
     pre: Option<sandbox::Ruleset>,
     dir: &Path,
     list: &Path,
@@ -1513,12 +1608,7 @@ fn run_step(
         Ok(r) => r,
         Err(e) => return fail_all(sink, &format!("sandbox setup failed: {e}")),
     };
-    let total: u64 = step_in
-        .paths
-        .iter()
-        .filter_map(|p| fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
+    let total: u64 = sizes.iter().sum();
     let limits = sandbox::limits_for(total);
     let tmp = match sandbox::make_child_tmp(dir) {
         Ok(t) => t,
@@ -2441,6 +2531,23 @@ impl<'a> Supervisor<'a> {
             if self.reported[j] == Reported::Nothing {
                 sink.fail(o, reason.clone());
             }
+        }
+        // Per input, all or nothing: an original input one of whose parts
+        // (a two-step fan-out) failed, was skipped or said nothing is
+        // settled by that, and none of its other parts' outputs is placed
+        // or handed on.
+        let short: Vec<usize> = origin
+            .iter()
+            .zip(&self.reported)
+            .filter(|&(_, r)| *r != Reported::Done)
+            .map(|(&o, _)| o)
+            .collect();
+        if !short.is_empty() {
+            let mut cut = vec![false; sink.inputs.len()];
+            for o in short {
+                cut[o] = true;
+            }
+            self.outputs.retain(|&(i, _)| !cut[origin[i]]);
         }
         let mut per = vec![Vec::new(); self.reported.len()];
         for (index, rel) in self.outputs {
@@ -3450,6 +3557,530 @@ pub(crate) mod tests {
     /// Copies the first input to `0/a.md` and reports it.
     const COPY: &str = "mkdir \"$4/0\"; read -r in < \"$6\"; cat \"$in\" > \"$4/0/a.md\"\n\
                         printf 'done\\t%s\\t0/a.md\\n' \"$in\"";
+
+    /// Copies every input to `<i>/out` and reports it done.
+    const COPY_ALL: &str = "i=0; while IFS= read -r in; do mkdir \"$4/$i\"; \
+                            cat \"$in\" > \"$4/$i/out\"; \
+                            printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; i=$((i+1)); done < \"$6\"";
+
+    /// `run` of `steps` over `inputs`: each input's `Done` output paths.
+    fn done_paths(steps: &[&Action], inputs: &[PathBuf]) -> Vec<PathBuf> {
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(steps, inputs.to_vec(), &mut seen, &tok);
+        let done: Vec<PathBuf> = seen
+            .0
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Done { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), inputs.len(), "{:?}", seen.0);
+        done
+    }
+
+    /// An `ext=same` action's copy of `t`'s input.
+    fn same_action(t: &Tmp) -> Action {
+        let mut a = script_action(t, "same", COPY_ALL, crate::catalog::EXT_SAME);
+        a.input = "text/x-8bit".into();
+        a.output = "text/plain".into();
+        a
+    }
+
+    /// `ext=same`: the output is named `<stem>.<the input's extension>`,
+    /// its case kept, only the last extension counted, none for an input
+    /// without one (or with an empty one, after a trailing dot); the
+    /// wrapper folder alone tells it from its input.
+    #[test]
+    fn ext_same_keeps_the_input_extension() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_keeps_the_input_extension", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let names = ["Film.hu.srt", "B.SRT", "notes", "a.tar.gz", "Film."];
+        let inputs: Vec<PathBuf> = names.iter().map(|n| docs.join(n)).collect();
+        for p in &inputs {
+            fs::write(p, "x\n").unwrap();
+        }
+        let a = same_action(&t);
+        let got = done_paths(&[&a], &inputs);
+        // `notes/` would be the input itself: the wrapper takes the next name.
+        let want = [
+            "Film.hu/Film.hu.srt",
+            "B/B.SRT",
+            "notes (1)/notes",
+            "a.tar/a.tar.gz",
+            // A trailing dot is an empty extension: none is kept.
+            "Film/Film",
+        ]
+        .map(|r| docs.join(r));
+        assert_eq!(got, want);
+        for p in &want {
+            assert_eq!(fs::read(p).unwrap(), b"x\n", "{}", p.display());
+        }
+    }
+
+    /// On a two-step route the extension kept is the user's input's, not
+    /// that of step 1's intermediate output.
+    #[test]
+    fn ext_same_on_a_two_step_route_keeps_the_original() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_on_a_two_step_route_keeps_the_original", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same-two");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.SRT");
+        fs::write(&input, "x\n").unwrap();
+        let s1 = script_action(&t, "first", COPY_ALL, "mid");
+        let s2 = same_action(&t);
+        let got = done_paths(&[&s1, &s2], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film.hu/Film.hu.SRT")]);
+    }
+
+    /// The output of `ext=same` carries no suffix: inside its wrapper it
+    /// has exactly its input's name, and nothing else is made beside it.
+    #[test]
+    fn ext_same_output_has_no_suffix() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("ext_same_output_has_no_suffix", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("ext-same-suffix");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.srt");
+        fs::write(&input, "x\n").unwrap();
+        let a = same_action(&t);
+        done_paths(&[&a], std::slice::from_ref(&input));
+        let list = |d: &Path| {
+            let mut v: Vec<String> = fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(list(&docs), ["Film.hu", "Film.hu.srt"]);
+        assert_eq!(list(&docs.join("Film.hu")), ["Film.hu.srt"]);
+    }
+
+    /// A text action's output is checked as UTF-8 whatever its extension:
+    /// a `.srt` output with a byte that is not UTF-8 fails its input and
+    /// nothing is published. Control: the same bytes from an action whose
+    /// output is not text are published.
+    #[test]
+    fn every_text_output_is_checked_as_utf8() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("every_text_output_is_checked_as_utf8", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("utf8-srt");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("Film.hu.srt");
+        fs::write(&input, b"1\n00:00:01,000 --> 00:00:02,000\nk\xe9s\n").unwrap();
+        let a = same_action(&t);
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&a], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output is not UTF-8".to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        let mut bytes = same_action(&t);
+        bytes.output = "application/x-subrip".into();
+        let got = done_paths(&[&bytes], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film.hu/Film.hu.srt")]);
+    }
+
+    /// The contract has no 8-bit output type: an action that declares
+    /// `out=text/x-8bit` (an encoder from UTF-8 to a code page) is checked
+    /// as text like any `text/*`, so its 8-bit bytes are refused and
+    /// nothing is published. Control: its pure ASCII output is UTF-8.
+    #[test]
+    fn an_8bit_output_type_is_refused() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_8bit_output_type_is_refused", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-out");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let encoder = |name: &str, bytes: &str| {
+            let body = format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; printf '{bytes}' > \"$4/0/out\"; \
+                 printf 'done\\t%s\\t0/out\\n' \"$in\""
+            );
+            let mut a = script_action(&t, name, &body, crate::catalog::EXT_SAME);
+            a.output = crate::classify::X8BIT_MIME.into();
+            a
+        };
+        let input = docs.join("Film.srt");
+        fs::write(&input, "k\u{e9}s\n").unwrap();
+        // `kés` in Windows-1250: 0xE9 alone is not UTF-8.
+        let cp1250 = encoder("cp1250", "k\\351s\\n");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&cp1250], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output is not UTF-8".to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        let ascii = encoder("ascii", "kes\\n");
+        let got = done_paths(&[&ascii], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("Film/Film.srt")]);
+    }
+
+    /// An 8-bit decoder's output may be three times the bytes the engine
+    /// handed it plus a byte order mark (a 3-byte input: 12), not one
+    /// more; any other text action keeps the 32 MiB budget for the same
+    /// output.
+    #[test]
+    fn x8bit_output_cap_is_three_times_the_input() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("x8bit_output_cap_is_three_times_the_input", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-cap");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        // Three copies of the input and `more` (3 bytes: exactly the cap).
+        let triple = |more: &str| {
+            format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; cat \"$in\" \"$in\" \"$in\" > \"$4/0/out\"; \
+                 printf '{more}' >> \"$4/0/out\"; printf 'done\\t%s\\t0/out\\n' \"$in\""
+            )
+        };
+        let decoder = |name: &str, more: &str| {
+            let mut a = script_action(&t, name, &triple(more), crate::catalog::EXT_SAME);
+            a.input = crate::classify::X8BIT_MIME.into();
+            a.output = "text/plain".into();
+            a
+        };
+        let at = decoder("at", "xyz");
+        let got = done_paths(&[&at], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 12);
+        let over = decoder("over", "xyzw");
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&over], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output larger than three times its \
+                         input (12 bytes)"
+                    .to_owned()
+            }]
+        );
+        let mut plain = decoder("plain", "xyzw");
+        plain.input = "text/plain".into();
+        let got = done_paths(&[&plain], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a (1)/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 13);
+    }
+
+    /// Each input of `$6` tripled plus `more`, reported done; but with
+    /// `only` set, an input of another size is failed instead.
+    fn tripler(more: &str, only: Option<u64>) -> String {
+        let (open, close) = match only {
+            Some(n) => (
+                format!("if [ \"$(wc -c < \"$in\")\" -eq {n} ]; then "),
+                "; else printf 'fail\\t%s\\tskipped\\n' \"$in\"; fi",
+            ),
+            None => (String::new(), ""),
+        };
+        format!(
+            "i=0; while IFS= read -r in; do {open}mkdir \"$4/$i\"; \
+             cat \"$in\" \"$in\" \"$in\" > \"$4/$i/out\"; printf '{more}' >> \"$4/$i/out\"; \
+             printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"{close}; i=$((i+1)); done < \"$6\""
+        )
+    }
+
+    /// An action that reads 8-bit text makes one UTF-8 copy of each
+    /// input: a second output fails that input, and nothing of it is
+    /// published (the second one would escape the cap, which names one
+    /// output). Control: the same outputs from a plain text action are
+    /// published together.
+    #[test]
+    fn an_8bit_action_publishes_one_output() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("an_8bit_action_publishes_one_output", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-one");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        let body = "read -r in < \"$6\"; mkdir \"$4/0\"; cp \"$in\" \"$4/0/a.srt\"; \
+                    cp \"$in\" \"$4/0/b.srt\"; printf 'done\\t%s\\t0/a.srt\\n' \"$in\"; \
+                    printf 'done\\t%s\\t0/b.srt\\n' \"$in\"";
+        let mut two = script_action(&t, "two", body, crate::catalog::EXT_SAME);
+        two.input = crate::classify::X8BIT_MIME.into();
+        two.output = "text/plain".into();
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&two], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(
+            seen.0,
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: X8BIT_ONE_OUTPUT.to_owned()
+            }]
+        );
+        assert_eq!(fs::read_dir(&docs).unwrap().count(), 1);
+        two.input = "text/plain".into();
+        let tok = CancelToken::install().unwrap();
+        let mut seen = Seen::default();
+        run(&[&two], vec![input.clone()], &mut seen, &tok);
+        assert_eq!(seen.0.len(), 2, "{:?}", seen.0);
+        assert!(docs.join("a/a.srt").is_file() && docs.join("a/b.srt").is_file());
+    }
+
+    /// On a two-step route the cap comes from the intermediate the engine
+    /// handed the decoder, not from the user's input: a 3-byte input that
+    /// step 1 makes 10 bytes may decode to 33. When step 1 makes several
+    /// parts of one input, decoding two of them is two outputs (refused),
+    /// and decoding one fails the input on the other (nothing placed).
+    #[test]
+    fn x8bit_cap_on_a_two_step_route() {
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("x8bit_cap_on_a_two_step_route", 0).is_none() {
+            return;
+        }
+        let t = Tmp::new("x8bit-two");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let input = docs.join("a.srt");
+        fs::write(&input, b"ab\n").unwrap();
+        // Step 1: a 10-byte part, after a 3-byte one when `split`.
+        let first = |name: &str, split: bool| {
+            let small = if split {
+                "printf 'ab\\n' > \"$4/0/small\"; printf 'done\\t%s\\t0/small\\n' \"$in\"; "
+            } else {
+                ""
+            };
+            let body = format!(
+                "read -r in < \"$6\"; mkdir \"$4/0\"; {small}printf '0123456789' > \"$4/0/big\"; \
+                 printf 'done\\t%s\\t0/big\\n' \"$in\""
+            );
+            script_action(&t, name, &body, "mid")
+        };
+        let decoder = |name: &str, body: &str| {
+            let mut a = script_action(&t, name, body, crate::catalog::EXT_SAME);
+            a.input = crate::classify::X8BIT_MIME.into();
+            a.output = "text/plain".into();
+            a
+        };
+        let failed = |steps: &[&Action]| {
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(steps, vec![input.clone()], &mut seen, &tok);
+            seen.0
+        };
+        let one = first("one", false);
+        // 3 x 10 + 3 = 33 bytes: at the cap.
+        let at = decoder("at", &tripler("xyz", None));
+        let got = done_paths(&[&one, &at], std::slice::from_ref(&input));
+        assert_eq!(got, [docs.join("a/a.srt")]);
+        assert_eq!(fs::metadata(&got[0]).unwrap().len(), 33);
+        let over = decoder("over", &tripler("xyzw", None));
+        assert_eq!(
+            failed(&[&one, &over]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "cannot publish output: text output larger than three times its \
+                         input (33 bytes)"
+                    .to_owned()
+            }]
+        );
+        let split = first("split", true);
+        assert_eq!(
+            failed(&[&split, &at]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: X8BIT_ONE_OUTPUT.to_owned()
+            }]
+        );
+        // Only the 10-byte part decoded, the 3-byte one failed: the input
+        // fails once, and its decoded part is not placed either.
+        let big = decoder("big", &tripler("xyz", Some(10)));
+        assert_eq!(
+            failed(&[&split, &big]),
+            [Outcome::Failed {
+                input: input.clone(),
+                reason: "skipped".to_owned()
+            }]
+        );
+        assert!(!docs.join("a (1)").exists());
+    }
+
+    /// Per input, all or nothing, across a fan-out too: when step 1 makes
+    /// parts of an input and step 2 fails one of them, the input fails
+    /// once and nothing of it is placed, not its other parts either. The
+    /// history agrees (one done, one failed, undoable) and Undo moves only
+    /// the group of the input whose parts all converted.
+    #[test]
+    fn a_failed_part_fails_its_whole_input() {
+        use crate::journal::{GroupOutcome, Recorder};
+        use crate::sandbox::tests::abi_or_skip;
+        if abi_or_skip("a_failed_part_fails_its_whole_input", 0).is_none() {
+            return;
+        }
+        struct Rec(Seen, Recorder);
+        impl Observer for Rec {
+            fn event(&mut self, o: &Outcome) {
+                self.0.event(o);
+                self.1.outcome(o);
+            }
+            fn dir(&mut self, _: &Path) {}
+            fn progress(&mut self, _: usize, _: usize, _: f32) {}
+            fn prepare_group(&mut self, g: &OutputGroup, p: &Path) -> io::Result<()> {
+                self.1.prepare_group(g, p)
+            }
+            fn group(&mut self, g: &OutputGroup, l: &LocationEvidence, d: &Durability) {
+                self.1.group(g, l, d);
+            }
+        }
+        let t = Tmp::new("fan-fail");
+        let docs = t.0.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let (a, b) = (docs.join("a.txt"), docs.join("b.txt"));
+        fs::write(&a, "ab\n").unwrap();
+        fs::write(&b, "cd\n").unwrap();
+        // Step 1: two parts of every input, a copy and a 10-byte one.
+        let split = script_action(
+            &t,
+            "split",
+            "i=0; while IFS= read -r in; do mkdir \"$4/$i\"; cp \"$in\" \"$4/$i/small\"; \
+             printf '0123456789' > \"$4/$i/big\"; printf 'done\\t%s\\t%s/small\\n' \"$in\" \"$i\"; \
+             printf 'done\\t%s\\t%s/big\\n' \"$in\" \"$i\"; i=$((i+1)); done < \"$6\"",
+            "mid",
+        );
+        // Step 2: copies every part but the copy of `a.txt`, which fails.
+        let copy = script_action(
+            &t,
+            "copy",
+            "i=0; while IFS= read -r in; do if [ \"$(cat \"$in\")\" = ab ]; then \
+             printf 'fail\\t%s\\tpart refused\\n' \"$in\"; else mkdir \"$4/$i\"; \
+             cp \"$in\" \"$4/$i/out\"; printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; fi; \
+             i=$((i+1)); done < \"$6\"",
+            "md",
+        );
+        let p = |d: &str| t.0.join(d).into_os_string().into_string().unwrap();
+        let (s, r, d, h) = (p("state"), p("run"), p("data"), p("home"));
+        let env = [
+            ("XDG_STATE_HOME", Some(s.as_str())),
+            ("XDG_RUNTIME_DIR", Some(r.as_str())),
+            ("XDG_DATA_HOME", Some(d.as_str())),
+            ("HOME", Some(h.as_str())),
+        ];
+        crate::xdg::tests::with_env(&env, || {
+            let job = crate::journal::new_job_id();
+            let mut obs = Rec(Seen::default(), Recorder::open(&job, "convert"));
+            let tok = CancelToken::install().unwrap();
+            run(&[&split, &copy], vec![a.clone(), b.clone()], &mut obs, &tok);
+            let Rec(seen, rec) = obs;
+            let of = |i: &Path| -> Vec<&Outcome> {
+                seen.0
+                    .iter()
+                    .filter(|o| match o {
+                        Outcome::Done { input, .. } | Outcome::Failed { input, .. } => input == i,
+                        _ => false,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                of(&a),
+                [&Outcome::Failed {
+                    input: a.clone(),
+                    reason: "part refused".to_owned()
+                }],
+                "{:?}",
+                seen.0
+            );
+            assert!(!docs.join("a").exists(), "a part of a.txt was placed");
+            let b_out = [docs.join("b/out"), docs.join("b/out (1)")];
+            assert_eq!(of(&b).len(), 2, "{:?}", seen.0);
+            assert!(b_out.iter().all(|f| f.is_file()));
+            let recorded = rec.finish(true);
+            assert_eq!(recorded.tally.counts(), (1, 0, 1));
+            assert!(recorded.undoable, "{:?}", recorded.warning);
+            let undone = crate::journal::undo(&job).unwrap();
+            assert_eq!(undone.groups.len(), 1, "{:?}", undone.groups);
+            assert!(matches!(
+                undone.groups[0],
+                GroupOutcome::MovedToTrash { .. }
+            ));
+            assert!(b_out.iter().all(|f| fs::symlink_metadata(f).is_err()));
+            assert!(a.is_file() && b.is_file(), "an input was moved");
+
+            // Step 2 skips one part (the other converts): one Skipped for
+            // the input, nothing of it placed.
+            let c = docs.join("c.txt");
+            fs::write(&c, "ef\n").unwrap();
+            let skipper = script_action(
+                &t,
+                "skipper",
+                "i=0; while IFS= read -r in; do if [ \"$(cat \"$in\")\" = ef ]; then \
+                 printf 'skip\\t%s\\tnot for me\\n' \"$in\"; else mkdir \"$4/$i\"; \
+                 cp \"$in\" \"$4/$i/out\"; printf 'done\\t%s\\t%s/out\\n' \"$in\" \"$i\"; fi; \
+                 i=$((i+1)); done < \"$6\"",
+                "md",
+            );
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(&[&split, &skipper], vec![c.clone()], &mut seen, &tok);
+            assert_eq!(
+                seen.0,
+                [Outcome::Skipped {
+                    input: c.clone(),
+                    reason: "not for me".to_owned()
+                }]
+            );
+            assert!(!docs.join("c").exists(), "a part of c.txt was placed");
+
+            // Step 2 converts one part and then exits without a word on
+            // the other: the input fails once, nothing of it is placed.
+            let d = docs.join("d.txt");
+            fs::write(&d, "gh\n").unwrap();
+            let quitter = script_action(
+                &t,
+                "quitter",
+                "read -r in < \"$6\"; mkdir \"$4/0\"; cp \"$in\" \"$4/0/out\"; \
+                 printf 'done\\t%s\\t0/out\\n' \"$in\"; exit 0",
+                "md",
+            );
+            let tok = CancelToken::install().unwrap();
+            let mut seen = Seen::default();
+            run(&[&split, &quitter], vec![d.clone()], &mut seen, &tok);
+            assert_eq!(seen.0.len(), 1, "{:?}", seen.0);
+            assert!(
+                matches!(&seen.0[0], Outcome::Failed { input, .. } if *input == d),
+                "{:?}",
+                seen.0
+            );
+            assert!(!docs.join("d").exists(), "a part of d.txt was placed");
+        });
+    }
 
     /// The group is killed before its members are counted, so even when
     /// they cannot be counted (an injected `waitid` error) nothing of the
