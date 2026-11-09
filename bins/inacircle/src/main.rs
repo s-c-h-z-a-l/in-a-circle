@@ -1464,11 +1464,13 @@ mod tests {
             (doc.label.as_str(), doc.group.as_str(), doc.lit),
             ("Document", "document", true)
         );
-        // Book and Encoding are on the wheel too, dim: no dragged file is a
-        // comic book, and a UTF-8 text has no code page to convert.
-        assert_eq!(g.slices.iter().flatten().count(), 3);
+        // Book, Encoding and Subtitles are on the wheel too, dim: no dragged
+        // file is a comic book, a UTF-8 text has no code page to convert, and
+        // it is not a subtitle.
+        assert_eq!(g.slices.iter().flatten().count(), 4);
         assert!(!g.slices[2].as_ref().expect("books point east").lit);
         assert!(!g.slices[6].as_ref().expect("encodings point west").lit);
+        assert!(!g.slices[4].as_ref().expect("subtitles point south").lit);
 
         let none = groups_of("https://example.com/\r\n");
         assert!(none.paths.is_empty() && none.slices.iter().all(Option::is_none));
@@ -1799,6 +1801,91 @@ mod tests {
         std::fs::write(&utf8, "1\r\nP\u{159}\u{ed}li\u{161}\r\n").unwrap();
         let g = group_menu_for(vec![utf8], Some(cat));
         assert!(!g.slices[6].as_ref().unwrap().lit, "Encoding stays dim");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the drawn wheels are built from for subtitles: an SRT lights
+    /// Subtitles (south), VTT north is lit and SRT south is drawn dim; an
+    /// ASS lights both. Valid UTF-8 text lights nothing.
+    #[test]
+    fn subtitle_menus_light_the_drawn_slices() {
+        let base = md_catalog().actions.remove(0);
+        let act = |id: &str, input: &str, output: &str, ext: &str, label: &str| Action {
+            id: id.into(),
+            input: input.into(),
+            output: output.into(),
+            ext: ext.into(),
+            label: label.into(),
+            group: "subtitles".into(),
+            lossy: true,
+            ..base.clone()
+        };
+        let cat = Catalog {
+            actions: vec![
+                act(
+                    "subtitles.srt-to-vtt",
+                    "application/x-subrip",
+                    "text/vtt",
+                    "vtt",
+                    "VTT",
+                ),
+                act(
+                    "subtitles.vtt-to-srt",
+                    "text/vtt",
+                    "application/x-subrip",
+                    "srt",
+                    "SRT",
+                ),
+                act(
+                    "subtitles.ass-to-srt",
+                    "text/x-ssa",
+                    "application/x-subrip",
+                    "srt",
+                    "SRT",
+                ),
+                act(
+                    "subtitles.ass-to-vtt",
+                    "text/x-ssa",
+                    "text/vtt",
+                    "vtt",
+                    "VTT",
+                ),
+            ],
+        };
+        // (label, preset, applicable) of the slice in `k`.
+        fn slot(m: &wheel::Menu, k: usize) -> Option<(&str, &str, bool)> {
+            m.slices[k]
+                .as_ref()
+                .map(|s| (s.label.as_str(), s.preset.as_str(), s.applicable))
+        }
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let srt = dir.join("Film.srt");
+        std::fs::write(&srt, b"1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n").unwrap();
+        let g = group_menu_for(vec![srt], Some(cat.clone()));
+        let lit = |k: usize| g.slices[k].as_ref().unwrap().lit;
+        assert_eq!(g.slices[4].as_ref().unwrap().group, "subtitles");
+        assert!(lit(4), "Subtitles lights, south");
+        assert!(
+            !lit(0) && !lit(2) && !lit(6),
+            "the other categories stay dim"
+        );
+        let m = target_menu(&g, "subtitles");
+        assert_eq!(m.hub, "Subtitles");
+        assert_eq!(slot(&m, 0), Some(("VTT", "vtt-srt", true)));
+        // The SRT slice of an SRT is drawn, dim: a click on it does nothing.
+        assert_eq!(slot(&m, 4), Some(("SRT", "srt-vtt", false)));
+        let ass = dir.join("Film.ass");
+        std::fs::write(&ass, b"[Script Info]\nTitle: x\n").unwrap();
+        let g = group_menu_for(vec![ass], Some(cat.clone()));
+        assert!(g.slices[4].as_ref().unwrap().lit, "an ASS lights Subtitles");
+        let m = target_menu(&g, "subtitles");
+        assert_eq!(slot(&m, 4), Some(("SRT", "srt-ass", true)));
+        assert_eq!(slot(&m, 0), Some(("VTT", "vtt-ass", true)));
+        let txt = dir.join("Plain.txt");
+        std::fs::write(&txt, "plain words\n").unwrap();
+        let g = group_menu_for(vec![txt], Some(cat));
+        assert!(!g.slices[4].as_ref().unwrap().lit, "plain text stays dim");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

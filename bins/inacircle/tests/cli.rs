@@ -20,7 +20,12 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_inacircle");
-const ACTIONS: [&str; 3] = ["inacircle-text", "inacircle-testaction", "inacircle-pages"];
+const ACTIONS: [&str; 4] = [
+    "inacircle-text",
+    "inacircle-testaction",
+    "inacircle-pages",
+    "inacircle-subtitles",
+];
 
 /// The action binaries live next to ours. `cargo test -p inacircle` alone
 /// does not build them, so build them once into the same target dir.
@@ -632,6 +637,93 @@ fn cli_iso_on_cp1250_fails_with_the_hint() {
     assert_eq!(fails[0].1, "byte 0x84 at 3: this looks like Windows-1250");
     assert!(!e.files().join("Film").exists());
     assert_eq!(fs::read(&src).unwrap(), b"1\r\n\x84ok\x94 \xe8\r\n");
+}
+
+/// An SRT with a top cue and italics converts to WebVTT (no byte order
+/// mark, LF) in its own folder; the history records the action, and Undo
+/// moves the folder to the Trash.
+#[test]
+fn cli_srt_to_vtt() {
+    let e = Env::new("srt2vtt");
+    let srt: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,500\r\n{\\an8}<i>Hello</i> there\r\n\r\n\
+        2\r\n00:00:03,000 --> 00:00:04,000\r\n<b>Bold</b>\r\n";
+    let src = e.file("Film.srt", srt);
+    let o = e.run(&["run", "vtt-srt", "Film.srt"]);
+    if skip_unsandboxed("cli_srt_to_vtt", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.vtt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    // A blank line closes every cue, the last one included.
+    let want = "WEBVTT\n\n00:00:01.000 --> 00:00:02.500 line:0\n<i>Hello</i> there\n\n\
+        00:00:03.000 --> 00:00:04.000\n<b>Bold</b>\n\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), srt, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("subtitles.srt-to-vtt")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
+}
+
+/// An ASS subtitle converts to SRT (byte order mark, CRLF): the italic
+/// override is kept, the drawing is dropped with a warning, and the
+/// history records the action, Undo moves the folder to the Trash.
+#[test]
+fn cli_ass_to_srt() {
+    let e = Env::new("ass2srt");
+    let ass: &[u8] = b"[Script Info]\nScriptType: v4.00+\n\n[Events]\n\
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+        Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,{\\i1}Hello{\\i0} there\n\
+        Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\p1}m 0 0 l 10 10{\\p0}Shape\n";
+    let src = e.file("Film.ass", ass);
+    let o = e.run(&["run", "srt-ass", "Film.ass"]);
+    if skip_unsandboxed("cli_ass_to_srt", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,500\r\n<i>Hello</i> there\r\n\r\n\
+        2\r\n00:00:03,000 --> 00:00:04,000\r\nShape\r\n\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), ass, "the source changed");
+    assert_eq!(
+        o.pairs("warn"),
+        [(src.clone(), "drawings removed (1 cues)".to_owned())],
+        "{}",
+        o.stdout
+    );
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("subtitles.ass-to-srt")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
 }
 
 /// A preset that matches no input still names its run after the 1:1 route
@@ -1973,18 +2065,18 @@ fn offer_groups_output() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\ta.txt\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=4\tid=subtitles\tlabel=Subtitles\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\ta.txt\n"
     );
     let o = e.run(&["offer", "--groups", "a.txt", "b.md"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\t2 files\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=yes\ngroup\tdir=2\tid=book\tlabel=Book\tlit=yes\ngroup\tdir=4\tid=subtitles\tlabel=Subtitles\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\t2 files\n"
     );
     // Nothing applies: the category stays, dim.
     let o = e.run(&["offer", "--groups", "x.bin"]);
     assert_eq!(
         o.stdout,
-        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\tx.bin\n"
+        "group\tdir=0\tid=document\tlabel=Document\tlit=no\ngroup\tdir=2\tid=book\tlabel=Book\tlit=no\ngroup\tdir=4\tid=subtitles\tlabel=Subtitles\tlit=no\ngroup\tdir=6\tid=encoding\tlabel=Encoding\tlit=no\nhub\tx.bin\n"
     );
     // The plain offer output is unchanged and `--groups` needs files.
     let o = e.run(&["offer", "--groups"]);
