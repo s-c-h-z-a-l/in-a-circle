@@ -56,9 +56,21 @@
 # 6368 B (file, 4880 B of .text), from the new action rows, presets and the
 # language environment passed to the child; inacircle-pages grew 496 B. The
 # shipped inacircle still does not link the doc, zip or epub crates.
-inacircle 1166392 896760
 # After the closing fixes: inacircle-text grew 1552 B (file, 1200 B of .text)
 # from the URL validity checks in the XHTML writer (percent escapes, one
 # fragment, authority brackets) and the create-new write of the HTML page.
-inacircle-text 861520 539672
+# Refreshed after the Markdown-and-images join to one EPUB book, same toolchain
+# and profile, built from commit 715b5b2b (tree clean; the commits after the
+# last source change touch only fuzz corpora). inacircle grew 15584 B (file,
+# 14736 B of .text) from the new action row, the preset's mixed-selection
+# rule and the count of documents plus usable images; inacircle-text grew
+# 67904 B (file, 59776 B of .text), both under the 100 KB explanation
+# threshold: the image reference resolution (lexical path normalisation,
+# percent decoding, file identity), the JPEG and PNG check, the image
+# chapter and package entries, and the join over documents. The .text
+# (599448 B) stays far under the 1 MiB family limit. inacircle-pages is
+# unchanged. The shipped inacircle still does not link the doc, zip or epub
+# crates.
+inacircle 1181976 911496
+inacircle-text 929424 599448
 inacircle-pages 504208 403763

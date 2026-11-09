@@ -1,0 +1,3 @@
+inacircle-manifest 0
+action	j.a	family=f	in=~ext/makrdowoutn	out=application/epub+zip	ext=epub	label=L	group=g	cost=1y	snols=ocle-manifest 0
+action	j.a	family=f	in=~ext/markdowoutn	out=applicatp	ext=epub	label=L	group=g	cost=1y		batch=yesdown	join=yes

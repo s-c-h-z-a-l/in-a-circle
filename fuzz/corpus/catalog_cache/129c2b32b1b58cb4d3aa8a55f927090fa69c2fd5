@@ -1,0 +1,15 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=imageossy=no	batch=yes	join=yes	mige/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yesize=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=imageossy=no	batch=yes	join=yes	mige/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batchepub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	ba	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	l*abel=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=applicmarkdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	b+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	basch=no	batch=ye

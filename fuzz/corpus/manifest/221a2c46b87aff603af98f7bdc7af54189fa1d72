@@ -1,0 +1,5 @@
+ineg,
+action	imy=image	in=image/jpeg,image/png	outs	byes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=imagenpeg,image/pnglossy=no	bah=yep=	=*=yes	mi=n=5bs	join=yes	min=	=	2
+
+~

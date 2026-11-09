@@ -377,10 +377,16 @@ fn cmd_run(mut args: Vec<OsString>) -> u8 {
     run(target, files, notify, cancel)
 }
 
-/// The input types `a` takes: its join set, else its one input type.
+/// The input types `a` takes: its join set and assets, else its one input
+/// type.
 fn join_types(a: &Action) -> Vec<&str> {
     match &a.join {
-        Some(j) => j.types.iter().map(String::as_str).collect(),
+        Some(j) => j
+            .types
+            .iter()
+            .chain(&j.assets)
+            .map(String::as_str)
+            .collect(),
         None => vec![a.input.as_str()],
     }
 }
@@ -477,9 +483,15 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         (true, Target::Preset(id) | Target::Action(id)) => id.to_owned(),
     };
 
-    // Classify before routing.
+    // Classify before routing. A join's assets go apart from its documents
+    // (`exec::run_join` orders and anchors on the documents).
     let mut pre = Vec::new();
     let mut inputs = Vec::new();
+    let mut assets = Vec::new();
+    let is_asset = |m: &str| {
+        join.and_then(|a| a.join.as_ref())
+            .is_some_and(|j| j.is_asset(m))
+    };
     for (f, c) in classified {
         match c {
             Ok(Classified::NotRegular) => pre.push(Outcome::Skipped {
@@ -492,6 +504,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             }),
             Ok(Classified::File(k)) if k.mime.as_deref().is_some_and(|m| accept.contains(&m)) => {
                 match &blocked {
+                    None if k.mime.as_deref().is_some_and(is_asset) => assets.push(f),
                     None => inputs.push(f),
                     Some(why) if !why.is_empty() => pre.push(Outcome::Failed {
                         input: f,
@@ -515,13 +528,17 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
         // nothing about formatting); the line itself needs a warning of an
         // input that has an output (`Summary::lost_done`).
         let label = steps.last().map_or(name.as_str(), |a| a.label.as_str());
-        Notifier::new(label, steps.iter().any(|a| a.lossy), inputs.len())
+        Notifier::new(
+            label,
+            steps.iter().any(|a| a.lossy),
+            inputs.len() + assets.len(),
+        )
     });
 
     mark("classify");
     let pre_count = pre.len();
     let job = journal::new_job_id();
-    let mut running = Running::start(&job, &name, inputs.len());
+    let mut running = Running::start(&job, &name, inputs.len() + assets.len());
     let mut rec = Recorder::open(&job, &name);
     out(&Line::new("job").bare(&job.0));
     let _ = io::stdout().flush();
@@ -534,11 +551,11 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
     }
     // Every file of the run, those settled above included: a join's
     // notice counts its result against them.
-    let files = pre_count + inputs.len();
+    let files = pre_count + inputs.len() + assets.len();
     let mut entry = None;
     let mut joined = None;
     let mut cut = 0;
-    let sandboxed = if inputs.is_empty() {
+    let sandboxed = if inputs.is_empty() && assets.is_empty() {
         engine::sandbox::ready().is_ok()
     } else {
         let mut obs = Printer {
@@ -549,7 +566,7 @@ fn run(target: Target, files: Vec<PathBuf>, notify: bool, cancel: CancelToken) -
             entry: measure_on.then(Entry::default),
         };
         let report = match join {
-            Some(a) => exec::run_join(a, inputs, &mut obs, &cancel),
+            Some(a) => exec::run_join(a, inputs, assets, &mut obs, &cancel),
             None => exec::run(&route, inputs, &mut obs, &cancel),
         };
         entry = obs.entry.take();
@@ -1454,6 +1471,7 @@ mod tests {
             join: Some(engine::catalog::Join {
                 types: vec!["image/jpeg".into(), "image/png".into()],
                 min: 1,
+                assets: Vec::new(),
             }),
             ..md_catalog().actions.remove(0)
         };
@@ -1550,6 +1568,109 @@ mod tests {
             );
             assert_eq!(m.hub, hub);
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The drawn Book wheel for Markdown plus images and for images alone
+    /// (what `wheel::stage2` paints): with documents the east slice is a lit
+    /// EPUB and the hub counts documents plus images (the text file and the
+    /// comic book stay out); with images alone there is no EPUB slice at
+    /// all, while PDF (north) and CBZ (south) stay live.
+    #[test]
+    fn markdown_and_images_join_epub_east() {
+        let act =
+            |id: &str, out: &str, ext: &str, label: &str, join: engine::catalog::Join| Action {
+                id: id.into(),
+                input: join.types[0].clone(),
+                output: out.into(),
+                ext: ext.into(),
+                label: label.into(),
+                group: "book".into(),
+                lossy: true,
+                join: Some(join),
+                ..md_catalog().actions.remove(0)
+            };
+        let images = |min| engine::catalog::Join {
+            types: vec!["image/jpeg".into(), "image/png".into()],
+            min,
+            assets: Vec::new(),
+        };
+        let cat = Catalog {
+            actions: vec![
+                act(
+                    "text.md-join-epub",
+                    "application/epub+zip",
+                    "epub",
+                    "EPUB",
+                    engine::catalog::Join {
+                        types: vec!["text/markdown".into()],
+                        min: 1,
+                        assets: vec!["image/jpeg".into(), "image/png".into()],
+                    },
+                ),
+                act(
+                    "pages.images-to-pdf",
+                    "application/pdf",
+                    "pdf",
+                    "PDF",
+                    images(1),
+                ),
+                act(
+                    "pages.images-to-cbz",
+                    "application/vnd.comicbook+zip",
+                    "cbz",
+                    "CBZ",
+                    images(1),
+                ),
+            ],
+        };
+        let dir = std::env::temp_dir().join(format!("inacircle-drop-mdimg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, data: &[u8]| {
+            let f = dir.join(name);
+            std::fs::write(&f, data).unwrap();
+            f
+        };
+        let md = [write("a.md", b"# A\n"), write("b.md", b"# B\n")];
+        let img = [
+            write("1.jpg", b"\xff\xd8\xff\xe0 j"),
+            write("2.png", b"\x89PNG\r\n\x1a\n"),
+            write("3.png", b"\x89PNG\r\n\x1a\n"),
+        ];
+        let txt = write("n.txt", b"words\n");
+        let cbz = write("c.cbz", b"PK\x03\x04 comic");
+        let slice = |m: &wheel::Menu, k: usize| {
+            m.slices[k]
+                .as_ref()
+                .map(|c| (c.label.clone(), c.preset.clone(), c.applicable))
+        };
+
+        let mut all: Vec<PathBuf> = md.to_vec();
+        all.extend(img.iter().cloned());
+        all.extend([txt, cbz]);
+        let g = group_menu_for(all, Some(cat.clone()));
+        assert!(g.slices[2].as_ref().is_some_and(|b| b.lit), "Book lights");
+        let m = target_menu(&g, "book");
+        assert_eq!(slice(&m, 2), Some(("EPUB".into(), "epub".into(), true)));
+        assert_eq!(slice(&m, 0), Some(("PDF".into(), "pdf".into(), true)));
+        assert_eq!(m.hub, "5 / 7 files");
+
+        let g = group_menu_for(img.to_vec(), Some(cat));
+        assert!(g.slices[2].as_ref().is_some_and(|b| b.lit), "Book lights");
+        let m = target_menu(&g, "book");
+        assert!(
+            m.slices
+                .iter()
+                .flatten()
+                .all(|c| c.preset != "epub" || !c.applicable),
+            "images alone offer no EPUB"
+        );
+        assert!(
+            slice(&m, 2).is_none_or(|(_, _, applicable)| !applicable),
+            "the east slice is dim or absent"
+        );
+        assert_eq!(slice(&m, 0), Some(("PDF".into(), "pdf".into(), true)));
+        assert_eq!(slice(&m, 4), Some(("CBZ".into(), "cbz".into(), true)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

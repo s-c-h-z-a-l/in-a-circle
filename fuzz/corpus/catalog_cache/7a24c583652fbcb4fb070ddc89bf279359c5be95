@@ -1,0 +1,44 @@
+inacircle-catalog 1
+bin	path=/b/tet	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/pin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=application/epub+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text	plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.]	family=f	in=text/plain	out=applit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	l	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipmarkd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdapplit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	l	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=atch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes
+action	j.]	family=f	in=text/plain	out=applit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	l	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipmarkd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-can	assets=image/png	out=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipmarkd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdapplit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	l	mtime=5	size=7	built=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipmarkd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	b+zipext=epub	label=L	group=g	cost=abel=L	group=g	cost=1	lossy=no	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	jxtation/epub+zip	ext=epub	label=L	gr=oup=g	cost=1	lossy=no	batch=yes	assets=image/png,textn/epub+zipext=epub	label=L	group=g	costacircle-catal=2lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdapplit=application/pdf	ext=pdf	label=L	group=g	cost={{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	l	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=image/png	out=applicatioalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markd,own	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	los{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{1	lossy=no	batch=yes	join=no

@@ -1,0 +1,11 @@
+inacoup=book	cost=05	mossy=yes	batch=yes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/png	out=application/pdf	ext=pdf	label=PDF	groQ2
+										ut=application/epub+zip	ext=epub	labook	cost=10	mossy=ye)	batch=yes	join=yes	min=1024
+action	im##agEPUB	group=book	cost=10	mossy=yes	batch=yzsyes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/png	out=application/pdf	ext=pdf	label=PDF	gro2
+										ut=application/epub+zip	ext=epub	label=EPUB	group=book	cosy=10	mossy=yes	batch=yes	join=yes	min=102410	mossy=yes	batch=yes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/png	out=application/pdf	ext=pdf	label=PDF	gro2
+										ut=application/epub+zip	exyes	batch=yzsyes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/png	out=application/pdf	ext=pdf	label=PDF	gro2
+										ut=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	mossn=yes	min=1024
+action	im##age.join-pdf	family=image	in=image/jpeg										,image/png	out=application/pdf	ext=pn=text/markdown,text/x-markdown=yes	min=2

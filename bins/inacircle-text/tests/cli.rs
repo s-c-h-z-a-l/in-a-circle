@@ -10,7 +10,8 @@ action\ttext.md-to-txt\tfamily=text\tin=text/markdown\tout=text/plain\text=txt\t
 action\ttext.md-to-epub\tfamily=text\tin=text/markdown\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.txt-to-epub\tfamily=text\tin=text/plain\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-to-html\tfamily=text\tin=text/markdown\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
-action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
+action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
+action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -72,7 +73,7 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn manifest_lists_six_actions() {
+fn manifest_lists_the_join_line() {
     let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
         .arg("--manifest")
         .output()
@@ -936,4 +937,888 @@ fn html_page_of_exactly_the_ceiling_is_written() {
             assert!(snapshot(&work).is_empty());
         }
     }
+}
+
+// ---------- text.md-join-epub (join) ----------
+
+/// A small baseline JPEG (the image probe's fixture, not duplicated).
+fn jpeg() -> Vec<u8> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// A valid 8-bit RGB PNG whose pixels are all `shade`, so two shades differ.
+fn png(shade: u8) -> Vec<u8> {
+    let (w, h) = (2usize, 2usize);
+    let mut rows = Vec::new();
+    for _ in 0..h {
+        rows.push(0);
+        rows.extend(std::iter::repeat_n(shade, w * 3));
+    }
+    testzip::png(w as u32, h as u32, 2, None, false, false, &rows)
+}
+
+/// Runs the join on `inputs` (documents first, then assets, as the engine
+/// passes them) without a language in the environment.
+fn join(work: &Path, inputs: &[&Path]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
+        .args(["run", "text.md-join-epub", "--work"])
+        .arg(work)
+        .arg("--")
+        .args(inputs)
+        .env_remove("INACIRCLE_LANG")
+        .output()
+        .unwrap()
+}
+
+/// Every entry of the book, in archive order.
+fn entries(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let f = fs::File::open(path).unwrap();
+    let limits = zip::Limits {
+        entries: 4096,
+        entry_bytes: 64 << 20,
+        ratio: 1,
+        name_bytes: 255,
+    };
+    let a = zip::open(&f, limits).unwrap();
+    (0..a.entries().len())
+        .map(|i| {
+            let mut v = Vec::new();
+            a.read(i, &mut v).unwrap();
+            (String::from_utf8(a.entries()[i].name.clone()).unwrap(), v)
+        })
+        .collect()
+}
+
+fn entry<'a>(es: &'a [(String, Vec<u8>)], name: &str) -> &'a [u8] {
+    &es.iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("no entry {name}"))
+        .1
+}
+
+/// The text of every XHTML chapter (not the navigation) in one string, and
+/// the names of the packaged images in archive order.
+fn chapters(es: &[(String, Vec<u8>)]) -> Vec<(String, String)> {
+    es.iter()
+        .filter(|(n, _)| n.starts_with("OEBPS/ch") && n.ends_with(".xhtml"))
+        .map(|(n, v)| (n.clone(), String::from_utf8(v.clone()).unwrap()))
+        .collect()
+}
+
+fn images(es: &[(String, Vec<u8>)]) -> Vec<&str> {
+    es.iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| n.starts_with("OEBPS/img/"))
+        .collect()
+}
+
+/// The book a successful join announced.
+fn joined_book(o: &Output, work: &Path) -> PathBuf {
+    let out = stdout(o);
+    let j = lines(&out, "joined");
+    assert_eq!(j.len(), 1, "{out}");
+    assert_eq!(j[0][1], "join/out.epub", "{out}");
+    work.join(j[0][1])
+}
+
+fn takes(o: &Output) -> Vec<String> {
+    lines(&stdout(o), "take")
+        .iter()
+        .map(|t| t[1].to_string())
+        .collect()
+}
+
+#[test]
+fn two_docs_one_book() {
+    let (root, work) = workdir("join-two");
+    let dir = root.join("kert");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    fs::write(
+        &a,
+        "# Alpha\n\nSee [the other](b.md#beta) and [gone](c.md).\n",
+    )
+    .unwrap();
+    fs::write(&b, "# Beta\n\nBack to [alpha](a.md).\n").unwrap();
+    let o = join(&work, &[&a, &b]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(takes(&o), [a.to_str().unwrap(), b.to_str().unwrap()]);
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    // The title is the folder's name, the file name's source too.
+    assert!(opf.contains("<dc:title>kert</dc:title>"), "{opf}");
+    let nav = String::from_utf8(entry(&es, "OEBPS/nav.xhtml").to_vec()).unwrap();
+    let (ia, ib) = (nav.find("Alpha").unwrap(), nav.find("Beta").unwrap());
+    assert!(ia < ib, "{nav}");
+    let ch = chapters(&es);
+    assert_eq!(ch.len(), 2);
+    // A link to the other file goes to its chapter file and heading.
+    let name = |i: usize| ch[i].0.trim_start_matches("OEBPS/");
+    assert!(
+        ch[0].1.contains(&format!("href=\"{}#beta\"", name(1))),
+        "{}",
+        ch[0].1
+    );
+    assert!(
+        ch[1].1.contains(&format!("href=\"{}\"", name(0))),
+        "{}",
+        ch[1].1
+    );
+    // A link to a file that is not in the book is its text and a warn.
+    assert!(!ch[0].1.contains("c.md"), "{}", ch[0].1);
+    assert!(
+        lines(&stdout(&o), "warn")
+            .iter()
+            .any(|w| w[2] == "links flattened to text"),
+        "{}",
+        stdout(&o)
+    );
+    epubcheck(&book);
+}
+
+#[test]
+fn doc_and_images_one_book() {
+    let (root, work) = workdir("join-images");
+    let md = root.join("jegyzet.md");
+    fs::write(
+        &md,
+        "# Képek\n\n![egy](one.png)\n\n![kettő](two.jpg)\n\n![ismét](one.png)\n",
+    )
+    .unwrap();
+    let (one, two, three) = (
+        root.join("one.png"),
+        root.join("two.jpg"),
+        root.join("three.png"),
+    );
+    fs::write(&one, png(10)).unwrap();
+    fs::write(&two, jpeg()).unwrap();
+    fs::write(&three, png(200)).unwrap();
+    let o = join(&work, &[&md, &one, &three, &two]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(takes(&o).len(), 4);
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    // Numbered by first reference; the unreferenced image comes last.
+    assert_eq!(
+        images(&es),
+        [
+            "OEBPS/img/0001.png",
+            "OEBPS/img/0002.jpg",
+            "OEBPS/img/0003.png"
+        ]
+    );
+    assert_eq!(entry(&es, "OEBPS/img/0001.png"), &png(10)[..]);
+    assert_eq!(entry(&es, "OEBPS/img/0002.jpg"), &jpeg()[..]);
+    assert_eq!(entry(&es, "OEBPS/img/0003.png"), &png(200)[..]);
+    let ch = chapters(&es);
+    assert!(ch[0].1.contains("src=\"img/0001.png\""), "{}", ch[0].1);
+    assert!(ch[0].1.contains("src=\"img/0002.jpg\""), "{}", ch[0].1);
+    // One document: the title is its first H1.
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(opf.contains("<dc:title>Képek</dc:title>"), "{opf}");
+    let last = &ch.last().unwrap().1;
+    assert!(last.contains("<h1>Images</h1>"), "{last}");
+    assert!(last.contains("src=\"img/0003.png\""), "{last}");
+    assert!(last.contains("alt=\"three.png\""), "{last}");
+    assert!(!last.contains("0001.png"), "{last}");
+    assert!(lines(&stdout(&o), "warn").is_empty(), "{}", stdout(&o));
+    epubcheck(&book);
+}
+
+#[test]
+fn image_refs_resolve_by_file_identity() {
+    use std::os::unix::fs::symlink;
+    let (root, work) = workdir("join-identity");
+    let sub = root.join("notes");
+    fs::create_dir_all(sub.join("kepek")).unwrap();
+    let md = sub.join("n.md");
+    fs::write(
+        &md,
+        "![up](../kep.png)\n\n![sp](kepek/a%20b.jpg)\n\n![dot](./k.png)\n\n![plain](k.png)\n\n\
+         ![link](sym.png)\n\n![abs](/abs/x.png)\n\n![url](http://example.com/y.png)\n\n\
+         ![out](../other.png)\n",
+    )
+    .unwrap();
+    let (kep, spaced, k) = (
+        root.join("kep.png"),
+        sub.join("kepek/a b.jpg"),
+        sub.join("k.png"),
+    );
+    fs::write(&kep, png(1)).unwrap();
+    fs::write(&spaced, jpeg()).unwrap();
+    fs::write(&k, png(2)).unwrap();
+    // Not an input: the reference must not pull it in.
+    fs::write(root.join("other.png"), png(3)).unwrap();
+    symlink("k.png", sub.join("sym.png")).unwrap();
+    let o = join(&work, &[&md, &kep, &k, &spaced]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    // Three files, once each, though five references name them.
+    assert_eq!(images(&es).len(), 3, "{:?}", images(&es));
+    let ch = chapters(&es);
+    let body = &ch[0].1;
+    assert_eq!(body.matches("<img ").count(), 5, "{body}");
+    // `./k.png`, `k.png` and the symlink are one image.
+    assert_eq!(body.matches("src=\"img/0003.png\"").count(), 3, "{body}");
+    // No local file, no image: the alt text stays.
+    for alt in ["abs", "url", "out"] {
+        assert!(body.contains(alt), "{body}");
+    }
+    assert!(!body.contains("example.com"), "{body}");
+    assert!(
+        lines(&stdout(&o), "warn")
+            .iter()
+            .any(|w| w[2] == "images replaced by their alt text"),
+        "{}",
+        stdout(&o)
+    );
+    epubcheck(&book);
+}
+
+#[test]
+fn damaged_image_fails_alone() {
+    let (root, work) = workdir("join-damaged");
+    let md = root.join("a.md");
+    let mut text = String::new();
+    let mut inputs: Vec<PathBuf> = vec![md.clone()];
+    for i in 0..12u8 {
+        let p = root.join(format!("p{i:02}.png"));
+        let mut bytes = png(i * 10);
+        if i == 5 {
+            // Cut inside the header.
+            bytes.truncate(20);
+        }
+        fs::write(&p, bytes).unwrap();
+        text.push_str(&format!(
+            "![pic {i}]({})\n\n",
+            p.file_name().unwrap().to_str().unwrap()
+        ));
+        inputs.push(p);
+    }
+    fs::write(&md, text).unwrap();
+    let refs: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+    let o = join(&work, &refs);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(fails[0][1], root.join("p05.png").to_str().unwrap());
+    assert_eq!(takes(&o).len(), 12, "{out}");
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    assert_eq!(images(&es).len(), 11);
+    let ch = chapters(&es);
+    assert!(ch[0].1.contains("pic 5"), "{}", ch[0].1);
+    assert_eq!(ch[0].1.matches("<img ").count(), 11);
+    // The broken one is not parked in the `Images` chapter either.
+    assert_eq!(ch.len(), 1);
+    epubcheck(&book);
+}
+
+#[test]
+fn missing_image_is_alt_text() {
+    let (root, work) = workdir("join-missing");
+    let md = root.join("a.md");
+    fs::write(&md, "![nowhere](nope.png)\n\n![exists](there.png)\n").unwrap();
+    // On disk but not among the inputs: never read, never packaged.
+    fs::write(root.join("there.png"), png(9)).unwrap();
+    let o = join(&work, &[&md]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(lines(&out, "fail").is_empty(), "{out}");
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    assert!(images(&es).is_empty());
+    let ch = chapters(&es);
+    assert!(ch[0].1.contains("nowhere") && ch[0].1.contains("exists"));
+    assert!(!ch[0].1.contains("<img "), "{}", ch[0].1);
+    assert_eq!(lines(&out, "warn").len(), 1, "{out}");
+    epubcheck(&book);
+}
+
+#[test]
+fn failed_doc_leaves_the_rest() {
+    let (root, work) = workdir("join-faildoc");
+    let dir = root.join("kert");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, big, c) = (dir.join("a.md"), dir.join("b.md"), dir.join("c.md"));
+    fs::write(&a, "# Alpha\n\n[to b](b.md)\n").unwrap();
+    // One byte past the 8 MiB input budget.
+    fs::write(&big, vec![b'x'; (8 << 20) + 1]).unwrap();
+    fs::write(&c, "# Gamma\n").unwrap();
+    let o = join(&work, &[&a, &big, &c]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(fails[0][1], big.to_str().unwrap());
+    assert_eq!(takes(&o), [a.to_str().unwrap(), c.to_str().unwrap()]);
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    let ch = chapters(&es);
+    assert_eq!(ch.len(), 2);
+    // The failed document is not in the book: its link is text.
+    assert!(!ch[0].1.contains("b.md"), "{}", ch[0].1);
+    epubcheck(&book);
+
+    // No document left: no output at all, the image has nothing to join.
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let img = dir.join("p.png");
+    fs::write(&img, png(1)).unwrap();
+    let o = join(&work2, &[&big, &img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty() && lines(&out, "take").is_empty());
+    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    assert!(!work2.join("join").exists());
+}
+
+#[test]
+fn chapter_limit_across_files() {
+    let (root, work) = workdir("join-chapters");
+    let dir = root.join("many");
+    fs::create_dir_all(&dir).unwrap();
+    let files: Vec<PathBuf> = (0..600)
+        .map(|i| {
+            let p = dir.join(format!("{i:03}.md"));
+            fs::write(&p, "# a\n\n# b\n").unwrap();
+            p
+        })
+        .collect();
+    let refs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+    let o = join(&work, &refs);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty() && lines(&out, "take").is_empty());
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 600, "every document fails");
+    assert!(
+        fails
+            .iter()
+            .all(|f| f[2] == "book would have more than 1024 chapters"),
+        "{}",
+        fails[0][2]
+    );
+    assert!(!work.join("join/out.epub").exists());
+}
+
+#[test]
+fn output_ceiling_fails_alone() {
+    let (root, work) = workdir("join-ceiling");
+    let md = root.join("a.md");
+    fs::write(&md, "# Alpha\n").unwrap();
+    // 2.1 MB of pixels that do not compress: the stored image alone is
+    // past the 1 MiB ceiling.
+    let (w, h) = (1200usize, 600usize);
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut rows = Vec::with_capacity(h * (1 + w * 3));
+    for _ in 0..h {
+        // Filter type 0, then the row.
+        rows.push(0u8);
+        rows.extend((0..w * 3).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        }));
+    }
+    let big = root.join("big.png");
+    fs::write(
+        &big,
+        testzip::png(w as u32, h as u32, 2, None, false, false, &rows),
+    )
+    .unwrap();
+    let o = run_with_fsize("text.md-join-epub", &work, &[&md, &big]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty() && lines(&out, "take").is_empty());
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 2, "{out}");
+    assert!(
+        fails
+            .iter()
+            .all(|f| f[2] == "EPUB would be larger than 1 MiB"),
+        "{out}"
+    );
+    // Nothing is left behind to publish.
+    assert!(
+        !work.join("join/out.epub").exists(),
+        "{:?}",
+        snapshot(&work)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn deterministic_join() {
+    let (root, work) = workdir("join-det");
+    let dir = root.join("kert");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b, img) = (dir.join("a.md"), dir.join("b.md"), dir.join("p.png"));
+    fs::write(&a, "# Alpha\n\n![x](p.png)\n").unwrap();
+    fs::write(&b, "# Beta\n").unwrap();
+    fs::write(&img, png(7)).unwrap();
+    let first = fs::read(joined_book(&join(&work, &[&a, &b, &img]), &work)).unwrap();
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let second = fs::read(joined_book(&join(&work2, &[&a, &b, &img]), &work2)).unwrap();
+    assert_eq!(first, second);
+    // A different image makes a different book (and a different identifier).
+    fs::write(&img, png(8)).unwrap();
+    let work3 = root.join("work3");
+    fs::create_dir_all(&work3).unwrap();
+    let third = fs::read(joined_book(&join(&work3, &[&a, &b, &img]), &work3)).unwrap();
+    assert_ne!(first, third);
+}
+
+#[test]
+fn sibling_folders_link_across() {
+    let (root, work) = workdir("join-siblings");
+    let (da, db) = (root.join("a"), root.join("b"));
+    fs::create_dir_all(&da).unwrap();
+    fs::create_dir_all(&db).unwrap();
+    let (one, two) = (da.join("1.md"), db.join("2.md"));
+    fs::write(&one, "# One\n\n[two](../b/2.md#two) [out](../../x.md)\n").unwrap();
+    fs::write(&two, "# Two\n\n[one](../a/1.md)\n").unwrap();
+    let o = join(&work, &[&one, &two]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    let ch = chapters(&es);
+    let name = |i: usize| ch[i].0.trim_start_matches("OEBPS/");
+    assert!(
+        ch[0].1.contains(&format!("href=\"{}#two\"", name(1))),
+        "{}",
+        ch[0].1
+    );
+    assert!(
+        ch[1].1.contains(&format!("href=\"{}\"", name(0))),
+        "{}",
+        ch[1].1
+    );
+    // A document outside every folder of the book is no target.
+    assert!(!ch[0].1.contains("x.md"), "{}", ch[0].1);
+    // Tie between two folders: the earlier input's folder names the book.
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(opf.contains("<dc:title>a</dc:title>"), "{opf}");
+    epubcheck(&book);
+}
+
+/// Watches files for being opened (inotify `IN_OPEN`), so a test can prove
+/// that the action never opened a file it must not touch.
+struct OpenWatch(std::os::fd::OwnedFd);
+
+impl OpenWatch {
+    fn new(paths: &[&Path]) -> OpenWatch {
+        use std::os::fd::FromRawFd;
+        // SAFETY: no pointer is passed; a negative result is checked.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `fd` is a new descriptor owned by nothing else.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        for p in paths {
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+            // SAFETY: `c` is NUL-terminated and outlives the call.
+            let wd = unsafe { libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_OPEN) };
+            assert!(
+                wd >= 0,
+                "{}: {}",
+                p.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+        OpenWatch(owned)
+    }
+
+    /// Whether any watched file was opened since the watch began.
+    fn opened(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is writable for its whole length; the descriptor is
+        // non-blocking, so an empty queue returns -1 (EAGAIN) at once.
+        let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        n > 0
+    }
+}
+
+/// A referenced file that is not an input is never opened, only its
+/// identity is looked at: neither a regular image nor a FIFO (whose open
+/// could block or have effects) sees an open; both keep their alt text.
+#[test]
+fn referenced_non_input_is_never_opened() {
+    let (root, work) = workdir("join-noopen");
+    let md = root.join("a.md");
+    fs::write(
+        &md,
+        "![plain](other.png)\n\n![pipe](pipe.png)\n\n![in](in.png)\n",
+    )
+    .unwrap();
+    let (other, pipe, input) = (
+        root.join("other.png"),
+        root.join("pipe.png"),
+        root.join("in.png"),
+    );
+    fs::write(&other, png(3)).unwrap();
+    fs::write(&input, png(4)).unwrap();
+    let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: c is NUL-terminated.
+    assert_eq!(unsafe { libc_mkfifo(c.as_ptr(), 0o600) }, 0);
+    let watch = OpenWatch::new(&[&other, &pipe]);
+    let o = join(&work, &[&md, &input]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(!watch.opened(), "a non-input file was opened");
+    let book = joined_book(&o, &work);
+    let es = entries(&book);
+    assert_eq!(images(&es).len(), 1);
+    let ch = chapters(&es);
+    assert!(ch[0].1.contains("plain") && ch[0].1.contains("pipe"));
+    assert_eq!(ch[0].1.matches("<img ").count(), 1, "{}", ch[0].1);
+    assert_eq!(lines(&out, "warn").len(), 1, "{out}");
+}
+
+/// An input with a non-UTF-8 path is skipped before anything opens it,
+/// image or document, as in every other action.
+#[test]
+fn join_non_utf8_path_is_skipped_unread() {
+    let (root, work) = workdir("join-badpath");
+    let md = root.join("a.md");
+    fs::write(&md, "# A\n").unwrap();
+    let bad = root.join(OsStr::from_bytes(b"bad\xff.png"));
+    fs::write(&bad, png(5)).unwrap();
+    let watch = OpenWatch::new(&[&bad]);
+    let o = join(&work, &[&md, &bad]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(!watch.opened(), "the non-UTF-8 input was opened");
+    let skip = lines(&out, "skip");
+    assert_eq!(skip.len(), 1, "{out}");
+    assert_eq!(skip[0][2], "non-UTF-8 path");
+    assert_eq!(takes(&o), [md.to_str().unwrap()]);
+}
+
+/// A colon in a file name is not a URL scheme: `a:b.png` (one letter
+/// before the colon) is a sibling image like any other.
+#[test]
+fn colon_in_file_name_is_a_local_image() {
+    let (root, work) = workdir("join-colon");
+    let md = root.join("a.md");
+    fs::write(&md, "![colon](a:b.png)\n").unwrap();
+    let img = root.join("a:b.png");
+    fs::write(&img, png(6)).unwrap();
+    let o = join(&work, &[&md, &img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let book = joined_book(&o, &work);
+    let ch = chapters(&entries(&book));
+    assert_eq!(ch.len(), 1, "referenced, so no Images chapter");
+    assert!(ch[0].1.contains("src=\"img/0001.png\""), "{}", ch[0].1);
+}
+
+/// `lines` lines of `- a`, three nodes each (list item, paragraph, text):
+/// a node-dense document of `4 * lines` bytes.
+fn dense(path: &Path, lines: usize) {
+    fs::write(path, "- a\n".repeat(lines)).unwrap();
+}
+
+/// The documents of one book share one document budget: two documents
+/// that each fit it but together pass its 524,288 nodes fail the whole
+/// book loudly (no file, every input it would take fails, the image too);
+/// together under it they join.
+#[test]
+fn documents_share_one_budget() {
+    let (root, work) = workdir("join-budget");
+    let dir = root.join("dense");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b, img) = (dir.join("a.md"), dir.join("b.md"), dir.join("p.png"));
+    // 100,000 items: ~300,000 nodes each, 600,000 together.
+    dense(&a, 100_000);
+    dense(&b, 100_000);
+    fs::write(&img, png(7)).unwrap();
+    let o = join(&work, &[&a, &b, &img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty() && lines(&out, "take").is_empty());
+    let fails = lines(&out, "fail");
+    let failed: Vec<&str> = fails.iter().map(|f| f[1]).collect();
+    assert_eq!(
+        failed,
+        [
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            img.to_str().unwrap()
+        ],
+        "{out}"
+    );
+    assert!(
+        fails
+            .iter()
+            .all(|f| f[2] == "book is too large (documents exceed the document budget together)"),
+        "{out}"
+    );
+    assert!(!work.join("join/out.epub").exists());
+
+    // Each alone fits: the same document is a book of its own.
+    let work1 = root.join("work1");
+    fs::create_dir_all(&work1).unwrap();
+    let o = join(&work1, &[&b]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+
+    // 80,000 items each: ~480,000 nodes together, under the budget.
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    dense(&a, 80_000);
+    dense(&b, 80_000);
+    let o = join(&work2, &[&a, &b, &img]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    assert_eq!(takes(&o).len(), 3);
+    joined_book(&o, &work2);
+}
+
+/// A document past the node budget on its own fails alone when nothing was
+/// spent before it, and the rest still join; after a document that spent
+/// some of the shared budget, it fails the book.
+#[test]
+fn document_over_the_budget_alone() {
+    let (root, work) = workdir("join-alone");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (big, small) = (dir.join("a.md"), dir.join("b.md"));
+    // 180,000 items: ~540,000 nodes, past 524,288 on its own.
+    dense(&big, 180_000);
+    fs::write(&small, "# Small\n").unwrap();
+    let o = join(&work, &[&big, &small]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 1, "{out}");
+    assert_eq!(fails[0][1], big.to_str().unwrap());
+    assert!(fails[0][2].contains("too many text elements"), "{out}");
+    assert_eq!(takes(&o), [small.to_str().unwrap()]);
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = join(&work2, &[&small, &big]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert_eq!(lines(&out, "fail").len(), 2, "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+}
+
+/// Items of a document of exactly the node budget (524,288): the list is
+/// one node, each item three, and a closing thematic break one more.
+const BUDGET_ITEMS: usize = 174_762;
+
+/// After a document that left no node, a document of only blank lines
+/// fails the book (it could be parsed without a node, but fails closed),
+/// while an empty file still joins; a document at the budget alone joins.
+#[test]
+fn spent_budget_admits_only_an_empty_file() {
+    let (root, work) = workdir("join-spent");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, blank, empty) = (dir.join("a.md"), dir.join("b.md"), dir.join("c.md"));
+    fs::write(&a, format!("{}\n***\n", "- a\n".repeat(BUDGET_ITEMS))).unwrap();
+    fs::write(&blank, "\n\n").unwrap();
+    fs::write(&empty, "").unwrap();
+
+    let o = join(&work, &[&a, &blank]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(lines(&out, "joined").is_empty(), "{out}");
+    assert_eq!(lines(&out, "fail").len(), 2, "{out}");
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let o = join(&work2, &[&a, &empty]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert_eq!(takes(&o), [a.to_str().unwrap(), empty.to_str().unwrap()]);
+    joined_book(&o, &work2);
+}
+
+/// Progress is the share of inputs passed, exactly: 0, then k/n.
+#[test]
+fn join_progress_counts_the_inputs() {
+    let (root, work) = workdir("join-progress");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    fs::write(&a, "# A\n").unwrap();
+    fs::write(&b, "# B\n").unwrap();
+    let o = join(&work, &[&a, &b]);
+    let out = stdout(&o);
+    let p: Vec<&str> = lines(&out, "progress").iter().map(|f| f[1]).collect();
+    assert_eq!(p, ["0", "0.5", "1"], "{out}");
+}
+
+/// The identifier follows the content of every input, not only its size
+/// or its name.
+#[test]
+fn join_identifier_follows_the_inputs() {
+    let identifier = |text: &str, k: usize| {
+        let (root, work) = workdir(&format!("join-id{k}"));
+        let dir = root.join("d");
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+        fs::write(&a, text).unwrap();
+        fs::write(&b, "# B\n").unwrap();
+        let o = join(&work, &[&a, &b]);
+        let es = entries(&joined_book(&o, &work));
+        let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+        let from = opf.find("<dc:identifier").unwrap();
+        let to = opf.find("</dc:identifier>").unwrap();
+        opf[from..to].to_string()
+    };
+    let (x, y, z) = (
+        identifier("# A1\n", 0),
+        identifier("# A2\n", 1),
+        identifier("# A1\n", 2),
+    );
+    assert_eq!(x, z);
+    assert_ne!(x, y);
+}
+
+/// The book is as old as its newest document.
+#[test]
+fn join_modified_is_the_newest_input() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let (root, work) = workdir("join-mtime");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    for (p, secs) in [(&a, 1_700_000_000u64), (&b, 1_000_000_000)] {
+        fs::write(p, "# T\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+    let o = join(&work, &[&a, &b]);
+    let es = entries(&joined_book(&o, &work));
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(
+        opf.contains(">2023-11-14T22:13:20Z</meta>"),
+        "newest of the two: {opf}"
+    );
+}
+
+/// An image is an input too: a newer image makes the book newer than its
+/// documents.
+#[test]
+fn join_modified_counts_the_images() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let (root, work) = workdir("join-mtime-image");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, img) = (dir.join("a.md"), dir.join("pic.png"));
+    fs::write(&a, "# T\n").unwrap();
+    fs::write(&img, png(7)).unwrap();
+    for (p, secs) in [(&a, 1_000_000_000u64), (&img, 1_700_000_000)] {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+    let o = join(&work, &[&a, &img]);
+    let es = entries(&joined_book(&o, &work));
+    let opf = String::from_utf8(entry(&es, "OEBPS/content.opf").to_vec()).unwrap();
+    assert!(
+        opf.contains(">2023-11-14T22:13:20Z</meta>"),
+        "the newer image sets the date: {opf}"
+    );
+}
+
+/// A document over the input limit and one that cannot be read fail with
+/// their own reasons; a non-text file is a `skip`, and a join that took
+/// nothing and failed nothing exits 3.
+#[test]
+fn join_failure_reasons_and_exit_codes() {
+    let (root, work) = workdir("join-reasons");
+    let dir = root.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let (a, big, gone) = (dir.join("a.md"), dir.join("big.md"), dir.join("gone.md"));
+    fs::write(&a, "# A\n").unwrap();
+    fs::write(&big, vec![b'x'; (8 << 20) + 1]).unwrap();
+    let o = join(&work, &[&a, &big, &gone]);
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 2, "{out}");
+    assert_eq!(fails[0][1], big.to_str().unwrap());
+    assert_eq!(fails[0][2], "This text file is larger than 8 MiB.");
+    assert_eq!(fails[1][1], gone.to_str().unwrap());
+    assert!(fails[1][2].contains("No such file"), "{out}");
+
+    let work2 = root.join("work2");
+    fs::create_dir_all(&work2).unwrap();
+    let bin = dir.join("bin.md");
+    fs::write(&bin, [0xffu8, 0xfe, 0, 1, 2]).unwrap();
+    let o = join(&work2, &[&bin]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(3), "{out}");
+    assert_eq!(lines(&out, "skip").len(), 1, "{out}");
+    assert!(lines(&out, "fail").is_empty(), "{out}");
+    assert!(!work2.join("join").exists());
+}
+
+/// A damaged image says so, and a header past the pixel limit says that.
+#[test]
+fn join_image_failure_reasons() {
+    let (root, work) = workdir("join-imgreasons");
+    let md = root.join("a.md");
+    fs::write(&md, "# A\n").unwrap();
+    let (cut, wide) = (root.join("cut.png"), root.join("wide.png"));
+    let mut bytes = png(1);
+    bytes.truncate(20);
+    fs::write(&cut, bytes).unwrap();
+    fs::write(
+        &wide,
+        testzip::png(20_000, 20_000, 2, None, false, false, &[]),
+    )
+    .unwrap();
+    let o = join(&work, &[&md, &cut, &wide]);
+    let out = stdout(&o);
+    let fails = lines(&out, "fail");
+    assert_eq!(fails.len(), 2, "{out}");
+    assert_eq!(fails[0][2], "damaged image data", "{out}");
+    assert_eq!(fails[1][2], "image is larger than 180 megapixels", "{out}");
+}
+
+/// A destination that looks like a URL or an absolute path is no local
+/// file, even when a file of that name is an input: `http://x/y.png` is
+/// not the folder `http:` and `%2F…` is not the root.
+#[test]
+fn urls_and_encoded_absolute_paths_are_not_files() {
+    let (root, work) = workdir("join-notlocal");
+    let md = root.join("a.md");
+    let url_dir = root.join("http:/example.com");
+    fs::create_dir_all(&url_dir).unwrap();
+    let (url_img, abs_img) = (url_dir.join("y.png"), root.join("k.png"));
+    fs::write(&url_img, png(1)).unwrap();
+    fs::write(&abs_img, png(2)).unwrap();
+    let abs = format!("%2F{}", abs_img.to_str().unwrap().trim_start_matches('/'));
+    fs::write(
+        &md,
+        format!("![url](http://example.com/y.png)\n\n![abs]({abs})\n"),
+    )
+    .unwrap();
+    let o = join(&work, &[&md, &url_img, &abs_img]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let es = entries(&joined_book(&o, &work));
+    let ch = chapters(&es);
+    // The inputs are in the book, but the document shows alt text only.
+    assert_eq!(images(&es).len(), 2);
+    assert_eq!(ch[0].1.matches("<img ").count(), 0, "{}", ch[0].1);
+    assert!(ch[0].1.contains("url") && ch[0].1.contains("abs"));
 }

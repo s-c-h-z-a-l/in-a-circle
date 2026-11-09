@@ -1,0 +1,2 @@
+incriacle-st 0
+action	text.md-ltext	in=text/markdown,text/x-marinacirc,aa-teclogmage/jpeg,imageA/png	out=apatch=yes	join=yes	min=2

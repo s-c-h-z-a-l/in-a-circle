@@ -1,0 +1,2 @@
+inacircle-manifest 5
+action	text.md-jin-epub	family=text	in=tem!gext/x-maage	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=dotch=yes	join=yes	min=2

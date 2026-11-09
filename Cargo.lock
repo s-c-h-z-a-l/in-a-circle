@@ -160,6 +160,9 @@ dependencies = [
  "epub",
  "libc",
  "manifest",
+ "probe",
+ "testzip",
+ "zip",
 ]
 
 [[package]]

@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	tely=text	in=text/markdown	assets=image/jpeg,image%pngpeg,image/png	o0	losel=Eh=yes	join=yes	min=1

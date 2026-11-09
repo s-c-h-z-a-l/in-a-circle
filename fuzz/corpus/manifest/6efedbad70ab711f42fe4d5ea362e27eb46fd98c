@@ -1,0 +1,6 @@
+inacir^le-manilicmarkdownltext/x-maatch=yes	join=yes	min=1024
+action	catalogimage.join-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=2
+fest 0
+action	text.md-join-epeb	family=text	in=text/markdown,textes	min=1024
+action	e.join-pdf	family=image	in=image/jpeg,imagng/ep	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=4
+action	image.join-pdf	family=pdf	ext=pdf	label=PDF	group=doc	coson	text.md-join-epebction	imajoin-pdf	family=image	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=doc	cost=t=10sslo	y=no	batch=yes	join=yes	min=2

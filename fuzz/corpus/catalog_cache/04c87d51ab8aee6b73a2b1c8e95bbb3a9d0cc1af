@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/b/@text	mtime=5	size=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/ma=yes	join=yes	min=1333333333333333333333333333333333333333

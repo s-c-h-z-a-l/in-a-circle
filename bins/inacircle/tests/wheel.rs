@@ -746,6 +746,152 @@ fn wheel_offers_and_runs_md_to_epub() {
     assert_one_group_and_undo(&root, "jegyzet", "jegyzet.epub");
 }
 
+/// Fixture of the Markdown-and-images wheel tests: the real text and pages
+/// actions (both primed into the catalog cache), and in `f/Utazás` two
+/// Markdown files (the first referencing `1.png`), three images, a text
+/// file and a CBZ. Returns the folder, the dropped list and the paths.
+fn md_images_fixture(root: &Root, with_pages: bool) -> (PathBuf, Vec<u8>, Vec<PathBuf>) {
+    let rows: Vec<u8> = (0..8).flat_map(|_| [0u8; 9]).collect();
+    let png = testzip::png(8, 8, 0, None, false, false, &rows);
+    let jpg_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/probe/tests/data/rgb.jpg");
+    let jpg = fs::read(&jpg_path).unwrap();
+    let cbz = testzip::zip(&[(b"p1.png", &png, testzip::Store::Stored)]);
+    root.real_action_cached("inacircle-pages", ("primer.png", &png), "pdf");
+    root.real_action_cached("inacircle-text", ("primer.md", b"# x\n"), "epub");
+    let dir = root.0.join("f/Utazás");
+    fs::create_dir_all(&dir).unwrap();
+    let mut list = Vec::new();
+    let mut paths = Vec::new();
+    let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+    if with_pages {
+        files.push(("a.md", "# Első\n\n![kép](1.png)\n".as_bytes().to_vec()));
+        files.push(("b.md", "# Második\n\nSzöveg.\n".as_bytes().to_vec()));
+    }
+    files.push(("1.png", png.clone()));
+    files.push(("2.jpg", jpg));
+    files.push(("3.png", png));
+    if with_pages {
+        files.push(("jegyzet.txt", b"nem konyv resz\n".to_vec()));
+        files.push(("regeny.cbz", cbz));
+    }
+    for (name, data) in files {
+        let p = dir.join(name);
+        fs::write(&p, data).unwrap();
+        list.extend_from_slice(format!("file://{}\r\n", p.display()).as_bytes());
+        paths.push(p);
+    }
+    (dir, list, paths)
+}
+
+/// Real `inacircle-text` on the wheel with a mixed selection: two Markdown
+/// files, three images, a text file and a CBZ are dropped. The wheel's
+/// offer is Book with an EPUB slice in the east that counts the documents
+/// and the images (`5 / 7 files`; the text file and the CBZ stay out);
+/// clicking it writes one book in the Markdown files' folder (not a folder
+/// of the images), as one history group that Undo trashes.
+#[test]
+fn wheel_md_and_images_to_epub() {
+    let root = Root::new("md-img-epub");
+    let (dir, list, paths) = md_images_fixture(&root, true);
+    let before: Vec<Vec<u8>> = paths.iter().map(|p| fs::read(p).unwrap()).collect();
+    // The offer the wheel draws from: the EPUB slice is lit under Book.
+    let offer = root.cmd().arg("offer").args(&paths).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(
+        offer.contains("slice\tgroup=book\tdir=2\tpreset=epub\tlabel=EPUB\tapplicable=5"),
+        "{offer}"
+    );
+    assert!(offer.contains("hub\t5 / 7 files"), "{offer}");
+    // Book is east of the center, EPUB is its east slice.
+    let code = choose_on_the_wheel(&root, &list, (1110, 540), (1110, 540));
+    assert_eq!(code, Some(0));
+    let book = fs::read(dir.join("Utazás/Utazás.epub")).expect("no EPUB written");
+    assert!(book.starts_with(b"PK\x03\x04"));
+    let has = |n: &str| book.windows(n.len()).any(|w| w == n.as_bytes());
+    assert!(has("OEBPS/img/0001.png"), "the referenced image");
+    assert!(has("OEBPS/img/0002.jpg"), "the unreferenced image");
+    assert!(has("OEBPS/img/0003.png"), "the third image");
+    assert!(!has("OEBPS/img/0004"), "no fourth image");
+    assert!(
+        !dir.join("1/1.epub").exists() && !dir.join("regeny").exists(),
+        "no book in an image's or the CBZ's folder"
+    );
+    let after: Vec<Vec<u8>> = paths.iter().map(|p| fs::read(p).unwrap()).collect();
+    assert_eq!(before, after, "an input changed");
+    // One group in the history; Undo trashes the book's wrapper folder
+    // (named after the Markdown files' folder, inside it).
+    let history = fs::read_to_string(root.0.join("state/inacircle/history")).unwrap();
+    assert_eq!(
+        history
+            .lines()
+            .filter(|l| l.starts_with("group-begin\t"))
+            .count(),
+        1,
+        "{history}"
+    );
+    let job = history
+        .lines()
+        .find(|l| l.starts_with("job-start\t"))
+        .and_then(|l| l.split('\t').find_map(|f| f.strip_prefix("job=")))
+        .unwrap_or_else(|| panic!("no job in {history}"));
+    let u = root.cmd().args(["undo", job]).output().unwrap();
+    assert!(u.status.success(), "{u:?}");
+    assert!(!dir.join("Utazás").exists(), "the wrapper stayed");
+    assert!(
+        root.0
+            .join("home/.local/share/Trash/files/Utazás/Utazás.epub")
+            .is_file()
+    );
+}
+
+/// Images alone have no EPUB: Book still lights (PDF and CBZ), but its
+/// east slice is not offered, so a click there changes nothing and the
+/// wheel stays open.
+#[test]
+fn wheel_images_alone_have_no_epub() {
+    let root = Root::new("img-no-epub");
+    let (dir, list, paths) = md_images_fixture(&root, false);
+    let offer = root.cmd().arg("offer").args(&paths).output().unwrap();
+    let offer = String::from_utf8_lossy(&offer.stdout).into_owned();
+    assert!(offer.contains("preset=pdf"), "{offer}");
+    assert!(
+        !offer.contains("preset=epub"),
+        "images alone offer no EPUB: {offer}"
+    );
+    let (mut c, mut child) = start(&root, false);
+    c.seat_caps(POINTER | KEYBOARD);
+    c.seat_devices(POINTER | KEYBOARD, Duration::from_secs(2));
+    c.pointer_enters();
+    drag_to_category(&mut c, &list, (1110, 540));
+    // As in `choose_on_the_wheel`: past the second-click guard.
+    c.pump(Duration::from_millis(300));
+    c.release_held();
+    c.pointer_motion(1110, 540);
+    c.pump(Duration::from_millis(50));
+    c.pointer_button(0x110);
+    // Nothing to run: the wheel is still up half a second later (a click
+    // on a slice would have closed it within the 20 s of the other tests).
+    c.pump(Duration::from_millis(500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the click on an empty east slice closed the wheel"
+    );
+    // Liveness: the wheel really is in stage 2. A click on the lit PDF
+    // slice (north) runs and closes it, and no book appears anywhere.
+    c.pointer_motion(960, 390);
+    c.pump(Duration::from_millis(50));
+    c.pointer_button(0x110);
+    assert!(
+        c.hangs_up(Duration::from_secs(20)).is_ok(),
+        "the click on PDF never closed the wheel"
+    );
+    let st = wait_exit(&mut child, Duration::from_secs(20));
+    assert_eq!(st.code(), Some(0));
+    assert!(dir.join("Utazás/Utazás.pdf").is_file(), "no PDF written");
+    assert!(!dir.join("Utazás/Utazás.epub").exists(), "an EPUB appeared");
+}
+
 /// The same with HTML: Document (north), its east slice HTML.
 #[test]
 fn wheel_offers_and_runs_md_to_html() {

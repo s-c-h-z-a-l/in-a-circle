@@ -458,3 +458,47 @@ fn md_fenced_code_output_budget_is_exact() {
         );
     }
 }
+
+/// Documents read in turn under one shared budget: each read spends its
+/// nodes and owned text from what is left, so together they never pass the
+/// budget they started with, though each alone fits it.
+#[test]
+fn read_spending_shares_one_budget() {
+    use doc::Dialect;
+    let a = b"# One\n\n- a\n- b\n\n*x* and `y`\n";
+    let b = b"Two [link](u) and **z**\n\n> q\n";
+    // What each document spends alone.
+    let spent = |src: &[u8]| {
+        let mut left = ALL;
+        let d = md::read_spending(src, &mut left, Dialect::Gfm).unwrap();
+        assert_eq!(d, md::read_limited_with(src, ALL, Dialect::Gfm).unwrap());
+        (ALL.nodes - left.nodes, ALL.text_bytes - left.text_bytes)
+    };
+    let (an, at) = spent(a);
+    let (bn, bt) = spent(b);
+    assert!(an > 0 && bn > 0 && at > 0 && bt > 0);
+
+    // Exactly the sum: both fit, nothing is left.
+    let mut left = lim(|l| {
+        l.nodes = an + bn;
+        l.text_bytes = at + bt;
+    });
+    md::read_spending(a, &mut left, Dialect::Gfm).unwrap();
+    md::read_spending(b, &mut left, Dialect::Gfm).unwrap();
+    assert_eq!((left.nodes, left.text_bytes), (0, 0));
+
+    // One node short of the sum: the second fails, though alone it fits,
+    // and the failed read spends nothing.
+    let short = lim(|l| l.nodes = an + bn - 1);
+    assert!(bn <= short.nodes);
+    let mut left = short;
+    md::read_spending(a, &mut left, Dialect::Gfm).unwrap();
+    let before = left;
+    exceeded(md::read_spending(b, &mut left, Dialect::Gfm), "nodes");
+    assert_eq!(left, before);
+
+    // The same for owned text.
+    let mut left = lim(|l| l.text_bytes = at + bt - 1);
+    md::read_spending(a, &mut left, Dialect::Gfm).unwrap();
+    exceeded(md::read_spending(b, &mut left, Dialect::Gfm), "owned text");
+}

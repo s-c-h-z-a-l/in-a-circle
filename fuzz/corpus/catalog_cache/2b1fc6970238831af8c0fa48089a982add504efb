@@ -1,0 +1,32 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,text/x-markdown	assets=imageossy=no	batch=yes	join=yes	mige/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	on	j.a	family=f	in=text/markdown,text/x-markdown	assets=imageossy=no	batch=yes	join=yes	mige/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/yes	mige/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epubbatch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	ba	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epubmily=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	eabel=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=ssy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ex/png	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	ba	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1pplication/epub+zipext=epub	label=L	group=g	cost=1lossy=no	batch=yes	join=yes	min=1024
+action	j.b	family=f	in=text/markdown	tasess=image/png	out=application/epub+zip	ext=epub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=n=1024
+action	j.b	family=f	in=text/markdown	tasess=imagepub	label=L	group=g	cost=1	lossy=n~	batch=yes
+action	j.a	family=f	in=text/plain	out=application/pdf	ext=pdf	label=L	group=g	cost=1	lossy=no	basch=no	batch=ye

@@ -1,0 +1,4 @@
+inacircircle-!ma\nifet 0
+action	text.md-join-epubf	amily=text	in=text/markdown,text/x-markdown	assets=image+jpeg,image/pngch=yes	join=yes	min=10124
+action	image.join-pdf	family=image	in=image/jptlossy=no	batce=yes	join=yes	min=10124
+action	ction	text.md-joinbatch=yes	join=yes	min=2

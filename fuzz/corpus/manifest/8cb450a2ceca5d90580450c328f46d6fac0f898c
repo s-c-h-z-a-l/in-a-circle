@@ -1,0 +1,6 @@
+inac`rc=6===============inacircle-manifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=is=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10let 	lossy=yes	batch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	family=text	in=text/markdown,text/x-markdown	assets=iatch=yes	join=yes	min=1024
+actiifest 0
+action	text.md-join-epub	familf	ext=pdyes	min=2

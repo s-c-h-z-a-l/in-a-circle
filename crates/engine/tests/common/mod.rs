@@ -111,6 +111,7 @@ pub fn join_action(bin: &Path, min: u32) -> Action {
         join: Some(Join {
             types: vec!["image/jpeg".into(), "image/png".into()],
             min,
+            assets: Vec::new(),
         }),
         ..action(bin, "pdf")
     }
@@ -127,9 +128,19 @@ pub fn join_then(extra: &str) -> String {
     format!("{JOIN_ALL}\n{extra}")
 }
 
-/// Runs the join action `act` on `inputs`; with `cancel_after`, a SIGTERM
-/// is sent to this thread after that long.
+/// Runs the join action `act` on `inputs` (documents only); with
+/// `cancel_after`, a SIGTERM is sent to this thread after that long.
 pub fn run_join(act: &Action, inputs: &[PathBuf], cancel_after: Option<Duration>) -> (Ran, Report) {
+    run_join_assets(act, inputs, &[], cancel_after)
+}
+
+/// [`run_join`] with `assets` beside the documents.
+pub fn run_join_assets(
+    act: &Action,
+    inputs: &[PathBuf],
+    assets: &[PathBuf],
+    cancel_after: Option<Duration>,
+) -> (Ran, Report) {
     let tok = CancelToken::install().unwrap();
     // SAFETY: pthread_self has no preconditions.
     let me = unsafe { libc::pthread_self() } as usize;
@@ -142,7 +153,7 @@ pub fn run_join(act: &Action, inputs: &[PathBuf], cancel_after: Option<Duration>
         })
     });
     let mut obs = Ran::default();
-    let report = exec::run_join(act, inputs.to_vec(), &mut obs, &tok);
+    let report = exec::run_join(act, inputs.to_vec(), assets.to_vec(), &mut obs, &tok);
     if let Some(h) = sent {
         h.join().unwrap();
     }

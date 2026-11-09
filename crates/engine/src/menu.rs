@@ -92,6 +92,7 @@ pub const PRESETS: &[Preset] = &[
         group: "book",
         join: &[],
     },
+    // Many Markdown files (with the images they use) join into one book.
     Preset {
         id: "epub",
         input: Some("text/markdown"),
@@ -99,7 +100,7 @@ pub const PRESETS: &[Preset] = &[
         label: "EPUB",
         direction: 2,
         group: "book",
-        join: &[],
+        join: &["text/markdown"],
     },
     Preset {
         id: "pdf",
@@ -239,11 +240,38 @@ fn count_of<'t>(tally: &Tally, types: impl IntoIterator<Item = &'t str>) -> usiz
     types.into_iter().map(|m| tally.of(m).0).sum()
 }
 
-/// Files `a` would take from `tally`, as a join action.
+/// Files `a` would take from `tally`, as a join action: `(documents,
+/// assets)`. Assets count only beside a document: alone they never make a
+/// run.
+fn join_parts(a: &Action, tally: &Tally) -> (usize, usize) {
+    let Some(j) = &a.join else {
+        return (0, 0);
+    };
+    let docs = count_of(tally, j.types.iter().map(String::as_str));
+    let assets = if docs > 0 {
+        count_of(tally, j.assets.iter().map(String::as_str))
+    } else {
+        0
+    };
+    (docs, assets)
+}
+
+/// Files `a` would take from `tally`, as a join action: its documents and
+/// the assets beside them.
 fn join_count(a: &Action, tally: &Tally) -> usize {
-    a.join
-        .as_ref()
-        .map_or(0, |j| count_of(tally, j.types.iter().map(String::as_str)))
+    let (docs, assets) = join_parts(a, tally);
+    docs + assets
+}
+
+/// The most files any join action of `p` could take, if it were runnable:
+/// the preset's join set, or a candidate's documents and assets. A
+/// candidate counts its whole type set, beyond the preset's set too, so a
+/// disabled join shows what [`choose`] would give it once runnable. Type
+/// checks only.
+fn raw_join(cat: &Catalog, p: &Preset, tally: &Tally) -> usize {
+    join_candidates(cat, p)
+        .map(|a| join_count(a, tally))
+        .fold(count_of(tally, p.join.iter().copied()), usize::max)
 }
 
 /// The join actions of a preset: they accept every type of the preset's
@@ -260,25 +288,45 @@ fn join_candidates<'c>(cat: &'c Catalog, p: &Preset) -> impl Iterator<Item = &'c
 }
 
 /// The runnable join action of a preset, cheapest first (id breaks ties),
-/// with the files it takes. The cheap checks (type set, a file of its types
-/// in the selection) come before `missing_tools`, which stats `PATH`: this
-/// runs on the drop to stage-2 path.
-fn join_action<'c>(cat: &'c Catalog, p: &Preset, tally: &Tally) -> Option<(&'c Action, usize)> {
-    if !join_candidates(cat, p).any(|a| join_count(a, tally) > 0) {
+/// with the documents and assets it takes. The cheap checks (type set, a
+/// document of its types in the selection) come before `missing_tools`,
+/// which stats `PATH`: this runs on the drop to stage-2 path.
+fn join_action<'c>(
+    cat: &'c Catalog,
+    p: &Preset,
+    tally: &Tally,
+) -> Option<(&'c Action, usize, usize)> {
+    if !join_candidates(cat, p).any(|a| join_parts(a, tally).0 > 0) {
         return None;
     }
     let a = join_candidates(cat, p)
         .filter(|a| missing_tools(a).is_empty())
         .min_by(|a, b| (a.cost, &a.id).cmp(&(b.cost, &b.id)))?;
-    let n = join_count(a, tally);
+    let (docs, assets) = join_parts(a, tally);
     let min = a.join.as_ref().map_or(0, |j| j.min);
-    (n > 0 && n >= usize::try_from(min).unwrap_or(usize::MAX)).then_some((a, n))
+    (docs > 0 && docs >= usize::try_from(min).unwrap_or(usize::MAX)).then_some((a, docs, assets))
+}
+
+/// Whether the join action `a`, taking `docs` documents and `assets`
+/// assets, wins over a 1:1 route that takes `one` files. A join without
+/// assets wins only on more files: on a tie the 1:1 route keeps the files
+/// apart. A join with assets (a book of documents and their images) wins
+/// whenever it makes something one file cannot: two or more documents, or
+/// a document with an asset, unless the 1:1 route takes more files; one
+/// document alone keeps its 1:1 form.
+fn join_wins(a: &Action, one: usize, docs: usize, assets: usize) -> bool {
+    let n = docs + assets;
+    if a.join.as_ref().is_some_and(|j| !j.assets.is_empty()) {
+        (docs >= 2 || (docs >= 1 && assets >= 1)) && n >= one
+    } else {
+        n > one
+    }
 }
 
 /// What a preset runs for a selection and for how many of its files, `None`
-/// when it cannot run. The 1:1 route and the join action compete on how many
-/// files each takes; on a tie the 1:1 route wins (it keeps the files apart).
-/// A join action needs at least its `min` files. The one source of truth for
+/// when it cannot run. The 1:1 route and the join action compete as
+/// [`join_wins`] says. A join action needs at least its `min` documents;
+/// its count is its documents and assets. The one source of truth for
 /// "applicable": the wheel, the offer and the run all ask it.
 pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(Choice<'c>, usize)> {
     let (one, route) = match preset.input {
@@ -289,19 +337,21 @@ pub fn choose<'c>(cat: &'c Catalog, preset: &Preset, tally: &Tally) -> Option<(C
     };
     let join = join_action(cat, preset, tally);
     match (route, join) {
-        (Some(r), Some((_, n))) if one >= n => Some((Choice::Route(r), one)),
-        (_, Some((a, n))) => Some((Choice::Join(a), n)),
+        (Some(r), Some((a, docs, assets))) if !join_wins(a, one, docs, assets) => {
+            Some((Choice::Route(r), one))
+        }
+        (_, Some((a, docs, assets))) => Some((Choice::Join(a), docs + assets)),
         (Some(r), None) => Some((Choice::Route(r), one)),
         (None, None) => None,
     }
 }
 
 /// How many files a preset could take if something were installed: the 1:1
-/// input or the join set, whichever has more, and the name of the first such
-/// file with the type to group presets by.
-fn raw_source<'t>(p: &Preset, tally: &'t Tally) -> (usize, &'t str, &'static str) {
+/// input or the join side ([`raw_join`]), whichever has more, and the name
+/// of the first such file with the type to group presets by.
+fn raw_source<'t>(cat: &Catalog, p: &Preset, tally: &'t Tally) -> (usize, &'t str, &'static str) {
     let (one, one_name) = p.input.map_or((0, ""), |i| tally.of(i));
-    let join = count_of(tally, p.join.iter().copied());
+    let join = raw_join(cat, p, tally);
     if join > one {
         let name = tally
             .types
@@ -320,7 +370,7 @@ fn disabled_reason(cat: &Catalog, p: &Preset, tally: &Tally) -> Option<String> {
         return None;
     }
     // The side the files are on: the join set when it has more files.
-    if count_of(tally, p.join.iter().copied()) > p.input.map_or(0, |i| tally.of(i).0) {
+    if raw_join(cat, p, tally) > p.input.map_or(0, |i| tally.of(i).0) {
         let mut joins = join_candidates(cat, p).peekable();
         if joins.peek().is_none() {
             return Some("no action installed".into());
@@ -419,7 +469,7 @@ fn offer_group_in(
     for p in presets.iter().filter(|p| p.group == g.id) {
         let applicable = match choose(cat, p, tally) {
             Some((_, n)) => n,
-            None => raw_source(p, tally).0,
+            None => raw_source(cat, p, tally).0,
         };
         let disabled = if applicable == 0 {
             Some("no matching file".to_owned())
@@ -518,7 +568,7 @@ pub fn offer_tally(cat: &Catalog, tally: &Tally) -> FlatOffer {
                 .map_or("", |t| t.2.as_str());
             (n, name, p.join[0])
         }
-        None => raw_source(p, tally),
+        None => raw_source(cat, p, tally),
     };
     // Most common source that has presets; ties: first preset order.
     let mut best: Option<(usize, &str, &str)> = None;
@@ -1080,6 +1130,7 @@ mod tests {
             j.join = Some(crate::catalog::Join {
                 types: vec!["image/jpeg".into(), "image/png".into()],
                 min: 1,
+                assets: Vec::new(),
             });
             actions.push(j);
         }
@@ -1117,6 +1168,7 @@ mod tests {
         j.join = Some(crate::catalog::Join {
             types: vec!["image/jpeg".into(), "image/png".into()],
             min: 1,
+            assets: Vec::new(),
         });
         cat.actions.push(j);
         cat
@@ -1354,6 +1406,187 @@ mod tests {
         assert_eq!(
             disabled_reason(&cat, pdf_preset(), &t).as_deref(),
             Some("no action installed")
+        );
+    }
+
+    const EPUB: &str = "application/epub+zip";
+    const MD: &str = "text/markdown";
+
+    /// The book catalog with the text family's EPUB actions: the 1:1 forms
+    /// from Markdown and plain text, and the Markdown join with images.
+    fn epub_catalog() -> Catalog {
+        let mut cat = book_catalog();
+        for (id, input) in [("text.md-to-epub", MD), ("text.txt-to-epub", "text/plain")] {
+            let mut a = act(id, input, EPUB, 10, true);
+            a.group = "book".into();
+            cat.actions.push(a);
+        }
+        let mut j = act("text.md-join-epub", MD, EPUB, 10, true);
+        j.group = "book".into();
+        j.batch = true;
+        j.join = Some(crate::catalog::Join {
+            types: vec![MD.into()],
+            min: 1,
+            assets: vec!["image/jpeg".into(), "image/png".into()],
+        });
+        cat.actions.push(j);
+        cat
+    }
+
+    fn epub_preset() -> &'static Preset {
+        PRESETS.iter().find(|p| p.id == "epub").unwrap()
+    }
+
+    /// The id of what the `epub` preset runs and for how many files.
+    fn epub_choice(cat: &Catalog, t: &Tally) -> Option<(String, usize)> {
+        choose(cat, epub_preset(), t).map(|(c, n)| match c {
+            Choice::Route(r) => (r[0].id.clone(), n),
+            Choice::Join(a) => (a.id.clone(), n),
+        })
+    }
+
+    /// The Book wheel's east slot (EPUB).
+    fn epub_slice(o: &Offer) -> &Slice {
+        o.slices[2].as_ref().unwrap()
+    }
+
+    #[test]
+    fn join_with_assets_wins_with_two_docs() {
+        let cat = epub_catalog();
+        // A tie on the files taken: the explicit rule, not the tie, decides.
+        let t = tally_of(&[many(MD, 2, "md")]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-join-epub".to_owned(), 2))
+        );
+        let o = offer_group(&cat, &t, "book");
+        let s = epub_slice(&o);
+        assert_eq!(
+            (s.preset, s.applicable, s.disabled.as_deref()),
+            ("epub", 2, None)
+        );
+        assert_eq!(o.hub, "Book", "all files apply");
+    }
+
+    #[test]
+    fn join_with_assets_wins_with_doc_and_image() {
+        let cat = epub_catalog();
+        let t = tally_of(&[many(MD, 1, "md"), many("image/png", 1, "png")]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-join-epub".to_owned(), 2))
+        );
+        let t = tally_of(&[many(MD, 1, "md"), many("image/jpeg", 4, "jpg")]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-join-epub".to_owned(), 5))
+        );
+        let o = offer_group(&cat, &t, "book");
+        assert_eq!(epub_slice(&o).applicable, 5);
+        // The plan-10 joins are untouched: the four images still join.
+        let s = pdf_slice(&o);
+        assert_eq!((s.applicable, s.disabled.as_deref()), (4, None));
+    }
+
+    #[test]
+    fn one_doc_alone_takes_the_one_to_one() {
+        let cat = epub_catalog();
+        let t = tally(&[("notes.md", MD)]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-to-epub".to_owned(), 1))
+        );
+        // A file of no asset type beside it changes nothing.
+        let t = tally_of(&[many(MD, 1, "md"), many("text/plain", 1, "txt")]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-to-epub".to_owned(), 1))
+        );
+        // Without the 1:1 action, the join runs the one document.
+        let mut cat = cat;
+        cat.actions.retain(|a| a.id != "text.md-to-epub");
+        let t = tally(&[("notes.md", MD)]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-join-epub".to_owned(), 1))
+        );
+    }
+
+    #[test]
+    fn images_alone_offer_no_epub() {
+        let cat = epub_catalog();
+        let t = tally_of(&[many("image/png", 3, "png"), many("image/jpeg", 2, "jpg")]);
+        assert!(choose(&cat, epub_preset(), &t).is_none());
+        let o = offer_group(&cat, &t, "book");
+        let s = epub_slice(&o);
+        assert_eq!(
+            (s.applicable, s.disabled.as_deref()),
+            (0, Some("no matching file"))
+        );
+        // PDF and CBZ stay.
+        assert_eq!(pdf_slice(&o).applicable, 5);
+        assert_eq!(o.slices[4].as_ref().unwrap().applicable, 5);
+        assert_eq!(o.hub, "Book");
+        // The flat offer has no EPUB slice at all.
+        let f = offer_tally(&cat, &t);
+        assert!(
+            f.groups
+                .iter()
+                .flat_map(|(_, o)| o.slices.iter().flatten())
+                .all(|s| s.preset != "epub" && s.preset != "epub-txt")
+        );
+        assert_eq!(f.hub, "5 / 5 files");
+    }
+
+    #[test]
+    fn hub_counts_docs_and_assets() {
+        let cat = Catalog {
+            actions: [epub_catalog().actions, two_way().actions].concat(),
+        };
+        let t = tally_of(&[
+            many(MD, 2, "md"),
+            many("image/png", 3, "png"),
+            many("text/plain", 1, "txt"),
+            many(CBZ, 1, "cbz"),
+        ]);
+        let o = offer_group(&cat, &t, "book");
+        let s = epub_slice(&o);
+        assert_eq!(
+            (s.preset, s.applicable, s.disabled.as_deref()),
+            ("epub", 5, None)
+        );
+        assert_eq!(o.hub, "5 / 7 files");
+        let f = offer_tally(&cat, &t);
+        assert_eq!(f.hub, "5 / 7 files");
+        let book = &f.groups.iter().find(|(g, _)| *g == "book").unwrap().1;
+        assert_eq!(epub_slice(book).preset, "epub");
+        assert_eq!(epub_slice(book).applicable, 5);
+    }
+
+    /// `min=` counts documents: images never make up the minimum.
+    #[test]
+    fn min_counts_documents() {
+        let mut cat = epub_catalog();
+        let j = cat.actions.iter_mut().find(|a| a.id == "text.md-join-epub");
+        j.unwrap().join.as_mut().unwrap().min = 2;
+        let t = tally_of(&[many(MD, 1, "md"), many("image/png", 5, "png")]);
+        // The join cannot run; the one document still has its 1:1 form.
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-to-epub".to_owned(), 1))
+        );
+        cat.actions.retain(|a| a.id != "text.md-to-epub");
+        assert!(choose(&cat, epub_preset(), &t).is_none());
+        let o = offer_group(&cat, &t, "book");
+        let s = epub_slice(&o);
+        assert_eq!(
+            (s.applicable, s.disabled.as_deref()),
+            (6, Some("needs more files"))
+        );
+        let t = tally_of(&[many(MD, 2, "md"), many("image/png", 5, "png")]);
+        assert_eq!(
+            epub_choice(&cat, &t),
+            Some(("text.md-join-epub".to_owned(), 7))
         );
     }
 

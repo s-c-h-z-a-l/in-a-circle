@@ -13,3 +13,8 @@ doc = { path = "../../crates/doc" }
 epub = { path = "../../crates/epub" }
 libc = "0.2"
 manifest = { path = "../../crates/manifest" }
+probe = { path = "../../crates/probe" }
+
+[dev-dependencies]
+testzip = { path = "../../tools/testzip" }
+zip = { path = "../../crates/zip" }

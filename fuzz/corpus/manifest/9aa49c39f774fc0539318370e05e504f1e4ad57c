@@ -1,0 +1,11 @@
+inacircle-manifest 0
+actio	cost=batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpe10le-c	lossy=atalog no	batch=yes	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+mipng	out=application/epub+ziinacircp	ext=PUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=imcge/jpeg,ima/pc	lossy=atalog no	batch=yes	join=no	eoin=ye
+s	
+min=2

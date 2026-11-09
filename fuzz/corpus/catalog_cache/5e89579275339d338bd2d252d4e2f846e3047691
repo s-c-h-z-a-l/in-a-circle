@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=0	size=7	builtin=yes
+action	j.a	family=f	in=text/mag	out=application/epub+zipext=epub	label=L	group=g	cost=1lossy=nobatcht=0	lossy=n	\natch=yesf	ext=pdf	label=L	group=g	cost=1	lossy=no	batch=yes	join=no

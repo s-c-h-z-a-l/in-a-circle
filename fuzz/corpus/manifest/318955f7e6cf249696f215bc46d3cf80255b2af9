@@ -1,0 +1,24 @@
+inacircle-manifest 0
+actioxt	in=text/sy=yes	batch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imagees	join=no	batch=yes	j0
+
+
+eoinacircle-historyt=application/epub+ziinacircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batchout=aprkdown	assets=image/jimage/ircp	ex#t=UB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	maRe	in=image/jpeg,imagees	join=no	batch=yes	j0
+
+ch=yes	join=yes	min=1024
+action	image.join-pdf	family=image	in=image/jpeg,imagees	join=no	batch=yes	j0
+
+
+eoinacircle-historyt=application/epub+ziinacircp	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batchout=aprkdown	assets=image/jimage/ircp	ex#t=UB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1024
+action	maRe	in=image/jpeg,imagees	join=no	batch=yes	j0
+
+
+eoin=ye
+s	
+UB	group=book	cepub+ziinacircp	ext=epub	label=EPUB	group=book	cost=1tch=yes	j0
+
+
+eoin=ye
+s	
+min=2

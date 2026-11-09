@@ -1,7 +1,9 @@
 #![no_main]
 //! `manifest::parse` and `parse_line` on arbitrary text: no panic, no hang.
 //! The input is whatever a plugin prints for `--manifest`, or the content of
-//! a cache or history file on the user's disk.
+//! a cache or history file on the user's disk. Each line is also taken as
+//! an `action` line by the engine, whose accepted actions must obey the
+//! action rules (join sets, assets, `min`).
 
 use libfuzzer_sys::fuzz_target;
 
@@ -30,4 +32,5 @@ fuzz_target!(|data: &[u8]| {
             let _ = manifest::write_line(&l);
         }
     }
+    engine::catalog::fuzz_parse_actions(text);
 });

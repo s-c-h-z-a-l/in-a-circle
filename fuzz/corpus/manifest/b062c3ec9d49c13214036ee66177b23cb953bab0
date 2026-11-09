@@ -1,0 +1,3 @@
+ina														alo+ 2
+										batch=yes	join=yes	min=1024
+action	im##age.join-pdf	family=image	in=imagey=yes									,ig	out=application/pff	ext=pdf	label=PDF	group=doc	cost=20	lossycatalogs=									ctnimayes	join=yes	min=2

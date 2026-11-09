@@ -1,0 +1,17 @@
+bc | def |ef |
+| --- | --- |
+ar | baz |
+bar
+
+bar |abc | def |
+| --- | --- |
+| --- | ,-- |
+| bar | baz |
+bar
+
+bar |abc | def |
+| --- | --- |
+| bar | baz |
+bar
+
+bar

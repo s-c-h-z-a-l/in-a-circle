@@ -1,0 +1,3 @@
+inacircle-catalog 1
+bin	path=ٝ/text	mtime=5	size=7	builtin=yes
+action	j.a	family=f	in=text/markdown,ao

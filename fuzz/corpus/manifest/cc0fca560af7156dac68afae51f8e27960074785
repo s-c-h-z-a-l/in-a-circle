@@ -1,0 +1,2 @@
+inacircle-manifest 0
+action	j.a	family=f	in=~ext/markdown	out=applicationp	ext=ep~b	label=L	group=g	cost=1	lossy=no	in=yes

@@ -1513,6 +1513,10 @@ fn cancel_end_to_end() {
     assert_eq!(mine[0].get("action"), Some("test.script"));
     assert_eq!(mine[0].get("pid"), Some(child.id().to_string().as_str()));
     assert!(mine[0].get("progress").is_some());
+    // The registry file records how many inputs the run has (`jobs`
+    // does not print it).
+    let entry = fs::read_to_string(e.root.join("runtime/inacircle/jobs").join(&id)).unwrap();
+    assert!(entry.split('\t').any(|f| f == "inputs=2"), "{entry}");
 
     // A running job cannot be undone.
     let u = e.run(&["undo", &id]);
@@ -1889,13 +1893,23 @@ const JOIN_ALL: &str = "work=$4; mkdir -p \"$work/join\"; : > \"$work/join/out.p
 
 /// [`join_plugin`] running `body` (`$4` the work dir, `$6` the input list).
 fn join_plugin_with(e: &Env, body: &str) {
+    join_plugin_line(
+        e,
+        "action\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1",
+        body,
+    );
+}
+
+/// [`join_plugin_with`] whose manifest has the one action `line` (as a
+/// `printf` format: tabs as `\\t`).
+fn join_plugin_line(e: &Env, line: &str, body: &str) {
     let src = e.root.join("joiner.src");
     fs::write(
         &src,
         format!(
             "#!/bin/sh\n\
              if [ \"$1\" = --manifest ]; then\n\
-             printf 'inacircle-manifest 0\\naction\\tp.images-to-pdf\\tfamily=p\\tin=image/jpeg,image/png\\tout=application/pdf\\text=pdf\\tlabel=PDF\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1\\n'\n\
+             printf 'inacircle-manifest 0\\n{line}\\n'\n\
              exit 0\nfi\n{body}\n"
         ),
     )
@@ -1950,6 +1964,41 @@ fn run_join_preset_publishes_one_result() {
     let mut want = b"\xff\xd8\xff\xe0 jpeg".to_vec();
     want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
     assert_eq!(fs::read(&done[0].1).unwrap(), want);
+    assert_eq!(
+        o.pairs("skip"),
+        [(e.files().join("c.txt"), "unsupported".to_owned())]
+    );
+}
+
+/// The epub preset runs a document join with its images: the action gets
+/// the Markdown file first, then the images in natural order; the result
+/// is named after the one document; a file of neither role is skipped.
+#[test]
+fn run_document_join_with_assets() {
+    let e = Env::with_actions("run-join-assets", &[]);
+    join_plugin_line(
+        &e,
+        "action\\tp.md-join-epub\\tfamily=p\\tin=text/markdown\\tassets=image/jpeg,image/png\\tout=application/epub+zip\\text=epub\\tlabel=EPUB\\tgroup=book\\tcost=10\\tlossy=yes\\tbatch=yes\\tjoin=yes\\tmin=1",
+        JOIN_ALL,
+    );
+    e.file("b.png", b"\x89PNG\r\n\x1a\n....");
+    e.file("notes.md", b"# Notes\n");
+    e.file("a.jpg", b"\xff\xd8\xff\xe0 jpeg");
+    e.file("c.txt", b"c\n");
+    let o = e.run(&["run", "epub", "b.png", "notes.md", "a.jpg", "c.txt"]);
+    if skip_no_sandbox("run_document_join_with_assets", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 1, 0));
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    let out = e.files().join("notes/notes.epub");
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let mut want = b"# Notes\n".to_vec();
+    want.extend_from_slice(b"\xff\xd8\xff\xe0 jpeg");
+    want.extend_from_slice(b"\x89PNG\r\n\x1a\n....");
+    assert_eq!(fs::read(&out).unwrap(), want);
     assert_eq!(
         o.pairs("skip"),
         [(e.files().join("c.txt"), "unsupported".to_owned())]
@@ -2286,4 +2335,107 @@ fn action_entry_marker_is_observed_once_and_absent_without_events() {
     // Without the switch, no marker line at all.
     let o = run_test_action(&e, &[&ok]);
     assert!(!o.stderr.contains("action_entry"), "{}", o.stderr);
+}
+
+/// Whether the ZIP `book` has an entry named `name`: entry names sit
+/// uncompressed in every header, so a byte search finds them.
+fn zip_names(book: &[u8], name: &str) -> bool {
+    book.windows(name.len()).any(|w| w == name.as_bytes())
+}
+
+/// The history's job group is one group, and Undo moves `wrapper` to the
+/// Trash with `file` in it.
+fn one_group_and_undo(e: &Env, o: &Out, wrapper: &Path, file: &str) {
+    let job = o.job();
+    let h = e.history();
+    let begins = h
+        .lines()
+        .filter(|l| l.starts_with("group-begin\t") && l.contains(&job))
+        .count();
+    assert_eq!(begins, 1, "{h}");
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert!(!wrapper.exists(), "the wrapper stayed");
+    let name = wrapper.file_name().unwrap();
+    assert!(
+        e.root
+            .join("home/.local/share/Trash/files")
+            .join(name)
+            .join(file)
+            .is_file()
+    );
+}
+
+/// `run epub` with Markdown and images: one document and its images give
+/// `<stem>/<stem>.epub`, two documents give `<dir>/<dir>/<dir>.epub`, the
+/// referenced image and the unreferenced one are both packaged, the run is
+/// one history group, and Undo moves the wrapper to the Trash.
+#[test]
+fn cli_md_and_images_to_epub() {
+    let png = gray_png();
+    let jpg = rgb_jpeg();
+
+    // One document and two images.
+    let e = Env::new("md-img-epub1");
+    let md = e.file("notes.md", b"# Notes\n\n![pic](a.png)\n");
+    let a = e.file("a.png", &png);
+    let b = e.file("b.jpg", &jpg);
+    let o = e.run(&["run", "epub", "notes.md", "a.png", "b.jpg"]);
+    if skip_no_sandbox("cli_md_and_images_to_epub", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 0, 0));
+    let wrapper = e.files().join("notes");
+    let out = wrapper.join("notes.epub");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let book = fs::read(&out).unwrap();
+    assert!(book.starts_with(b"PK\x03\x04"));
+    assert!(zip_names(&book, "OEBPS/img/0001.png"), "referenced image");
+    assert!(zip_names(&book, "OEBPS/img/0002.jpg"), "unreferenced image");
+    assert!(!zip_names(&book, "OEBPS/img/0003"), "no third image");
+    // The one document is the first chapter, the unreferenced image the
+    // "Images" chapter after it; nothing else.
+    assert!(zip_names(&book, "OEBPS/ch0001.xhtml"), "the document");
+    assert!(zip_names(&book, "OEBPS/ch0002.xhtml"), "the Images chapter");
+    assert!(!zip_names(&book, "OEBPS/ch0003"), "no third chapter");
+    for (p, bytes) in [
+        (&md, &b"# Notes\n\n![pic](a.png)\n"[..]),
+        (&a, &png),
+        (&b, &jpg),
+    ] {
+        assert_eq!(fs::read(p).unwrap(), bytes, "an input changed");
+    }
+    one_group_and_undo(&e, &o, &wrapper, "notes.epub");
+
+    // Two documents and an image, in their own folder.
+    let e = Env::new("md-img-epub2");
+    let docs = [
+        e.file("kotet/a.md", b"# A\n\n![](k.png)\n"),
+        e.file("kotet/b.md", b"# B\n"),
+        e.file("kotet/k.png", &png),
+    ];
+    let o = e.run(&["run", "epub", "kotet/a.md", "kotet/b.md", "kotet/k.png"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 0, 0));
+    let wrapper = e.files().join("kotet/kotet");
+    let out = wrapper.join("kotet.epub");
+    let done = o.pairs("done");
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    assert!(done.iter().all(|(_, p)| *p == out), "{done:?}");
+    let book = fs::read(&out).unwrap();
+    assert!(zip_names(&book, "OEBPS/img/0001.png"));
+    // One chapter per document; the image is referenced, so no Images chapter.
+    assert!(zip_names(&book, "OEBPS/ch0001.xhtml"), "first document");
+    assert!(zip_names(&book, "OEBPS/ch0002.xhtml"), "second document");
+    assert!(!zip_names(&book, "OEBPS/ch0003"), "no third chapter");
+    for (p, bytes) in docs
+        .iter()
+        .zip([&b"# A\n\n![](k.png)\n"[..], b"# B\n", &png])
+    {
+        assert_eq!(fs::read(p).unwrap(), bytes, "an input changed");
+    }
+    one_group_and_undo(&e, &o, &wrapper, "kotet.epub");
 }

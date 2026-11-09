@@ -54,11 +54,41 @@ pub fn read_limited_with(
     limits: Limits,
     dialect: Dialect,
 ) -> Result<Document, ReadError> {
+    let mut m = Meter::new(limits);
+    read_metered(bytes, limits, dialect, &mut m)
+}
+
+/// [`read_limited_with`] under what is left of a budget several documents
+/// share: the document is read under `left`, and once it is read its nodes
+/// and owned text are taken off `left.nodes` and `left.text_bytes`, so
+/// the documents read in turn together never pass the budget `left`
+/// started with. `left.input_bytes` stays one document's limit and the
+/// output budget is untouched. On an error `left` is unchanged (the
+/// failed document holds nothing).
+pub fn read_spending(
+    bytes: &[u8],
+    left: &mut Limits,
+    dialect: Dialect,
+) -> Result<Document, ReadError> {
+    let mut m = Meter::new(*left);
+    let doc = read_metered(bytes, *left, dialect, &mut m)?;
+    let (nodes, text) = m.spent();
+    // The meter never lets a charge pass its limits: no underflow.
+    left.nodes -= nodes;
+    left.text_bytes -= text;
+    Ok(doc)
+}
+
+fn read_metered(
+    bytes: &[u8],
+    limits: Limits,
+    dialect: Dialect,
+    m: &mut Meter,
+) -> Result<Document, ReadError> {
     if bytes.len() > limits.input_bytes {
         return Err(LimitError::Exceeded("input").into());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
-    let mut m = Meter::new(limits);
     let nuls = bytes.iter().filter(|&&b| b == 0).count();
     let doc = if nuls > 0 {
         // Each NUL (1 byte) becomes U+FFFD (3 bytes): the copy is charged
@@ -71,9 +101,9 @@ pub fn read_limited_with(
         for c in text.chars() {
             copy.push(if c == '\0' { '\u{fffd}' } else { c });
         }
-        block::parse(&copy, dialect, &mut m)?
+        block::parse(&copy, dialect, m)?
     } else {
-        block::parse(text, dialect, &mut m)?
+        block::parse(text, dialect, m)?
     };
     Ok(doc)
 }

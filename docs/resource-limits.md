@@ -153,6 +153,42 @@ archive) peak at about 3.5 MB `VmHWM` (debug build; the baseline is about
 1.7 MB), not the sum of the images; the test ceiling is 6 MB, far below the
 archive size, so memory that grew with the archive would fail it.
 
+The join action `text.md-join-epub` parses every Markdown file of the
+book and holds them until the book is packed (links across files need all
+of them), so memory follows their sum, not one file. What a parsed file
+holds follows its nodes and owned text, not its input bytes (24 files of
+660 KB of `- a` lines, 15.8 MiB, each under the node budget, peaked at
+2.9 GB held side by side). So the files of one book share ONE document
+budget: the 524,288 nodes and 32 MiB of owned text of `Limits::DEFAULT`
+are charged across all of them, each file read under what the files
+before it left (each file still has its own 8 MiB input limit). The
+largest book holds what the largest accepted single file holds. Past the
+shared budget no book is made: every input the book would have taken
+(the files read, the one that passed it, those not yet read, the images)
+fails with `book is too large (documents exceed the document budget
+together)`. A file that passes the budget on its own fails alone when it
+is the first that spends any of it; after others it fails the book.
+Measured peak RSS (release `inacircle-text`, no sandbox, `getrusage`
+of the child, `ru_maxrss` in KiB): the 24 dense files above stop at the
+second file, 185,140 KiB (190 MB), the same as one dense file of 495,000
+nodes joined alone (185,112 KiB); two dense files of 261,000 nodes each
+join at 161,420 KiB; two prose files of 8 MiB join at 88,276 KiB; three of
+7 MiB pass the shared owned-text budget and fail at 74,500 KiB. All are
+under a fifth of the sandbox's `RLIMIT_DATA` net (>= 1 GiB).
+The largest input count (1,024: 24 Markdown files and 1,000 PNG images of
+130,808 B, a 131 MB book) peaks at 15,640 KiB in the same method. Images
+are copied in chunks, so their count does not grow the peak.
+Images are never held by the book: each is header-checked
+(`probe::sniff`, at most 64 MiB, 180 MP, as for the CBZ), digested in 8 KiB
+reads for the book's identifier, and later streamed into the archive from
+the file it was checked from (identity and size must still match). The
+output ceiling is `RLIMIT_FSIZE`, checked by the write itself (the size of
+a book is known only once it is packed): past it every input the book would
+have taken fails with `EPUB would be larger than <N> MiB` and the file is
+removed. The book has at most 1,024 chapters (`book would have more than
+1024 chapters`). The header check does not read the image body: an image
+damaged inside its data passes, as for the CBZ.
+
 A PNG page is inflated once into a counter to prove it holds exactly the
 scanlines its header promises. A JPEG page is passed through without
 checking its scan data: the probe reads the markers, not the entropy

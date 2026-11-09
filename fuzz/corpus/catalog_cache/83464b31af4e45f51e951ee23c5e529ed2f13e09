@@ -1,0 +1,6 @@
+inacircle-catalog 1
+bin	path=/b/text	mtime=5	size=7	buiize=7	builtin=yes
+action	text.md-join-epub	family=text	in=text/p=book	cost=20	losel=EPUB	group=book	cost=20	lossy=yes	batch=yes	join=yes	ltin=yes
+action	text.md-join-epub	family=text	in=text/p=book	cost=20	losel=EPUB	grou=20	lossy=yes	batyes
+action	text.md-join-epub	family=text	in=text/p=book	=yes	batch=yes	join=yes	ltin=yes
+action	text.md-joinh=yes	join=yes	ltin=yesch=yes	join=yes	min=1

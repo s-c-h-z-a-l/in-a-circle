@@ -12,8 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use std::io::{self, Read};
+
 use doc::{Dialect, Document, LimitError, Limits, Loss};
-use epub::{BookError, Meta, fnv1a_128, uuid_v8, write};
+use epub::{
+    BookError, Image, ImageKind, ImageSource, Meta, NoImages, Part, fnv1a_128, fnv1a_128_read,
+    uuid_v8, write, write_book,
+};
 
 // ---------- memory measurement ----------
 
@@ -599,12 +604,80 @@ fn fnv_test_vectors() {
     assert_eq!(fnv1a_128(&[b"foobar"]), 0x343e1662793c64bf6f0d3597ba446f18);
     // Chunks hash as their concatenation.
     assert_eq!(fnv1a_128(&[b"foo", b"bar"]), fnv1a_128(&[b"foobar"]));
+    // The streamed hash is the chunked one, across the 8 KiB read size.
+    let big: Vec<u8> = (0..20_000u32).map(|i| (i * 7) as u8).collect();
+    assert_eq!(fnv1a_128_read(&big[..]).unwrap(), fnv1a_128(&[&big[..]]));
     // UUID version 8 (RFC 9562): version nibble 8, variant bits 10.
     assert_eq!(uuid_v8(0), "00000000-0000-8000-8000-000000000000");
     assert_eq!(uuid_v8(u128::MAX), "ffffffff-ffff-8fff-bfff-ffffffffffff");
     assert_eq!(
         uuid_v8(0x343e1662793c64bf6f0d3597ba446f18),
         "343e1662-793c-84bf-af0d-3597ba446f18"
+    );
+}
+
+/// A reader that fails first with `kind`, then gives `rest`.
+struct FailsOnce {
+    kind: Option<io::ErrorKind>,
+    rest: &'static [u8],
+}
+
+impl Read for FailsOnce {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(kind) = self.kind.take() {
+            return Err(kind.into());
+        }
+        self.rest.read(buf)
+    }
+}
+
+/// An interrupted read is retried (the hash is the same as without it);
+/// any other read error ends the hash and is returned.
+#[test]
+fn streamed_hash_retries_interrupts_and_returns_other_errors() {
+    let r = FailsOnce {
+        kind: Some(io::ErrorKind::Interrupted),
+        rest: b"foobar",
+    };
+    assert_eq!(fnv1a_128_read(r).unwrap(), fnv1a_128(&[b"foobar"]));
+    let r = FailsOnce {
+        kind: Some(io::ErrorKind::PermissionDenied),
+        rest: b"foobar",
+    };
+    assert_eq!(
+        fnv1a_128_read(r).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+/// A book without images finds none, whatever is asked, and has none to
+/// open.
+#[test]
+fn no_images_resolves_nothing() {
+    let mut none = NoImages;
+    assert_eq!(none.resolve(0, "a.png"), None);
+    assert_eq!(none.resolve(3, ""), None);
+    assert_eq!(none.count(), 0);
+    assert!(none.open(0).is_err());
+}
+
+/// With no output ceiling at all the chapters are still written (the
+/// budget left to a chapter is the ceiling minus what is used, which must
+/// not overflow).
+#[test]
+fn book_without_an_output_ceiling() {
+    let (s, r) = book_with(
+        &md("# One\n\ntext\n\n# Two\n\nmore\n"),
+        &meta("T"),
+        Limits::UNLIMITED,
+    );
+    r.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        entries(&s.0)
+            .iter()
+            .filter(|(n, _)| n.starts_with("OEBPS/ch"))
+            .count(),
+        2
     );
 }
 
@@ -637,4 +710,591 @@ fn memory_is_one_chapter_at_a_time() {
         peak < 4 * largest + 512 * 1024,
         "peak {peak} B, total {total} B"
     );
+}
+
+/// A single document, every kind of block, image and link: the bytes
+/// the one-document packer wrote before books of several documents
+/// existed, pinned by their hash.
+const SINGLE_PART: &str = "\
+preface ![alt *a*](pic.png \"t\") [other](b.md#x) [self](./) [dot](.) [up](../a.md)
+
+# \u{c1}ttekint\u{e9}s
+
+Bevezet\u{151} *kiemel\u{e9}s* `k\u{f3}d` [l\u{e1}sd](#2026-terv) <b>raw</b> \u{1}
+
+## R\u{e9}szletek
+
+| N\u{e9}v | \u{c9}rt\u{e9}k |
+|:----|------:|
+| ![x](x.jpg) | 1 |
+
+> - [ ] task ![y](https://example.org/y.png)
+
+# 2026 terv
+
+```rust
+fn main() {}
+```
+
+1. one
+2. two [kint](https://example.org/?a=1&b=2)
+
+---
+";
+
+#[test]
+fn single_part_output_unchanged() {
+    let (s, losses) = book(SINGLE_PART, "Jegyzetek & 2026");
+    let digest = fnv1a_128(&[&s.bytes()]);
+    println!("single part: {} B, digest {digest:032x}", s.bytes().len());
+    assert_eq!(
+        losses,
+        BTreeSet::from([
+            Loss::ControlCharacters,
+            Loss::Html,
+            Loss::Images,
+            Loss::Links
+        ])
+    );
+    assert_eq!(digest, 0x27c35886dc2efacb4d2e27a5462af50e);
+}
+
+#[test]
+fn single_part_through_write_book_is_write() {
+    let d = md(SINGLE_PART);
+    let m = meta("Jegyzetek & 2026");
+    let (a, _) = book_with(&d, &m, Limits::DEFAULT);
+    let b = Scratch::new();
+    let part = Part {
+        doc: &d,
+        title: m.title.clone(),
+        file_key: String::new(),
+    };
+    write_book(&[part], &mut NoImages, &m, b.create(), Limits::DEFAULT).unwrap();
+    assert_eq!(a.bytes(), b.bytes());
+}
+
+// ---------- books of several documents and images ----------
+
+/// A 1x1 RGB PNG (IHDR, one IDAT, IEND; checksums valid).
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+    0x00, 0x03, 0x01, 0x01, 0x00, 0xf7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+    0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// A small baseline JPEG (the image probe's fixture).
+const JPEG: &[u8] = include_bytes!("../../probe/tests/data/rgb.jpg");
+
+/// Images by path: a destination resolves to the image of the same
+/// lexically normalized path, from the folder of the document's key.
+struct Pics {
+    keys: Vec<String>,
+    paths: Vec<String>,
+    data: Vec<Vec<u8>>,
+    images: Vec<Image>,
+    asked: Vec<(usize, String)>,
+    opened: Vec<usize>,
+}
+
+impl Pics {
+    fn new(keys: &[&str], pics: &[(&str, ImageKind, &[u8])]) -> Pics {
+        Pics {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+            paths: pics.iter().map(|p| p.0.to_string()).collect(),
+            data: pics.iter().map(|p| p.2.to_vec()).collect(),
+            images: pics
+                .iter()
+                .map(|&(path, kind, bytes)| Image {
+                    kind,
+                    len: bytes.len() as u64,
+                    alt: path.rsplit('/').next().unwrap().to_string(),
+                })
+                .collect(),
+            asked: Vec::new(),
+            opened: Vec::new(),
+        }
+    }
+}
+
+impl ImageSource for Pics {
+    fn resolve(&mut self, part: usize, dest: &str) -> Option<usize> {
+        self.asked.push((part, dest.to_string()));
+        let path = match self.keys[part].rsplit_once('/') {
+            Some((dir, _)) => doc::xhtml::normalize(&format!("{dir}/{dest}")),
+            None => doc::xhtml::normalize(dest),
+        };
+        self.paths.iter().position(|p| *p == path)
+    }
+    fn count(&self) -> usize {
+        self.images.len()
+    }
+    fn image(&self, i: usize) -> &Image {
+        &self.images[i]
+    }
+    fn open(&mut self, i: usize) -> io::Result<Box<dyn Read + '_>> {
+        self.opened.push(i);
+        Ok(Box::new(&self.data[i][..]))
+    }
+}
+
+/// A book of the documents `(key, Markdown)`, with `pics`.
+fn book_of(
+    docs: &[(&str, &str)],
+    pics: &mut dyn ImageSource,
+    title: &str,
+) -> (Scratch, Result<BTreeSet<Loss>, BookError>) {
+    let ds: Vec<Document> = docs.iter().map(|(_, src)| md(src)).collect();
+    let parts: Vec<Part> = ds
+        .iter()
+        .zip(docs)
+        .map(|(d, (key, _))| Part {
+            doc: d,
+            title: key.trim_end_matches(".md").to_string(),
+            file_key: key.to_string(),
+        })
+        .collect();
+    let s = Scratch::new();
+    let r = write_book(&parts, pics, &meta(title), s.create(), Limits::DEFAULT);
+    (s, r)
+}
+
+const A_MD: &str = "# Alpha\n\n![one](one.png) [to beta two](b.md#beta-two) [to b](b.md)\n";
+const B_MD: &str = "# Beta\n\n![two](pics/two.jpg \"T\") ![one again](./one.png) ![gone](gone.png)\n\n# Beta two\n\n[back](a.md#alpha)\n";
+
+fn two_docs_three_pics() -> Pics {
+    Pics::new(
+        &["a.md", "b.md"],
+        &[
+            ("one.png", ImageKind::Png, PNG),
+            ("pics/two.jpg", ImageKind::Jpeg, JPEG),
+            ("three.png", ImageKind::Png, PNG),
+        ],
+    )
+}
+
+#[test]
+fn epubcheck_passes_with_images_and_parts() {
+    let mut pics = two_docs_three_pics();
+    let (s, r) = book_of(&[("a.md", A_MD), ("b.md", B_MD)], &mut pics, "Utazás");
+    // `gone.png` is referred to but not given: its alt text.
+    assert_eq!(r.unwrap(), BTreeSet::from([Loss::Images]));
+    let es = entries(&s.0);
+    let names: Vec<&str> = es.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "mimetype",
+            "META-INF/container.xml",
+            "OEBPS/content.opf",
+            "OEBPS/nav.xhtml",
+            "OEBPS/style.css",
+            "OEBPS/ch0001.xhtml",
+            "OEBPS/ch0002.xhtml",
+            "OEBPS/ch0003.xhtml",
+            "OEBPS/ch0004.xhtml",
+            "OEBPS/img/0001.png",
+            "OEBPS/img/0002.jpg",
+            "OEBPS/img/0003.png",
+        ]
+    );
+    let opf = text(&es, "OEBPS/content.opf");
+    for want in [
+        "<item id=\"img0001\" href=\"img/0001.png\" media-type=\"image/png\"/>",
+        "<item id=\"img0002\" href=\"img/0002.jpg\" media-type=\"image/jpeg\"/>",
+        "<item id=\"img0003\" href=\"img/0003.png\" media-type=\"image/png\"/>",
+        "<itemref idref=\"ch0004\"/>",
+        "<dc:title>Utazás</dc:title>",
+    ] {
+        assert!(opf.contains(want), "{want}\n{opf}");
+    }
+    assert_eq!(opf.matches("<item ").count(), 2 + 4 + 3, "{opf}");
+    let c1 = text(&es, "OEBPS/ch0001.xhtml");
+    assert!(
+        c1.contains("<img src=\"img/0001.png\" alt=\"one\"/>"),
+        "{c1}"
+    );
+    let c2 = text(&es, "OEBPS/ch0002.xhtml");
+    for want in [
+        "<img src=\"img/0002.jpg\" alt=\"two\" title=\"T\"/>",
+        // The same image by another path is the same packaged file.
+        "<img src=\"img/0001.png\" alt=\"one again\"/>",
+        " gone</p>",
+    ] {
+        assert!(c2.contains(want), "{want}\n{c2}");
+    }
+    // Every destination is resolved once per document.
+    let mut asked = pics.asked.clone();
+    asked.sort();
+    asked.dedup();
+    assert_eq!(asked.len(), pics.asked.len(), "{:?}", pics.asked);
+    epubcheck(&s.0);
+}
+
+#[test]
+fn images_chapter_lists_unreferenced_in_order() {
+    let mut pics = Pics::new(
+        &["a.md"],
+        &[
+            ("d.png", ImageKind::Png, PNG),
+            ("b & \"c\".jpg", ImageKind::Jpeg, JPEG),
+            ("a.png", ImageKind::Png, PNG),
+            ("e.jpg", ImageKind::Jpeg, JPEG),
+        ],
+    );
+    let (s, r) = book_of(&[("a.md", "# A\n\n![x](a.png)\n")], &mut pics, "A");
+    assert!(r.unwrap().is_empty());
+    let es = entries(&s.0);
+    // The referenced one first, then the others in the source's order.
+    let ch = text(&es, "OEBPS/ch0002.xhtml");
+    let want = "<h1>Images</h1>\n\
+<figure><img src=\"img/0002.png\" alt=\"d.png\"/></figure>\n\
+<figure><img src=\"img/0003.jpg\" alt=\"b &amp; &quot;c&quot;.jpg\"/></figure>\n\
+<figure><img src=\"img/0004.jpg\" alt=\"e.jpg\"/></figure>\n\
+</body>\n</html>\n";
+    assert!(ch.ends_with(want), "{ch}");
+    assert!(ch.contains("<title>Images</title>"), "{ch}");
+    assert!(text(&es, "OEBPS/ch0001.xhtml").contains("<img src=\"img/0001.png\" alt=\"x\"/>"));
+    let nav = text(&es, "OEBPS/nav.xhtml");
+    assert!(
+        nav.ends_with(
+            "<li><a href=\"ch0002.xhtml\">Images</a></li>\n</ol>\n</nav>\n</body>\n</html>\n"
+        ),
+        "{nav}"
+    );
+    let css = text(&es, "OEBPS/style.css");
+    assert!(css.starts_with(doc::xhtml::STYLE_EPUB) && css.contains("page-break-after:always"));
+    epubcheck(&s.0);
+
+    // Every image referred to: no `Images` chapter, the plain stylesheet.
+    let mut pics = Pics::new(&["a.md"], &[("a.png", ImageKind::Png, PNG)]);
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut pics, "A");
+    r.unwrap();
+    let es = entries(&s.0);
+    assert!(!es.iter().any(|(n, _)| n == "OEBPS/ch0002.xhtml"));
+    assert_eq!(text(&es, "OEBPS/style.css"), doc::xhtml::STYLE_EPUB);
+    assert!(!text(&es, "OEBPS/nav.xhtml").contains("Images"));
+}
+
+#[test]
+fn cross_file_links_resolve() {
+    let mut pics = two_docs_three_pics();
+    let (s, r) = book_of(&[("a.md", A_MD), ("b.md", B_MD)], &mut pics, "T");
+    r.unwrap();
+    let es = entries(&s.0);
+    let c1 = text(&es, "OEBPS/ch0001.xhtml");
+    // b's two chapters are ch0002 and ch0003, numbered across the book.
+    assert!(
+        c1.contains("<a href=\"ch0003.xhtml#beta-two\">to beta two</a>"),
+        "{c1}"
+    );
+    assert!(c1.contains("<a href=\"ch0002.xhtml\">to b</a>"), "{c1}");
+    let c3 = text(&es, "OEBPS/ch0003.xhtml");
+    assert!(c3.contains("<h1 id=\"beta-two\">Beta two</h1>"), "{c3}");
+    assert!(
+        c3.contains("<a href=\"ch0001.xhtml#alpha\">back</a>"),
+        "{c3}"
+    );
+    epubcheck(&s.0);
+}
+
+#[test]
+fn link_to_a_file_outside_the_book_is_text() {
+    let (s, r) = book_of(
+        &[
+            (
+                "a.md",
+                "# A\n\n[c](c.md) [b gone](b.md#nowhere) [up](../a.md)\n",
+            ),
+            ("b.md", "# B\n"),
+        ],
+        &mut NoImages,
+        "T",
+    );
+    assert_eq!(r.unwrap(), BTreeSet::from([Loss::Links]));
+    let c1 = text(&entries(&s.0), "OEBPS/ch0001.xhtml");
+    assert!(c1.contains("<p>c b gone up</p>"), "{c1}");
+    epubcheck(&s.0);
+}
+
+/// Keys are paths relative to the documents' deepest common folder; a
+/// link resolves against its own document's folder in that key space.
+#[test]
+fn links_across_sibling_folders() {
+    let (s, r) = book_of(
+        &[
+            (
+                "a/one.md",
+                "# One
+
+[two](../b/two.md#h) [lost](../../x.md)
+",
+            ),
+            (
+                "b/two.md",
+                "# H
+
+[one](../a/one.md) [out](../../b/two.md#h)
+",
+            ),
+        ],
+        &mut NoImages,
+        "T",
+    );
+    // `../../x.md` and `../../b/two.md` climb out of the common folder:
+    // text, never a document of the book (not even one of the same name).
+    assert_eq!(r.unwrap(), BTreeSet::from([Loss::Links]));
+    let es = entries(&s.0);
+    let c1 = text(&es, "OEBPS/ch0001.xhtml");
+    assert!(
+        c1.contains("<a href=\"ch0002.xhtml#h\">two</a> lost</p>"),
+        "{c1}"
+    );
+    let c2 = text(&es, "OEBPS/ch0002.xhtml");
+    assert!(
+        c2.contains("<a href=\"ch0001.xhtml\">one</a> out</p>"),
+        "{c2}"
+    );
+    epubcheck(&s.0);
+}
+
+#[test]
+fn nav_parts_with_sub_chapters() {
+    let (s, r) = book_of(
+        &[
+            ("one.md", "plain text, no heading\n"),
+            ("two.md", "pre\n\n# X\n\n## x1\n\n# Y\n"),
+            ("three.md", "# Only\n\n## o1\n\n## o2\n\n### deep\n"),
+        ],
+        &mut NoImages,
+        "Book",
+    );
+    r.unwrap();
+    let es = entries(&s.0);
+    let nav = text(&es, "OEBPS/nav.xhtml");
+    let want = "<ol>\n\
+<li><a href=\"ch0001.xhtml\">one</a></li>\n\
+<li><a href=\"ch0002.xhtml\">two</a>\n\
+<ol>\n\
+<li><a href=\"ch0002.xhtml\">Chapter 1</a></li>\n\
+<li><a href=\"ch0003.xhtml\">X</a>\n\
+<ol>\n\
+<li><a href=\"ch0003.xhtml#x1\">x1</a></li>\n\
+</ol>\n\
+</li>\n\
+<li><a href=\"ch0004.xhtml\">Y</a></li>\n\
+</ol>\n\
+</li>\n\
+<li><a href=\"ch0005.xhtml\">three</a>\n\
+<ol>\n\
+<li><a href=\"ch0005.xhtml\">Only</a></li>\n\
+<li><a href=\"ch0006.xhtml\">o1</a></li>\n\
+<li><a href=\"ch0007.xhtml\">o2</a>\n\
+<ol>\n\
+<li><a href=\"ch0007.xhtml#deep\">deep</a></li>\n\
+</ol>\n\
+</li>\n\
+</ol>\n\
+</li>\n\
+</ol>\n";
+    assert!(nav.contains(want), "{nav}");
+    // `three` splits at its two H2s, the H1 before them its own chapter.
+    assert!(!es.iter().any(|(n, _)| n == "OEBPS/ch0008.xhtml"));
+    // Each chapter's head carries its own title.
+    assert!(text(&es, "OEBPS/ch0001.xhtml").contains("<title>one</title>"));
+    assert!(text(&es, "OEBPS/ch0003.xhtml").contains("<title>X</title>"));
+    epubcheck(&s.0);
+}
+
+#[test]
+fn chapter_limit_across_files() {
+    // 600 documents of two chapters each: 1200 chapters.
+    let two = "# a\n\n# b\n";
+    let keys: Vec<String> = (0..600).map(|i| format!("{i:03}.md")).collect();
+    let docs: Vec<(&str, &str)> = keys.iter().map(|k| (k.as_str(), two)).collect();
+    let (s, r) = book_of(&docs, &mut NoImages, "Many");
+    let e = r.unwrap_err();
+    assert!(matches!(e, BookError::TooManyChapters), "{e:?}");
+    assert_eq!(e.to_string(), "book would have more than 1024 chapters");
+    assert_eq!(s.bytes().len(), 0, "nothing written");
+
+    // 512 of them: exactly 1024.
+    let (s, r) = book_of(&docs[..512], &mut NoImages, "Many");
+    r.unwrap();
+    let es = entries(&s.0);
+    assert!(es.iter().any(|(n, _)| n == "OEBPS/ch1024.xhtml"));
+    epubcheck(&s.0);
+
+    // The `Images` chapter counts: 1024 chapters and an unreferenced image.
+    let mut pics = Pics::new(&[], &[("x.png", ImageKind::Png, PNG)]);
+    let (s, r) = book_of(&docs[..512], &mut pics, "Many");
+    assert!(matches!(r, Err(BookError::TooManyChapters)), "{r:?}");
+    assert_eq!(s.bytes().len(), 0);
+    assert!(pics.opened.is_empty());
+}
+
+#[test]
+fn image_bytes_identical() {
+    let mut pics = two_docs_three_pics();
+    let (s, r) = book_of(&[("a.md", A_MD), ("b.md", B_MD)], &mut pics, "T");
+    r.unwrap();
+    let es = entries(&s.0);
+    let bytes = |n: &str| &es.iter().find(|(m, _)| m == n).unwrap().1;
+    assert_eq!(bytes("OEBPS/img/0001.png"), PNG);
+    assert_eq!(bytes("OEBPS/img/0002.jpg"), JPEG);
+    assert_eq!(bytes("OEBPS/img/0003.png"), PNG);
+    // Each image copied once, though `one.png` is referred to twice.
+    assert_eq!(pics.opened, [0, 1, 2]);
+
+    // A source that gives fewer bytes than it said fails the book, and
+    // the file is cut back to empty.
+    let mut short = Pics::new(&["a.md"], &[("a.png", ImageKind::Png, PNG)]);
+    short.images[0].len += 1;
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut short, "T");
+    let e = r.unwrap_err();
+    assert!(
+        matches!(e, BookError::Zip(zip::WriteError::EntryTooSmall)),
+        "{e:?}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+
+    // So does one that gives more: the image is never cut to fit.
+    let mut long = Pics::new(&["a.md"], &[("a.png", ImageKind::Png, PNG)]);
+    long.images[0].len -= 1;
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut long, "T");
+    let e = r.unwrap_err();
+    assert!(
+        matches!(e, BookError::Zip(zip::WriteError::EntryTooLarge)),
+        "{e:?}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+
+    // A read that fails mid-copy is an image error, like an open failure.
+    struct Failing(Image);
+    impl ImageSource for Failing {
+        fn resolve(&mut self, _: usize, _: &str) -> Option<usize> {
+            Some(0)
+        }
+        fn count(&self) -> usize {
+            1
+        }
+        fn image(&self, _: usize) -> &Image {
+            &self.0
+        }
+        fn open(&mut self, _: usize) -> io::Result<Box<dyn Read + '_>> {
+            struct Eio;
+            impl Read for Eio {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    Err(io::Error::other("device error"))
+                }
+            }
+            Ok(Box::new(PNG.chain(Eio)))
+        }
+    }
+    let mut failing = Failing(Image {
+        kind: ImageKind::Png,
+        len: PNG.len() as u64 + 1,
+        alt: "a.png".into(),
+    });
+    let (s, r) = book_of(&[("a.md", "![x](a.png)\n")], &mut failing, "T");
+    let e = r.unwrap_err();
+    assert!(matches!(e, BookError::Image(_)), "{e:?}");
+    assert!(
+        e.to_string().starts_with("reading an image failed: "),
+        "{e}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+
+    // One that cannot open an image fails it too.
+    struct Unopenable(Pics);
+    impl ImageSource for Unopenable {
+        fn resolve(&mut self, part: usize, dest: &str) -> Option<usize> {
+            self.0.resolve(part, dest)
+        }
+        fn count(&self) -> usize {
+            self.0.count()
+        }
+        fn image(&self, i: usize) -> &Image {
+            self.0.image(i)
+        }
+        fn open(&mut self, _: usize) -> io::Result<Box<dyn Read + '_>> {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    }
+    let mut bad = Unopenable(Pics::new(&["a.md"], &[("a.png", ImageKind::Png, PNG)]));
+    let (s, r) = book_of(&[("a.md", "x\n")], &mut bad, "T");
+    let e = r.unwrap_err();
+    assert!(matches!(e, BookError::Image(_)), "{e:?}");
+    assert!(
+        e.to_string().starts_with("reading an image failed: "),
+        "{e}"
+    );
+    assert_eq!(s.bytes().len(), 0);
+}
+
+/// A large image is copied through the writer's buffer, never held.
+#[test]
+fn images_are_streamed() {
+    /// `len` bytes of a PNG signature followed by zeros, made as read.
+    struct Big {
+        images: Vec<Image>,
+    }
+    impl ImageSource for Big {
+        fn resolve(&mut self, _: usize, _: &str) -> Option<usize> {
+            Some(0)
+        }
+        fn count(&self) -> usize {
+            1
+        }
+        fn image(&self, i: usize) -> &Image {
+            &self.images[i]
+        }
+        fn open(&mut self, _: usize) -> io::Result<Box<dyn Read + '_>> {
+            Ok(Box::new(io::repeat(0).take(self.images[0].len)))
+        }
+    }
+    const LEN: u64 = 32 << 20;
+    let mut big = Big {
+        images: vec![Image {
+            kind: ImageKind::Png,
+            len: LEN,
+            alt: "big.png".into(),
+        }],
+    };
+    let d = md("![b](big.png)\n");
+    let part = Part {
+        doc: &d,
+        title: "a".into(),
+        file_key: "a.md".into(),
+    };
+    let m = meta("Big");
+    let s = Scratch::new();
+    let f = s.create();
+    let (r, peak) = peak_of(|| write_book(&[part], &mut big, &m, f, Limits::DEFAULT));
+    r.unwrap();
+    println!("images_are_streamed: {LEN} B image, peak {peak} B");
+    assert!(std::fs::metadata(&s.0).unwrap().len() > LEN);
+    assert!(peak < 1 << 20, "peak {peak} B");
+}
+
+#[test]
+fn deterministic_with_images() {
+    let run = || {
+        let mut pics = two_docs_three_pics();
+        let (s, r) = book_of(&[("a.md", A_MD), ("b.md", B_MD)], &mut pics, "T");
+        r.unwrap();
+        s.bytes()
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn no_documents_is_an_error() {
+    let s = Scratch::new();
+    let r = write_book(&[], &mut NoImages, &meta("T"), s.create(), Limits::DEFAULT);
+    let e = r.unwrap_err();
+    assert!(matches!(e, BookError::NoDocuments), "{e:?}");
+    assert_eq!(e.to_string(), "book has no documents");
 }

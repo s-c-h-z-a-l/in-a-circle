@@ -1,0 +1,2 @@
+iuacirc-manifest 0
+action	j.a	family=f	in=text/markdown	=no	batch=yes	assets=image/png,text/markdown	join=yes
