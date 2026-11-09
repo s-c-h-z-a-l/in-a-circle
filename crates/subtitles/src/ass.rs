@@ -436,7 +436,8 @@ impl<'a> Reader<'a> {
 
     fn skip(&mut self, line: usize, reason: &'static str) {
         self.skipped.count += 1;
-        if self.skipped.first.is_none_or(|(first, _)| line < first) {
+        // Skips are recorded in line order, so the first one is the earliest.
+        if self.skipped.first.is_none() {
             self.skipped.first = Some((line, reason));
         }
     }

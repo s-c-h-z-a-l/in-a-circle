@@ -480,6 +480,30 @@ fn bad_cue_in_the_middle_is_skipped_rest_converts() {
 }
 
 #[test]
+fn skipped_items_in_several_places_keep_the_earliest_line() {
+    // Three skipped items: a bad timestamp on line 6, a stray block on line 12,
+    // another bad timestamp on line 17. `first` is the earliest of them, and
+    // the count is all three.
+    let parsed = read(
+        "WEBVTT\n\n\
+         00:00:01.000 --> 00:00:02.000\nfirst\n\n\
+         00:00;01.000 --> 00:00:02.000\nbad early\n\n\
+         00:00:03.000 --> 00:00:04.000\nsecond\n\n\
+         garbage\n\n\
+         00:00:05.000 --> 00:00:06.000\nthird\n\n\
+         00:00;05.000 --> 00:00:06.000\nbad late\n\n",
+    );
+    assert_eq!(texts(&parsed), vec!["first", "second", "third"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 3,
+            first: Some((6, "bad timestamp")),
+        }
+    );
+}
+
+#[test]
 fn end_at_100_hours_is_skipped_and_99_59_59_999_is_kept() {
     // The end is checked against the limit as the start is: 100:00:00.000 is
     // past it, and the limit itself (99:59:59.999) is still a cue.

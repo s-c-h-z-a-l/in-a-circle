@@ -104,6 +104,29 @@ fn bad_cue_in_the_middle_is_skipped_rest_converts() {
 }
 
 #[test]
+fn skipped_items_in_several_places_keep_the_earliest_line() {
+    // Three skipped items: a bad timestamp on line 6, a stray block on line 13,
+    // another bad timestamp on line 20. `first` is the earliest of them, and
+    // the count is all three.
+    let parsed = read(
+        "1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n\
+         2\n00:00;01,000 --> 00:00:02,000\nbad early\n\n\
+         3\n00:00:03,000 --> 00:00:04,000\nsecond\n\n\
+         x\n\n\
+         4\n00:00:05,000 --> 00:00:06,000\nthird\n\n\
+         5\n00:00;05,000 --> 00:00:06,000\nbad late\n\n",
+    );
+    assert_eq!(texts(&parsed), vec!["first", "second", "third"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 3,
+            first: Some((6, "bad timestamp")),
+        }
+    );
+}
+
+#[test]
 fn missing_blank_line_between_cues() {
     let parsed = read(
         "1\n00:00:01,000 --> 00:00:02,000\nfirst\n2\n00:00:03,000 --> 00:00:04,000\nsecond\n3\n00:00:05,000 --> 00:00:06,000\nthird\n",

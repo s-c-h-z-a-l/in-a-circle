@@ -629,6 +629,33 @@ fn bad_dialogue_is_skipped_rest_converts() {
     );
 }
 
+#[test]
+fn skipped_items_in_several_places_keep_the_earliest_line() {
+    // Three skipped items: a bad timestamp on the first dialogue line after the
+    // header, a stray line between dialogues, and another bad timestamp near the
+    // end. `first` is the earliest of them, and the count is all three.
+    let header = plain("");
+    let first_line = header.lines().count() + 1;
+    let file = format!(
+        "{header}\
+         Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,first\n\
+         Dialogue: 0,0:00:01;00,0:00:02.00,Default,,0,0,0,,bad early\n\
+         Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,second\n\
+         garbage line\n\
+         Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,third\n\
+         Dialogue: 0,0:00;05.00,0:00:06.00,Default,,0,0,0,,bad late\n"
+    );
+    let parsed = read(&file);
+    assert_eq!(texts(&parsed), vec!["first", "second", "third"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 3,
+            first: Some((first_line + 1, "bad timestamp")),
+        }
+    );
+}
+
 /// A file with one dialogue whose text is `prefix` followed by `unit` repeated
 /// to at least `bytes`.
 fn flood(prefix: &str, unit: &str, bytes: usize) -> Vec<u8> {
