@@ -1,0 +1,14 @@
+<?xml  version="1.0"?>
+<!-- valid test for Production 58-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT one ANY>
+ <!ELEMENTfour ANY>
+ <!ELEMENT five ANY>
+ <!NOTATION this SYSTEM "alpha">
+ <!NOTATION that NY>
+ <!ELEMENT five ANY>
+ <!NOTATION this SYSTEM "alpha">
+ <!NOTATION that SYSTEM "beta"NOTATIeTATION
+</test>

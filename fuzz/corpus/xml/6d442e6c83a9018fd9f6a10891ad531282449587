@@ -1,0 +1,12 @@
+<?xm
+<!DO>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMElor="white">-->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="whital -->
+

@@ -197,7 +197,42 @@ are in `CLAUDE.md`.
   takes it as a lossless intermediate, and the notice says formatting was
   lost for a run whose output actually lost something.
 - `text.txt-to-md` escapes every tilde of a run of two or more, so that
-  plain text is never read back as strikethrough.
+  plain text is never read back as strikethrough, and the `:` of a line
+  made only of `:` and dashes (`:--`, `:-:`) under another line of its
+  paragraph, which a GFM reader would take for a one-column table's
+  delimiter row. CommonMark readers show neither escape. Every other
+  tree the txt reader builds is written byte for byte as before.
+- The Markdown writer (`doc::md`) has two modes. The CommonMark mode
+  (`write`, `write_limited`) is what `text.txt-to-md` writes; a table in
+  it is one line per row (reported) and strikethrough loses its marks
+  (reported). A code block's info string gets a backslash before every
+  `\` and `&`, since readers take escapes and entities off it. The GFM
+  mode (`write_limited_with(.., Dialect::Gfm)`)
+  writes everything else the same way and adds: a table as a pipe table
+  (a header row, kept even when all its cells are empty, the delimiter
+  row `---`, `:--`, `:-:` or `--:` per column, then the body rows, a row
+  short of cells padded with empty ones; in a tight list item it
+  follows a paragraph without a blank line, and a block after it needs
+  one, so such an item reads back loose), every `|` in a cell written
+  `\|`, a line break in a cell (a block in a book's cell) written as a
+  space and reported as cell line breaks that became spaces only when
+  one was there;
+  strikethrough as `~~...~~` (adjacent ones joined, a nested one written
+  as its outer one, an empty one left out), with a tilde next to a
+  delimiter escaped; emphasis, strong emphasis and strikethrough with
+  the white space at their edges moved outside the delimiters, a
+  delimiter that would touch a run of its own character switched to
+  `_`, and a mark whose delimiters still could not open or close by the
+  flanking rules (`a<del>"b"</del>c`), or whose opener could close an
+  enclosing mark, left out and reported as lost emphasis or
+  strikethrough, so a GFM reader never shows a stray `~~` or `*`; a
+  line-start `:` escaped, so a paragraph line never becomes a delimiter
+  row. Task list items and extended autolinks are written as in the
+  CommonMark mode. A `www.` or `://` in text whose run
+  (to white space or `<`) would hold one of the writer's escapes, or
+  runs into the next inline, gets its `.` or `:` as an entity, so a GFM
+  reader does not make a link that holds the backslash; elsewhere a
+  GFM reader links the text as it reads.
 - `text.md-to-txt` reads a `.md` input as GitHub Flavored Markdown
   (CommonMark plus tables, strikethrough, task lists and extended
   autolinks). The action writes GFM tables as aligned columns in a full
@@ -356,7 +391,16 @@ are in `CLAUDE.md`.
   texts in `docs/resource-limits.md`); a spine item that
   is missing, outside the book, encrypted, too large, of another type or
   whose data is damaged fails only itself (`ChapterError`) and the rest of
-  the book reads.
+  the book reads. `Book::resolve` resolves an `href` or `src` written in a
+  chapter by the same rules, relative to the chapter's folder (not the
+  package's); one that is empty once the query and fragment are cut
+  (`#id`) names the chapter itself; a chapter outside the book, or a path
+  over 512 bytes, resolves to nothing. `Book::resource` reads one file
+  entry by its exact name under a cap the caller gives, checked on the
+  declared size before anything is reserved or inflated and on the bytes
+  produced (`too large`); no such file entry is `missing`, a ZIP
+  encryption flag or a cipher in `encryption.xml` is `encrypted`, the ZIP
+  reader's reason is `damaged`. Neither keeps anything.
 - The XHTML chapter reader, `doc::xhtml_read`, maps one chapter (decoded by
   `xml::decode`, then read with the HTML named characters and the XML
   depth limit) to the document tree; text disappears only with a reported
@@ -383,7 +427,9 @@ are in `CLAUDE.md`.
   on lines of its own. A table's header is its `thead` row or a first row of
   `th` cells, else empty; `tfoot` rows come last; a cell spanning columns or
   rows (clamped as HTML does, 1000 and 65534) is kept once and the cells it
-  covered are empty (`merged table cells split`); a caption is a paragraph
+  covered are empty (`merged table cells split`); an element between rows
+  that holds no text (an anchor, white space) makes no row, so it takes no
+  row span; a caption is a paragraph
   before the table. Stylesheets and `style` attributes are never read: every
   chapter reports `book styles (fonts, colours, layout) not carried over`.
   Budgets: every element is a node, charged when it starts, and so is every
@@ -394,6 +440,19 @@ are in `CLAUDE.md`.
   charged (a step count the tests and the fuzz target bound), with the
   builder's own stacks, no recursion. `has_text` tells whether a document
   holds any text that is not white space (an image's alt text is not).
+  `read_with_ids` reads the same tree and, beside it, the chapter's `id`
+  attributes (`Ids`): an id on a heading the tree keeps is that heading's,
+  by its ordinal (the headings counted from 0 in document order, nested
+  ones included); so is the id of a block container (`div`, `section`
+  and the other transparent block elements, `blockquote`, `li`) whose
+  first block is that heading, so a link to a section lands on its title
+  (outer containers first). Every other id (a footnote anchor, a
+  paragraph, a span, a heading where only inline content fits, an empty
+  heading, a container with something before its heading or none) is in
+  `others`. Ids are kept as written, an empty one is none, an element
+  dropped with its content keeps none; their text is owned text, charged
+  before it is copied, so a chapter near the limit can fail with ids and
+  still read without them (the text actions read without).
 - `text.md-to-epub` and `text.txt-to-epub` (`group=book`, `lossy=yes`) write
   one book per input into the work directory, `<stem>.epub`. The title is
   the first non-empty H1 of a Markdown input, else the file's stem (always
@@ -458,6 +517,75 @@ are in `CLAUDE.md`.
   (`book is too large`) or the output ceiling (`Plain text would be
   larger than <N> MiB`), the file is cut back to empty and removed and
   the input fails.
+- `text.epub-to-md` (`in=application/epub+zip`, `group=document`,
+  `lossy=yes`, `batch=no`) writes one GitHub Flavored Markdown file per
+  book, `<stem>.md`, and beside it the JPEG and PNG images its chapters
+  show, `<stem>-0001.jpg`, `<stem>-0002.png`... (four digits from 1, in
+  the order of their first reference; the names come only from the
+  input's stem and the counter, never from the book). The file starts
+  with `# <title>`, the authors (joined by `, `) as a paragraph and a
+  blank line, what the book lacks left out; then every spine item as in
+  `text.epub-to-txt`, written by the GFM writer (tables as pipe tables,
+  strikethrough as `~~`), a blank line between chapters (a chapter's
+  first list after a list of its kind takes the other marker, `*` or
+  `)`, so a reader keeps the two lists apart and an ordered one its
+  start), and an
+  unreadable one as the paragraph `\[Chapter N could not be read:
+  <reason>\]` (escaped, so it is never a link). The book is read twice:
+  first every chapter for its headings only, which gives each heading
+  its id as a viewer and the join number them over the whole md
+  (`doc::xhtml::slug`, the title heading first, repeats `-1`, `-2`... in
+  order) and records where each heading `id` attribute lands; then one
+  chapter at a time to write it. A link into the book (no URL scheme)
+  becomes `#<id>` when it lands on a heading (its fragment names a
+  heading's `id`, an `id` inside the heading such as a table of
+  contents anchor `<h2><a id="c2"/>II.</h2>`, or that of a container
+  the heading leads; or with no fragment the chapter has a first
+  heading), else it keeps only its text. The `<id>` is the anchor a viewer
+  (GitHub) gives the heading: the slug without the `h-` an EPUB id needs
+  before a digit (`#1984`, `#1984-1`), which the join still finds; a
+  heading whose text gives no anchor (`!!!`) cannot be linked, and a
+  heading text that is the prefix itself (`H 1` beside `1`) is numbered
+  by our rule, not GitHub's; nor do decomposed accents (`e` + U+0301,
+  left out of ours) and white space other than a plain space (a no-break
+  space, `-` in ours) give GitHub's anchor, so such a heading's link may
+  miss in a viewer, while the join resolves it. Further, `http:`,
+  `https:`, `mailto:` and
+  `//host/...` links stay as they are, any other scheme keeps only its
+  text (so the md never carries a `javascript:` or `file:` link); each
+  dropped link is reported. An image is resolved in the book like a
+  link; the entry is read once however often it is named (two paths to
+  one entry are one file) and written byte for byte when the image probe
+  finds a JPEG or PNG of at most 180 megapixels (one the PDF writer
+  cannot pass, such as a PNG with alpha, is kept too). The bytes are
+  copied as they are. An image with a feature the PDF writer lacks is
+  checked by its header only (type, size, pixel count); a PNG the PDF
+  writer supports is also checked in structure (chunk CRCs, chunk order,
+  the IDAT run), so a damaged one keeps its alt text. Compressed pixel
+  data is never decoded, so damage inside it is not detected (a viewer
+  shows such an image broken). Every other image (GIF, WebP, SVG, a damaged header, missing,
+  outside the book, encrypted, over the limits in
+  `docs/resource-limits.md`) keeps
+  its alt text in its place, and one `warn`, `N image(s) replaced by alt
+  text`, counts those places; it stands for the images loss, which then
+  has no line of its own, so the `warn` lines stay within the
+  supervisor's 16. The md links to an image by its file name
+  (`![alt](<stem>-0001.jpg)`, in `<...>` when the name has a space; `%`,
+  `#`, `?` and control characters percent-encoded). When the stem is so
+  long that an image's name does not fit the file system (it is 6 bytes
+  longer than the md's), the images keep their alt text and the md is
+  still made when the book has text. A book with no text but at least
+  one image written is made (a picture book); with neither, it fails:
+  `image names too long for this folder` when an image could not be
+  written for its name, else `book has no text`. Nothing is reported
+  before the book is whole: then one `done`
+  per image in order, the md last, and the `warn` lines. On any failure
+  every file written for the book (the md and the images) is cut back to
+  empty and removed and the input fails with no `done`, so nothing of it
+  is published. The md and its images, joined again by
+  `text.md-join-epub`, make a book again when it is within the EPUB
+  writer's limits (1024 chapters, one document's budgets); a larger
+  book's md is still written but cannot be joined back in one piece.
 - The text family stops a document at structure budgets, charged while it
   is built (before the allocation): input 8 MiB, 524,288 nodes (blocks
   and inlines, including link reference definitions), 32 MiB of owned
@@ -477,6 +605,7 @@ action	text.md-to-html	family=text	in=text/markdown	out=text/html	ext=html	label
 action	text.txt-to-html	family=text	in=text/plain	out=text/html	ext=html	label=HTML	group=document	cost=10	lossy=yes	batch=yes
 action	text.md-join-epub	family=text	in=text/markdown	assets=image/jpeg,image/png	out=application/epub+zip	ext=epub	label=EPUB	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	text.epub-to-txt	family=text	in=application/epub+zip	out=text/plain	ext=txt	label=Plain text	group=document	cost=10	lossy=yes	batch=yes
+action	text.epub-to-md	family=text	in=application/epub+zip	out=text/markdown	ext=md	label=Markdown	group=document	cost=10	lossy=yes	batch=no
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
@@ -1038,10 +1167,11 @@ compositor.
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
-  north, `plain-text` (from Markdown) and `plain-text-epub` (from an EPUB)
-  south, so an EPUB lights only Document, with its other slices dim and
-  nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has
-  no one-to-one form, it only joins images into one comic book; `html`
+  (from plain text) and `markdown-epub` (from an EPUB) north, `plain-text`
+  (from Markdown) and `plain-text-epub` (from an EPUB) south, so an EPUB
+  lights only Document (Markdown north, Plain text south, HTML east dim)
+  and nothing in Book; `pdf` north and `cbz` south in Book; `cbz` has no
+  one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped
   files fit both inputs, a preset that can run beats a dim one, then the one
@@ -1049,7 +1179,8 @@ compositor.
   the table, plain text before Markdown, which is also the flat offer's tie
   order; so one EPUB and one Markdown file leave `plain-text` (from Markdown)
   in the south slot, and more EPUBs than Markdown files give it to
-  `plain-text-epub`): lit if
+  `plain-text-epub`; the same holds in the north slot between `markdown`
+  (from plain text) and `markdown-epub`): lit if
   applicable, dim otherwise; the hub is the category's label, or
   `<n> / <total> files` when the most files any lit target of the category
   takes (`n`, the count the run would take) is below the number dropped.

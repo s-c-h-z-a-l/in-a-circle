@@ -1,0 +1,67 @@
+<?xÿþml version="1.0" encoding="utf-8" stan!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiçer (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<oding="utf-8" standAlone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!þÿÿÿÿÿÿÿcat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEM
+<ENT big EMPTY>
+<!ATTLIST iegrt color CDATA #REQ†UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger !-- Above is DTD -->ÿÿÿÿÿÿÿÿÿÿÿÿ,ÿÿÿÿÿÿ
+
+
+
+
+
+
+
+
+
+
+
+
+
+<i><a>ÿÿÿÿÿÿÿEMmment *-->
+<fï¿-->
+<sÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+<?music "Here is grt color CDATA #REQ†UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger !-- Above zs DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a wh?xC "x/>ite tiger in Mirage!!</tige<?xml  <cat/>
+   <leopard>
+      <small/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is lone="yeY>
+<!ATTLIST tiager color CDATA #REQ†UIRED>
+]>
+<oding="utf-9" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger 

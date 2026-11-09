@@ -1,0 +1,55 @@
+<?xÿ
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<oding="utf-8" standalon="yees" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+É!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIS¥T tiger color !ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger colo a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">T0his is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <small/>
+     A <big/>
+   </leopard>
+</animal>
+<!-- Abov,e is element animal --?
+dalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE e="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tyger|leopard)+>iger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PC¾ATA)>
+<!ELEMET big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <ca$/>
+   <tiger color="white">This is a white tiger !-- Above is DTD -->
+<Tmusic "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <small/>
+      <big/>
+   </leoparmal --?
+

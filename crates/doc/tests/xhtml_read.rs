@@ -4,7 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use doc::xhtml_read::{XhtmlError, has_text, read_limited, read_steps};
+use doc::xhtml_read::{
+    Ids, XhtmlError, has_text, read_limited, read_steps, read_with_ids, read_with_ids_steps,
+};
 use doc::{Align, Block, Document, Inline, LimitError, Limits, ListItem, Loss, txt};
 
 const XHTML: &str = "http://www.w3.org/1999/xhtml";
@@ -1278,5 +1280,472 @@ fn trailing_trim_edges() {
     assert_eq!(
         blocks("<p><em>a </em></p>"),
         vec![para(vec![Inline::Emph(vec![t("a")])])]
+    );
+}
+
+fn read_ids(body: &str) -> (Vec<Block>, Ids) {
+    let s = page(body);
+    let (d, _, ids) = read_with_ids(&s, Limits::DEFAULT).unwrap_or_else(|e| panic!("{e:?}"));
+    // The ids never change the tree: it is the one `read_limited` builds.
+    assert_eq!(d, read_limited(&s, Limits::DEFAULT).unwrap().0);
+    (d.blocks, ids)
+}
+
+/// The text of every heading in document order (pre-order: a block, then
+/// the blocks inside it), the order the heading ordinals count in.
+fn heading_texts(blocks: &[Block]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&Block> = blocks.iter().rev().collect();
+    while let Some(b) = stack.pop() {
+        match b {
+            Block::Heading { content, .. } => out.push(match content.as_slice() {
+                [Inline::Text(t)] => t.clone(),
+                other => format!("{other:?}"),
+            }),
+            Block::BlockQuote(inner) => stack.extend(inner.iter().rev()),
+            Block::List { items, .. } => {
+                stack.extend(items.iter().rev().flat_map(|i| i.blocks.iter().rev()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The heading text each id lands on.
+fn heading_of(blocks: &[Block], ids: &Ids) -> Vec<(String, String)> {
+    let texts = heading_texts(blocks);
+    ids.headings
+        .iter()
+        .map(|(n, id)| (id.clone(), texts[*n].clone()))
+        .collect()
+}
+
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+#[test]
+fn heading_ids_kept_in_order() {
+    // Ordinals count the headings in document order, nested ones (a quote,
+    // a list item) included; a heading without an id is counted too.
+    let (b, ids) = read_ids(concat!(
+        r#"<h1 id="top">Top</h1><p>x</p><h2>No id</h2>"#,
+        r#"<blockquote><h3 id="q">In quote</h3></blockquote>"#,
+        r#"<ul><li><h4 id="l">In item</h4></li></ul><h2 id="end">End</h2>"#,
+    ));
+    assert_eq!(
+        ids.headings,
+        vec![
+            (0, "top".to_string()),
+            (2, "q".to_string()),
+            (3, "l".to_string()),
+            (4, "end".to_string())
+        ]
+    );
+    assert_eq!(
+        heading_of(&b, &ids),
+        pairs(&[
+            ("top", "Top"),
+            ("q", "In quote"),
+            ("l", "In item"),
+            ("end", "End")
+        ])
+    );
+    assert!(ids.others.is_empty());
+
+    // A container whose first block is a heading: its id lands on that
+    // heading too, outer ids first, through transparent wrappers and
+    // white space; a list item's id likewise.
+    let (b, ids) = read_ids(concat!(
+        r#"<section id="c1"> <div id="w"><h2 id="t">Title</h2></div><p>p</p></section>"#,
+        r#"<ol><li id="i"><h3>Item</h3></li></ol>"#,
+        r#"<blockquote id="bq"><h3>Quoted</h3></blockquote>"#,
+        r#"<body id="never"/>"#,
+    ));
+    assert_eq!(
+        heading_of(&b, &ids),
+        pairs(&[
+            ("c1", "Title"),
+            ("w", "Title"),
+            ("t", "Title"),
+            ("i", "Item"),
+            ("bq", "Quoted")
+        ])
+    );
+    assert_eq!(ids.others, vec!["never".to_string()]);
+
+    // Something before the heading: the container's id is not the
+    // heading's (a link to it lands on the paragraph, not a title).
+    for body in [
+        r#"<section id="s"><p>first</p><h2>H</h2></section>"#,
+        r#"<section id="s"><hr/><h2>H</h2></section>"#,
+        r#"<section id="s">text<h2>H</h2></section>"#,
+        r#"<section id="s"><blockquote><h2>H</h2></blockquote></section>"#,
+        r#"<section id="s"><table><tr><td>c</td></tr></table><h2>H</h2></section>"#,
+        r#"<section id="s"></section><h2>H</h2>"#,
+        r#"<section id="s"><p><h2>H</h2></p></section>"#,
+    ] {
+        let (_, ids) = read_ids(body);
+        assert!(ids.headings.is_empty(), "{body}: {ids:?}");
+        assert_eq!(ids.others, vec!["s".to_string()], "{body}");
+    }
+    // An empty element before the heading leaves nothing: the id is still
+    // the heading's.
+    let (b, ids) = read_ids(r#"<section id="s"><span/><p></p><h2>H</h2></section>"#);
+    assert_eq!(heading_of(&b, &ids), pairs(&[("s", "H")]));
+
+    // An empty heading is no heading: its ids are others, and it takes no
+    // ordinal.
+    let (b, ids) = read_ids(r#"<div id="d"><h2 id="e"> </h2></div><h2 id="f">F</h2>"#);
+    assert_eq!(heading_of(&b, &ids), pairs(&[("f", "F")]));
+    assert_eq!(ids.headings, vec![(0, "f".to_string())]);
+    assert_eq!(ids.others, vec!["d".to_string(), "e".to_string()]);
+}
+
+/// Appends random nested markup. Every heading with an id has its own id as
+/// text (`h<n>`); a heading without one has other text. Headings go only
+/// where they stay headings (not in a table cell, where they are inline).
+/// Returns nothing; `ids` collects the ids of the headings written.
+fn gen_markup(rng: &mut Rng, depth: u32, next: &mut u32, out: &mut String, ids: &mut Vec<String>) {
+    let count = 1 + rng.below(4);
+    for _ in 0..count {
+        let kind = if depth >= 5 {
+            rng.below(3)
+        } else {
+            rng.below(9)
+        };
+        match kind {
+            0 | 1 => {
+                // A heading, with an id three times out of four.
+                let n = *next;
+                *next += 1;
+                let tag = 1 + rng.below(6);
+                // The id on the heading, or inside it on an empty anchor
+                // (a table of contents target) or a span around its text.
+                match rng.below(8) {
+                    0 | 1 => out.push_str(&format!("<h{tag}>plain{n}</h{tag}>")),
+                    2 | 3 => {
+                        out.push_str(&format!(r#"<h{tag}><a id="h{n}"/>h{n}</h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
+                    4 => {
+                        out.push_str(&format!(r#"<h{tag}><span id="h{n}">h{n}</span></h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
+                    _ => {
+                        out.push_str(&format!(r#"<h{tag} id="h{n}">h{n}</h{tag}>"#));
+                        ids.push(format!("h{n}"));
+                    }
+                }
+            }
+            2 => out.push_str("<p>text</p>"),
+            3 => {
+                out.push_str("<section>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</section>");
+            }
+            4 => {
+                out.push_str("<div>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</div>");
+            }
+            5 => {
+                out.push_str("<blockquote>");
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</blockquote>");
+            }
+            6 => {
+                let list = if rng.below(2) == 0 { "ul" } else { "ol" };
+                out.push_str(&format!("<{list}>"));
+                for _ in 0..1 + rng.below(3) {
+                    out.push_str("<li>");
+                    gen_markup(rng, depth + 1, next, out, ids);
+                    out.push_str("</li>");
+                }
+                out.push_str(&format!("</{list}>"));
+            }
+            7 => {
+                // A table: cells hold text only, so no heading is lost to it.
+                out.push_str("<table>");
+                for _ in 0..1 + rng.below(3) {
+                    out.push_str("<tr><td>a</td><td>b</td></tr>");
+                }
+                out.push_str("</table>");
+            }
+            _ => {
+                // A wrapper with an id of its own (`w`): a container id may
+                // pass to the heading that leads it, so it is not checked
+                // against the heading text below.
+                out.push_str(r#"<div id="w">"#);
+                gen_markup(rng, depth + 1, next, out, ids);
+                out.push_str("</div>");
+            }
+        }
+    }
+}
+
+#[test]
+fn heading_ordinals_map_to_own_ids_in_random_nesting() {
+    // Every heading's text is its own id, so the n-th pre-order heading's
+    // text must be the id paired with ordinal n. A wrong ordinal that stays
+    // in range (swapped, off by one) fails here.
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for case in 0..3000 {
+        let (mut body, mut expected, mut next) = (String::new(), Vec::new(), 0);
+        gen_markup(&mut rng, 0, &mut next, &mut body, &mut expected);
+        let (blocks, ids) = read_ids(&body);
+        let texts = heading_texts(&blocks);
+        assert_eq!(texts.len() as u32, next, "case {case}: {body}");
+        // Only own ids (`h<n>`) are checked; a wrapper's `w` may sit on a
+        // heading it leads.
+        let own: Vec<&(usize, String)> = ids.headings.iter().filter(|(_, id)| id != "w").collect();
+        for (n, id) in &own {
+            assert_eq!(&texts[*n], id, "case {case}: ordinal {n} in {body}");
+        }
+        let got: Vec<&String> = own.iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            got,
+            expected.iter().collect::<Vec<_>>(),
+            "case {case}: {body}"
+        );
+        // Ordinals never decrease (a heading may carry a wrapper id too).
+        assert!(
+            ids.headings.windows(2).all(|w| w[0].0 <= w[1].0),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+fn ids_inside_a_heading_are_its_own() {
+    // A table of contents anchor at the start of the heading, a span
+    // around its text, emphasis and a link inside it, and a block element
+    // it holds (inline content there): all the heading's, after its own
+    // id and its container's. An anchor before the heading, outside it,
+    // and ids inside an empty or a cell's heading stay others.
+    let (_, ids) = read_ids(concat!(
+        r#"<div id="d"><h2 id="own"><a id="toc"/>Chapter <span id="s">II</span>"#,
+        r#"<em id="e">.</em><a id="l" href="x.xhtml">x</a><p id="p">y</p></h2></div>"#,
+        r#"<a id="before"/><h2><span id="only">Three</span></h2>"#,
+        r#"<h3><a id="empty"/></h3>"#,
+        r#"<table><tr><td><h2><a id="cell"/>c</h2></td></tr></table>"#,
+        r#"<p><a id="after"/>z</p>"#,
+    ));
+    assert_eq!(
+        ids.headings,
+        [
+            (0, "d"),
+            (0, "own"),
+            (0, "toc"),
+            (0, "s"),
+            (0, "e"),
+            (0, "l"),
+            (0, "p"),
+            (1, "only"),
+        ]
+        .map(|(n, id)| (n, id.to_string()))
+        .to_vec()
+    );
+    assert_eq!(
+        ids.others,
+        ["before", "empty", "cell", "after"]
+            .map(String::from)
+            .to_vec()
+    );
+}
+
+#[test]
+fn ids_on_non_heading_elements_listed() {
+    // Footnote anchors, paragraphs, spans, a heading in a cell (inline
+    // there), elements in `pre` and in code: all others, in the order they
+    // are settled (document order here).
+    // An empty id is no id; an element dropped with its content keeps none.
+    let (_, ids) = read_ids(concat!(
+        r#"<p id="p1">a<a id="n1"/><span id="s1">b</span><a id="r1" href="x.xhtml#n1">c</a></p>"#,
+        r#"<table id="t"><tr id="tr"><td id="td"><h2 id="h-in-cell">x</h2></td></tr></table>"#,
+        r#"<pre id="pre">a<span id="in-pre">b</span></pre><p><code id="c">x</code><img id="img" src="i.png"/></p>"#,
+        r#"<p id="">empty</p><svg xmlns="http://www.w3.org/2000/svg" id="svg"><g id="g"/></svg>"#,
+        r#"<script id="sc"/><ul id="u"><li>i</li></ul><hr id="hr"/>"#,
+    ));
+    assert!(ids.headings.is_empty());
+    assert_eq!(
+        ids.others,
+        [
+            "p1",
+            "n1",
+            "s1",
+            "r1",
+            "t",
+            "tr",
+            "td",
+            "h-in-cell",
+            "pre",
+            "in-pre",
+            "c",
+            "img",
+            "u",
+            "hr"
+        ]
+        .map(String::from)
+        .to_vec()
+    );
+    // The same id twice is listed twice: the reader keeps what the book says.
+    let (_, ids) = read_ids(r#"<p id="x">a</p><p id="x">b</p>"#);
+    assert_eq!(ids.others, vec!["x".to_string(), "x".to_string()]);
+}
+
+#[test]
+fn id_text_charged_to_the_budget() {
+    let s = page(&format!(r#"<p id="{}">abc</p>"#, "i".repeat(100)));
+    let with = |n| {
+        read_with_ids(
+            &s,
+            Limits {
+                text_bytes: n,
+                ..Limits::DEFAULT
+            },
+        )
+        .map(|_| ())
+    };
+    // The text (3) and the id (100).
+    assert_eq!(with(103), Ok(()));
+    assert_eq!(
+        with(102),
+        Err(XhtmlError::Limit(LimitError::Exceeded("owned text")))
+    );
+    // Without ids the chapter costs what it always did.
+    assert!(
+        read_limited(
+            &s,
+            Limits {
+                text_bytes: 3,
+                ..Limits::DEFAULT
+            }
+        )
+        .is_ok()
+    );
+    // A heading's id and a container's id waiting for a heading are
+    // charged too: 1 + 2 + 3.
+    let s = page(r#"<div id="ab"><h1 id="cde">x</h1></div>"#);
+    let ok = |n| {
+        read_with_ids(
+            &s,
+            Limits {
+                text_bytes: n,
+                ..Limits::DEFAULT
+            },
+        )
+        .is_ok()
+    };
+    assert!(ok(6));
+    assert!(!ok(5));
+}
+
+#[test]
+fn ids_are_linear() {
+    // Deeply nested containers with ids, each waiting for a heading that
+    // comes only at the end, then many headings with ids: every id is
+    // resolved once.
+    let depth = 200;
+    let mut body = String::new();
+    for i in 0..depth {
+        body.push_str(&format!(r#"<div id="d{i}">"#));
+    }
+    body.push_str(r#"<h1 id="h">x</h1>"#);
+    for _ in 0..depth {
+        body.push_str("</div>");
+    }
+    let mut n = 0;
+    while body.len() < 2 << 20 {
+        body.push_str(&format!(
+            r#"<section id="s{n}"><h2 id="h{n}">t</h2><p id="p{n}">p</p></section>"#
+        ));
+        n += 1;
+    }
+    let s = page(&body);
+    let (r, steps) = read_with_ids_steps(&s, Limits::DEFAULT);
+    assert!(
+        steps <= STEPS_PER_BYTE * s.len() as u64,
+        "{steps} steps for {} bytes",
+        s.len()
+    );
+    let (_, _, ids) = r.unwrap();
+    assert_eq!(ids.headings.len(), depth + 1 + 2 * n);
+    assert_eq!(ids.others.len(), n);
+    // Without ids the steps are the reader's own, unchanged.
+    assert!(read_steps(&s, Limits::DEFAULT).1 <= steps);
+}
+
+#[test]
+fn inline_between_table_rows_opens_no_row() {
+    // An empty inline element between rows (an anchor) opened an implicit
+    // row that took the row span of the cell above: `d` landed in the
+    // spanned column.
+    let (d, _) = read(&page(
+        r#"<table><tr><td rowspan="2">a</td><td>b</td></tr><a id="x"/><tr><td>d</td></tr></table>"#,
+    ));
+    assert_eq!(
+        d.blocks,
+        vec![Block::Table {
+            align: vec![Align::None; 2],
+            head: vec![vec![], vec![]],
+            rows: vec![vec![vec![t("a")], vec![t("b")]], vec![vec![], vec![t("d")]]],
+        }]
+    );
+    // White space, an empty span or emphasis there neither.
+    assert_eq!(
+        blocks(
+            r#"<table><tr><td rowspan="2">a</td></tr> <span> </span><b/><br/><tr><td>d</td></tr></table>"#
+        ),
+        vec![Block::Table {
+            align: vec![Align::None; 2],
+            head: vec![vec![], vec![]],
+            rows: vec![vec![vec![t("a")], vec![]], vec![vec![], vec![t("d")]]],
+        }]
+    );
+    // Text between rows is still a row of its own: no text is lost.
+    assert_eq!(
+        blocks(r#"<table><tr><td>a</td></tr><span>x</span><tr><td>d</td></tr></table>"#),
+        vec![Block::Table {
+            align: vec![Align::None],
+            head: vec![vec![]],
+            rows: vec![vec![vec![t("a")]], vec![vec![t("x")]], vec![vec![t("d")]]],
+        }]
+    );
+}
+
+/// The steps the ids cost on top of the reader's own for a body.
+fn id_steps(body: &str) -> u64 {
+    let s = page(body);
+    let (r, with) = read_with_ids_steps(&s, Limits::DEFAULT);
+    r.unwrap_or_else(|e| panic!("{e:?} for {s}"));
+    with - steps(&s)
+}
+
+#[test]
+fn id_step_counts_per_construct() {
+    // The linearity test bounds the steps only from above, so an id that
+    // costs nothing would pass it: each id costs one step when it is
+    // settled, and a heading's ids one more when the heading closes.
+    //
+    // Containers without a heading: each waiting id is settled at the end
+    // of its container, 1 each.
+    assert_eq!(id_steps(r#"<div id="a"><p>x</p></div>"#), 1);
+    assert_eq!(
+        id_steps(r#"<div id="a"><div id="b"><div id="c"><p>x</p></div></div></div>"#),
+        3
+    );
+    // A heading's own id: 1 when it starts, 1 when it closes.
+    assert_eq!(id_steps(r#"<h1 id="b">T</h1>"#), 2);
+    // A waiting container id and the heading's own: the waiting id 1, the
+    // own id 1, both again when the heading closes, 2.
+    assert_eq!(id_steps(r#"<div id="a"><h1 id="b">T</h1></div>"#), 4);
+    // Three waiting ids settled by one heading, none of its own: 3 + 3.
+    assert_eq!(
+        id_steps(r#"<div id="a"><div id="b"><div id="c"><h1>T</h1></div></div></div>"#),
+        6
     );
 }

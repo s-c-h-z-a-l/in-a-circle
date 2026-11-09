@@ -2,6 +2,8 @@
 //! what they dropped (txt -> md may merge blank-line runs, md -> txt drops
 //! structure). Contract v0 (docs/architecture.md).
 
+mod base;
+mod epub_md;
 mod epub_read;
 mod join;
 
@@ -14,46 +16,10 @@ use std::time::UNIX_EPOCH;
 
 use action::{Command, Events, Invocation, parse_args};
 use doc::xhtml::{Anchors, Chapter, Mode};
-use doc::{Dialect, Document, LimitError, Limits, Loss, ReadError};
+use doc::{Dialect, Document, LimitError, Loss};
 
-/// The structure budgets of one conversion (`document_*` budgets, see
-/// [`Limits::DEFAULT`] for the values and their reasons). The input is read
-/// at most `input_bytes` (+1 to detect more); past any budget the input
-/// fails (`fail`, nothing staged) and the batch goes on. The sandbox's
-/// RLIMIT_DATA (>= 1 GiB) is the second net.
-const LIMITS: Limits = Limits::DEFAULT;
-
-/// Why a conversion stopped.
-enum ConvertError {
-    NotText,
-    Limit(LimitError),
-    /// Any other failure, as the `fail` reason.
-    Other(String),
-}
-
-impl From<epub::BookError> for ConvertError {
-    fn from(e: epub::BookError) -> Self {
-        match e {
-            epub::BookError::Limit(l) => ConvertError::Limit(l),
-            other => ConvertError::Other(other.to_string()),
-        }
-    }
-}
-
-impl From<ReadError> for ConvertError {
-    fn from(e: ReadError) -> Self {
-        match e {
-            ReadError::NotText => ConvertError::NotText,
-            ReadError::Limit(l) => ConvertError::Limit(l),
-        }
-    }
-}
-
-impl From<LimitError> for ConvertError {
-    fn from(e: LimitError) -> Self {
-        ConvertError::Limit(e)
-    }
-}
+// The shared items, named from the crate root as every module names them.
+use base::{ConvertError, IMAGE_BYTES, LIMITS, MAX_PIXELS, Outcome, output_cap, too_large};
 
 /// `n` with thousands separators (`524,288`), for the rejection copy.
 fn grouped(n: usize) -> String {
@@ -183,6 +149,22 @@ fn manifest_text() -> String {
         "Plain text",
         "document",
     ));
+    // A book to Markdown and its images: one book per process (`batch=no`),
+    // since the supervisor takes at most 1024 `done` lines from one
+    // process and one book may need them all (1023 images and the md).
+    s.push_str(&manifest::write_line(
+        &manifest::Line::new("action")
+            .bare("text.epub-to-md")
+            .pair("family", "text")
+            .pair("in", "application/epub+zip")
+            .pair("out", "text/markdown")
+            .pair("ext", "md")
+            .pair("label", "Markdown")
+            .pair("group", "document")
+            .pair("cost", "10")
+            .pair("lossy", "yes")
+            .pair("batch", "no"),
+    ));
     s
 }
 
@@ -195,6 +177,7 @@ enum Conversion {
     MdToHtml,
     TxtToHtml,
     EpubToTxt,
+    EpubToMd,
 }
 
 impl Conversion {
@@ -207,13 +190,14 @@ impl Conversion {
             "text.md-to-html" => Some(Conversion::MdToHtml),
             "text.txt-to-html" => Some(Conversion::TxtToHtml),
             "text.epub-to-txt" => Some(Conversion::EpubToTxt),
+            "text.epub-to-md" => Some(Conversion::EpubToMd),
             _ => None,
         }
     }
 
     fn ext(self) -> &'static str {
         match self {
-            Conversion::TxtToMd => "md",
+            Conversion::TxtToMd | Conversion::EpubToMd => "md",
             Conversion::MdToTxt | Conversion::EpubToTxt => "txt",
             Conversion::MdToEpub | Conversion::TxtToEpub => "epub",
             Conversion::MdToHtml | Conversion::TxtToHtml => "html",
@@ -241,7 +225,9 @@ impl Conversion {
             | Conversion::TxtToEpub
             | Conversion::MdToHtml
             | Conversion::TxtToHtml => unreachable!("books and pages go through `publish`"),
-            Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
+            Conversion::EpubToTxt | Conversion::EpubToMd => {
+                unreachable!("an EPUB goes through `epub_read` or `epub_md`")
+            }
         }
     }
 
@@ -278,41 +264,6 @@ fn title(conv: Conversion, d: &Document, input: &Path) -> String {
     let t: String = t.chars().filter(|&c| doc::xhtml::xml_char(c)).collect();
     let t = t.trim();
     if t.is_empty() { "Untitled" } else { t }.to_string()
-}
-
-/// The soft `RLIMIT_FSIZE` of this process, the largest file it may write
-/// (the engine sets it to 16 x the input, 256 MiB to 16 GiB). `None` is
-/// unlimited. A failing `getrlimit` is an error, so the input fails closed
-/// instead of writing without a known ceiling. `getrlimit` on itself is
-/// allowed by the sandbox's seccomp policy.
-fn output_cap() -> Result<Option<u64>, ConvertError> {
-    let mut rl = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `rl` is a valid, writable `rlimit` for the whole call, and
-    // RLIMIT_FSIZE is a valid resource; the call only writes into `rl`.
-    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut rl) };
-    if rc != 0 {
-        return Err(ConvertError::Other(format!(
-            "cannot read the output size limit: {}",
-            io::Error::last_os_error()
-        )));
-    }
-    Ok((rl.rlim_cur != libc::RLIM_INFINITY).then_some(rl.rlim_cur))
-}
-
-/// The copy for an output past the ceiling (N rounded down, so it never
-/// overstates the limit; in KiB below 1 MiB, so it never reads "0 MiB").
-/// If the ceiling cannot be read now, the generic copy.
-fn too_large(what: &str) -> ConvertError {
-    match output_cap() {
-        Ok(Some(c)) if c >= 1 << 20 => {
-            ConvertError::Other(format!("{what} would be larger than {} MiB", c >> 20))
-        }
-        Ok(Some(c)) => ConvertError::Other(format!("{what} would be larger than {} KiB", c >> 10)),
-        _ => ConvertError::Other(format!("{what} would be too large")),
-    }
 }
 
 /// Writes the EPUB or the HTML page of `d`, which `conv.read` made of
@@ -399,7 +350,9 @@ fn publish(
         Conversion::TxtToMd | Conversion::MdToTxt => {
             unreachable!("text goes through `convert`")
         }
-        Conversion::EpubToTxt => unreachable!("an EPUB goes through `epub_read`"),
+        Conversion::EpubToTxt | Conversion::EpubToMd => {
+            unreachable!("an EPUB goes through `epub_read` or `epub_md`")
+        }
     };
     losses.extend(more);
     Ok(losses)
@@ -410,12 +363,6 @@ fn publish(
 fn merge_losses(mut reader: BTreeSet<Loss>, writer: BTreeSet<Loss>) -> BTreeSet<Loss> {
     reader.extend(writer);
     reader
-}
-
-enum Outcome {
-    Done,
-    Unsupported,
-    Failed,
 }
 
 fn process(
@@ -431,8 +378,10 @@ fn process(
     }
     // A book is read from the file entry by entry, never whole: it is not
     // held to the text input budget.
-    if let Conversion::EpubToTxt = conv {
-        return epub_read::process(inv, i, input, ev);
+    match conv {
+        Conversion::EpubToTxt => return epub_read::process(inv, i, input, ev),
+        Conversion::EpubToMd => return epub_md::process(inv, i, input, ev),
+        _ => {}
     }
     let bytes = match action::read_file_bounded(input, LIMITS.input_bytes) {
         Ok(b) => b,

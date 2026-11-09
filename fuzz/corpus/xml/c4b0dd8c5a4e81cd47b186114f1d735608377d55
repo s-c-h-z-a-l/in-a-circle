@@ -1,0 +1,10 @@
+<?xml  version="1.0"?>
+<!-- validity test <?˜for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT test ANY>
+ <!ELEMENT a MPTY>
+ <!ELEMENT TY>
+
+ <!ATTLIST &ametoken namevalue NM
+

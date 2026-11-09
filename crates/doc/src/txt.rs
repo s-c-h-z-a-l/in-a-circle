@@ -948,10 +948,15 @@ mod tests {
             ControlCharacters,
             Styles,
             MergedCells,
+            CellsFlattened,
         ] {
             assert!(!l.message().is_empty());
         }
         assert_eq!(Emphasis.message(), "emphasis removed");
+        assert_eq!(
+            CellsFlattened.message(),
+            "table cell line breaks became spaces"
+        );
     }
 
     #[test]

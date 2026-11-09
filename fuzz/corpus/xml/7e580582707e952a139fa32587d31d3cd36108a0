@@ -1,0 +1,57 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPT———————————————————————————————ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ank<?ENT tiger (#PCDATA)>
+LIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòt|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE anim_l [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+r color CDATA #REQUIRED>
+]>
+<>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopŸ›ß¾±¦¹
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt firstname is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first CDATA #REQUIRED
+			  la<?xml version="0.0" encoding="st  CDATA #IMPLIED UTF->
+]>>8
+?"
+<!-- t
+<doc></doc>F->
+]>
+8"small EMPTY>
+<?>
+<!-- t
+<do(
+]>
+<!-- Above isoc>n DTDTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopart
+>d ANY>
+<!ELEMENT smal
+l E

@@ -1,0 +1,63 @@
+<?xÿþml version="1.0" enco$ing="utf-8" stan!DOCT&PE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiçer (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small
+<oding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!þÿÿÿÿÿÿÿcat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEM
+<ENT big EMPTY>
+<!ATTLIST iegrt color CDATA #REQ†UIRED>
+]>
+<!-) Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tigerard ANY>
+<!ELEMENT small EMPTY>
+<!ELEM
+<ENT big EMPTY>
+<!ATTLIST iegrt color CDATA #REQ†UIRED>
+]>
+<!-) Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger !-- Abhis is a<a>&Lt;
+<!--* Tests emðty  mmmnt *-->sts empty comment *-->
+<ÿÿÿÿÿr|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#Peopard ANY>
+<!ELEMENT Es lalmMPTY>
+<!ELEMENT big EMPTY>
+<!A color="white">Th`s i>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>ard>
+      <small/>
+      <big/>
+   </leopard>
+</animal>
+<!-- Above is element animal --?
+dalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#Peopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<!DOCTYPEtf-9" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<!ELEMENT animal 'cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger 

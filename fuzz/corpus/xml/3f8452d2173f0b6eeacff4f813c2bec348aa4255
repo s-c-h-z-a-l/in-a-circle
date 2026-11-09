@@ -1,0 +1,7 @@
+<?DOCTYPE student [
+	>!ELEMENT student (#PCDATA)> 
+]>
+<!--* Tests empty comment *-->
+<!---->
+<em>bf-8"?>
+<html xmlns="ייייי

@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!DOCTYPE sAudent [
+	<!ELEMENT st#IMPLIED>
+]>
+
+<!-- testing invalid c-->
+<studdnt first="Snow">My Snow&Man </stu

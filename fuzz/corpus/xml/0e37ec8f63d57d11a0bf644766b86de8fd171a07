@@ -1,0 +1,11 @@
+<!DOCTYPE doc
+[
+<!ELEMENT do CDATA
+
+ CDATA
+ "s1
+ 
+ >
+<!ATTLIST d>
+]>
+<doc><c/><c aŒƒ1="test"/></doc>

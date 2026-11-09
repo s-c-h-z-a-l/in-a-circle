@@ -194,7 +194,7 @@ fn is_special(c: u8) -> bool {
 }
 
 /// Unicode whitespace as CommonMark defines it: Zs plus tab, LF, FF, CR.
-fn is_space(c: char) -> bool {
+pub(super) fn is_space(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\x0c' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
@@ -203,7 +203,7 @@ fn is_space(c: char) -> bool {
 }
 
 /// Unicode punctuation as CommonMark defines it: general categories P and S.
-fn is_punct(c: char) -> bool {
+pub(super) fn is_punct(c: char) -> bool {
     if c.is_ascii() {
         return c.is_ascii_punctuation();
     }
@@ -272,7 +272,7 @@ fn scan_email(b: &[u8], i: usize) -> Option<usize> {
 
 /// Schemes of a GFM extended URL autolink (spec: "`http://`, `https://`,
 /// or `ftp://`"); matched without regard to case, as URI schemes are.
-const SCHEMES: [&[u8]; 3] = [b"http", b"https", b"ftp"];
+pub(super) const SCHEMES: [&[u8]; 3] = [b"http", b"https", b"ftp"];
 
 /// Whitespace as the GFM spec (and cmark-gfm's `cmark_isspace`) means it:
 /// space, tab, LF, VT, FF, CR. It ends an extended autolink's path.

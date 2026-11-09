@@ -21,6 +21,13 @@
 //! Media types are compared by their `type/subtype`, ASCII case ignored,
 //! parameters cut.
 //!
+//! Resources: [`Book::resolve`] resolves an `href` or `src` of a chapter
+//! by the same rules, relative to the chapter's folder (an empty one, or
+//! only a fragment, is the chapter itself); [`Book::resource`] reads one
+//! entry by its exact name under a size cap the caller gives, checked on
+//! the declared size before anything is reserved and on the bytes
+//! produced.
+//!
 //! DRM: `META-INF/encryption.xml` lists the encrypted resources
 //! (`EncryptedData`, its `EncryptionMethod` and `CipherReference URI`,
 //! relative to the container root). Font obfuscation (the IDPF and Adobe
@@ -274,10 +281,37 @@ pub struct Book<'f> {
     /// spine first names them.
     pub items: Vec<Item>,
     archive: zip::Archive<'f>,
+    /// The archive's file entries (not folders) by name: indices into
+    /// `archive.entries()`, sorted by name. 8 bytes per entry, 96 KB at
+    /// the 12,000-entry limit.
+    index: Vec<usize>,
+    /// The entries `encryption.xml` marks encrypted, sorted (a ZIP entry's
+    /// own flag is on the entry).
+    locked: Vec<usize>,
     /// One per item.
     slots: Vec<Slot>,
     limits: Limits,
     steps: u64,
+}
+
+/// The entries of `index` (see [`Book::index`]) sorted by name.
+fn by_name(archive: &zip::Archive<'_>) -> Vec<usize> {
+    let entries = archive.entries();
+    let mut index: Vec<usize> = (0..entries.len())
+        .filter(|&i| !entries[i].is_dir())
+        .collect();
+    index.sort_unstable_by(|&a, &b| entries[a].name.cmp(&entries[b].name));
+    index
+}
+
+/// The file entry named exactly `name`. The ZIP reader has refused
+/// duplicate names, so a name is at most one entry.
+fn find(archive: &zip::Archive<'_>, index: &[usize], name: &[u8]) -> Option<usize> {
+    let entries = archive.entries();
+    index
+        .binary_search_by(|&i| entries[i].name.as_slice().cmp(name))
+        .ok()
+        .map(|k| index[k])
 }
 
 /// Open the book in `file` with [`Limits::DEFAULT`].
@@ -288,33 +322,28 @@ pub fn open(file: &File) -> Result<Book<'_>, BookError> {
 /// Open the book in `file` with these limits.
 pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
     let archive = zip::open(file, ZIP_LIMITS).map_err(|e| BookError::Damaged(e.to_string()))?;
-    // Name -> entry index, borrowing the names. The ZIP reader has refused
-    // duplicate names, so each name is one entry.
-    let names: HashMap<&[u8], usize> = archive
-        .entries()
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| !e.is_dir())
-        .map(|(i, e)| (e.name.as_slice(), i))
-        .collect();
+    let index = by_name(&archive);
+    let names = |name: &str| find(&archive, &index, name.as_bytes());
 
-    let at = *names
-        .get(CONTAINER.as_bytes())
-        .ok_or(BookError::NoContainer)?;
+    let at = names(CONTAINER).ok_or(BookError::NoContainer)?;
     let bytes = read_package(&archive, at, &limits)?;
     let rootfile = parse_container(&bytes, &limits)?.ok_or(BookError::NoPackage)?;
     let opf_path = normalize(&percent_decode(&rootfile));
     if escapes(&opf_path) {
         return Err(BookError::NoPackage);
     }
-    let at = *names.get(opf_path.as_bytes()).ok_or(BookError::NoPackage)?;
+    let at = names(&opf_path).ok_or(BookError::NoPackage)?;
     let bytes = read_package(&archive, at, &limits)?;
     let pkg = parse_package(&bytes, &opf_path, &limits)?;
     drop(bytes);
-    let encrypted = match names.get(ENCRYPTION.as_bytes()) {
+    let encrypted = match names(ENCRYPTION) {
         None => HashSet::new(),
-        Some(&at) => parse_encryption(&read_package(&archive, at, &limits)?, &limits)?,
+        Some(at) => parse_encryption(&read_package(&archive, at, &limits)?, &limits)?,
     };
+    // The entries it names (a URI naming none names nothing).
+    let mut ciphered: Vec<usize> = encrypted.iter().filter_map(|p| names(p)).collect();
+    drop(encrypted);
+    ciphered.sort_unstable();
 
     let base = opf_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     // Manifest item -> its index in `items`, set when the spine first
@@ -334,9 +363,8 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
             *seen[m].get_or_insert_with(|| {
                 let (href, media_type) = &pkg.items[m];
                 steps += (href.len() + media_type.len()) as u64;
-                let (item, slot, xhtml) = resolve_item(
-                    base, href, media_type, &names, &archive, &encrypted, &limits,
-                );
+                let (item, slot, xhtml) =
+                    resolve_item(base, href, media_type, &names, &archive, &ciphered, &limits);
                 items.push(item);
                 slots.push(slot);
                 xhtml_locked.push(xhtml);
@@ -372,6 +400,8 @@ pub fn open_with(file: &File, limits: Limits) -> Result<Book<'_>, BookError> {
         chapters,
         items,
         archive,
+        index,
+        locked: ciphered,
         slots,
         limits,
         steps,
@@ -385,9 +415,9 @@ fn resolve_item(
     base: &str,
     href: &str,
     media_type: &str,
-    names: &HashMap<&[u8], usize>,
+    names: &dyn Fn(&str) -> Option<usize>,
     archive: &zip::Archive<'_>,
-    encrypted: &HashSet<String>,
+    locked: &[usize],
     limits: &Limits,
 ) -> (Item, Slot, Option<bool>) {
     let media_type = essence(media_type);
@@ -400,14 +430,12 @@ fn resolve_item(
         return (item(href), Slot::Fail(ChapterError::OutsideTheBook), None);
     };
     // A path longer than any entry name is looked up nowhere.
-    let at = (path.len() <= MAX_PATH)
-        .then(|| names.get(path.as_bytes()))
-        .flatten();
-    let Some(&i) = at else {
+    let at = (path.len() <= MAX_PATH).then(|| names(&path)).flatten();
+    let Some(i) = at else {
         return (item(&path), Slot::Fail(ChapterError::Missing), None);
     };
     let entry = &archive.entries()[i];
-    let is_locked = entry.encrypted || encrypted.contains(&path);
+    let is_locked = entry.encrypted || locked.binary_search(&i).is_ok();
     let xhtml = media_type
         .eq_ignore_ascii_case(XHTML_TYPE)
         .then_some(is_locked);
@@ -491,11 +519,96 @@ impl Book<'_> {
             Slot::Fail(e) => return Err(e.clone()),
         };
         let r = read_capped(&self.archive, at, self.limits.chapter_bytes, out);
-        r.map_err(|e| match e {
-            Capped::Over => ChapterError::TooLarge,
-            Capped::Zip(zip::ZipError::Encrypted) => ChapterError::Encrypted,
-            Capped::Zip(e) => ChapterError::Damaged(e.to_string()),
-        })
+        r.map_err(chapter_error)
+    }
+
+    /// The entry name `href` (an `href` or `src` written in spine item
+    /// `chapter`) names: relative to the chapter's folder, with the rules
+    /// of the spine's hrefs (query and fragment cut, `%XX` decoded,
+    /// normalized lexically). An href that is empty once they are cut (a
+    /// link to `#id`) names the chapter itself. Nothing is looked up: the
+    /// entry need not exist ([`Book::resource`] says `Missing`).
+    ///
+    /// `OutsideTheBook`: the href has a URL scheme (`http:`, `data:`...),
+    /// is absolute (`/x`, `//host/x`) or climbs above the container root,
+    /// or the chapter itself is outside the book. `Missing`: the spine
+    /// item names no manifest item of this book, or the path is longer
+    /// than [`MAX_PATH`] (no entry has such a name). Linear in the
+    /// lengths of `href` and the chapter's path.
+    pub fn resolve(&self, chapter: &ChapterRef, href: &str) -> Result<String, ChapterError> {
+        let k = chapter.item.ok_or(ChapterError::Missing)?;
+        let (Some(item), Some(slot)) = (self.items.get(k), self.slots.get(k)) else {
+            return Err(ChapterError::Missing);
+        };
+        if let Slot::Fail(ChapterError::OutsideTheBook) = slot {
+            return Err(ChapterError::OutsideTheBook);
+        }
+        // A cut path (`...` appended) is no entry's: no folder to start from.
+        if item.path.len() > MAX_PATH {
+            return Err(ChapterError::Missing);
+        }
+        let own = href.find(['?', '#']).map_or(href, |end| &href[..end]);
+        let path = if own.is_empty() {
+            item.path.clone()
+        } else {
+            let base = item.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+            resolve(base, href).ok_or(ChapterError::OutsideTheBook)?
+        };
+        if path.len() > MAX_PATH {
+            return Err(ChapterError::Missing);
+        }
+        Ok(path)
+    }
+
+    /// The bytes of the file entry named exactly `path` (as
+    /// [`Book::resolve`] gives it) in `out`, cleared first and left empty
+    /// on an error; at most `cap` bytes, checked on the entry's declared
+    /// size before anything is reserved or inflated, and on the bytes
+    /// produced. `TooLarge`: over `cap`. `Missing`: no such file entry (a
+    /// folder entry is none). `Encrypted`: the ZIP entry's flag, or
+    /// `encryption.xml` names it with a cipher. `Damaged`: the ZIP
+    /// reader's reason (CRC, method, deflate stream). `OutsideTheBook`:
+    /// `path` is absolute or climbs above the root (never a name
+    /// [`Book::resolve`] gives). Nothing is kept.
+    pub fn resource(&self, path: &str, cap: u64, out: &mut Vec<u8>) -> Result<(), ChapterError> {
+        out.clear();
+        let at = self.resource_at(path)?;
+        read_capped(&self.archive, at, cap, out).map_err(chapter_error)
+    }
+
+    /// The declared size of the file entry [`Book::resource`] would read
+    /// for `path`, with nothing read: the most a read of it can produce,
+    /// whatever its data turns out to be (the ZIP reader stops at the
+    /// declared size), so a caller can charge a read before making it,
+    /// one that fails included. Its errors are `resource`'s that come
+    /// before any read: `OutsideTheBook`, `Missing`, `Encrypted`.
+    pub fn resource_size(&self, path: &str) -> Result<u64, ChapterError> {
+        let at = self.resource_at(path)?;
+        Ok(self.archive.entries()[at].size)
+    }
+
+    /// The index of the file entry named exactly `path`, if it may be read.
+    fn resource_at(&self, path: &str) -> Result<usize, ChapterError> {
+        if escapes(path) {
+            return Err(ChapterError::OutsideTheBook);
+        }
+        let at = (path.len() <= MAX_PATH)
+            .then(|| find(&self.archive, &self.index, path.as_bytes()))
+            .flatten()
+            .ok_or(ChapterError::Missing)?;
+        if self.archive.entries()[at].encrypted || self.locked.binary_search(&at).is_ok() {
+            return Err(ChapterError::Encrypted);
+        }
+        Ok(at)
+    }
+}
+
+/// A read's failure as a spine item's or resource's reason.
+fn chapter_error(e: Capped) -> ChapterError {
+    match e {
+        Capped::Over => ChapterError::TooLarge,
+        Capped::Zip(zip::ZipError::Encrypted) => ChapterError::Encrypted,
+        Capped::Zip(e) => ChapterError::Damaged(e.to_string()),
     }
 }
 

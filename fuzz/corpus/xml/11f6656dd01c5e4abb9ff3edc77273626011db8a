@@ -1,0 +1,7 @@
+<!DOCTYPE doc
+[
+<!ELEMENT doc TY>
+<!ATTLIST a>
+<!ATTLIST b >
+<!ATTLIST c att CDATA #IMPLIED>
+<!ATTLISTSatt3="test"/></doc>

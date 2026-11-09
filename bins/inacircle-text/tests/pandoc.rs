@@ -387,6 +387,169 @@ fn books_convert_cleanly() {
     }
 }
 
+/// What `text.epub-to-md` gave for `book`: the md, every `done` path and
+/// the `warn` messages.
+fn convert_md(book: &Book, work: &Path) -> (String, Vec<String>, Vec<String>) {
+    let path = books_dir().join(book.file);
+    let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
+        .args(["run", "text.epub-to-md", "--work"])
+        .arg(work)
+        .arg("--")
+        .arg(&path)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert_eq!(o.status.code(), Some(0), "{}: {out}", book.file);
+    let fields: Vec<Vec<&str>> = out.lines().map(|l| l.split('\t').collect()).collect();
+    assert!(
+        fields.iter().all(|f| f[0] != "fail" && f[0] != "skip"),
+        "{}: {out}",
+        book.file
+    );
+    let done: Vec<String> = fields
+        .iter()
+        .filter(|f| f[0] == "done")
+        .map(|f| f[2].to_string())
+        .collect();
+    let warns = fields
+        .iter()
+        .filter(|f| f[0] == "warn")
+        .map(|f| f[2].to_string())
+        .collect();
+    let md = done.last().expect("a done line");
+    assert!(md.ends_with(".md"), "{}: {out}", book.file);
+    let text = fs::read_to_string(work.join(md)).unwrap();
+    (text, done, warns)
+}
+
+/// An in-book link (`#id`) as its text, as the plain-text reading has it.
+fn unlink_internal(b: &mut doc::Block) {
+    fn inlines(is: &mut Vec<doc::Inline>) {
+        for i in std::mem::take(is) {
+            match i {
+                doc::Inline::Link {
+                    dest, mut content, ..
+                } if dest.starts_with('#') => {
+                    inlines(&mut content);
+                    is.extend(content);
+                }
+                doc::Inline::Link {
+                    dest,
+                    title,
+                    mut content,
+                    auto,
+                } => {
+                    inlines(&mut content);
+                    is.push(doc::Inline::Link {
+                        dest,
+                        title,
+                        content,
+                        auto,
+                    });
+                }
+                doc::Inline::Emph(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Emph(c));
+                }
+                doc::Inline::Strong(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Strong(c));
+                }
+                doc::Inline::Strikethrough(mut c) => {
+                    inlines(&mut c);
+                    is.push(doc::Inline::Strikethrough(c));
+                }
+                other => is.push(other),
+            }
+        }
+    }
+    match b {
+        doc::Block::Paragraph(c) | doc::Block::Heading { content: c, .. } => inlines(c),
+        doc::Block::BlockQuote(bs) => bs.iter_mut().for_each(unlink_internal),
+        doc::Block::List { items, .. } => items
+            .iter_mut()
+            .flat_map(|i| i.blocks.iter_mut())
+            .for_each(unlink_internal),
+        doc::Block::Table { head, rows, .. } => {
+            head.iter_mut().for_each(inlines);
+            rows.iter_mut().flatten().for_each(inlines);
+        }
+        _ => {}
+    }
+}
+
+/// Every corpus book converts to Markdown too, with its images beside it,
+/// and the md read back (GFM) as plain text has the word sequence of the
+/// book's own plain text: the two readings of a book agree. Every in-book
+/// link lands on a heading, and at least one survives over the corpus;
+/// they are read as their text for the words.
+#[test]
+fn books_convert_to_md_and_read_back_to_the_txt_words() {
+    let mut internal = 0;
+    for book in BOOKS {
+        let txt_work = tmp(book.file);
+        let (text, _) = convert(book, &txt_work.0);
+        let work = tmp(book.file);
+        let (md, done, warns) = convert_md(book, &work.0);
+        assert!(!md.contains("could not be read"), "{}", book.file);
+        assert!(
+            warns.iter().all(|w| !w.contains("could not be read")),
+            "{}: {warns:?}",
+            book.file
+        );
+        // Every image the md names is a file beside it.
+        for d in &done[..done.len() - 1] {
+            assert!(work.0.join(d).is_file(), "{}: {d}", book.file);
+            let name = Path::new(d).file_name().unwrap().to_string_lossy();
+            assert!(
+                md.contains(name.as_ref()),
+                "{}: {name} not linked",
+                book.file
+            );
+        }
+        let doc =
+            doc::md::read_limited_with(md.as_bytes(), doc::Limits::DEFAULT, doc::Dialect::Gfm)
+                .unwrap();
+        // Every internal link lands on a heading of the md, numbered as a
+        // viewer numbers them.
+        let mut texts = Vec::new();
+        doc::xhtml::headings(&doc.blocks, &mut texts);
+        let mut slugs = doc::xhtml::Slugs::default();
+        let ids: Vec<String> = texts.iter().map(|t| slugs.unique(t)).collect();
+        let links: Vec<&str> = md
+            .split("](#")
+            .skip(1)
+            .map(|r| &r[..r.find([')', ' ']).unwrap()])
+            .collect();
+        for l in &links {
+            assert!(
+                ids.iter()
+                    .any(|id| id == l || id.strip_prefix("h-") == Some(l)),
+                "{}: #{l} lands on no heading",
+                book.file
+            );
+        }
+        println!("{}: {} internal links", book.file, links.len());
+        internal += links.len();
+        let mut doc = doc;
+        for b in &mut doc.blocks {
+            unlink_internal(b);
+        }
+        let (back, _) = doc::txt::write(&doc);
+        let (ours, theirs) = (words(&back, false), words(&text, false));
+        let hs = hunks(&ours, &theirs);
+        assert!(
+            hs.is_empty(),
+            "{}: {}",
+            book.file,
+            hs.iter().map(show).collect::<Vec<_>>().join("\n")
+        );
+    }
+    // The books' tables of contents link to anchors inside their
+    // headings (`<h2><a id="c2"/>...</h2>`): those links stay links.
+    assert!(internal > 0, "no internal link survived");
+}
+
 #[test]
 fn sources_file_names_every_book() {
     let sources = fs::read_to_string(books_dir().join("SOURCES")).unwrap();

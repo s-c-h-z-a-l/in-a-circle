@@ -12,7 +12,8 @@ action\ttext.txt-to-epub\tfamily=text\tin=text/plain\tout=application/epub+zip\t
 action\ttext.md-to-html\tfamily=text\tin=text/markdown\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.txt-to-html\tfamily=text\tin=text/plain\tout=text/html\text=html\tlabel=HTML\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
 action\ttext.md-join-epub\tfamily=text\tin=text/markdown\tassets=image/jpeg,image/png\tout=application/epub+zip\text=epub\tlabel=EPUB\tgroup=book\tcost=10\tlossy=yes\tbatch=yes\tjoin=yes\tmin=1\n\
-action\ttext.epub-to-txt\tfamily=text\tin=application/epub+zip\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n";
+action\ttext.epub-to-txt\tfamily=text\tin=application/epub+zip\tout=text/plain\text=txt\tlabel=Plain text\tgroup=document\tcost=10\tlossy=yes\tbatch=yes\n\
+action\ttext.epub-to-md\tfamily=text\tin=application/epub+zip\tout=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\tlossy=yes\tbatch=no\n";
 
 /// A unique temporary directory, removed on drop.
 struct Tmp(PathBuf);
@@ -108,6 +109,24 @@ fn txt_to_md_writes_into_work_only() {
     assert!(out.starts_with("progress\t0\n"), "{out}");
     assert_eq!(lines(&out, "progress").len(), 2);
     assert_eq!(lines(&out, "progress")[1][1], "1");
+}
+
+/// A text line made only of `:` and dashes under another line would be
+/// a table's delimiter row for a GFM viewer (the line above its header):
+/// its `:` is escaped, which no CommonMark viewer shows.
+#[test]
+fn txt_to_md_never_writes_a_delimiter_row() {
+    let root = tmp("delimrow");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = root.join("a.txt");
+    fs::write(&a, "Name\n:--\n\nx\ny\n:-:\n").unwrap();
+    let o = run_raw("text.txt-to-md", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let done = lines(&out, "done");
+    let produced = fs::read_to_string(work.join(done[0][2])).unwrap();
+    assert_eq!(produced, "Name\\\n\\:--\n\nx\\\ny\\\n\\:-:\n");
 }
 
 #[test]
@@ -1888,6 +1907,18 @@ mod epub_to_txt {
         repeat: usize,
         extra: &[(&str, &[u8])],
     ) {
+        let extra: Vec<_> = extra.iter().map(|&(n, d)| (n, d, Stored)).collect();
+        fs::write(path, book_zip(version, meta, chs, repeat, &extra)).unwrap();
+    }
+
+    /// The archive of [`book_at`], each `extra` entry stored as it says.
+    fn book_zip(
+        version: &str,
+        meta: &str,
+        chs: &[Ch],
+        repeat: usize,
+        extra: &[(&str, &[u8], testzip::Store)],
+    ) -> Vec<u8> {
         let manifest: String = chs
             .iter()
             .enumerate()
@@ -1926,10 +1957,10 @@ mod epub_to_txt {
                 entries.push((n.as_bytes(), d, Stored));
             }
         }
-        for (n, d) in extra {
-            entries.push((n.as_bytes(), d, Stored));
+        for &(n, d, store) in extra {
+            entries.push((n.as_bytes(), d, store));
         }
-        fs::write(path, testzip::zip(&entries)).unwrap();
+        testzip::zip(&entries)
     }
 
     /// An EPUB 3 book of `chs` at `root/<name>`.
@@ -2672,5 +2703,1140 @@ mod epub_to_txt {
             "{out}"
         );
         assert!(snapshot(&work).is_empty());
+    }
+
+    // ---------- text.epub-to-md ----------
+
+    mod md {
+        use super::*;
+        use testzip::Store::Deflated;
+
+        const MD: &str = "text.epub-to-md";
+
+        /// A book at `root/<name>` (EPUB 3) with `extra` entries (images).
+        fn book_with(
+            root: &Path,
+            name: &str,
+            meta: &str,
+            chs: &[Ch],
+            extra: &[(&str, &[u8], testzip::Store)],
+        ) -> PathBuf {
+            let p = root.join(name);
+            fs::write(&p, book_zip("3.0", meta, chs, 1, extra)).unwrap();
+            p
+        }
+
+        /// What one run on one book gave: the md (empty when none), every
+        /// `done` path in order, the `warn` messages, and the output.
+        struct Md {
+            text: String,
+            done: Vec<String>,
+            warns: Vec<String>,
+            o: Output,
+        }
+
+        fn md(book: &Path, work: &Path) -> Md {
+            let o = run_raw(MD, work, &[book]);
+            let out = stdout(&o);
+            let done: Vec<String> = lines(&out, "done")
+                .iter()
+                .map(|d| d[2].to_string())
+                .collect();
+            let warns = lines(&out, "warn")
+                .iter()
+                .map(|w| w[2].to_string())
+                .collect();
+            let text = done
+                .last()
+                .filter(|d| d.ends_with(".md"))
+                .map(|d| fs::read_to_string(work.join(d)).unwrap())
+                .unwrap_or_default();
+            Md {
+                text,
+                done,
+                warns,
+                o,
+            }
+        }
+
+        fn ok(r: &Md) {
+            assert_eq!(r.o.status.code(), Some(0), "{}", stdout(&r.o));
+            assert!(lines(&stdout(&r.o), "fail").is_empty(), "{}", stdout(&r.o));
+        }
+
+        /// The fixture JPEG with `pad` bytes of zeros in comment segments
+        /// after its SOI: still a valid JPEG, `pad` bytes larger, and
+        /// nearly nothing more once deflated in the book.
+        fn padded_jpeg(pad: usize) -> Vec<u8> {
+            let j = jpeg();
+            let mut out = j[..2].to_vec();
+            let mut left = pad;
+            while left > 0 {
+                // `n` bytes in all: the marker, then a length that counts
+                // itself and the data (at most 65535).
+                let n = left.clamp(4, 65_537);
+                out.extend_from_slice(&[0xFF, 0xFE]);
+                out.extend_from_slice(&((n - 2) as u16).to_be_bytes());
+                out.extend(std::iter::repeat_n(0u8, n - 4));
+                left = left.saturating_sub(n);
+            }
+            out.extend_from_slice(&j[2..]);
+            out
+        }
+
+        #[test]
+        fn manifest_lists_epub_to_md() {
+            let o = Command::new(env!("CARGO_BIN_EXE_inacircle-text"))
+                .arg("--manifest")
+                .output()
+                .unwrap();
+            assert!(stdout(&o).lines().any(|l| l
+                == "action\ttext.epub-to-md\tfamily=text\tin=application/epub+zip\t\
+                    out=text/markdown\text=md\tlabel=Markdown\tgroup=document\tcost=10\t\
+                    lossy=yes\tbatch=no"));
+        }
+
+        /// `# <title>`, the authors as a paragraph, then every spine item in
+        /// spine order a blank line apart; a table is a GFM pipe table.
+        #[test]
+        fn epub_to_md_header_order_and_gfm_table() {
+            let (root, work) = workdir("md-order");
+            let mut note = ch("notes.xhtml", "<p>Note.</p>");
+            note.linear = false;
+            let b = book(
+                &root,
+                "novel.epub",
+                "<dc:title> The   Book </dc:title><dc:creator>Ann</dc:creator>\
+                 <dc:creator>Bob</dc:creator>",
+                &[
+                    ch("c1.xhtml", "<h1>One</h1><p>First <em>word</em>.</p>"),
+                    note,
+                    ch(
+                        "c2.xhtml",
+                        "<h1>Two</h1><table><thead><tr><th>a</th><th style=\"text-align:right\">b</th></tr></thead>\
+                         <tbody><tr><td>1 | 2</td><td>3<br/>4</td></tr></tbody></table>",
+                    ),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "# The Book\n\nAnn, Bob\n\n# One\n\nFirst *word*.\n\nNote.\n\n# Two\n\n\
+                 | a | b |\n| --- | --- |\n| 1 \\| 2 | 3 4 |\n"
+            );
+            assert_eq!(r.done, ["0/novel.md"]);
+            assert_eq!(r.warns, [STYLES, "table cell line breaks became spaces"]);
+        }
+
+        /// The images a chapter shows go beside the md byte for byte, named
+        /// by the input's stem in the order of their first reference, and
+        /// reported before the md; an image no chapter shows is not
+        /// written.
+        #[test]
+        fn images_written_beside_the_md() {
+            let (root, work) = workdir("md-images");
+            let (j, p) = (jpeg(), png(7));
+            let b = book_with(
+                &root,
+                "novel.epub",
+                "",
+                &[ch(
+                    "c1.xhtml",
+                    "<p>See <em><img src=\"img/b.png\" alt=\"B\"/></em> and <img src=\"img/a.jpg\" alt=\"A\" title=\"t\"/>.</p>",
+                )],
+                &[
+                    ("OEBPS/img/a.jpg", &j, Stored),
+                    ("OEBPS/img/b.png", &p, Deflated),
+                    ("OEBPS/img/unused.jpg", &j, Stored),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.done,
+                ["0/novel-0001.png", "0/novel-0002.jpg", "0/novel.md"]
+            );
+            assert_eq!(fs::read(work.join("0/novel-0001.png")).unwrap(), p);
+            assert_eq!(fs::read(work.join("0/novel-0002.jpg")).unwrap(), j);
+            assert_eq!(
+                r.text,
+                "See *![B](novel-0001.png)* and ![A](novel-0002.jpg \"t\").\n"
+            );
+            assert_eq!(snapshot(&work).len(), 3);
+            assert_eq!(r.warns, [STYLES]);
+        }
+
+        /// One image named by two paths from two chapters is one file, and
+        /// both references point to it.
+        #[test]
+        fn same_image_two_paths_one_file() {
+            let (root, work) = workdir("md-same-image");
+            let j = jpeg();
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        "Text/c1.xhtml",
+                        "<p><img src=\"../Images/a.jpg\" alt=\"one\"/></p>",
+                    ),
+                    ch(
+                        "Text/c2.xhtml",
+                        "<p><img src=\"../Images/./a.jpg\" alt=\"two\"/></p>",
+                    ),
+                ],
+                &[("OEBPS/Images/a.jpg", &j, Stored)],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b-0001.jpg", "0/b.md"]);
+            assert_eq!(r.text, "![one](b-0001.jpg)\n\n![two](b-0001.jpg)\n");
+        }
+
+        /// GIF, WebP and SVG are never written: their places keep the alt
+        /// text and one counted `warn` says so.
+        #[test]
+        fn gif_webp_svg_become_alt_text() {
+            let (root, work) = workdir("md-gif");
+            let gif = b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec();
+            let webp = b"RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00/\x00\x00\x00\x10\x07\x10\x11\x11\x88\x88\xfe\x07\x00".to_vec();
+            let svg =
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x</script></svg>".to_vec();
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>a <img src=\"a.gif\" alt=\"G\"/> <img src=\"a.webp\" alt=\"W\"/> <img src=\"a.svg\" alt=\"S\"/></p>",
+                )],
+                &[
+                    ("OEBPS/a.gif", &gif, Stored),
+                    ("OEBPS/a.webp", &webp, Stored),
+                    ("OEBPS/a.svg", &svg, Stored),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b.md"]);
+            assert_eq!(r.text, "a G W S\n");
+            assert_eq!(r.warns, ["3 image(s) replaced by alt text", STYLES]);
+            assert_eq!(snapshot(&work).len(), 1);
+        }
+
+        /// 1023 images are written; the 1024th keeps its alt text, so the
+        /// md and its images are at most 1024 `done` lines.
+        #[test]
+        fn image_limit_1023() {
+            let (root, work) = workdir("md-1023");
+            let p = png(1);
+            let names: Vec<String> = (1..=1024).map(|k| format!("OEBPS/i/{k}.png")).collect();
+            let extra: Vec<(&str, &[u8], testzip::Store)> =
+                names.iter().map(|n| (n.as_str(), &p[..], Stored)).collect();
+            let body: String = (1..=1024)
+                .map(|k| format!("<p><img src=\"i/{k}.png\" alt=\"i{k}\"/></p>"))
+                .collect();
+            let b = book_with(&root, "b.epub", "", &[ch("c.xhtml", &body)], &extra);
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done.len(), 1024);
+            assert_eq!(r.done[1022], "0/b-1023.png");
+            assert_eq!(r.done[1023], "0/b.md");
+            assert!(
+                r.text.contains("![i1023](b-1023.png)\n\ni1024\n"),
+                "{}",
+                &r.text[r.text.len() - 200..]
+            );
+            assert_eq!(r.warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// The images read are at most twice the book file in all: two
+        /// images that each nearly match the book fit, a third does not
+        /// and keeps its alt text (they deflate to almost nothing, so the
+        /// book stays small).
+        #[test]
+        fn image_total_over_twice_the_book() {
+            let (root, work) = workdir("md-budget");
+            let build = |pad: usize| {
+                let j = padded_jpeg(pad);
+                let b = book_with(
+                    &root,
+                    "b.epub",
+                    "",
+                    &[ch(
+                        "c.xhtml",
+                        "<p>x <img src=\"1.jpg\" alt=\"one\"/> <img src=\"2.jpg\" alt=\"two\"/> <img src=\"3.jpg\" alt=\"three\"/></p>",
+                    )],
+                    &[
+                        ("OEBPS/1.jpg", &j, Deflated),
+                        ("OEBPS/2.jpg", &j, Deflated),
+                        ("OEBPS/3.jpg", &j, Deflated),
+                    ],
+                );
+                (b, j.len() as u64)
+            };
+            let (b, plain) = build(0);
+            let size = fs::metadata(&b).unwrap().len();
+            // Each image about 85% of the book.
+            let (b, image) = build((size * 85 / 100 - plain) as usize);
+            let size = fs::metadata(&b).unwrap().len();
+            // The premise: two fit in twice the book, three do not.
+            assert!(
+                2 * image <= 2 * size && 3 * image > 2 * size,
+                "{image} {size}"
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b-0001.jpg", "0/b-0002.jpg", "0/b.md"]);
+            assert_eq!(r.text, "x ![one](b-0001.jpg) ![two](b-0002.jpg) three\n");
+            assert_eq!(r.warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// A damaged image is charged its declared size too: the ZIP
+        /// reader inflates it whole before the CRC tells it is wrong.
+        /// Four damaged images of about 45% of the book each spend 180%
+        /// of the twice-the-book budget, so a valid fifth of the same size
+        /// no longer fits and keeps its alt text. Without the charge, such
+        /// a book inflates about a thousand times its size (the ZIP ratio
+        /// limit) for nothing; with it, never more than twice.
+        #[test]
+        fn damaged_images_charge_the_budget() {
+            let (root, work) = workdir("md-damaged-budget");
+            let build = |n: usize| {
+                let bad: Vec<Vec<u8>> = (1..=4u8).map(|k| vec![k; n]).collect();
+                let j = padded_jpeg(n.saturating_sub(jpeg().len()));
+                let names = ["OEBPS/1.png", "OEBPS/2.png", "OEBPS/3.png", "OEBPS/4.png"];
+                let mut extra: Vec<(&str, &[u8], testzip::Store)> = names
+                    .iter()
+                    .zip(&bad)
+                    .map(|(n, d)| (*n, &d[..], Deflated))
+                    .collect();
+                extra.push(("OEBPS/ok.jpg", &j, Deflated));
+                let mut z = book_zip(
+                    "3.0",
+                    "",
+                    &[ch(
+                        "c.xhtml",
+                        "<p>x <img src=\"1.png\" alt=\"A\"/> <img src=\"2.png\" alt=\"B\"/> \
+                         <img src=\"3.png\" alt=\"C\"/> <img src=\"4.png\" alt=\"D\"/> \
+                         <img src=\"ok.jpg\" alt=\"K\"/></p>",
+                    )],
+                    1,
+                    &extra,
+                );
+                // Each damaged entry's CRC, in its local and central
+                // header, made wrong.
+                for d in &bad {
+                    let crc = testzip::crc32(d).to_le_bytes();
+                    let at: Vec<usize> = z
+                        .windows(4)
+                        .enumerate()
+                        .filter(|(_, w)| *w == crc)
+                        .map(|(k, _)| k)
+                        .collect();
+                    assert_eq!(at.len(), 2);
+                    for k in at {
+                        z[k] ^= 1;
+                    }
+                }
+                let b = root.join("b.epub");
+                fs::write(&b, &z).unwrap();
+                (b, z.len() as u64, j.len() as u64)
+            };
+            let (_, size, _) = build(1000);
+            let n = (size * 45 / 100) as usize;
+            let (b, size, image) = build(n);
+            // The premise: the four damaged reads fit in twice the book,
+            // and the valid image would too on its own, not after them.
+            let n = n as u64;
+            assert!(
+                4 * n <= 2 * size && image <= 2 * size && 4 * n + image > 2 * size,
+                "{n} {image} {size}"
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b.md"]);
+            assert_eq!(r.text, "x A B C D K\n");
+            assert_eq!(r.warns, ["5 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// A damaged PNG (a CRC wrong), a truncated JPEG, a missing image
+        /// and one outside the book keep their alt text; the book is made.
+        #[test]
+        fn damaged_image_is_alt_text() {
+            let (root, work) = workdir("md-damaged");
+            let mut bad = png(3);
+            let at = bad.len() - 20;
+            bad[at] ^= 0xFF;
+            let j = jpeg();
+            let cut = &j[..j.len() / 2];
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>t <img src=\"bad.png\" alt=\"P\"/> <img src=\"cut.jpg\" alt=\"J\"/> \
+                     <img src=\"none.jpg\" alt=\"M\"/> <img src=\"../../x.jpg\" alt=\"O\"/> \
+                     <img src=\"ok.jpg\" alt=\"K\"/></p>",
+                )],
+                &[
+                    ("OEBPS/bad.png", &bad, Stored),
+                    ("OEBPS/cut.jpg", cut, Stored),
+                    ("OEBPS/ok.jpg", &j, Stored),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, ["0/b-0001.jpg", "0/b.md"]);
+            assert_eq!(r.text, "t P J M O ![K](b-0001.jpg)\n");
+            assert_eq!(r.warns, ["4 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// Three chapters with a `Notes` heading: the md's headings get
+        /// `notes`, `notes-1`, `notes-2` (numbered over the whole book, as
+        /// a viewer and the join number them), and a link to each lands on
+        /// its own one, read back from the md.
+        #[test]
+        fn duplicate_headings_across_chapters_link_right() {
+            let (root, work) = workdir("md-dup-headings");
+            let notes = |k: usize| {
+                ch(
+                    &format!("c{k}.xhtml"),
+                    &format!(
+                        "<section id=\"s{k}\"><h2 id=\"n\">Notes</h2><p>note {k}</p></section>"
+                    ),
+                )
+            };
+            let b = book(
+                &root,
+                "b.epub",
+                "<dc:title>Book</dc:title>",
+                &[
+                    ch(
+                        "c0.xhtml",
+                        "<p><a href=\"c1.xhtml#n\">one</a> <a href=\"c2.xhtml#s2\">two</a> \
+                         <a href=\"c3.xhtml\">three</a></p>",
+                    ),
+                    notes(1),
+                    notes(2),
+                    notes(3),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "# Book\n\n[one](#notes) [two](#notes-1) [three](#notes-2)\n\n\
+                 ## Notes\n\nnote 1\n\n## Notes\n\nnote 2\n\n## Notes\n\nnote 3\n"
+            );
+            // Read back: each link's id is the heading right above its note.
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let ch = doc::xhtml::Chapter {
+                blocks: &d.blocks,
+                file: "b.md".into(),
+            };
+            let a = doc::xhtml::Anchors::build(std::slice::from_ref(&ch));
+            let ids = a.top_level_ids(0, &d.blocks);
+            for (k, id) in [(1, "notes"), (2, "notes-1"), (3, "notes-2")] {
+                let (at, _) = ids.iter().find(|(_, i)| *i == id).unwrap();
+                let doc::Block::Paragraph(p) = &d.blocks[at + 1] else {
+                    panic!("{id}")
+                };
+                assert_eq!(p, &[doc::Inline::Text(format!("note {k}"))]);
+            }
+        }
+
+        /// A chapter that starts with a list of the kind the chapter before
+        /// ends with takes the other marker, so a reader keeps them two
+        /// lists, and an ordered one keeps its start.
+        #[test]
+        fn lists_across_chapters_stay_apart() {
+            let (root, work) = workdir("md-lists");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p>x</p><ul><li>end one</li></ul>"),
+                    ch("c2.xhtml", "<ul><li>start two</li></ul>"),
+                    ch("c3.xhtml", "<ul><li>three</li></ul><ol><li>one</li></ol>"),
+                    ch("c4.xhtml", "<ol start=\"5\"><li>five</li></ol>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "x\n\n- end one\n\n* start two\n\n- three\n\n1. one\n\n5) five\n"
+            );
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let lists: Vec<Option<u64>> = d
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    doc::Block::List { start, .. } => Some(*start),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lists, [None, None, None, Some(1), Some(5)]);
+        }
+
+        /// A heading that starts with a digit is linked by GitHub's anchor,
+        /// with no `h-` before it (`#1984`, then `#1984-1`), which the join
+        /// still finds; a heading with no anchor text (`!!!`) has no
+        /// anchor, so its link keeps only its text.
+        #[test]
+        fn digit_led_headings_link_github_form() {
+            let (root, work) = workdir("md-digit-heading");
+            let b = book(
+                &root,
+                "b.epub",
+                "<dc:title>Book</dc:title>",
+                &[
+                    ch(
+                        "c0.xhtml",
+                        "<p><a href=\"c1.xhtml\">a</a> <a href=\"c2.xhtml#x\">b</a> \
+                         <a href=\"c3.xhtml#e\">c</a></p>",
+                    ),
+                    ch("c1.xhtml", "<h2>1984</h2><p>one</p>"),
+                    ch("c2.xhtml", "<h2 id=\"x\">1984</h2><p>two</p>"),
+                    ch("c3.xhtml", "<h2 id=\"e\">!!!</h2><p>three</p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "# Book\n\n[a](#1984) [b](#1984-1) c\n\n## 1984\n\none\n\n## 1984\n\ntwo\n\n\
+                 ## \\!\\!\\!\n\nthree\n"
+            );
+            assert_eq!(r.warns, [LINKS, STYLES]);
+            // Read back as the join does: the fragment through the slug
+            // rule finds the heading right above its note.
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let ch = doc::xhtml::Chapter {
+                blocks: &d.blocks,
+                file: "b.md".into(),
+            };
+            let a = doc::xhtml::Anchors::build(std::slice::from_ref(&ch));
+            let ids = a.top_level_ids(0, &d.blocks);
+            for (fragment, note) in [("1984", "one"), ("1984-1", "two")] {
+                let id = doc::xhtml::slug(fragment);
+                let (at, _) = ids.iter().find(|(_, i)| *i == id).unwrap();
+                let doc::Block::Paragraph(p) = &d.blocks[at + 1] else {
+                    panic!("{id}")
+                };
+                assert_eq!(p, &[doc::Inline::Text(note.into())]);
+            }
+        }
+
+        /// A table of contents links to an anchor inside the heading
+        /// (`<h2><a id="x"/>...</h2>`, as Project Gutenberg's books do) or
+        /// to a span around its text: the link lands on that heading.
+        #[test]
+        fn toc_anchor_inside_heading_links() {
+            let (root, work) = workdir("md-toc-anchor");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        "toc.xhtml",
+                        "<p><a href=\"c1.xhtml#chap01\">I</a> <a href=\"c2.xhtml#t2\">II</a></p>",
+                    ),
+                    ch(
+                        "c1.xhtml",
+                        "<h2><a id=\"chap01\"/>CHAPTER I.</h2><p>one</p>",
+                    ),
+                    ch(
+                        "c2.xhtml",
+                        "<h2><span id=\"t2\">CHAPTER II.</span></h2><p>two</p>",
+                    ),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "[I](#chapter-i) [II](#chapter-ii)\n\n## CHAPTER I.\n\none\n\n\
+                 ## CHAPTER II.\n\ntwo\n"
+            );
+            assert_eq!(r.warns, [STYLES]);
+        }
+
+        /// A link to a footnote anchor (not a heading), to a chapter with
+        /// no heading, and with a scheme other than the web's or mail's
+        /// keeps only its text; a web link stays.
+        #[test]
+        fn link_to_footnote_anchor_is_text() {
+            let (root, work) = workdir("md-footnote");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        "c1.xhtml",
+                        "<h1 id=\"top\">Top</h1><p>Text<a id=\"r1\" href=\"#fn1\">1</a>. \
+                         <a href=\"#top\">up</a> <a href=\"c2.xhtml\">plain</a></p>\
+                         <p><a href=\"https://example.org/x\">web</a> <a href=\"javascript:alert(1)\">js</a></p>\
+                         <p id=\"fn1\">Note.</p>",
+                    ),
+                    ch("c2.xhtml", "<p>No heading.</p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "# Top\n\nText1. [up](#top) plain\n\n[web](https://example.org/x) js\n\nNote.\n\n\
+                 No heading.\n"
+            );
+            assert_eq!(r.warns, [LINKS, STYLES]);
+        }
+
+        /// A book named with a space and accents names its images the same
+        /// way; the md links to them in `<...>`, and the link read back is
+        /// the file's name.
+        #[test]
+        fn image_name_with_space_and_accent() {
+            let (root, work) = workdir("md-name");
+            let j = jpeg();
+            let b = book_with(
+                &root,
+                "Árvíztűrő tükör.epub",
+                "",
+                &[ch("c.xhtml", "<p>Kép: <img src=\"a.jpg\" alt=\"x\"/></p>")],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.done,
+                ["0/Árvíztűrő tükör-0001.jpg", "0/Árvíztűrő tükör.md"]
+            );
+            assert_eq!(r.text, "Kép: ![x](<Árvíztűrő tükör-0001.jpg>)\n");
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let doc::Block::Paragraph(p) = &d.blocks[0] else {
+                panic!()
+            };
+            let doc::Inline::Image { dest, .. } = &p[1] else {
+                panic!("{p:?}")
+            };
+            assert_eq!(dest, "Árvíztűrő tükör-0001.jpg");
+            assert_eq!(fs::read(work.join("0").join(dest)).unwrap(), j);
+        }
+
+        /// A stem so long that the md's name fits the file system but an
+        /// image's (6 bytes longer) does not: the images keep their alt
+        /// text and the book is made.
+        #[test]
+        fn long_stem_images_keep_alt_text() {
+            let (root, work) = workdir("md-long-stem");
+            let j = jpeg();
+            // 250 + `.epub` is the longest file name (255 bytes); the md's
+            // is 253, an image's 259.
+            let stem = "s".repeat(250);
+            let b = book_with(
+                &root,
+                &format!("{stem}.epub"),
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>t <img src=\"a.jpg\" alt=\"A\"/> <img src=\"b.jpg\" alt=\"B\"/></p>",
+                )],
+                &[("OEBPS/a.jpg", &j, Stored), ("OEBPS/b.jpg", &j, Stored)],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.done, [format!("0/{stem}.md")]);
+            assert_eq!(r.text, "t A B\n");
+            assert_eq!(r.warns, ["2 image(s) replaced by alt text", STYLES]);
+            assert_eq!(snapshot(&work).len(), 1);
+            // A picture book under such a stem fails for its names, not
+            // for having no text, and leaves nothing.
+            let (root, work) = workdir("md-long-stem-pictures");
+            let b = book_with(
+                &root,
+                &format!("{stem}.epub"),
+                "",
+                &[ch("c.xhtml", "<p><img src=\"a.jpg\" alt=\"\"/></p>")],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            fails_alone(
+                &run_raw(MD, &work, &[&b]),
+                &work,
+                "image names too long for this folder",
+            );
+        }
+
+        /// A control character in the stem (a line feed) is percent-encoded
+        /// in the image's link, so the link read back and decoded is the
+        /// file's name.
+        #[test]
+        fn control_character_in_stem_links_the_image() {
+            let (root, work) = workdir("md-newline-stem");
+            let j = jpeg();
+            let b = book_with(
+                &root,
+                "new\nline.epub",
+                "",
+                &[ch("c.xhtml", "<p>K <img src=\"a.jpg\" alt=\"x\"/></p>")],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            // The `done` lines carry the name escaped: read the md itself.
+            let o = run_raw(MD, &work, &[&b]);
+            assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+            assert_eq!(lines(&stdout(&o), "done").len(), 2, "{}", stdout(&o));
+            let text = fs::read_to_string(work.join("0/new\nline.md")).unwrap();
+            assert_eq!(text, "K ![x](new%0Aline-0001.jpg)\n");
+            let d = doc::md::read_limited_with(
+                text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let doc::Block::Paragraph(p) = &d.blocks[0] else {
+                panic!()
+            };
+            let doc::Inline::Image { dest, .. } = &p[1] else {
+                panic!("{p:?}")
+            };
+            let name = doc::xhtml::percent_decode(dest);
+            assert_eq!(name, "new\nline-0001.jpg");
+            assert_eq!(fs::read(work.join("0").join(&name)).unwrap(), j);
+        }
+
+        /// A picture book (each chapter one image, no text) is an md of its
+        /// images; with no image written either, there is no book.
+        #[test]
+        fn picture_book_to_md() {
+            let (root, work) = workdir("md-pictures");
+            let (j, p) = (jpeg(), png(9));
+            let b = book_with(
+                &root,
+                "comic.epub",
+                "",
+                &[
+                    ch("p1.xhtml", "<div><img src=\"p1.jpg\" alt=\"\"/></div>"),
+                    ch("p2.xhtml", "<div><img src=\"p2.png\" alt=\"\"/></div>"),
+                ],
+                &[("OEBPS/p1.jpg", &j, Stored), ("OEBPS/p2.png", &p, Stored)],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.done,
+                ["0/comic-0001.jpg", "0/comic-0002.png", "0/comic.md"]
+            );
+            assert_eq!(r.text, "![](comic-0001.jpg)\n\n![](comic-0002.png)\n");
+
+            let gif = b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec();
+            let b = book_with(
+                &root,
+                "gifs.epub",
+                "<dc:title>Gifs</dc:title>",
+                &[ch(
+                    "p1.xhtml",
+                    "<div><img src=\"p1.gif\" alt=\"Cover\"/></div>",
+                )],
+                &[("OEBPS/p1.gif", &gif, Stored)],
+            );
+            let w = work.join("x");
+            fs::create_dir_all(&w).unwrap();
+            let o = run_raw(MD, &w, &[&b]);
+            fails_alone(&o, &w, "book has no text");
+        }
+
+        /// A late chapter that cannot be read is an escaped paragraph in its
+        /// place (never a link), counted once.
+        #[test]
+        fn bad_late_chapter_marked_in_md() {
+            let (root, work) = workdir("md-bad");
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p>one</p>"),
+                    ch("c2.xhtml", "<p>two</p>"),
+                    ch("c3.xhtml", "<p>broken</b></p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "one\n\ntwo\n\n\\[Chapter 3 could not be read: not well-formed XML (line 2)\\]\n"
+            );
+            assert_eq!(r.warns, ["1 chapter(s) could not be read", STYLES]);
+        }
+
+        #[test]
+        fn drm_book_fails() {
+            let (root, work) = workdir("md-drm");
+            let p = root.join("drm.epub");
+            let enc = encryption(&[(AES, "OEBPS/a.xhtml")]);
+            book_at(
+                &p,
+                "3.0",
+                "",
+                &[ch("a.xhtml", "<p>x<img src=\"a.jpg\" alt=\"\"/></p>")],
+                1,
+                &[("META-INF/encryption.xml", &enc), ("OEBPS/a.jpg", &jpeg())],
+            );
+            let o = run_raw(MD, &work, &[&p]);
+            fails_alone(&o, &work, "book is DRM-protected");
+        }
+
+        /// The md passing the output ceiling after an image was written
+        /// fails the book with no `done` at all, and nothing of it is left:
+        /// neither the md nor the image.
+        #[test]
+        fn failure_leaves_no_images() {
+            let (root, work) = workdir("md-fail");
+            let j = jpeg();
+            let para = format!("<p>{}</p>", "abcdefghi ".repeat(100));
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p><img src=\"a.jpg\" alt=\"a\"/></p>"),
+                    ch("c2.xhtml", &para.repeat(20)),
+                ],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            let o = run_with_fsize_of(MD, &work, &[&b], 8192);
+            fails_alone(&o, &work, "Markdown would be larger than 8 KiB");
+        }
+
+        /// An image of exactly the budget (twice the book file) is read and
+        /// written; one byte more keeps its alt text.
+        #[test]
+        fn image_of_exactly_the_budget_is_placed() {
+            // `pad` and `fill` (a byte of text) found so that the deflated
+            // book is half the image's size to the byte: the image is
+            // 3818 B, the book 1909 B (asserted below).
+            let build = |name: &str, pad: usize| {
+                let (root, work) = workdir(name);
+                let j = padded_jpeg(pad);
+                let b = book_with(
+                    &root,
+                    "b.epub",
+                    "",
+                    &[ch("c.xhtml", "<p>xy <img src=\"1.jpg\" alt=\"one\"/></p>")],
+                    &[("OEBPS/1.jpg", &j, Deflated)],
+                );
+                let size = fs::metadata(&b).unwrap().len();
+                (md(&b, &work), j.len() as u64, size, (root, work))
+            };
+            let (r, image, size, (_root, work)) = build("md-budget-exact", 3033);
+            assert_eq!(image, 2 * size, "{image} {size}");
+            ok(&r);
+            assert_eq!(r.done, ["0/b-0001.jpg", "0/b.md"]);
+            assert_eq!(r.text, "xy ![one](b-0001.jpg)\n");
+            assert_eq!(
+                fs::read(work.join("0/b-0001.jpg")).unwrap().len() as u64,
+                image
+            );
+            // One byte more than the budget.
+            let (r, image, size, _) = build("md-budget-over", 3034);
+            assert_eq!(image, 2 * size + 1, "{image} {size}");
+            ok(&r);
+            assert_eq!(r.done, ["0/b.md"]);
+            assert_eq!(r.text, "xy one\n");
+            assert_eq!(r.warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        /// An image larger than the process's `RLIMIT_FSIZE` keeps its alt
+        /// text (a write of it would fail); one of exactly the ceiling is
+        /// written.
+        #[test]
+        fn image_past_the_file_size_ceiling_is_alt_text() {
+            const CAP: usize = 4096;
+            let (root, work) = workdir("md-image-ceiling");
+            // Incompressible filler, so the budget (twice the book file)
+            // is far above two images of the ceiling's size.
+            let mut x = 1u32;
+            let filler: Vec<u8> = (0..20_000)
+                .map(|_| {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (x >> 24) as u8
+                })
+                .collect();
+            let (big, exact) = (
+                padded_jpeg(CAP + 1 - jpeg().len()),
+                padded_jpeg(CAP - jpeg().len()),
+            );
+            assert_eq!((big.len(), exact.len()), (CAP + 1, CAP));
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[ch(
+                    "c.xhtml",
+                    "<p>x <img src=\"big.jpg\" alt=\"big\"/> <img src=\"exact.jpg\" alt=\"ok\"/></p>",
+                )],
+                &[
+                    ("OEBPS/big.jpg", &big, Deflated),
+                    ("OEBPS/exact.jpg", &exact, Deflated),
+                    ("OEBPS/filler.bin", &filler, Stored),
+                ],
+            );
+            let o = run_with_fsize_of(MD, &work, &[&b], CAP as u64);
+            let out = stdout(&o);
+            assert_eq!(o.status.code(), Some(0), "{out}");
+            assert!(lines(&out, "fail").is_empty(), "{out}");
+            let done: Vec<&str> = lines(&out, "done").iter().map(|d| d[2]).collect();
+            assert_eq!(done, ["0/b-0001.jpg", "0/b.md"], "{out}");
+            assert_eq!(fs::read(work.join("0/b-0001.jpg")).unwrap(), exact);
+            assert_eq!(
+                fs::read_to_string(work.join("0/b.md")).unwrap(),
+                "x big ![ok](b-0001.jpg)\n"
+            );
+            let warns: Vec<&str> = lines(&out, "warn").iter().map(|w| w[2]).collect();
+            assert_eq!(warns, ["1 image(s) replaced by alt text", STYLES]);
+        }
+
+        fn svg_page(data: &[u8]) -> Ch {
+            Ch {
+                href: "p.svg".into(),
+                media: "image/svg+xml",
+                data: Some(data.to_vec()),
+                spine: true,
+                linear: true,
+            }
+        }
+
+        /// An SVG page is read and left out as an image loss (not parsed as
+        /// a chapter: no "could not be read" line, no text of its own); a
+        /// book of nothing else has no text, and is not a book with no
+        /// chapter read.
+        #[test]
+        fn svg_page_in_an_md_book() {
+            let raw = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+            let (root, work) = workdir("md-svg");
+            let b = book_with(
+                &root,
+                "b.epub",
+                "",
+                &[svg_page(raw), ch("c.xhtml", "<p>x</p>")],
+                &[],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.text, "x\n");
+            assert_eq!(r.warns, [IMAGES, STYLES]);
+            let (root, work) = workdir("md-svg-only");
+            let b = book_with(&root, "pics.epub", "", &[svg_page(raw)], &[]);
+            fails_alone(&run_raw(MD, &work, &[&b]), &work, "book has no text");
+        }
+
+        /// A spine item missing from the ZIP is a paragraph in its place
+        /// and is counted.
+        #[test]
+        fn missing_chapter_is_marked_and_counted() {
+            let (root, work) = workdir("md-missing");
+            let mut gone = ch("c2.xhtml", "<p>never</p>");
+            gone.data = None;
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch("c1.xhtml", "<p>one</p>"),
+                    gone,
+                    ch("c3.xhtml", "<p>three</p>"),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(
+                r.text,
+                "one\n\n\\[Chapter 2 could not be read: missing\\]\n\nthree\n"
+            );
+            assert_eq!(r.warns, ["1 chapter(s) could not be read", STYLES]);
+        }
+
+        /// The heading index charges a chapter's bytes as sums: the path
+        /// (300 B), the heading's anchor and its id (30,000 B each) are
+        /// about 90 KB, far under the 8 MiB of text it holds. Products of
+        /// these would be past it (path times anchor 9 MB, id times
+        /// anchor 900 MB) and refuse the book.
+        #[test]
+        fn long_heading_and_id_are_charged_as_sums() {
+            let (root, work) = workdir("md-index-bytes");
+            let name = "a".repeat(300);
+            let text = "b".repeat(30_000);
+            let id = "i".repeat(30_000);
+            let b = book(
+                &root,
+                "b.epub",
+                "",
+                &[
+                    ch(
+                        &format!("{name}.xhtml"),
+                        &format!("<h1 id=\"{id}\">{text}</h1>"),
+                    ),
+                    ch(
+                        "c.xhtml",
+                        &format!("<p><a href=\"{name}.xhtml#{id}\">go</a></p>"),
+                    ),
+                ],
+            );
+            let r = md(&b, &work);
+            ok(&r);
+            assert_eq!(r.text, format!("# {text}\n\n[go](#{text})\n"));
+        }
+
+        /// The heading index holds at most 2^19 entries, and each chapter
+        /// with headings counts itself too: 1024 chapters of 256 headings,
+        /// each with an id, are 513 entries a chapter, 525,312 in all,
+        /// 1,024 past the limit. (Counting a chapter's `id`s alone,
+        /// without the chapter, would give exactly the limit.) Nothing is
+        /// left behind.
+        #[test]
+        fn index_entries_count_each_chapter() {
+            let (root, work) = workdir("md-index-entries");
+            let chs: Vec<Ch> = (0..1024)
+                .map(|c| {
+                    let body: String = (0..256)
+                        .map(|k| format!("<h2 id=\"i{c}-{k}\">h{c}-{k}</h2>"))
+                        .collect();
+                    ch(&format!("c{c}.xhtml"), &body)
+                })
+                .collect();
+            let b = book(&root, "b.epub", "", &chs);
+            let o = run_raw(MD, &work, &[&b]);
+            fails_alone(&o, &work, "book is too large");
+        }
+
+        /// The same book gives the same md and images, byte for byte.
+        #[test]
+        fn deterministic_md_and_images() {
+            let (root, work) = workdir("md-determ");
+            let (j, p) = (jpeg(), png(5));
+            let b = book_with(
+                &root,
+                "b.epub",
+                "<dc:title>T</dc:title>",
+                &[
+                    ch(
+                        "c1.xhtml",
+                        "<h1 id=\"a\">A</h1><p><img src=\"a.jpg\" alt=\"a\"/></p>",
+                    ),
+                    ch(
+                        "c2.xhtml",
+                        "<h1>A</h1><p><a href=\"c1.xhtml#a\">back</a><img src=\"b.png\" alt=\"b\"/></p>",
+                    ),
+                ],
+                &[("OEBPS/a.jpg", &j, Stored), ("OEBPS/b.png", &p, Stored)],
+            );
+            let runs: Vec<Vec<(PathBuf, Vec<u8>)>> = (0..2)
+                .map(|k| {
+                    let w = work.join(k.to_string());
+                    fs::create_dir_all(&w).unwrap();
+                    ok(&md(&b, &w));
+                    snapshot(&w)
+                        .into_iter()
+                        .map(|(p, c)| (p.strip_prefix(&w).unwrap().to_path_buf(), c))
+                        .collect()
+                })
+                .collect();
+            assert_eq!(runs[0].len(), 3);
+            assert_eq!(runs[0], runs[1]);
+        }
+
+        /// The words of a book, lower-cased letters and digits, leaving out
+        /// what the plain-text writer adds for an in-book link of the md
+        /// (` (#id)`): the md read back as GFM and written as plain text
+        /// has the same word sequence as the book's own plain text, so the
+        /// two readings of a book agree.
+        fn words(text: &str) -> Vec<String> {
+            text.split_whitespace()
+                .filter(|w| !w.starts_with("(#"))
+                .map(|w| {
+                    w.chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>()
+                })
+                .filter(|w| !w.is_empty())
+                .collect()
+        }
+
+        #[test]
+        fn md_reads_back_to_the_txt_words() {
+            let (root, work) = workdir("md-words");
+            let j = jpeg();
+            let b = book_with(
+                &root,
+                "b.epub",
+                "<dc:title>The Title</dc:title><dc:creator>Ann</dc:creator>",
+                &[
+                    ch(
+                        "c1.xhtml",
+                        "<h1 id=\"one\">Chapter <em>one</em></h1><p>Some <strong>bold</strong> and \
+                         <code>code</code> text<a href=\"#fn\">1</a>, a <a href=\"https://example.org\">site</a> \
+                         and <a href=\"c2.xhtml\">the next</a>.</p><ul><li>first</li><li>second <del>gone</del></li></ul>\
+                         <blockquote><p>quoted * star _ under</p></blockquote><pre>pre  text</pre>\
+                         <table><tr><th>h1</th><th>h2</th></tr><tr><td>c1</td><td>c2<br/>more</td></tr></table>\
+                         <p><img src=\"a.jpg\" alt=\"picture\"/> <img src=\"none.png\" alt=\"lost\"/></p>\
+                         <p id=\"fn\">1. The note.</p>",
+                    ),
+                    ch(
+                        "c2.xhtml",
+                        "<h2>Two</h2><ol start=\"3\"><li>three</li></ol><p>[brackets] # hash</p>",
+                    ),
+                    ch("c3.xhtml", "<p>broken</b></p>"),
+                ],
+                &[("OEBPS/a.jpg", &j, Stored)],
+            );
+            let txt_work = work.join("txt");
+            fs::create_dir_all(&txt_work).unwrap();
+            let (plain, _, o) = txt(&b, &txt_work);
+            assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+            let r = md(&b, &work);
+            ok(&r);
+            let d = doc::md::read_limited_with(
+                r.text.as_bytes(),
+                doc::Limits::DEFAULT,
+                doc::Dialect::Gfm,
+            )
+            .unwrap();
+            let (back, _) = doc::txt::write(&d);
+            assert_eq!(
+                words(&back),
+                words(&plain),
+                "md:\n{}\ntxt:\n{plain}",
+                r.text
+            );
+            assert!(words(&plain).len() > 30);
+        }
     }
 }

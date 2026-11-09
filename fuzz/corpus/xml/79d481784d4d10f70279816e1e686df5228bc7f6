@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!DOCTYPE studånt [
+	<!ELEMENT student (#TCDATA)> 
+]>
+
+
+<!-- testin inval
+<?MyInstruct 
+<ß–equence  -->
+<?MyInstruct 
+Name is ?=====================?>
+<!DOCTYPE studånt nt>

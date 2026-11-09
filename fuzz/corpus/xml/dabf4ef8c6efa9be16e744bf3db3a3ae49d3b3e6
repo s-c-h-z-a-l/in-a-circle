@@ -1,0 +1,36 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big TTLIST studenv first CDATA #REQUIRED
+NT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMTE Nsmall EMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first Æ»ATA #REQUIRED
+		  la<?xm->
+<?music ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+ <a>&nbsp;<ED>
+http://www.w3.org/1999/xhtml" xmlns:epub="htt<ED>
+http://www.w6.org/1999/xhtml" xmlns:exhtml" xmlns:epub="htt<ED>
+http://www.w<a xmlns:xml="www.idpf.org.2007/ops"><heaõ><title>T</title></hpub="http://wwTA)KKKKKKT leopard ANY>

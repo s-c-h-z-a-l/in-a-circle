@@ -1,0 +1,73 @@
+<?xÿþml version="1.0" encoding="utf-8" standaÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿlone=
+<!ELEMENT leopardEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQ†UIRED>
+]>
+<!-- -->
+<?music "Hewe is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+,   <leopard>
+      <smallcat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in M*irage!!</tiger>
+   <cat/>
+   <leopard>
+ 
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">TTLIST tiger color CDATA #REQ†UIRED>
+]>
+<!-- -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <smallcat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<?music "Here is a PI" ?> ôõ<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in is is a wh
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <smallcat/>
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -
+   <cat/>
+   <tiger color="white">This is a white tigeÿÿÿz Mirage!!</tiger>
+   <cat/>/
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tiger in is is a wh
+   <cat/>
+   <tiger color="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+   <leopard>
+      <smallcat/> versio
+   <tiger color="white">Tis is a white tiger !-- Abovm is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="white">This is a white tigeÿÿÿz Mirage!!
+<!-- Above is element animal --?
+

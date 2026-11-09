@@ -1,0 +1,12 @@
+
+<!DOCTYPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leoUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is a PI" ?> 
+<animal>
+   <cat/>} <?xml version="1.0l xÚlnscolor="whi ovi Aebs XML>
+

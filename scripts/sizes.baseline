@@ -83,6 +83,19 @@
 # limit. inacircle grew 632 B (file, 368 B of .text) from the new action row
 # and preset; inacircle-pages is unchanged. The shipped inacircle still does
 # not link the xml, doc, zip or epub crates.
-inacircle 1182608 911864
-inacircle-text 1119680 767939
+# Refreshed after the EPUB to Markdown work (the EPUB book as a Markdown file
+# with its images), same toolchain and profile, built from commit 34950b25
+# (tree clean; the commits after the last source change touch only fuzz
+# corpora). inacircle-text grew 123528 B (file, 111760 B of .text), over the
+# 100 KB explanation threshold. The growth is the GFM writer's mark logic
+# (escapes, the autolink guards that keep the output stable when read back,
+# table and strikethrough output) and the epub-to-markdown action around it
+# (the metadata pass, the unique heading slugs for internal links, the image
+# copy and naming, the output folder), plus the formatting code
+# monomorphised for them. The .text (879699 B) stays under the 1 MiB family
+# limit. inacircle grew 264 B (file, 16 B of .text) from the new action row
+# and preset; inacircle-pages is unchanged. The shipped inacircle still does
+# not link the xml, doc, zip or epub crates.
+inacircle 1182872 911880
+inacircle-text 1243208 879699
 inacircle-pages 504208 403763

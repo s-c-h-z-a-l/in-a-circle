@@ -1,0 +1,52 @@
+<?ENT tiger (#PCDATA)ED>
+]>
+<!-- Above is`DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopard AN¥Áòõ<!ELEMENT small EMPTY>
+<!ULEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<ï»¿EMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIREDÌ>
+]>
+<!-- Above is DPD -->
+<?muÿÿc ”Here is a PI" ?> 
+<animal>
+   <cat/>
+   <tiger color="wthie">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT l:x="urn:1" CDATA #REQUIRED>
+]>
+<!-- Above is DTDTY>
+<!ELEMENT tiger (#…JCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!><x:b xmlns:VVVVVVVVVVVVVVVVVVELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger coloVVVVVVVVVVVVr CDATA #(REQUIRED>
+]>
+<!--LIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above Nis DTD -->
+<?musiÙ ”H<a>&Lt;
+<!--* Tests emp<a>&#0;<ty comment *-->
+<!---->
+<student>My Name is SnowMan.LEMENT student (#PCDATA)> ö¢Áò-õššššššššššššššššššššššššere iemants/1.1/"/dcÑš‘Œs/1.1/ÃÁÃ"><dc:titM "Hereove i PI" ?> 
+<animal>
+   VVx=ž‘t animal -->
+"urn:0
+šššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššššÃÞÌ-*a v= v="&#20`;& v d Tests empty commentÿÿÿÿÿÿÿ±!---->
+<stu"/><x:c/></x:ade
+></a>

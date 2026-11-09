@@ -1611,6 +1611,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The drawn Document wheel for an EPUB when both book actions are
+    /// installed: Markdown north and Plain text south are lit, HTML east is
+    /// dim; Book stays dim.
+    #[test]
+    fn epub_menus_offer_markdown_north_and_plain_text_south() {
+        let base = md_catalog().actions.remove(0);
+        let act = |id: &str, out: &str, ext: &str, label: &str| Action {
+            id: id.into(),
+            input: "application/epub+zip".into(),
+            output: out.into(),
+            ext: ext.into(),
+            label: label.into(),
+            group: "document".into(),
+            lossy: true,
+            ..base.clone()
+        };
+        let cat = Catalog {
+            actions: vec![
+                act("text.epub-to-txt", "text/plain", "txt", "Plain text"),
+                act("text.epub-to-md", "text/markdown", "md", "Markdown"),
+            ],
+        };
+        let dir =
+            std::env::temp_dir().join(format!("inacircle-drop-epubmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("book.epub");
+        std::fs::write(&file, b"PK\x03\x04rest").unwrap();
+        let g = group_menu_for(vec![file], Some(cat));
+        assert!(g.slices[0].as_ref().unwrap().lit, "Document lights");
+        assert!(!g.slices[2].as_ref().unwrap().lit, "Book stays dim");
+        let m = target_menu(&g, "document");
+        assert_eq!(m.hub, "Document");
+        let slot = |k: usize| {
+            let s = m.slices[k].as_ref().unwrap();
+            (s.label.as_str(), s.preset.as_str(), s.applicable)
+        };
+        assert_eq!(slot(0), ("Markdown", "markdown-epub", true));
+        assert_eq!(slot(4), ("Plain text", "plain-text-epub", true));
+        assert!(!m.slices[2].as_ref().unwrap().applicable, "east is dim");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The drawn Book wheel for Markdown plus images and for images alone
     /// (what `wheel::stage2` paints): with documents the east slice is a lit
     /// EPUB and the hub counts documents plus images (the text file and the

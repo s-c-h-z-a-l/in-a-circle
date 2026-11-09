@@ -71,29 +71,14 @@ impl Anchors {
     /// headings by file name).
     pub fn build(chapters: &[Chapter]) -> Anchors {
         let mut a = Anchors::default();
-        let mut used: HashSet<String> = HashSet::new();
-        // Next suffix to try per base slug, so n equal headings cost O(n)
-        // rather than O(n^2) probes.
-        let mut next: HashMap<String, usize> = HashMap::new();
+        let mut slugs = Slugs::default();
         for (ci, ch) in chapters.iter().enumerate() {
             a.files.push(ch.file.clone());
             let mut ids = Vec::new();
             let mut texts = Vec::new();
             headings(ch.blocks, &mut texts);
             for text in texts {
-                let base = slug(&text);
-                let mut id = base.clone();
-                if used.contains(&id) {
-                    let n = next.entry(base.clone()).or_insert(0);
-                    loop {
-                        *n += 1;
-                        id = format!("{base}-{n}");
-                        if !used.contains(&id) {
-                            break;
-                        }
-                    }
-                }
-                used.insert(id.clone());
+                let id = slugs.unique(&text);
                 a.owner.insert(id.clone(), ci);
                 ids.push(id);
             }
@@ -128,6 +113,44 @@ impl Anchors {
     }
 }
 
+/// The unique heading ids of one document, given heading by heading in
+/// document order: each is the [`slug`] of the heading's text, and a
+/// collision is numbered over everything given before, as GitHub does
+/// (the second `intro` is `intro-1`, the third `intro-2`, and an `a-1`
+/// that is already taken makes the next `a` `a-2`). [`Anchors::build`]
+/// numbers a whole document with it; a reader that meets a document's
+/// headings one part at a time (a book read chapter by chapter) numbers
+/// them the same way by feeding the same texts in the same order. Memory
+/// is every id given (held twice: the used set and the per-base counter's
+/// key).
+#[derive(Debug, Clone, Default)]
+pub struct Slugs {
+    used: HashSet<String>,
+    /// Next suffix to try per base slug, so n equal headings cost O(n)
+    /// rather than O(n^2) probes.
+    next: HashMap<String, usize>,
+}
+
+impl Slugs {
+    /// The id of the next heading, whose plain text ([`plain`]) is `text`.
+    pub fn unique(&mut self, text: &str) -> String {
+        let base = slug(text);
+        let mut id = base.clone();
+        if self.used.contains(&id) {
+            let n = self.next.entry(base.clone()).or_insert(0);
+            loop {
+                *n += 1;
+                id = format!("{base}-{n}");
+                if !self.used.contains(&id) {
+                    break;
+                }
+            }
+        }
+        self.used.insert(id.clone());
+        id
+    }
+}
+
 /// How many headings [`headings`] finds in `bs` (the same walk).
 fn count_headings(bs: &[Block]) -> usize {
     bs.iter()
@@ -141,8 +164,10 @@ fn count_headings(bs: &[Block]) -> usize {
 }
 
 /// Plain texts of the headings in `bs`, depth first in document order (the
-/// order [`Writer::block`] meets them in).
-fn headings(bs: &[Block], out: &mut Vec<String>) {
+/// order [`Writer::block`] meets them in): a block, then the blocks inside
+/// it (quotes, list items). The recursion is as deep as the tree, which
+/// the readers' depth limits bound.
+pub fn headings(bs: &[Block], out: &mut Vec<String>) {
     for b in bs {
         match b {
             Block::Heading { content, .. } => {
@@ -194,6 +219,42 @@ fn name_start_range(c: char) -> bool {
 /// A link target goes through the same function, so `#2026-terv` and
 /// `#h-2026-terv` both find the heading.
 pub fn slug(text: &str) -> String {
+    let s = bare_slug(text);
+    if name_start(&s) { s } else { format!("h-{s}") }
+}
+
+/// The anchor a Markdown viewer (GitHub) gives the heading whose plain
+/// text ([`plain`]) is `text` and which [`Slugs::unique`] gave `id`: `id`
+/// without the `h-` that [`slug`] put before a text that is no XML name
+/// (`1984` -> `h-1984` -> `1984`, the second `1984` -> `h-1984-1` ->
+/// `1984-1`), since a Markdown anchor needs none. A link written with it
+/// still finds the heading through [`slug`] (the join's rule). Empty when
+/// the heading's text gives no anchor at all (`!!!`). The numbering is
+/// ours: where a heading's text is the prefix itself (`H 1` beside `1`)
+/// GitHub numbers the two apart (`h-1`, `1`) and ours share a base
+/// (`h-1`, `h-1-1`), a case left as it is. So are two where our slug
+/// and GitHub's differ: a combining mark (`e` + U+0301, a decomposed
+/// accent) is left out of ours and kept by GitHub's, and a white space
+/// other than U+0020 (a no-break space) is `-` in ours and left out of
+/// GitHub's, so such a heading's link may miss in a viewer; the join
+/// still finds it, as its rule is [`slug`].
+pub fn md_anchor<'a>(text: &str, id: &'a str) -> &'a str {
+    if name_start(&bare_slug(text)) {
+        id
+    } else {
+        id.strip_prefix("h-").unwrap_or(id)
+    }
+}
+
+/// Whether a slug starts as an XML name must (a letter or `_`).
+fn name_start(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_alphabetic())
+}
+
+/// [`slug`] without its `h-` prefix.
+fn bare_slug(text: &str) -> String {
     let mut s = String::new();
     for c in text.chars().flat_map(char::to_lowercase) {
         if c.is_whitespace() {
@@ -206,11 +267,7 @@ pub fn slug(text: &str) -> String {
             s.push(c);
         }
     }
-    let starts_ok = s
-        .chars()
-        .next()
-        .is_some_and(|c| c == '_' || c.is_alphabetic());
-    if starts_ok { s } else { format!("h-{s}") }
+    s
 }
 
 /// Stylesheet of [`Mode::Standalone`]: about 1 KB as asked of the page
@@ -1054,6 +1111,28 @@ mod tests {
     }
 
     #[test]
+    fn md_anchor_drops_only_the_added_prefix() {
+        let mut slugs = Slugs::default();
+        let mut next = |t: &str| {
+            let id = slugs.unique(t);
+            let a = md_anchor(t, &id).to_string();
+            // The join's rule finds the heading from the anchor.
+            assert_eq!(slug(&a), id, "{t}");
+            a
+        };
+        assert_eq!(next("1984"), "1984");
+        assert_eq!(next("1984"), "1984-1");
+        assert_eq!(next("1. Loomings"), "1-loomings");
+        // A heading's own `h-` stays.
+        assert_eq!(next("H-2"), "h-2");
+        assert_eq!(next("Notes"), "notes");
+        assert_eq!(next("-x"), "-x");
+        // No anchor text at all.
+        assert_eq!(next("!!!"), "");
+        assert_eq!(next("!!!"), "-1");
+    }
+
+    #[test]
     fn slug_keeps_unicode_and_prefixes_digits() {
         assert_eq!(slug("Áttekintés"), "áttekintés");
         assert_eq!(slug("2026 terv"), "h-2026-terv");
@@ -1094,6 +1173,28 @@ mod tests {
             out.contains("<h1 id=\"a-2\">") && out.contains("<h1 id=\"a-3\">"),
             "{out}"
         );
+    }
+
+    /// Fed heading by heading, [`Slugs`] numbers as [`Anchors::build`]
+    /// does over the whole document (a book read one chapter at a time
+    /// gets the ids a join of its chapters would give).
+    #[test]
+    fn slugs_one_at_a_time_equal_anchors() {
+        let d1 = doc("# A\n\n# A\n\n# A-1\n\n# 2026\n");
+        let d2 = doc("# A\n\n> # A\n\n- # 2026\n");
+        let chapters = [
+            chapter(&d1.blocks, "c1.xhtml"),
+            chapter(&d2.blocks, "c2.xhtml"),
+        ];
+        let a = Anchors::build(&chapters);
+        let mut s = Slugs::default();
+        for (k, ch) in chapters.iter().enumerate() {
+            let mut texts = Vec::new();
+            headings(ch.blocks, &mut texts);
+            let ids: Vec<String> = texts.iter().map(|t| s.unique(t)).collect();
+            assert_eq!(ids, a.headings[k]);
+        }
+        assert_eq!(a.headings[1], ["a-2", "a-3", "h-2026-1"]);
     }
 
     #[test]

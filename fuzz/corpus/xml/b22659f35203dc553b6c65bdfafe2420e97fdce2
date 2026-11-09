@@ -1,0 +1,49 @@
+<?ENT tiger (#PCDATA+>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEv-vvvv 
+=
+ =
+ vvvvvv 
+=
+MENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMEN
+<i
+>&T ankmal !DOCTYPE a [<!ENTITY % ~ew"x">]<a/><animal>
+   <cat/>
+   <tiger colour="white">This is a white tiger in Mirage!!</tiger>
+   <cat/>
+  <?musicELEMENT leopard ANY>
+is DTD -->
+YPE animal [
+<!ELEMENT  -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEM
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTYDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMDOCTYPE a [<!ENTITY %  e#ENT small EMPTY>
+<!ELEMENT big E->
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger #C(PDATA)>
+<!ELEMENT leopard ANY>
+NT leopard ANY>
+<!ELEMENT smENT tiger (#…PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMEN=T small EMPTY>
+<!E$LEMENT d)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<hELEMENT leopard ANY>
+<!TT=IST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music ”Here is a PI" ?> 
+<:animalb>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ

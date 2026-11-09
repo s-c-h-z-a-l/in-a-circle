@@ -1456,3 +1456,297 @@ fn encrypted_data_below_a_wrapper_is_still_read() {
     assert_eq!(all[1].as_ref().unwrap(), &xhtml("a"));
     assert_eq!(all[2], Err(ChapterError::Encrypted));
 }
+
+/// A Calibre-shaped book: the package in `OEBPS/`, chapters in
+/// `OEBPS/Text/` (one with a space in its name), images in
+/// `OEBPS/Images/`, plus `extra` entries; `enc` as `encryption.xml`.
+fn resource_book(enc: Option<&str>, extra: &[(&str, &[u8], Store)]) -> Vec<u8> {
+    let manifest = [
+        item("c1", "Text/Chapter%201.xhtml"),
+        item("c2", "Text/c2.xhtml"),
+        item("out", "../../out.xhtml"),
+        item("gone", "Text/gone.xhtml"),
+    ]
+    .concat();
+    let spine = [
+        itemref("c1"),
+        itemref("c2"),
+        itemref("out"),
+        itemref("gone"),
+        itemref("nope"),
+    ]
+    .concat();
+    let opf = package("", &manifest, &spine);
+    let cont = container("OEBPS/content.opf");
+    let (c1, c2) = (xhtml("one"), xhtml("two"));
+    let mut entries: Vec<(&str, &[u8], Store)> = vec![
+        ("META-INF/container.xml", cont.as_bytes(), Stored),
+        ("OEBPS/content.opf", opf.as_bytes(), Stored),
+        ("OEBPS/Text/Chapter 1.xhtml", &c1, Stored),
+        ("OEBPS/Text/c2.xhtml", &c2, Stored),
+        ("OEBPS/Images/a b.jpg", b"\xFF\xD8\xFFjpeg", Stored),
+        ("OEBPS/Images/big.png", &[9u8; 4096], Deflated),
+        ("OEBPS/Images/", b"", Stored),
+    ];
+    if let Some(enc) = enc {
+        entries.push(("META-INF/encryption.xml", enc.as_bytes(), Stored));
+    }
+    entries.extend_from_slice(extra);
+    zip_bytes(&entries)
+}
+
+#[test]
+fn resolve_relative_to_the_chapter() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    let c1 = &book.chapters[0];
+    // The chapter's folder, not the package's; `%XX` decoded, `.` and
+    // `..` normalized, the query and fragment cut.
+    for href in [
+        "../Images/a%20b.jpg",
+        "../Images/./a b.jpg",
+        "../Text/../Images/a%20b.jpg?v=2",
+        "../Images/a%20b.jpg#frag",
+        ".././Images//a b.jpg",
+    ] {
+        assert_eq!(
+            book.resolve(c1, href).as_deref(),
+            Ok("OEBPS/Images/a b.jpg"),
+            "{href}"
+        );
+    }
+    assert_eq!(
+        book.resolve(c1, "c2.xhtml#n1").as_deref(),
+        Ok("OEBPS/Text/c2.xhtml")
+    );
+    // A link to the chapter itself (only a fragment, or nothing).
+    assert_eq!(
+        book.resolve(c1, "#n1").as_deref(),
+        Ok("OEBPS/Text/Chapter 1.xhtml")
+    );
+    assert_eq!(
+        book.resolve(c1, "").as_deref(),
+        Ok("OEBPS/Text/Chapter 1.xhtml")
+    );
+    // Resolving names no entry: it need not exist.
+    assert_eq!(
+        book.resolve(&book.chapters[1], "img.gif").as_deref(),
+        Ok("OEBPS/Text/img.gif")
+    );
+    // From a chapter that is missing (its path is known) it still resolves;
+    // from one outside the book, or a spine item naming no manifest item,
+    // there is no folder to start from.
+    assert_eq!(
+        book.resolve(&book.chapters[3], "x.jpg").as_deref(),
+        Ok("OEBPS/Text/x.jpg")
+    );
+    assert_eq!(
+        book.resolve(&book.chapters[2], "x.jpg"),
+        Err(ChapterError::OutsideTheBook)
+    );
+    assert_eq!(
+        book.resolve(&book.chapters[4], "x.jpg"),
+        Err(ChapterError::Missing)
+    );
+    // A chapter of another book (an item index this one does not have).
+    let foreign = epub::read::ChapterRef {
+        index: 1,
+        item: Some(99),
+        linear: true,
+    };
+    assert_eq!(book.resolve(&foreign, "x.jpg"), Err(ChapterError::Missing));
+    // A path longer than any entry name names nothing.
+    let long = format!("{}.jpg", "a".repeat(MAX_PATH));
+    assert_eq!(book.resolve(c1, &long), Err(ChapterError::Missing));
+    // The package at the root: a chapter at the root resolves from there.
+    let f = simple(1, &[]);
+    let book = open(&f).unwrap();
+    assert_eq!(
+        book.resolve(&book.chapters[0], "i.png").as_deref(),
+        Ok("OEBPS/i.png")
+    );
+}
+
+#[test]
+fn resolve_escaping_href_is_outside() {
+    let f = file_of(&resource_book(None, &[("x.jpg", b"x", Stored)]));
+    let book = open(&f).unwrap();
+    let c1 = &book.chapters[0];
+    for href in [
+        "../../../x.jpg",
+        "../../%2E%2E/x.jpg",
+        "%2E%2E/%2E%2E/%2E%2E/x.jpg",
+        "/x.jpg",
+        "//host/x.jpg",
+        "%2F..%2F..%2F..%2Fx.jpg",
+        "http://example.com/x.jpg",
+        "file:///etc/passwd",
+        "data:image/png;base64,AAAA",
+        "javascript:alert(1)",
+    ] {
+        assert_eq!(
+            book.resolve(c1, href),
+            Err(ChapterError::OutsideTheBook),
+            "{href}"
+        );
+    }
+    // Climbing to the container root stays inside it.
+    assert_eq!(book.resolve(c1, "../../x.jpg").as_deref(), Ok("x.jpg"));
+    let mut out = Vec::new();
+    book.resource("x.jpg", 10, &mut out).unwrap();
+    assert_eq!(out, b"x");
+    // `resource` refuses an escaping path itself, whoever built it.
+    assert_eq!(
+        book.resource("../x.jpg", 10, &mut out),
+        Err(ChapterError::OutsideTheBook)
+    );
+    assert!(out.is_empty());
+}
+
+#[test]
+fn resource_reads_the_entry_exactly() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    let mut out = b"old".to_vec();
+    let path = book
+        .resolve(&book.chapters[0], "../Images/a%20b.jpg")
+        .unwrap();
+    book.resource(&path, 64 << 20, &mut out).unwrap();
+    assert_eq!(out, b"\xFF\xD8\xFFjpeg");
+    // Deflated, at exactly its size.
+    book.resource("OEBPS/Images/big.png", 4096, &mut out)
+        .unwrap();
+    assert_eq!(out, vec![9u8; 4096]);
+    // A chapter is a resource too (a link target).
+    book.resource("OEBPS/Text/c2.xhtml", 1 << 20, &mut out)
+        .unwrap();
+    assert_eq!(out, xhtml("two"));
+}
+
+#[test]
+fn resource_over_cap_is_too_large() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    let mut out = b"old".to_vec();
+    assert_eq!(
+        book.resource("OEBPS/Images/big.png", 4095, &mut out),
+        Err(ChapterError::TooLarge)
+    );
+    assert!(out.is_empty());
+    // The declared size is checked before anything is allocated or
+    // inflated: an entry claiming 1 GiB (within the ratio limit of what it
+    // stores) is too large against a 64 MiB cap at once.
+    let big = vec![0u8; 2 << 20];
+    let mut z = resource_book(None, &[("OEBPS/Images/huge.png", &big, Stored)]);
+    forge_size(&mut z, "OEBPS/Images/huge.png", 1 << 30);
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    let mut fresh = Vec::new();
+    assert_eq!(
+        book.resource("OEBPS/Images/huge.png", 64 << 20, &mut fresh),
+        Err(ChapterError::TooLarge)
+    );
+    assert_eq!(fresh.capacity(), 0, "nothing reserved for the claim");
+}
+
+#[test]
+fn resource_size_is_the_declared_size() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    assert_eq!(book.resource_size("OEBPS/Images/big.png"), Ok(4096));
+    assert_eq!(book.resource_size("OEBPS/Images/a b.jpg"), Ok(7));
+    assert_eq!(
+        book.resource_size("OEBPS/Images/none.jpg"),
+        Err(ChapterError::Missing)
+    );
+    assert_eq!(
+        book.resource_size("../x.jpg"),
+        Err(ChapterError::OutsideTheBook)
+    );
+    // What the entry claims, damaged or not: nothing is read.
+    let big = vec![0u8; 2 << 20];
+    let mut z = resource_book(None, &[("OEBPS/Images/huge.png", &big, Stored)]);
+    forge_size(&mut z, "OEBPS/Images/huge.png", 1 << 30);
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    assert_eq!(book.resource_size("OEBPS/Images/huge.png"), Ok(1 << 30));
+    let enc = encryption(&[(AES, "OEBPS/Images/a%20b.jpg")]);
+    let f = file_of(&resource_book(Some(&enc), &[]));
+    let book = open(&f).unwrap();
+    assert_eq!(
+        book.resource_size("OEBPS/Images/a b.jpg"),
+        Err(ChapterError::Encrypted)
+    );
+}
+
+#[test]
+fn resource_missing() {
+    let f = file_of(&resource_book(None, &[]));
+    let book = open(&f).unwrap();
+    let mut out = b"old".to_vec();
+    for path in [
+        "OEBPS/Images/none.jpg",
+        // Names are matched exactly, case included, not decoded again.
+        "OEBPS/images/a b.jpg",
+        "OEBPS/Images/a%20b.jpg",
+        // A folder entry is no resource.
+        "OEBPS/Images/",
+        "OEBPS/Images",
+        "",
+    ] {
+        assert_eq!(
+            book.resource(path, 1 << 20, &mut out),
+            Err(ChapterError::Missing),
+            "{path}"
+        );
+        assert!(out.is_empty());
+    }
+    let long = "a".repeat(MAX_PATH + 1);
+    assert_eq!(
+        book.resource(&long, 1 << 20, &mut out),
+        Err(ChapterError::Missing)
+    );
+    // Damaged data is the ZIP reader's reason.
+    let mut z = resource_book(None, &[]);
+    let (local, _) = headers(&z, "OEBPS/Images/a b.jpg");
+    z[local + 30 + "OEBPS/Images/a b.jpg".len() + 1] ^= 1;
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    assert_eq!(
+        book.resource("OEBPS/Images/a b.jpg", 1 << 20, &mut out),
+        Err(ChapterError::Damaged(
+            "the entry's CRC-32 does not match".into()
+        ))
+    );
+    assert!(out.is_empty());
+}
+
+#[test]
+fn resource_of_encrypted_entry_is_encrypted() {
+    // Listed in encryption.xml with a cipher (by a URI relative to the
+    // container root): encrypted. Obfuscated (a font): read as it is.
+    let enc = encryption(&[
+        (AES, "OEBPS/Images/a%20b.jpg"),
+        (IDPF, "OEBPS/Images/big.png"),
+    ]);
+    let f = file_of(&resource_book(Some(&enc), &[]));
+    let book = open(&f).unwrap();
+    let mut out = Vec::new();
+    assert_eq!(
+        book.resource("OEBPS/Images/a b.jpg", 1 << 20, &mut out),
+        Err(ChapterError::Encrypted)
+    );
+    assert!(out.is_empty());
+    book.resource("OEBPS/Images/big.png", 1 << 20, &mut out)
+        .unwrap();
+    assert_eq!(out.len(), 4096);
+    // The ZIP entry's encryption flag.
+    let mut z = resource_book(None, &[]);
+    zip_encrypt(&mut z, "OEBPS/Images/big.png");
+    let f = file_of(&z);
+    let book = open(&f).unwrap();
+    assert_eq!(
+        book.resource("OEBPS/Images/big.png", 1 << 20, &mut out),
+        Err(ChapterError::Encrypted)
+    );
+}

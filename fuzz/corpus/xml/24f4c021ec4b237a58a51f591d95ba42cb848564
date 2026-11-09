@@ -1,0 +1,45 @@
+<?ENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger"color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+YPE animal [
+<!ELEMENT ankmal (cat|tTY>
+<!ELEMENT tiger (#…PCDATA)>
+<!ELEMENT leopEMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMP'Y>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt fier (#…PCDATA)>
+<!ELEMENT leopEMPTY>
+<!ELEMENT big E-<a>..bs>
+YPE animal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMFNT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMP'Y>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Above is DTD -<?xmludent (#PCDATA)>
+	<!AT-ÿÿÿs>
+<studunt first="Snow">My name is Snow&Mao </stude (#PCDAdunt first="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenrst="Snow">My name is Snow&Ma, </stude (#PCDATA)>
+	<!ATTLIST studenv first CDATA #REQUIRED
+		  la<?xm->
+<?music ”Here is a PI" ?>al  
+<animal>
+   <cat<animal>
+   <cat

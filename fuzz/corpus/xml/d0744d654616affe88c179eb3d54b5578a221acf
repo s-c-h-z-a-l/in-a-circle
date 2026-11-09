@@ -1,0 +1,24 @@
+<!DOCT[PE book1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!imal [
+<!ELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- AbovePI" ?> 
+<animal>
+   <cat/>
+   <tige>
+   <cat/>
+   <leopard>
+ !ELEMENT PTY>
+<!ELEMENT tiger (#PC [
+<!ELEMENT book ANY>
+]>
+<!-- IllegalChar #xdfff
+ in p02: í¿¿ -->
+<book/>

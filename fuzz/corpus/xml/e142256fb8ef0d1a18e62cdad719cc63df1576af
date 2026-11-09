@@ -1,0 +1,36 @@
+<?xml version="1. Above is XMLDecl -->
+<!DOCTYPE animal [
+lor CDAMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT l ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Abo<a>	Ãve isY>
+<!ATTLISTeopard ANY>
+< cat EMPTY>
+<!ELEMENT tiger (#PCDATA)><!ELEMENT animal (cat|tiger|leopardl E)+>
+<!ELEELEMENT c<!--* Tes
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANATTLIST tiger color CDAMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT l ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Abo<a>	Ãve isY>
+<!ATTLISTeopard ANY>
+< cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATTLIST tiger color CDATA #REQUIRED>
+]>
+<!-- Abo<a>	Ãve isY>
+<!ATTLIST tiger cx?>olor CDATA #REQUIRED>
+]>
+<!-- Above is DTD -->
+<?music "Here is as a white tiger i<a>&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&Zmp;&amp;&aap&;mmp;&amp;p;&amp;&amp;&amp;&p;&amp;&   am

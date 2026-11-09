@@ -1,0 +1,12 @@
+<?xml  version="1.0"?>
+<!-- validity test for Production 60-->
+<!DOCTYPE test
+ [
+ <!ELEMENT tesb) "a"> 
+ <!ATTLIST nametoken namevalue NMTO,KEN "hello">
+  ]>
+<test>
+The def<i>]<a>ÿÿÿ meets tèe 
+lexical constraints of tÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþ<tÿÿÿÿÿÿÿÿÿÿÿÿÿÿ xmlns:p=""/>ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿed attribute type.
+</test>
+

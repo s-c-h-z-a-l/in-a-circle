@@ -2487,3 +2487,194 @@ fn cli_epub_to_txt() {
     assert_eq!(fs::read(&src).unwrap(), book, "the book changed");
     one_group_and_undo(&e, &o, &wrapper, "a.txt");
 }
+
+/// A minimal EPUB 3 book (title, one author, one chapter) whose chapter
+/// shows `images` (name, bytes), stored beside the chapter. Built with
+/// `testzip`, so the ZIP is not made by the code under test.
+fn epub_with_images(chapter: &str, images: &[(&str, &[u8])]) -> Vec<u8> {
+    use testzip::Store::Stored;
+    let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+    let mut items = String::new();
+    for (i, (name, _)) in images.iter().enumerate() {
+        let mt = if name.ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        items.push_str(&format!(
+            "<item id=\"i{i}\" href=\"{name}\" media-type=\"{mt}\"/>"
+        ));
+    }
+    let opf = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Kis könyv</dc:title><dc:creator>Szerző</dc:creator><dc:identifier id="id">urn:uuid:12345678-1234-1234-1234-123456789abc</dc:identifier><dc:language>hu</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>{items}</manifest><spine><itemref idref="c1"/></spine></package>"#
+    );
+    let page = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body>{chapter}</body></html>"
+    );
+    let paths: Vec<String> = images.iter().map(|(n, _)| format!("OEBPS/{n}")).collect();
+    let mut entries: Vec<(&[u8], &[u8], testzip::Store)> = vec![
+        (b"mimetype", b"application/epub+zip", Stored),
+        (b"META-INF/container.xml", container.as_bytes(), Stored),
+        (b"OEBPS/content.opf", opf.as_bytes(), Stored),
+        (b"OEBPS/c1.xhtml", page.as_bytes(), Stored),
+    ];
+    for (p, (_, data)) in paths.iter().zip(images) {
+        entries.push((p.as_bytes(), data, Stored));
+    }
+    testzip::zip(&entries)
+}
+
+/// A tool on `PATH`; a missing one skips with a visible line, unless
+/// `INACIRCLE_REQUIRE_BOOK_TOOLS=1` makes it a failure.
+fn have_book_tool(tool: &str) -> bool {
+    let found = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
+        .unwrap_or(false);
+    if !found {
+        if std::env::var_os("INACIRCLE_REQUIRE_BOOK_TOOLS").is_some_and(|v| v == "1") {
+            panic!("{tool} is required (INACIRCLE_REQUIRE_BOOK_TOOLS=1) but not installed");
+        }
+        println!("skipped: {tool} not installed");
+    }
+    found
+}
+
+/// `run markdown-epub` turns an EPUB into `<stem>/<stem>.md` and the images
+/// its chapter shows (`<stem>-0001.jpg`, `<stem>-0002.png`) in ONE wrapper
+/// folder: several `done` lines, one history group, and Undo moves the whole
+/// folder to the Trash. The book is untouched. A failing book (no text, no
+/// image) places nothing, and does not stop a good book of the same run.
+#[test]
+fn cli_epub_to_md() {
+    let png = gray_png();
+    let jpg = rgb_jpeg();
+    let e = Env::new("epub-md");
+    let book = epub_with_images(
+        "<h1>Első</h1><p>Szöveg.</p><p><img src=\"k.jpg\" alt=\"kép\"/><img src=\"l.png\" alt=\"másik\"/></p>",
+        &[("k.jpg", &jpg), ("l.png", &png)],
+    );
+    let src = e.file("a.epub", &book);
+    let o = e.run(&["run", "markdown-epub", "a.epub"]);
+    if skip_no_sandbox("cli_epub_to_md", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let wrapper = e.files().join("a");
+    let done = o.pairs("done");
+    // One md and two images: three `done` lines for the one input, all in
+    // the one wrapper.
+    assert_eq!(done.len(), 3, "{}", o.stdout);
+    for (i, p) in &done {
+        assert_eq!(*i, src);
+        assert!(Path::new(p).starts_with(&wrapper), "{p}");
+    }
+    let md = fs::read_to_string(wrapper.join("a.md")).unwrap();
+    assert!(md.starts_with("# Kis könyv\n\nSzerző\n\n"), "{md}");
+    assert!(md.contains("![kép](a-0001.jpg)"), "{md}");
+    assert!(md.contains("![másik](a-0002.png)"), "{md}");
+    assert_eq!(fs::read(wrapper.join("a-0001.jpg")).unwrap(), jpg);
+    assert_eq!(fs::read(wrapper.join("a-0002.png")).unwrap(), png);
+    assert_eq!(fs::read(&src).unwrap(), book, "the book changed");
+    one_group_and_undo(&e, &o, &wrapper, "a.md");
+    let trashed = e.root.join("home/.local/share/Trash/files/a");
+    assert!(trashed.join("a-0001.jpg").is_file(), "the images went too");
+    assert!(trashed.join("a-0002.png").is_file(), "the images went too");
+
+    // A failing book (no text, no image) places nothing; the good book of
+    // the same run still lands whole. This is the early failure (nothing was
+    // ever created). A book that fails after its images were written is
+    // covered below the engine: `failure_leaves_no_images` in the text
+    // family's CLI tests (no `done`, nothing left) and the engine's done
+    // gate (nothing without `done` is placed).
+    let e = Env::new("epub-md-fail");
+    let good = e.file("good.epub", &tiny_epub("<p>Szöveg.</p>"));
+    let empty = e.file("empty.epub", &tiny_epub(""));
+    let o = e.run(&["run", "markdown-epub", "good.epub", "empty.epub"]);
+    assert_eq!(o.summary(), (1, 0, 1), "{}", o.stdout);
+    let fails = o.pairs("fail");
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(fails[0].0.ends_with("empty.epub"), "{fails:?}");
+    assert!(fails[0].1.contains("book has no text"), "{fails:?}");
+    assert!(e.files().join("good/good.md").is_file());
+    assert!(
+        !e.files().join("empty").exists(),
+        "a failed book left a folder"
+    );
+    let mut names: Vec<_> = fs::read_dir(e.files())
+        .unwrap()
+        .map(|d| d.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["empty.epub", "good", "good.epub"], "stray files");
+    assert!(good.is_file() && empty.is_file());
+}
+
+/// The way back: an EPUB becomes Markdown and images, and that folder's
+/// Markdown and images join into one book again (the `epub` preset). The
+/// book is within the EPUB writer's limits (one chapter, two images), so
+/// it survives: the text and both images are in the new book, byte for byte
+/// for the images, and `epubcheck` (when installed) finds nothing.
+#[test]
+fn epub_md_images_back_to_epub() {
+    let png = gray_png();
+    let jpg = rgb_jpeg();
+    let e = Env::new("epub-md-epub");
+    let book = epub_with_images(
+        "<h1>Első</h1><p>Szöveg a könyvből.</p><p><img src=\"k.jpg\" alt=\"kép\"/><img src=\"l.png\" alt=\"másik\"/></p>",
+        &[("k.jpg", &jpg), ("l.png", &png)],
+    );
+    e.file("a.epub", &book);
+    let o = e.run(&["run", "markdown-epub", "a.epub"]);
+    if skip_no_sandbox("epub_md_images_back_to_epub", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    let out = e.files().join("a");
+    for n in ["a.md", "a-0001.jpg", "a-0002.png"] {
+        assert!(out.join(n).is_file(), "{n}");
+    }
+    let o = e.run(&["run", "epub", "a/a.md", "a/a-0001.jpg", "a/a-0002.png"]);
+    assert_eq!(o.code, Some(0), "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(o.summary(), (3, 0, 0));
+    let back = out.join("a/a.epub");
+    let done = o.pairs("done");
+    assert!(done.iter().all(|(_, p)| Path::new(p) == back), "{done:?}");
+    let bytes = fs::read(&back).unwrap();
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+    assert!(zip_names(&bytes, "OEBPS/img/0001.jpg"), "first image");
+    assert!(zip_names(&bytes, "OEBPS/img/0002.png"), "second image");
+    // The images come back byte for byte (stored, so a search finds them).
+    for img in [&jpg, &png] {
+        assert!(
+            bytes.windows(img.len()).any(|w| w == img.as_slice()),
+            "an image changed on the way"
+        );
+    }
+    let text = |s: &str| bytes.windows(s.len()).any(|w| w == s.as_bytes());
+    assert!(text("Szöveg a könyvből."), "the text is in the new book");
+    assert!(text("Kis könyv"), "the title is in the new book");
+    // The md's image names resolved: the images sit inline in the chapter,
+    // not appended as a separate "Images" chapter.
+    assert!(text("src=\"img/0001.jpg\""), "first image linked inline");
+    assert!(text("src=\"img/0002.png\""), "second image linked inline");
+    assert!(
+        !zip_names(&bytes, "OEBPS/ch0003"),
+        "an extra chapter (unlinked images?)"
+    );
+    if have_book_tool("epubcheck") {
+        let c = Command::new("epubcheck")
+            .arg("--failonwarnings")
+            .arg(&back)
+            .output()
+            .unwrap();
+        assert!(
+            c.status.success(),
+            "epubcheck: {}\n{}",
+            String::from_utf8_lossy(&c.stdout),
+            String::from_utf8_lossy(&c.stderr)
+        );
+    }
+}

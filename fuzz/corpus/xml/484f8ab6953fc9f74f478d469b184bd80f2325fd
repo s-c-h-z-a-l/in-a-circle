@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Ab -->
+<!DOCTYPE animal [
+<!ELEMENT animel (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT žšard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTD>
+]>!-->
+<?simuc "Here ->

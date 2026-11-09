@@ -1,0 +1,14 @@
+<a>,&Lt;<a><![CDATA[<b>LLLLLLLLLLLLLLLl ANY>
+<?Ó† an only leg<?al per 5th edotiin c<!ELEME<N
+<?xml version="2.0" encoding="utf-8" standalone="yes" ?>
+<!-- Above is XMLDecl -->
+<!DOCTYPE animal [
+<çELEMENT animal (cat|tiger|leopard)+>
+<!ELEMENT cat EMPTY>
+<!ELEMENT tiger (#PCDATA)>
+<!ELEMENT leopard ANY>
+<!ELEMENT small EMPTY>
+<!ELEMENT big EMPTY>
+<!ATT0LIST tiger color CDATA #REQUIRED>s is a thtwi e&LLLLLLLimal>
+<!--LLLLLL AboLL</aLLLLLLLLL±LLLLL'amp;]]><ve is elemala> -->
+
