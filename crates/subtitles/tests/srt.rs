@@ -276,6 +276,64 @@ fn font_tag_keeps_text_and_reports_styling() {
 }
 
 #[test]
+fn legacy_alignment_top_row_is_top_as_in_ass() {
+    // `{\a5}` to `{\a7}` are the SSA top row. The other SSA alignments (1 to 11)
+    // are the default placement with no report; any other value is styling.
+    // The ASS reader reads the same override the same way.
+    for a in 0..=12 {
+        let srt = read(&format!("1\n00:00:01,000 --> 00:00:02,000\n{{\\a{a}}}x\n"));
+        let ass = subtitles::read_ass(
+            format!(
+                "[Events]\nFormat: Start, End, Text\nDialogue: 0:00:01.00,0:00:02.00,{{\\a{a}}}x\n"
+            )
+            .as_bytes(),
+        )
+        .expect("the ASS input has a cue");
+        assert_eq!(srt.cues[0].top, (5..=7).contains(&a), "\\a{a}");
+        assert_eq!(srt.cues[0].top, ass.cues[0].top, "\\a{a} against ASS");
+        let styling = if (1..=11).contains(&a) {
+            losses(&[])
+        } else {
+            losses(&[(Loss::Styling, 1)])
+        };
+        assert_eq!(srt.losses, styling, "\\a{a}");
+        assert_eq!(srt.losses, ass.losses, "\\a{a} losses against ASS");
+    }
+}
+
+#[test]
+fn karaoke_capital_k_is_karaoke() {
+    let parsed = read("1\n00:00:01,000 --> 00:00:02,000\n{\\K10}a{\\k5}b\n");
+    assert_eq!(texts(&parsed), vec!["ab"]);
+    assert_eq!(parsed.losses, losses(&[(Loss::Karaoke, 1)]));
+}
+
+#[test]
+fn bare_italic_bold_underline_switch_off() {
+    // `{\i}`, `{\b}` and `{\u}` with no value switch their style off: the SRT
+    // reader keeps no style to return to, so off is the reset.
+    let parsed =
+        read("1\n00:00:01,000 --> 00:00:02,000\n{\\i1}a{\\i}b{\\b1}c{\\b}d{\\u1}e{\\u}f\n");
+    let flags: Vec<(&str, bool, bool, bool)> = parsed.cues[0].lines[0]
+        .runs
+        .iter()
+        .map(|r| (r.text.as_str(), r.italic, r.bold, r.underline))
+        .collect();
+    assert_eq!(
+        flags,
+        vec![
+            ("a", true, false, false),
+            ("b", false, false, false),
+            ("c", false, true, false),
+            ("d", false, false, false),
+            ("e", false, false, true),
+            ("f", false, false, false),
+        ]
+    );
+    assert!(parsed.losses.is_empty());
+}
+
+#[test]
 fn an8_sets_top_others_dropped() {
     let parsed = read(
         "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}top\n\n2\n00:00:03,000 --> 00:00:04,000\n{\\an2}bottom\n\n3\n00:00:05,000 --> 00:00:06,000\n{\\an5}middle\n\n4\n00:00:07,000 --> 00:00:08,000\n{\\an7}left top\n\n5\n00:00:09,000 --> 00:00:10,000\n{\\an9}right top\n",

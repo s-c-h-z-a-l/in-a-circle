@@ -8,8 +8,9 @@
 //! - Timing: `H+:MM:SS,mmm` (`.` also accepted). Minutes and seconds take one
 //!   or two digits; the milliseconds are read as an integer, so `,5` is 5 ms.
 //!   Coordinates after the end time are dropped, a `Position` loss per cue.
-//! - Markup: `<i> <b> <u>` and their `{\i1}`-style forms (`0` switches them
-//!   off), `{\an7}`/`{\an8}`/`{\an9}` for a top cue, `<font>` (its text stays,
+//! - Markup: `<i> <b> <u>` and their `{\i1}`-style forms (`0` or no value
+//!   switches them off), `{\an7}`/`{\an8}`/`{\an9}` and `{\a5}`/`{\a6}`/`{\a7}`
+//!   for a top cue, `<font>` (its text stays,
 //!   the styling is reported), `<br>` (any case, `/` or a space allowed) as a
 //!   line break, other `<…>` tags (dropped, text kept), and other `{\…}` blocks
 //!   (their effect is reported). A `<` opens a tag only when its
@@ -500,19 +501,26 @@ fn split_tag(inner: &str) -> (bool, &str) {
 fn block(inner: &str, open: &mut Open) {
     for token in inner.split('\\').map(str::trim).filter(|t| !t.is_empty()) {
         match token {
+            // A bare `\i`, `\b` or `\u` is off: this reader keeps no style to
+            // return to, so off is the reset (ASS returns to the style's own).
             "i1" => open.style.italic = true,
-            "i0" => open.style.italic = false,
+            "i0" | "i" => open.style.italic = false,
             "b1" => open.style.bold = true,
-            "b0" => open.style.bold = false,
+            "b0" | "b" => open.style.bold = false,
             "u1" => open.style.underline = true,
-            "u0" => open.style.underline = false,
+            "u0" | "u" => open.style.underline = false,
             // Numpad 7, 8, 9: the top row. The bottom and middle rows are the
             // default placement, so their alignment is dropped without a report.
             "an7" | "an8" | "an9" => open.top = true,
             "an1" | "an2" | "an3" | "an4" | "an5" | "an6" => {}
+            // Legacy SSA alignment: 5 to 7 is the top row, as in the ASS reader
+            // (`ass.rs`, `SSA_TOP`). The other values 1 to 11 are the default.
+            "a5" | "a6" | "a7" => open.top = true,
+            "a1" | "a2" | "a3" | "a4" | "a8" | "a9" | "a10" | "a11" => {}
             "p0" => open.drawing = false,
             t if t.starts_with("pos(") || t.starts_with("move(") => open.lose(Loss::Position),
-            t if t.starts_with('k') => open.lose(Loss::Karaoke),
+            // `\k` and `\K` are both karaoke timing.
+            t if t.starts_with(['k', 'K']) => open.lose(Loss::Karaoke),
             t if t
                 .strip_prefix('p')
                 .is_some_and(|n| n.parse::<u32>().is_ok_and(|v| v != 0)) =>
