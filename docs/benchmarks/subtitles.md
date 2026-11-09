@@ -1,0 +1,305 @@
+# Subtitle actions
+
+What the subtitle family (SRT, WebVTT, ASS/SSA conversions) costs in memory,
+binary size and classifier time, what its limits protect, and what is still
+open. Gates and rules: [acceptance.md](acceptance.md); limits:
+[`resource-limits.md`](../resource-limits.md#subtitles).
+
+**Status: measured here, on one machine.** The memory series, the size check
+and the classifier micro-measurement below were run for this page. The test,
+coverage, fuzzing, mutation and differential figures are the recorded results
+of the closing runs on this branch. The two-machine drag timings, the second
+machine and the TV check are **open** (see [Verdict](#verdict)).
+
+## Machine
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 5700X 8-Core (16 threads), x86_64; the tuned reference desktop's CPU model |
+| Kernel | Linux 7.3.1-1-cachyos; `mitigations=off`, `split_lock_detect=off`, `tsc=reliable`; governor `performance` (read from sysfs; a fixed clock was not verified) |
+| RAM | 94 GB |
+| Toolchain | rustc and cargo 1.98.1 (`rust-toolchain.toml`); release profile of the workspace (fat LTO, one codegen unit, `panic=abort`, stripped) |
+| Reference | ffmpeg n9.0.2 for the differential tests |
+
+This is not the reference acceptance environment recorded in
+[wheel-reference.md](wheel-reference.md): the kernel differs, and no
+acceptance environment record was made for this page. The figures are
+diagnostic for memory and size, and a CPU micro-measurement for the classifier.
+
+## What was built
+
+Four actions, one format in and one out: `subtitles.srt-to-vtt`,
+`subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and `subtitles.ass-to-vtt`.
+The classifier types a file by its head: a `.srt` with a `-->` timing
+(`application/x-subrip`), a `.vtt` with the `WEBVTT` signature (`text/vtt`),
+and a `.ass` or `.ssa` with a `[Script Info]` section (`text/x-ssa`). The
+readers are in `crates/subtitles` (standard library only); the action binary is
+`inacircle-subtitles`.
+
+Every conversion is lossy where the target cannot carry a feature. The notice
+names the loss, one line per kind: colours, fonts and sizes; exact positions;
+karaoke effects; drawings; style and region blocks; speaker names written as
+`Name:` prefixes; and characters that look like markup, written as look-alikes.
+
+| Limit | Value | Past it |
+|---|---|---|
+| input | 8 MiB (`INPUT_BYTES`) | refused before parsing |
+| output | 32 MiB (`OUTPUT_BYTES`) | refused while writing; the file is removed |
+| time | 99:59:59.999 (`MAX_MS`) | the cue is skipped with a warning |
+| items | 2,000,000 (`ITEM_BUDGET`) | refused whole (`too many lines and styled runs (more than 2,000,000)`); nothing is truncated |
+| warnings | seven loss kinds and one for skipped cues | at most eight lines per input |
+
+## Memory: why an item budget
+
+An 8 MiB input can hold about 4.2 million two-byte lines (`x\n`). Each line
+is a reader `Line` with a run list, and a run holds its own text, so the
+reader's memory follows the number of lines and runs, not the bytes. A byte
+limit alone did not protect the process: the one-cue, two-byte-line SRT shape
+peaked at 906.3 MiB, which is about 227 B per line (906.3 MiB over 4,194,303
+lines). The item budget refuses it at 2,000,000 items, before most of that
+memory is taken.
+
+The budget is 2,000,000 items. A cue, a line and a run are one item each. At
+the budget the densest refused shape peaked at 216.5 MiB, about 113 B per item
+over the whole process (the input buffer and the allocator included). The
+budget keeps the peak at about a fifth of the 1 GiB `RLIMIT_DATA` floor that
+the sandbox sets (the code comment rounds this to a quarter). Scale against real files: a film subtitle is about 10,000
+items (2,000 cues of two lines of two runs), and the densest real 8 MiB file,
+the smallest SRT cues (27 B each, about 310,000 cues of three items), is about
+930,000 items. The budget sits above both.
+
+### Peak RSS of the real binary, dense 8 MiB inputs
+
+Peak RSS is the child's own `ru_maxrss` from `wait4`, with `RLIMIT_DATA` 1 GiB
+and `RLIMIT_FSIZE` 256 MiB, as the test helper sets them. "Before" and
+"after" are the figures recorded with the change (test build). The two "here"
+columns are the five runs of this page: the release binary, and the test build
+(the dense test's own printed figures). MiB, min / median / max over 5 runs.
+
+| Shape (8 MiB input) | before | after (recorded) | here, release | here, test build | Outcome |
+|---|---|---|---|---|---|
+| SRT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.7 / 129.0 / 129.0 | 128.5 / 128.8 / 129.1 | kept, exit 0 |
+| SRT, one cue of 2-byte lines (`x\n`) | 906.3 | 216.5 | 216.1 / 216.3 / 216.3 | 216.5 / 216.7 / 216.9 | refused (`TooComplex`), exit 1 |
+| WebVTT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.8 / 128.9 / 129.0 | 128.9 / 129.0 / 129.2 | kept, exit 0 |
+| ASS, about 180,000 cues of 46 B | 87.2 | 81.6 | 81.2 / 81.5 / 81.6 | 81.4 / 81.6 / 81.8 | kept, exit 0 |
+| ASS, one cue of `x\N` lines (3 B each) | 607.8 | 216.7 | 216.3 / 216.4 / 216.5 | 216.4 / 216.5 / 216.6 | refused (`TooComplex`), exit 1 |
+
+The two refused shapes are refused whole: their output is not written. The
+speaker-name probe (a 1 MiB name over 400 lines, `vtt-to-srt`) held 406.4 MiB
+before the change and 12.1 MiB after. It was recorded with the change and not
+re-run here; its output is past the 32 MiB ceiling, so it still fails, after
+parsing.
+
+Wall times are not comparable between the two builds: the release binary
+runs in 0.10 to 0.17 s per shape (`Popen` to `wait4`), and the test build in
+0.6 to 1.8 s (its own harness includes reading the pipes in a debug build).
+
+## Binary size
+
+`scripts/check-sizes.sh`, release builds of the shipped binaries at HEAD
+(`780ad0fe6`, clean tree). File bytes against the `inacircle` limit of 1 572 864 B
+(1.5 MB); `.text` bytes against the 1 MiB family limit (`CLAUDE.md`). Growth
+is against the previous line in `scripts/sizes.baseline`.
+
+| Binary | file B, baseline → now (growth) | `.text` B, baseline → now (growth) |
+|---|---|---|
+| `inacircle` | 1,195,944 → 1,199,304 (+3,360) | 922,792 → 924,600 (+1,808) |
+| `inacircle-text` | 1,267,920 → 1,268,024 (+104) | 901,091 → 901,043 (−48) |
+| `inacircle-pages` | 504,208 → 514,648 (+10,440) | 403,763 → 412,179 (+8,416) |
+| `inacircle-subtitles` | 430,776 → 444,176 (+13,400) | 343,843 → 355,091 (+11,248) |
+
+Every growth is under the 100 KB explanation threshold. The `inacircle` growth
+comes from the engine's classifier, which now types subtitles, plus whatever
+else changed since its previous line. `inacircle-subtitles` grew since its
+own line (built from `b2e797e0`), and that growth is the subtitle code. The
+`inacircle-pages` binary does not depend on the engine or the subtitle crate
+(its direct dependencies are `action`, `manifest`, `pdf`, `probe` and `zip`),
+so its growth is not from this work; this page does not attribute it. Every
+`.text` stays under the 1 MiB family limit. The aarch64 baseline was not
+refreshed.
+
+## Classifier cost
+
+`classify_with` runs on every dropped file before the wheel shows it. The
+subtitle types add a search of the 4 KiB head for `-->` in a `.srt` (for
+`WEBVTT` and `[Script Info]` the check is a prefix or a short search, and it
+runs only for those extensions). This is a CPU micro-measurement on this
+machine, **not** the acceptance measurement of the wheel's budget (drop to
+second wheel, two machines, about 50 manual drags each); that is still open.
+
+Method: a throw-away `classify_bench` example, not committed, built in release
+mode from two trees: the base `bdb66403` (`main`) and HEAD `780ad0fe6`. Each
+"drop" is one `Reread::per_drop()` budget and one `classify_with` call per
+file, timed with `Instant`. Files: 300 KiB of ASCII, in two sets of 50. The
+*arrow* set has `00:00:01,000 --> 00:00:02,000` as its first line (classified
+`application/x-subrip` by HEAD, `.srt text` by base). The *no-arrow* set has
+plain lines and no `-->` at all. Each run is 2,000 drops; each tree and case
+ran in two alternating rounds (base then HEAD, then HEAD then base). Median
+is the lower middle, p95 is nearest-rank. The per-drop times include the
+file open and the reads that the read-on performs.
+
+| Case | Tree | median µs (round 1 / 2) | p95 µs (round 1 / 2) |
+|---|---|---|---|
+| arrow, 1 file | base | 21.2 / 20.4 | 22.6 / 21.8 |
+| arrow, 1 file | HEAD | 22.1 / 21.3 | 23.1 / 22.5 |
+| arrow, 50 files | base | 170.8 / 169.5 | 174.7 / 173.0 |
+| arrow, 50 files | HEAD | 169.0 / 172.5 | 171.7 / 175.9 |
+| no arrow, 1 file | base | 20.6 / 20.5 | 20.8 / 21.4 |
+| no arrow, 1 file | HEAD | 23.6 / 24.2 | 25.0 / 25.1 |
+| no arrow, 50 files | base | 172.6 / 168.3 | 178.2 / 171.3 |
+| no arrow, 50 files | HEAD | 265.1 / 261.2 | 270.1 / 271.2 |
+
+Difference of the two-round medians, HEAD minus base:
+
+- arrow, 1 file: median +0.9 µs (+4.2 %), p95 +0.6 µs (+2.7 %).
+- arrow, 50 files: median +0.6 µs (+0.3 %), p95 within noise.
+- no arrow, 1 file: median +3.4 µs (+16 %), p95 +4.0 µs.
+- no arrow, 50 files: median +92.7 µs (+54 %), p95 +95.9 µs. About 1.9 µs per
+  file: the head search is a plain `windows(3)` scan over 4 KiB, and a
+  `.srt` with no arrow in its head pays it.
+
+Reading: a real `.srt` has its arrow within its first bytes, so the search
+ends early, and a drop of ordinary subtitles costs under 1 µs more per file.
+The no-arrow case is a broken or non-subtitle `.srt` with a text head, which
+the wheel would classify as text anyway. Even so, 93 µs for a 50-file drop of
+such files is about 9 % of the wheel's 1 ms budget, and it is measured here
+only as a micro-cost. A first-byte scan would cut most of it; that is not
+changed in this page.
+
+## Test and verification evidence
+
+Recorded results of the closing runs on this branch (not re-run for this page):
+
+- Full workspace suite, with `INACIRCLE_REQUIRE_LANDLOCK=1`,
+  `INACIRCLE_REQUIRE_PDF_TOOLS=1` and `INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1`:
+  debug 2285 passed / 0 failed / 6 ignored; release 2291 passed / 0 failed /
+  6 ignored.
+- Line coverage (`cargo llvm-cov`, clean profile, all tests): `crates/subtitles`
+  98.72 %; `bins/inacircle-subtitles` 93.55 %; `crates/engine` 92.75 %;
+  `bins/inacircle` 97.04 %.
+- Fuzzing (`scripts/fuzz.sh`, targets `srt`, `vtt`, `ass`, 600 s each):
+  1,030,122 runs (srt), 202,229 (vtt), 796,807 (ass); no crash. The campaign
+  found six defects of the writer and reader round trip before it was green.
+  The corpora were reduced with `cmin` to 1,935,
+  1,502 and 1,845 inputs.
+- Mutation testing (`scripts/mutants.sh diff`, against `main`): 550 mutants,
+  501 caught, 4 timeouts, 35 unviable, 10 missed. Six of the ten were killed
+  afterwards by new tests. Four are equivalent: the first-skip line is only
+  ever moved forward by strictly increasing line numbers, and no test pins
+  that ordering.
+
+## Differential and conformance evidence
+
+- **SRT against ffmpeg** (times and plain text): `tests/data/srt/ordinary.srt`,
+  `irregular.srt`, `markup.srt`. `wild.srt` is excluded: hand-written edge
+  cases, with each difference pinned by a named test. Known differences
+  (`crates/subtitles/tests/srt.rs`, header):
+  - a cue that ends before it starts is skipped (ffmpeg moves its end to the
+    next cue's start);
+  - a cue at 100 hours or more is skipped (ffmpeg writes a three-digit hour);
+  - a `<` that is not a tag is kept as text (ffmpeg reads it as a tag);
+  - a broken timing line after a blank line skips its block (ffmpeg merges the
+    block into the previous cue);
+  - a block of stray text is counted and not shown (ffmpeg appends it to the
+    previous cue);
+  - `<font>` is dropped (ffmpeg keeps it); the comparison strips tags on both
+    sides, so this does not show in it.
+- **ASS against ffmpeg** (times and plain text): `ordinary.ass`, `reordered.ass`,
+  `reset.ass`, `v4.ass`. `wild.ass` is excluded, as above. Known differences
+  (`crates/subtitles/tests/ass.rs`, header):
+  - `\h` is a no-break space (ffmpeg keeps the two characters);
+  - `\n` is a space unless `WrapStyle: 2` (ffmpeg breaks at every `\n`);
+  - drawing text (`\p1` to `\p0`) is dropped (ffmpeg keeps it as text);
+  - a reordered `Format:` line is read (ffmpeg drops every dialogue of such a file);
+  - three-digit centiseconds are skipped and counted (ffmpeg drops the cue silently);
+  - a zero-length cue is kept (ffmpeg drops it);
+  - a non-dialogue line in `[Events]` is counted (ffmpeg ignores it silently);
+  - an undefined style name takes `Default` (ffmpeg applies no style; styling
+    is not compared);
+  - section names in other letter cases and with a trailing space are read
+    (ffmpeg reads none of a file whose `[Script Info]` is in lowercase).
+- **WebVTT against web-platform-tests**: 42 files of
+  `webvtt/parsing/file-parsing/tests` at commit `0fe2d70`, with the cue count
+  and first cue of each checked against `expected.tsv`. Every file whose HTML
+  states a count matches it, except `timings-negative`: 1 cue here against the
+  test's 4, because a cue that ends before it starts is skipped, as in the SRT
+  reader. `stylesheets` has no count in its test (it checks that no stylesheet
+  applies). The reader's other choices where the standard leaves room
+  (`crates/subtitles/src/vtt.rs`, header): the signature must be a word of its
+  own; `NOTE` blocks are silent; `STYLE` and `REGION` blocks are reported as
+  `Settings`; a `-->` in cue text starts the next cue; `<v>` names become
+  `VoiceNames`; timing hours of any length, milliseconds exactly three digits.
+
+## Verdict
+
+Holds on this machine:
+
+- The item budget bounds the readers. The densest 8 MiB shapes peak at about
+  129 MiB or below for the kept inputs, and at about 216.5 MiB for the two
+  refused ones, under the 1 GiB net, with the refused output never written.
+- The cue-shaped inputs (the shapes a real subtitle has) run at 81 to 129 MiB,
+  far from the net.
+- `inacircle-subtitles` is 444,176 B (355,091 B of `.text`), under the family
+  limit; `inacircle` is 1,199,304 B, under its 1.5 MB limit.
+- The classifier adds under 1 µs per arrow `.srt` file, on this machine, in a
+  micro-measurement. It adds about 93 µs to a drop of 50 arrow-less `.srt`
+  files, a case the wheel would see only for broken or non-subtitle files.
+
+Open (not measured here, not recorded as passing):
+
+- **Two-machine drag timings** (the user's manual series): a `.srt` and an
+  `.ass` dragged into the circle, about 50 manual drags per machine, measuring
+  the drop to the stage-2 wheel commit and the choice to the action's start,
+  per [acceptance.md](acceptance.md). The classifier figure above is not that
+  measurement.
+- **Second-machine memory and size check**: the series here ran on one
+  machine. The aarch64 size baseline was not refreshed.
+- **Manual try on a television** of the converted files.
+
+## Reproduce
+
+Every test or benchmark run goes through the memory prefix (the test memory
+rule of this repository). Builds run without it.
+
+```sh
+MEM="systemd-run --user --scope -q --slice=inacircle-tests.slice -p MemoryMax=60G -p MemorySwapMax=0 --"
+
+# Shipped binaries and the size check
+cargo build --release -p inacircle-subtitles
+scripts/check-sizes.sh
+
+# Dense memory shapes, test build (prints one peak-RSS line per shape), 5 runs
+for i in 1 2 3 4 5; do
+  $MEM cargo test -p inacircle-subtitles --test cli dense_8_mib_input -- --nocapture
+done
+
+# Release binary: the same five shapes from a parent that sets RLIMIT_DATA
+# (1 GiB) and RLIMIT_FSIZE (256 MiB) on each child, runs
+#   target/release/inacircle-subtitles run <action> --work <dir> -- <input>
+# and reads ru_maxrss from wait4. The parent is a throw-away script that
+# generates the inputs as the dense test does (bins/inacircle-subtitles/tests/cli.rs);
+# it is not committed. Run it under the prefix:
+#   $MEM python3 -I <parent>.py <binary> 5 <input dir> <work dir>
+
+# Refused-shape check (no peak figure): one run per format
+$MEM cargo test -p inacircle-subtitles --test cli too_complex_fails_and_leaves_nothing
+
+# Conformance: SRT and ASS against ffmpeg, WebVTT against the WPT files
+INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 $MEM cargo test -p subtitles --test srt --test ass --test vtt
+
+# Full suite, debug and release, with the required-tool switches
+INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 \
+  $MEM cargo test --workspace
+INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 \
+  $MEM cargo test --release --workspace
+
+# Classifier micro-measurement: the throw-away example in a copy of each tree
+#   git archive bdb66403 | tar -x -C <base>   # then add crates/engine/examples/classify_bench.rs
+#   git archive 780ad0fe6 | tar -x -C <head>  # the same file
+#   (cd <tree> && cargo build --release -p engine --example classify_bench)
+# Inputs: two sets of 50 files of 300 KiB ASCII .srt, one with the arrow line
+# first and one with no `-->`; the example takes <drops> <files...> and prints
+# the median and p95 of the per-drop time (one Reread::per_drop() and one
+# classify_with per file). Run it under the prefix:
+#   $MEM <tree>/target/release/examples/classify_bench 2000 <files...>
+```

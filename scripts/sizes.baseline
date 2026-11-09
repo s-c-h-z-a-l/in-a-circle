@@ -107,11 +107,22 @@
 # .text): the classifier's 8-bit text detection with its bounded re-read, and
 # the new group and two presets. inacircle-pages is unchanged. The shipped
 # inacircle still does not link the xml, doc, zip or epub crates.
-inacircle 1195944 922792
-inacircle-text 1267920 901091
-inacircle-pages 504208 403763
+# Refreshed after the subtitle actions (the SRT, WebVTT and ASS readers and
+# writers, the four conversion actions, the classifier's subtitle types), same
+# toolchain and profile, built from commit 780ad0fe6 (tree clean). Growth since
+# the previous line: inacircle +3360 B file (+1808 B .text), the engine's
+# subtitle classifier and anything else changed since that line; inacircle-text
+# +104 B file (-48 B .text); inacircle-pages +10440 B file (+8416 B .text), a
+# binary whose direct dependencies do not include the engine or the subtitle
+# crate, so not from this work and not attributed here; inacircle-subtitles
+# +13400 B file (+11248 B .text) since its own line, which is the subtitle code.
+# Every growth is under the 100 KB explanation threshold and every .text is
+# under the 1 MiB family limit. The aarch64 baseline is not refreshed.
+inacircle 1199304 924600
+inacircle-text 1268024 901043
+inacircle-pages 514648 412179
 # Added with the subtitle family's first binary, inacircle-subtitles, built from
 # commit b2e797e0 plus the new crate's sources, same toolchain and profile: a
 # new binary, so no growth is measured; its .text (343843 B) is far under the
 # 1 MiB family limit. The other lines are not refreshed here.
-inacircle-subtitles 430776 343843
+inacircle-subtitles 444176 355091
