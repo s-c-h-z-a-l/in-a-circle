@@ -1613,9 +1613,46 @@ fn accounting_rows() -> Vec<Row> {
             None,
         ),
         row(
-            "animation in a paragraph: Styling per cue",
+            "animation in a paragraph, named by nothing: nothing counted",
             doc(r#"<p begin="0s" end="1s">a<animation begin="0s" dur="1s"/>b</p>"#),
+            &[],
+            0,
+            None,
+        ),
+        row(
+            "animate attribute naming a visibility set: the paragraph refused",
+            styled(
+                r#"<animation><set xml:id="a1" begin="0s" end="1s" tts:visibility="hidden"/></animation>"#,
+                r#"<p begin="0s" end="3s" animate="a1">Secret</p><p begin="4s" end="5s">Plain</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "visibility changes over time")),
+        ),
+        row(
+            "animate attribute naming a colour animation: Styling, text kept",
+            styled(
+                r#"<animation><set xml:id="c1" begin="0s" end="1s" tts:color="red"/></animation>"#,
+                r#"<p begin="0s" end="3s" animate="c1">colour</p>"#,
+            ),
             &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "animate attribute naming nothing: Styling, text kept",
+            doc(r#"<p begin="0s" end="3s" animate="nothing">a</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "animation in the head, named by nothing: nothing counted",
+            styled(
+                r#"<animation><set xml:id="u" begin="0s" end="1s" tts:color="red"/></animation>"#,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[],
             0,
             None,
         ),
@@ -2135,6 +2172,72 @@ fn a_set_on_another_property_still_only_counts_styling() {
     assert_eq!(texts(&parsed), vec!["colour"]);
     assert_eq!(loss(&parsed, Loss::Styling), 1);
     assert_eq!(parsed.skipped.count, 0);
+}
+
+/// 13.2.1: an `animate` attribute names out-of-line animations of the head. A
+/// visibility one refuses the paragraph that names it, as an inline `set` does:
+/// the timeline is not played, so the text is neither shown nor hidden. This is
+/// the repro of review item R4: `Secret` was shown for its whole time.
+#[test]
+fn an_animate_attribute_naming_a_visibility_set_refuses_the_paragraph() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="a1" begin="0s" end="1s" tts:visibility="hidden"/></animation>"#,
+        r#"<p begin="0s" end="3s" animate="a1">Secret</p><p begin="4s" end="5s">Plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// 13.2.1: the animation applies to the element that names it and to everything
+/// under it. A `display` animation on a division refuses its paragraphs, and a
+/// paragraph outside the division is shown.
+#[test]
+fn an_animate_attribute_reaches_the_content_under_its_element() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="a1" begin="0s" end="1s" tts:display="none"/></animation>"#,
+        r#"<div animate="a1"><p begin="0s" end="3s">inside</p><p begin="4s" end="5s">also</p></div><p begin="6s" end="7s">outside</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["outside"]);
+    assert_eq!(parsed.skipped.count, 2);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// 13.2.1, 10.4: an animation of another property is not a visibility change:
+/// the element's text is kept and each cue counts `Styling` once. The same holds
+/// for an IDREF that names no animation the head gives.
+#[test]
+fn an_animate_attribute_naming_another_property_counts_styling() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="c1" begin="0s" end="1s" tts:color="red"/></animation>"#,
+        r#"<p begin="0s" end="3s" animate="c1">colour</p><p begin="4s" end="5s" animate="nothing">none</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["colour", "none"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 2);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// 13.2.1: the `animate` attribute may name an animation the head gives after
+/// the element that names it. The region is read first; its paragraphs are
+/// refused all the same, and a paragraph outside it is shown.
+#[test]
+fn an_animate_attribute_may_name_a_later_animation() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" animate="a1"/></layout><animation><set xml:id="a1" begin="0s" end="1s" tts:visibility="hidden"/></animation>"#,
+        r#"<p begin="0s" end="3s" region="r">in region</p><p begin="4s" end="5s">plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
 }
 
 /// The italic, bold and underline of a cue's first run (cues here have one run).

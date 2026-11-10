@@ -75,9 +75,11 @@
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
 //! | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
-//! | `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
-//! | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
-//! | `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
+//! | `set` or `animate` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
+//! | `set` or `animate` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach). One inside an `animation` is out-of-line: see the rows below |
+//! | `set` or `animate` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
+//! | `animation` (13.1.2): a container of out-of-line `set` and `animate` | nothing counted itself. Each `set` or `animate` with an `xml:id` is counted where an element names it with an `animate` attribute (next row); one that nothing names has no effect, so nothing is counted |
+//! | the `animate` attribute (13.2.1) on `body`, `div`, `p`, `span` or `region`, each IDREF it names | an IDREF costs one item. A visibility target refuses each paragraph under the element (or placed in the region): `skipped`, `visibility changes over time`. Another target, or an IDREF that names no such animation, is `Styling` on the element's cues. Each element named costs one item (its entry, charged before it is stored) |
 //! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
 //! | a foreign-namespace element in a paragraph or span with no visible text | `Elements`, once (an item), wherever it sits in the paragraph |
 //! | a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
@@ -115,7 +117,7 @@ mod slice;
 mod style;
 mod time;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use xml::{Element, ErrorKind, Event, Options, QName, Reader};
 
@@ -209,15 +211,46 @@ pub(crate) fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Parsed, ReadErr
     doc.finish()
 }
 
-/// The ordinals of the elements that a `set` or `animate` changing visibility
-/// is a child of, when that animation is not inside a paragraph. A paragraph
-/// inside such an element is refused, including the ones that come before the
-/// animation in the document, so the scopes are found before the reading
-/// starts. Elements are numbered by their start tags in document order, the
-/// root being 0, and the reading numbers them the same way (`Doc::start`). A
-/// paragraph's own animations are seen when they are read, so they are not
-/// listed. This pass is linear in the document.
-fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeSet<u32>, ReadError> {
+/// What the animations name an element does to it (see [`animated_scopes`]):
+/// its visibility changes over time (`visible`), or a named animation changes
+/// another property, or names nothing the reader knows (`styling`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Anim {
+    visible: bool,
+    styling: bool,
+}
+
+impl Anim {
+    /// The entry of the element with this ordinal; none when nothing names it.
+    fn of(scopes: &BTreeMap<u32, Anim>, ord: u32) -> Anim {
+        scopes.get(&ord).copied().unwrap_or_default()
+    }
+}
+
+/// One open element of the pre-pass.
+#[derive(Clone, Copy)]
+struct Open {
+    ord: u32,
+    /// The element is in a paragraph, or is one.
+    para: bool,
+    /// An `animation` element: its `set` and `animate` children are out-of-line.
+    animation: bool,
+    /// `tt`, `body`, `div` or `region`: a visibility change of its own
+    /// reaches the content it holds, outside a paragraph.
+    scoped: bool,
+}
+
+/// The per-element effects of the animations, by ordinal (see [`Anim`]). A
+/// visibility `set` or `animate` in a `tt`, `body`, `div` or `region` (not in a
+/// paragraph) scopes that element; an `animate` attribute on `body`, `div`, `p`,
+/// `span` or `region` names out-of-line animations by `xml:id`, which the head
+/// may give after the element (so the names are resolved after the pass).
+/// Elements are numbered by their start tags in document order, the root being
+/// 0, and the reading numbers them the same way (`Doc::start`). A paragraph's
+/// inline `set` is seen when it is read, so it is not listed. Each element
+/// listed costs one item (its entry, charged before it is stored); each IDREF
+/// of an `animate` attribute costs one more. This pass is linear in the document.
+fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeMap<u32, Anim>, ReadError> {
     let mut reader = Reader::new(
         input,
         Options {
@@ -225,9 +258,12 @@ fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeSet<u32>, Re
             html_entities: false,
         },
     );
-    // One entry per open element: its ordinal, and whether it is in a paragraph.
-    let mut open: Vec<(u32, bool)> = Vec::new();
-    let mut scopes = BTreeSet::new();
+    let mut open: Vec<Open> = Vec::new();
+    let mut scopes: BTreeMap<u32, Anim> = BTreeMap::new();
+    // Out-of-line animations by `xml:id`: whether each changes visibility.
+    let mut defs: BTreeMap<String, Anim> = BTreeMap::new();
+    // Each IDREF of an `animate` attribute, with the ordinal of its element.
+    let mut refs: Vec<(u32, String)> = Vec::new();
     let mut next: u32 = 0;
     loop {
         match reader.next() {
@@ -235,18 +271,52 @@ fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeSet<u32>, Re
                 let ord = next;
                 next += 1;
                 let parent = open.last().copied();
-                let in_para = parent.is_some_and(|(_, para)| para);
-                let animation =
-                    is_tt(el.name) && matches!(el.name.local, "set" | "animate" | "animation");
-                if !in_para && animation && animates_visibility(&el) {
-                    let target = parent.map_or(0, |(o, _)| o);
-                    if !scopes.contains(&target) {
+                let in_para = parent.is_some_and(|p| p.para);
+                let in_animation = parent.is_some_and(|p| p.animation);
+                let tt = is_tt(el.name);
+                let animates = tt && matches!(el.name.local, "set" | "animate");
+                if animates && in_animation {
+                    if let Some(id) = el.attr(Some(xml::XML_NS), "id") {
+                        let visible = animates_visibility(&el);
+                        let anim = Anim {
+                            visible,
+                            styling: !visible,
+                        };
+                        match defs.get_mut(id) {
+                            Some(def) => {
+                                def.visible |= anim.visible;
+                                def.styling |= anim.styling;
+                            }
+                            None => {
+                                budget.charge()?;
+                                defs.insert(id.to_owned(), anim);
+                            }
+                        }
+                    }
+                } else if let Some(p) = parent
+                    && animates
+                    && p.scoped
+                    && animates_visibility(&el)
+                {
+                    scope(&mut scopes, budget, p.ord)?.visible = true;
+                }
+                if tt && matches!(el.name.local, "body" | "div" | "p" | "span" | "region") {
+                    for id in el
+                        .attr(None, "animate")
+                        .unwrap_or_default()
+                        .split_ascii_whitespace()
+                    {
                         budget.charge()?;
-                        scopes.insert(target);
+                        refs.push((ord, id.to_owned()));
                     }
                 }
-                let para = in_para || (is_tt(el.name) && el.name.local == "p");
-                open.push((ord, para));
+                let para = in_para || (tt && el.name.local == "p");
+                open.push(Open {
+                    ord,
+                    para,
+                    animation: tt && el.name.local == "animation",
+                    scoped: tt && matches!(el.name.local, "tt" | "body" | "div" | "region"),
+                });
             }
             Ok(Some(Event::End(_))) => {
                 open.pop();
@@ -256,7 +326,31 @@ fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeSet<u32>, Re
             Ok(None) | Err(_) => break,
         }
     }
+    // An IDREF naming no out-of-line animation, or one that is not one, changes
+    // something the reader does not play: `styling`.
+    for (ord, id) in refs {
+        let named = defs.get(&id).copied().unwrap_or(Anim {
+            visible: false,
+            styling: true,
+        });
+        let entry = scope(&mut scopes, budget, ord)?;
+        entry.visible |= named.visible;
+        entry.styling |= named.styling;
+    }
     Ok(scopes)
+}
+
+/// The entry of an element that an animation names, charged the first time.
+fn scope<'m>(
+    scopes: &'m mut BTreeMap<u32, Anim>,
+    budget: &mut Budget,
+    ord: u32,
+) -> Result<&'m mut Anim, ReadError> {
+    if !scopes.contains_key(&ord) {
+        budget.charge()?;
+        scopes.insert(ord, Anim::default());
+    }
+    Ok(scopes.entry(ord).or_default())
 }
 
 /// The `xml` crate's refusal as the reader's. A declared encoding other than
@@ -549,7 +643,9 @@ fn role(parent: Kind, name: QName) -> Role {
         (Kind::Paragraph | Kind::Span, "span") => Role::Open(Kind::Span),
         (Kind::Paragraph | Kind::Span, "br") => Role::Break,
         (Kind::Paragraph | Kind::Span, "ruby" | "rb" | "rbc" | "rt" | "rtc" | "rp") => Role::Ruby,
-        (_, "set" | "animate" | "animation") => Role::Ignored(Ignore::Styling),
+        // Out-of-line animations: counted where an element names one (`animate`).
+        (_, "animation") => Role::Silent,
+        (_, "set" | "animate") => Role::Ignored(Ignore::Styling),
         (_, "image") => Role::Ignored(Ignore::Image),
         // An element that carries text, in a place where it cannot be shown.
         (_, "p" | "div" | "span" | "ruby" | "rb" | "rbc" | "rt" | "rtc" | "rp") => {
@@ -704,14 +800,14 @@ struct Doc<'b> {
     images: usize,
     /// The containers a visibility-changing animation applies to (see
     /// [`animated_scopes`]), by ordinal.
-    animated_scopes: BTreeSet<u32>,
+    animated_scopes: BTreeMap<u32, Anim>,
     /// The ordinal the next start tag takes, and the one of the current element.
     next_ord: u32,
     ord: u32,
 }
 
 impl<'b> Doc<'b> {
-    fn new(budget: &'b mut Budget, animated_scopes: BTreeSet<u32>) -> Doc<'b> {
+    fn new(budget: &'b mut Budget, animated_scopes: BTreeMap<u32, Anim>) -> Doc<'b> {
         Doc {
             budget,
             animated_scopes,
@@ -849,7 +945,7 @@ impl<'b> Doc<'b> {
         frame.css = decl.over(&Css::default());
         // The root takes no visibility (10.2.49 applies to body, div, p, region and span).
         frame.css.hidden = None;
-        frame.animated = self.animated_scopes.contains(&self.ord);
+        frame.animated = Anim::of(&self.animated_scopes, self.ord).visible;
         // `tts:extent` is consumed above, so it is not a placement of the content.
         frame.flags = Flags {
             styling: decl.styling || hiding_declared(&decl),
@@ -875,7 +971,11 @@ impl<'b> Doc<'b> {
     /// last. A `style` in a region is a nested declaration of it (10.4.1.4): an
     /// unnamed entry the region references after the attribute's styles.
     fn define(&mut self, kind: Kind, el: &Element) -> Result<(), ReadError> {
-        let own = attrs_css(el);
+        let anim = Anim::of(&self.animated_scopes, self.ord);
+        let mut own = attrs_css(el);
+        if kind == Kind::Region {
+            own.styling |= anim.styling;
+        }
         let id = el.attr(Some(xml::XML_NS), "id");
         let parent = self.stack.last().map(|f| (f.kind, f.entry));
         let entry = match (kind, parent) {
@@ -893,7 +993,7 @@ impl<'b> Doc<'b> {
                 self.sheet.push_ref(self.budget, entry, target)?;
             }
         }
-        if kind == Kind::Region && self.animated_scopes.contains(&self.ord) {
+        if kind == Kind::Region && anim.visible {
             self.sheet.mark_animated(entry);
         }
         self.budget.charge()?;
@@ -938,7 +1038,12 @@ impl<'b> Doc<'b> {
             note(&mut fault, reason);
         }
         let decl = self.sheet.declared(el);
-        let mut flags = parent_flags.join(own_flags(&decl));
+        // A named animation that changes another property is styling on this element's content.
+        let anim = Anim::of(&self.animated_scopes, self.ord);
+        let mut flags = parent_flags.join(own_flags(&decl)).join(Flags {
+            styling: anim.styling,
+            ..Flags::default()
+        });
         let mut css = decl.over(&parent_css);
         // display and opacity reach the content (10.2.14, 10.2.30); visibility is in `css`.
         // display and opacity are not inherited, so each element takes its own
@@ -947,7 +1052,7 @@ impl<'b> Doc<'b> {
         let mut concealed = parent_concealed
             || decl.display_none.or(initial.display_none) == Some(true)
             || decl.opacity.or(initial.opacity) == Some(Opacity::Zero);
-        let mut animated = parent_animated || self.animated_scopes.contains(&self.ord);
+        let mut animated = parent_animated || anim.visible;
         // A `region` names the region of the element and its content; a span's
         // is not used (its text is not placed in it), which is a `Position` loss.
         let region = match (kind, el.attr(None, "region")) {
