@@ -1550,6 +1550,16 @@ fn accounting_rows() -> Vec<Row> {
             None,
         ),
         row(
+            "head: profile declarations of the parameter namespace: silent",
+            styled(
+                r##"<ttp:profile xmlns:ttp="http://www.w3.org/ns/ttml#parameter"><ttp:features><ttp:feature value="#animate"/></ttp:features></ttp:profile>"##,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[],
+            0,
+            None,
+        ),
+        row(
             "head: foreign element (document)",
             styled(
                 r#"<x:foo xmlns:x="urn:x"/>"#,
@@ -2400,4 +2410,21 @@ fn an_empty_conditional_style_counts_nothing() {
     ));
     assert_eq!(texts(&parsed), vec!["a"]);
     assert!(parsed.losses.is_empty());
+}
+
+/// 6, 7: the `ttp:profile`, `ttp:features` and `ttp:extensions` elements of the
+/// head declare the profile. They are not content, so a document that has them
+/// has no loss. Both parameter namespace families are read the same way.
+#[test]
+fn profile_declarations_are_not_content() {
+    for ns in [
+        "http://www.w3.org/ns/ttml#parameter",
+        "http://www.w3.org/2006/10/ttaf1#parameter",
+    ] {
+        let parsed = read(&format!(
+            r##"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="{ns}"><head><ttp:profile use="http://www.w3.org/ns/ttml/profile/imsc1/text"><ttp:features><ttp:feature value="#animate"/></ttp:features><ttp:extensions/></ttp:profile></head><body><div><p begin="0s" end="1s">a</p></div></body></tt>"##
+        ));
+        assert_eq!(texts(&parsed), vec!["a"], "{ns}");
+        assert!(parsed.losses.is_empty(), "{ns}");
+    }
 }
