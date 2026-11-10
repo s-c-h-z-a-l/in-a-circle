@@ -75,6 +75,8 @@
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
 //! | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
+//! | `condition` on a `style` (8.2.1): its own declarations are not applied, the styles it references with `style` still are (10.4.4.2) | `Styling` on each cue of an element that references it, if it declares anything |
+//! | `condition` on a `region` (8.2.1): the region is excluded, so it is not defined | a paragraph that names it is placed as a region named and not defined: `Position` |
 //! | `set` or `animate` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
 //! | `set` or `animate` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach). One inside an `animation` is out-of-line: see the rows below |
 //! | `set` or `animate` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
@@ -976,7 +978,21 @@ impl<'b> Doc<'b> {
         if kind == Kind::Region {
             own.styling |= anim.styling;
         }
-        let id = el.attr(Some(xml::XML_NS), "id");
+        // A condition is not evaluated (8.2.1). A conditional region is excluded,
+        // so it is not defined: its name refers to nothing, and the paragraphs
+        // that name it are placed as an undefined region. A conditional style's
+        // own declarations are ignored, while the styles it references still
+        // apply (10.4.4.2): it counts `Styling` on the cues that reference it.
+        let conditional = el.attr(None, "condition").is_some();
+        let id = el
+            .attr(Some(xml::XML_NS), "id")
+            .filter(|_| !(conditional && kind == Kind::Region));
+        if conditional && kind == Kind::Style && own != Css::default() {
+            own = Css {
+                styling: true,
+                ..Css::default()
+            };
+        }
         let parent = self.stack.last().map(|f| (f.kind, f.entry));
         let entry = match (kind, parent) {
             (Kind::Region, _) => self.sheet.define_region(self.budget, id, own)?,

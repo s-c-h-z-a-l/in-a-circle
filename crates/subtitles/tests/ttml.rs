@@ -1786,6 +1786,26 @@ fn accounting_rows() -> Vec<Row> {
             Some((1, "conditional element")),
         ),
         row(
+            "condition on a style: its declarations not applied, Styling on its references",
+            styled(
+                r#"<styling><style xml:id="s" condition="false" tts:fontStyle="italic"/></styling>"#,
+                r#"<p begin="0s" end="1s" style="s">a</p>"#,
+            ),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "condition on a region: not defined, its paragraphs Position, text shown",
+            styled(
+                r#"<layout><region xml:id="r" condition="false" tts:display="none"/></layout>"#,
+                r#"<p begin="0s" end="1s" region="r">a</p>"#,
+            ),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
             "span outside a paragraph: its text cannot be shown, skipped",
             doc(r#"<span begin="0s" end="1s">lost</span><p begin="0s" end="1s">x</p>"#),
             &[],
@@ -2337,4 +2357,47 @@ fn a_conditional_initial_is_not_applied_and_counts_styling() {
     ));
     assert_eq!(run_flags(&parsed.cues[0]), (false, false, false));
     assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// 8.2.1, 10.4.4.2: a conditional style's own declarations are ignored, so the
+/// text is not italic and each cue counts `Styling`. The style it references
+/// with `style` still applies: referential styling is not ignored.
+#[test]
+fn a_conditional_style_is_not_applied_but_its_references_are() {
+    let parsed = read(&styled(
+        r#"<styling><style xml:id="base" tts:fontWeight="bold"/><style xml:id="s" condition="false" style="base" tts:fontStyle="italic"/></styling>"#,
+        r#"<p begin="0s" end="1s" style="s">a</p>"#,
+    ));
+    assert_eq!(
+        run_flags(&parsed.cues[0]),
+        (false, true, false),
+        "bold from the reference, not the italic"
+    );
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// 8.2.1: a conditional region is excluded, so it is not defined. Its
+/// `display="none"` does not hide the paragraphs that name it: they are placed
+/// as an undefined region (`Position`), and their text is shown.
+#[test]
+fn a_conditional_region_is_not_defined() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" condition="false" tts:display="none"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">shown</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["shown"]);
+    assert_eq!(loss(&parsed, Loss::Position), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// 8.2.1: a conditional style that declares nothing ignores nothing, so it
+/// counts nothing when a paragraph references it.
+#[test]
+fn an_empty_conditional_style_counts_nothing() {
+    let parsed = read(&styled(
+        r#"<styling><style xml:id="s" condition="false"/></styling>"#,
+        r#"<p begin="0s" end="1s" style="s">a</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert!(parsed.losses.is_empty());
 }
