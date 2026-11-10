@@ -162,11 +162,34 @@ jobs:
           pandoc --version >/dev/null
           echo "pandoc $PANDOC_VERSION installed"
 
+      # The TTML differential test compares our reader with ttconv 1.2.3
+      # (Sandflow's `tt convert`), an independent converter. It runs in CI
+      # only: the oracle is not a project dependency and is not installed on
+      # a development machine. Version 1.2.3 was uploaded to PyPI on
+      # 2026-08-30, well over two weeks before this pin. The wheel is pinned
+      # and verified by its SHA-256 (as the tools above are); it has no
+      # dependencies of its own. pipx (on the runner image) installs it on its
+      # own, and its bin folder goes on PATH. INACIRCLE_REQUIRE_TTCONV=1 makes
+      # a missing tool a failure in the Test step instead of a skip.
+      - name: Install ttconv (TTML oracle)
+        env:
+          TTCONV_VERSION: 1.2.3
+          TTCONV_SHA256: 5cc41ae017cfbb036cd07358a20d2181893a57151f02e23dfcc4e7a972542bff
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLo ttconv.whl "https://files.pythonhosted.org/packages/8e/dc/abb76aa54c2bb3ed29fd42fb10395e3cba3f480614973ccfc67a68a5f8a8/ttconv-$TTCONV_VERSION-py3-none-any.whl"
+          echo "$TTCONV_SHA256  ttconv.whl" | sha256sum -c -
+          pipx install "$RUNNER_TEMP/ttconv.whl"
+          pipx list --short | grep -qx "ttconv $TTCONV_VERSION"
+          "$HOME/.local/bin/tt" --help | grep -q convert
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Test
         if: ${{ !cancelled() }}
         env:
           INACIRCLE_REQUIRE_PDF_TOOLS: "1"
           INACIRCLE_REQUIRE_BOOK_TOOLS: "1"
+          INACIRCLE_REQUIRE_TTCONV: "1"
         run: cargo test --workspace --no-fail-fast
 
       # The Trash undo's tests on the runner's disk filesystem. Their
