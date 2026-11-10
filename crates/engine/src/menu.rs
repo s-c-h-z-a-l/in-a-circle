@@ -203,8 +203,8 @@ pub const PRESETS: &[Preset] = &[
         join: &[],
         action: Some("text.iso88592-to-utf8"),
     },
-    // Subtitles: SRT (south) and VTT (north) from either other format; an
-    // ASS file lights both slices. The planner finds each converter.
+    // Subtitles: SRT (south) and VTT (north) from any other format; an ASS
+    // or a TTML file lights both slices. The planner finds each converter.
     Preset {
         id: "srt-vtt",
         input: Some("text/vtt"),
@@ -238,6 +238,26 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         id: "vtt-ass",
         input: Some("text/x-ssa"),
+        output: "text/vtt",
+        label: "VTT",
+        direction: 0,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
+    },
+    Preset {
+        id: "srt-ttml",
+        input: Some("application/ttml+xml"),
+        output: "application/x-subrip",
+        label: "SRT",
+        direction: 4,
+        group: SUBTITLES_GROUP,
+        join: &[],
+        action: None,
+    },
+    Preset {
+        id: "vtt-ttml",
+        input: Some("application/ttml+xml"),
         output: "text/vtt",
         label: "VTT",
         direction: 0,
@@ -1217,7 +1237,7 @@ mod tests {
         assert!(!g[0].as_ref().unwrap().lit && !g[2].as_ref().unwrap().lit);
     }
 
-    /// The four subtitle actions, each in the group its manifest names.
+    /// The six subtitle actions, each in the group its manifest names.
     fn subtitle_catalog() -> Catalog {
         let mut cat = Catalog { actions: vec![] };
         for (id, input, output) in [
@@ -1225,6 +1245,12 @@ mod tests {
             ("subtitles.vtt-to-srt", "text/vtt", "application/x-subrip"),
             ("subtitles.ass-to-srt", "text/x-ssa", "application/x-subrip"),
             ("subtitles.ass-to-vtt", "text/x-ssa", "text/vtt"),
+            (
+                "subtitles.ttml-to-srt",
+                "application/ttml+xml",
+                "application/x-subrip",
+            ),
+            ("subtitles.ttml-to-vtt", "application/ttml+xml", "text/vtt"),
         ] {
             let mut a = act(id, input, output, 10, true);
             a.group = "subtitles".into();
@@ -1257,6 +1283,7 @@ mod tests {
             ("Film.srt", "application/x-subrip"),
             ("Film.vtt", "text/vtt"),
             ("Film.ass", "text/x-ssa"),
+            ("Film.ttml", "application/ttml+xml"),
         ] {
             let g = groups(&cat, &tally(&[(name, mime)]));
             let s = g[4].as_ref().unwrap();
@@ -1287,14 +1314,72 @@ mod tests {
         assert_eq!((s.label.as_str(), s.applicable), ("SRT", 1));
     }
 
+    /// A TTML file (the classifier's `application/ttml+xml`, whatever its
+    /// extension) lights VTT north and SRT south, both with one file.
+    #[test]
+    fn ttml_offers_srt_south_and_vtt_north() {
+        let cat = subtitle_catalog();
+        let o = offer_group(
+            &cat,
+            &tally(&[("Film.xml", "application/ttml+xml")]),
+            "subtitles",
+        );
+        assert_eq!(lit_targets(&o), [(0, "vtt-ttml"), (4, "srt-ttml")]);
+        let s = o.slices[0].as_ref().unwrap();
+        assert_eq!((s.label.as_str(), s.applicable), ("VTT", 1));
+        let s = o.slices[4].as_ref().unwrap();
+        assert_eq!((s.label.as_str(), s.applicable), ("SRT", 1));
+    }
+
+    /// The TTML actions add nothing to the SRT, VTT and ASS offers: every
+    /// slice (preset, label, count, reason) and the hub are what they were
+    /// with the four older actions installed alone.
+    #[test]
+    fn existing_subtitle_offers_are_unchanged() {
+        let all = subtitle_catalog();
+        let mut old = all.clone();
+        old.actions.retain(|a| !a.input.contains("ttml"));
+        assert_eq!(old.actions.len(), 4);
+        let slots = |o: &Offer| {
+            let slices: Vec<_> = o
+                .slices
+                .iter()
+                .enumerate()
+                .filter_map(|(k, s)| {
+                    s.as_ref().map(|s| {
+                        (
+                            k,
+                            s.preset,
+                            s.label.clone(),
+                            s.applicable,
+                            s.disabled.clone(),
+                        )
+                    })
+                })
+                .collect();
+            (o.hub.clone(), slices)
+        };
+        for (name, mime) in [
+            ("Film.srt", "application/x-subrip"),
+            ("Film.vtt", "text/vtt"),
+            ("Film.ass", "text/x-ssa"),
+        ] {
+            let t = tally(&[(name, mime)]);
+            let before = slots(&offer_group(&old, &t, "subtitles"));
+            assert_eq!(slots(&offer_group(&all, &t, "subtitles")), before, "{name}");
+            assert!(!before.1.is_empty(), "{name}");
+        }
+    }
+
     /// UTF-8 text is not a subtitle: Subtitles stays dim and no target
-    /// lights, for a `.srt` the classifier left as plain text too.
+    /// lights, for a `.srt` or `.ttml` the classifier left as plain text.
     #[test]
     fn utf8_text_files_do_not_offer_subtitles() {
         let cat = subtitle_catalog();
         for (n, m) in [
             ("a.srt", "text/plain"),
             ("a.vtt", "text/plain"),
+            ("a.ttml", "text/plain"),
             ("a.txt", "text/markdown"),
             ("a.srt", "text/x-8bit"),
         ] {

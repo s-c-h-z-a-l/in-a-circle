@@ -1548,9 +1548,10 @@ compositor.
   lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
   `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
   leaves Encoding dim; a subtitle lights only Subtitles (south): `vtt-srt`
-  (VTT from SRT) and `vtt-ass` (VTT from ASS) share its north slot, `srt-vtt`
-  (SRT from VTT) and `srt-ass` (SRT from ASS) its south slot, so an SRT
-  offers VTT north only, a VTT SRT south only, and an ASS both; `pdf` north
+  (VTT from SRT), `vtt-ass` (VTT from ASS) and `vtt-ttml` (VTT from TTML)
+  share its north slot, `srt-vtt` (SRT from VTT), `srt-ass` (SRT from ASS)
+  and `srt-ttml` (SRT from TTML) its south slot, so an SRT offers VTT north
+  only, a VTT SRT south only, and an ASS or a TTML both; `pdf` north
   and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:

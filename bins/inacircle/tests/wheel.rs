@@ -833,6 +833,46 @@ fn wheel_offers_and_runs_subtitles() {
     assert_one_group_and_undo(&root, "Film", "Film.srt");
 }
 
+/// A TTML document named `.xml` dropped on the wheel lights Subtitles
+/// (south); its second level has SRT south and VTT north lit, and each
+/// click writes its file and records one history group that Undo trashes.
+/// The drawn slices are pinned by `subtitle_menus_light_the_drawn_slices`.
+#[test]
+fn wheel_offers_and_runs_ttml() {
+    let ttml: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\n\
+        <p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>\n\
+        </div></body></tt>\n";
+    let root = Root::new("ttml-vtt");
+    root.real_action_cached("inacircle-subtitles", ("primer.xml", ttml), "vtt-ttml");
+    let src = root.0.join("f/Film.xml");
+    fs::write(&src, ttml).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Subtitles is south of the center, VTT is its north slice.
+    let code = choose_on_the_wheel(&root, &list, (960, 690), (960, 390));
+    assert_eq!(code, Some(0));
+    let vtt = fs::read(root.0.join("f/Film/Film.vtt")).expect("no VTT written");
+    assert_eq!(vtt, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n\n");
+    assert_eq!(fs::read(&src).unwrap(), ttml, "the source changed");
+    assert_one_group_and_undo(&root, "Film", "Film.vtt");
+
+    let root = Root::new("ttml-srt");
+    root.real_action_cached("inacircle-subtitles", ("primer.xml", ttml), "srt-ttml");
+    let src = root.0.join("f/Film.xml");
+    fs::write(&src, ttml).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // SRT is the south slice of the TTML's second level, as Subtitles is south.
+    let code = choose_on_the_wheel(&root, &list, (960, 690), (960, 690));
+    assert_eq!(code, Some(0));
+    let srt_out = fs::read(root.0.join("f/Film/Film.srt")).expect("no SRT written");
+    assert_eq!(
+        srt_out,
+        "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n".as_bytes()
+    );
+    assert_eq!(fs::read(&src).unwrap(), ttml, "the source changed");
+    assert_one_group_and_undo(&root, "Film", "Film.srt");
+}
+
 /// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document
 /// (north); its south slice is Plain text; clicking it writes the book's
 /// text next to the source in its wrapper folder, as one history group

@@ -726,6 +726,90 @@ fn cli_ass_to_srt() {
     assert!(src.exists());
 }
 
+/// A TTML document with an italic span after a line break, and two timed
+/// paragraphs. The classifier reads it as `application/ttml+xml` by its
+/// root and namespace, whatever the extension.
+const TTML: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\">\n\
+<body><div>\n\
+<p begin=\"00:00:01.000\" end=\"00:00:02.500\">Hello<br/><span tts:fontStyle=\"italic\">there</span></p>\n\
+<p begin=\"00:00:03.000\" end=\"00:00:04.000\">Second</p>\n\
+</div></body>\n</tt>\n";
+
+/// A `.ttml` file converts to SRT (byte order mark, CRLF) in its own
+/// folder; the history records the action, and Undo moves the folder to
+/// the Trash.
+#[test]
+fn cli_ttml_to_srt() {
+    let e = Env::new("ttml2srt");
+    let src = e.file("Film.ttml", TTML);
+    let o = e.run(&["run", "srt-ttml", "Film.ttml"]);
+    if skip_unsandboxed("cli_ttml_to_srt", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.srt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "\u{feff}1\r\n00:00:01,000 --> 00:00:02,500\r\nHello\r\n<i>there</i>\r\n\r\n\
+        2\r\n00:00:03,000 --> 00:00:04,000\r\nSecond\r\n\r\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), TTML, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("subtitles.ttml-to-srt")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
+}
+
+/// A TTML document named `.xml` (what most exporters write) converts to
+/// WebVTT in its own folder: the menu's VTT preset runs the TTML action, the
+/// history records it, and Undo moves the folder to the Trash.
+#[test]
+fn cli_xml_ttml_to_vtt() {
+    let e = Env::new("xmlttml2vtt");
+    let src = e.file("Film.xml", TTML);
+    let o = e.run(&["run", "vtt-ttml", "Film.xml"]);
+    if skip_unsandboxed("cli_xml_ttml_to_vtt", &o) {
+        return;
+    }
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    let out = e.files().join("Film/Film.vtt");
+    assert_eq!(o.pairs("done"), [(src.clone(), out.display().to_string())]);
+    assert_eq!(o.summary(), (1, 0, 0));
+    let want = "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHello\n<i>there</i>\n\n\
+        00:00:03.000 --> 00:00:04.000\nSecond\n\n";
+    assert_eq!(fs::read(&out).unwrap(), want.as_bytes());
+    assert_eq!(fs::read(&src).unwrap(), TTML, "the source changed");
+    let job = o.job();
+    assert!(
+        e.history()
+            .lines()
+            .any(|l| parse_line(l).is_ok_and(|l| l.kind == "job"
+                && l.get("id") == Some(&job)
+                && l.get("action") == Some("subtitles.ttml-to-vtt")
+                && l.get("status") == Some("done"))),
+        "{}",
+        e.history()
+    );
+    let u = e.run(&["undo", &job]);
+    assert_eq!(u.code, Some(0), "{}{}", u.stdout, u.stderr);
+    assert_eq!(u.kind("moved").len(), 1, "{}", u.stdout);
+    assert!(!out.exists() && !e.files().join("Film").exists());
+    assert!(src.exists());
+}
+
 /// A preset that matches no input still names its run after the 1:1 route
 /// it would have taken (the history's `action=`), not after the preset.
 #[test]
