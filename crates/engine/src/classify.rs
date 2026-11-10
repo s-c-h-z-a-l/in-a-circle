@@ -78,13 +78,15 @@ const CHUNK: usize = 16 * 1024;
 const CUT_MAX: usize = 3;
 
 /// Extensions of text that may be in a legacy 8-bit code page: the plain
-/// text and Markdown names, subtitles (TTML included, so a code page one
-/// is decoded like any other), tables, logs and configuration. `nfo` is
-/// left out: it is usually CP437 art with escape codes, which the
+/// text and Markdown names, subtitles, tables, logs and configuration.
+/// `nfo` is left out: it is usually CP437 art with escape codes, which the
 /// Windows-1250 and ISO-8859-2 actions would turn into the wrong letters.
+/// XML names (TTML) are left out too: a code page action keeps the file's
+/// XML declaration, so its output would declare the old encoding over
+/// UTF-8 bytes. Such a file is not offered the code pages at all.
 const X8BIT_EXT: &[&str] = &[
-    "txt", "text", "md", "markdown", "mdown", "mkd", "srt", "vtt", "ass", "ssa", "ttml", "dfxp",
-    "sub", "csv", "tsv", "log", "ini", "cfg", "conf", "me", "1st", "readme", "diz",
+    "txt", "text", "md", "markdown", "mdown", "mkd", "srt", "vtt", "ass", "ssa", "sub", "csv",
+    "tsv", "log", "ini", "cfg", "conf", "me", "1st", "readme", "diz",
 ];
 
 /// The SUB byte (Ctrl-Z) DOS editors wrote as an end-of-file mark: allowed
@@ -1314,17 +1316,19 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_ttml_is_still_8bit() {
+    fn non_utf8_ttml_is_not_offered_the_code_pages() {
         let d = Dir::new("ttml8");
-        let mut ttml = b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n".to_vec();
+        // The declaration names the code page, as a real Windows-1250 TTML does.
+        let mut ttml = b"<?xml version=\"1.0\" encoding=\"windows-1250\"?>\n".to_vec();
+        ttml.extend_from_slice(b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n");
         ttml.extend_from_slice(CP1250);
         let p = d.file("a.ttml", &ttml);
-        assert_eq!(kind(&p), x8bit());
-        let mut dfxp = b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n".to_vec();
+        assert_eq!(kind(&p), is(None, ".ttml file"));
+        let mut dfxp = b"<?xml version=\"1.0\" encoding=\"iso-8859-2\"?>\n".to_vec();
+        dfxp.extend_from_slice(b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n");
         dfxp.extend_from_slice(ISO);
         let p = d.file("b.dfxp", &dfxp);
-        assert_eq!(kind(&p), x8bit());
-        // An `.xml` is no candidate by its name: its code page is not judged.
+        assert_eq!(kind(&p), is(None, ".dfxp file"));
         let p = d.file("c.xml", &ttml);
         assert_eq!(kind(&p), is(None, ".xml file"));
     }

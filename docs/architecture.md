@@ -1017,15 +1017,18 @@ Every action runs sandboxed, set up in the child between `fork` and
   text search past any `<?…?>`, comments and `<!DOCTYPE …>` (its internal
   subset included). The root must end within the 4 KiB head; a root past
   it is not recognised. Whether the XML is well formed is the reader's
-  to say. A UTF-16 TTML has NUL bytes, so it is not text and not offered.
+  to say. A UTF-16 TTML has NUL bytes, and a non-UTF-8 one is not valid
+  UTF-8: neither is text, so neither is offered TTML or a code page.
   The name alone never makes a subtitle: without the head check the file
-  keeps its text label (`.srt text`). A subtitle that is not valid UTF-8 is `text/x-8bit`, decided first
-  as before, and goes to the code page actions.
+  keeps its text label (`.srt text`). An SRT, WebVTT or ASS file that is not valid UTF-8 is
+  `text/x-8bit`, decided first as before, and goes to the code page actions.
 - **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
   the code page actions and taken by no other preset. A file is one when
   its extension is on the classifier's text list (`txt`, `text`, `md`,
-  `markdown`, `mdown`, `mkd`, `srt`, `vtt`, `ass`, `ssa`, `ttml`, `dfxp`,
-  `sub`, `csv`, `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; not
+  `markdown`, `mdown`, `mkd`, `srt`, `vtt`, `ass`, `ssa`, `sub`, `csv`,
+  `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; XML
+  names such as `ttml` and `dfxp` are not, since a code page action keeps
+  the file's XML declaration; not
   `nfo`, usually CP437 art) or it has none, what is read has no NUL and no
   C0 control byte other than TAB, LF, CR and FF (one Ctrl-Z, `0x1A`, as the
   file's very last byte is allowed), and it is not valid UTF-8. A file with
