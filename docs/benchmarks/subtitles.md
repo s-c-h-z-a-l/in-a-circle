@@ -424,7 +424,22 @@ Two rounds of whole-branch review, each by a reviewer independent of the
 implementation. The first found 2 critical findings (silent content loss in
 the SRT reader and in the WebVTT reader), 4 important and 5 minor. The second
 found no critical or important finding and 4 minor ones. All were fixed.
-The reviewer rounds of the TTML work are summarized here when complete.
+
+The whole-branch review of the TTML work found these, all fixed:
+
+- white space between timed spans ran together into one word (critical);
+- a line break decided a paragraph's end, so a paragraph timed only by its
+  spans was skipped with no end time;
+- text in pruned elements, and untimed documents, failed without a reason;
+- attributes in foreign namespaces, the `animate` attribute, and conditional
+  styles and regions were not handled;
+- a stray image hid the reason that text was skipped;
+- a profile declaration gave a false warning;
+- a preserved line was not trimmed across its runs.
+
+The independent checks were extended with a text-conservation model (a property
+test and a fuzz target): the first checks had left span-timed and untimed
+paragraphs unchecked.
 
 ## Differential and conformance evidence
 

@@ -37,21 +37,22 @@
 //! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
 //! | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 //! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
-//! | `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
+//! | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
+//! | an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
 //! | the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in either TTML family), anywhere | silent: profile declarations, not content (6, 7) |
 //! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
 //! | an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
-//! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
+//! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 //! | `styling`: any other child | `Elements`, once (an item) |
 //! | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
 //! | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
 //! | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
 //! | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
-//! | a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past [`style::MAX_CHAIN`] sets `Styling` on the element |
-//! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
+//! | a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past 32 entries sets `Styling` on the element |
+//! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic (`oblique` too), bold (`normal` or `bold` only, 10.2.24) and the decorations of the text, inherited as 10.2 says |
 //! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
 //! | other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
 //! | `tts:display` `none`, `tts:visibility` `hidden`, `tts:opacity` `0`, on `body`, `div`, `p`, `region` or `span` (10.2.14, 10.2.49, 10.2.30) | the content is not shown: `none` and `0` hide the element and everything in it, `hidden` is inherited and a descendant with `visible` is shown. A hidden paragraph is `skipped`: `hidden by the document`; a paragraph with its own hidden text, or a hidden span in a shown paragraph, counts once (the outermost element holding the hidden text). Opacity counts the whole element; the other values are initial values and count nothing |
@@ -61,6 +62,7 @@
 //! | `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
 //! | `tts:extent` on `tt` (10.2.16) | the root container's height in px (`top` of a px placement); `auto`, `contain`, and two px lengths are read; anything else `Position` |
 //! | a region's placement that cannot be computed (`em`, `c`, `rw`, `rh`, a sign, a `px` without a root height) | the paragraph is not `top`; its placement counts as `Position` |
+//! | a paragraph with no region (no `layout`, or none named on it or its ancestors) | never `top`; no count (a region named and not defined counts `Position`, as below) |
 //! | `region` on `body`, `div` or `p` naming no region | `Position` on the paragraphs it reaches |
 //! | `region` on a `span` | `Position` on the span's text (the span is not placed in its region) |
 //! | `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
@@ -99,6 +101,7 @@
 //! | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 //! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
 //! | the animation pass, before the reading: each `body`, `div`, `region` or `tt` a visibility `set` or `animate` reaches outside a paragraph (one item each); each element an `animate` attribute names, on `body`, `div`, `p`, `span` or `region` (one item each); each IDREF of an `animate` attribute (one item each); each out-of-line `set` or `animate` in an `animation`, once per distinct `xml:id` | the item budget: past it `TooComplex`. A visibility `set` or `animate` inside a paragraph or span costs nothing |
+//! | each element outside a paragraph that holds a `set` or `animate` of `display`, `visibility` or `opacity` (the animated-visibility scope pass: a division, the body, a region, the root, or a head element, one item each); a `set` inside a paragraph or span is free | the item budget, charged in a pre-pass before the read (`animated_scopes`) |
 //! | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 //!
 //! Document-level counts. A `Styling` or `Position` that holds for every cue of

@@ -401,6 +401,7 @@ same figures). The five densest 8 MiB shapes, before and after the item budget:
 | SRT, about 310,000 cues of 27 B | 138.4 MiB, 1.57 s, kept | 129.0 MiB, 1.73 s, kept |
 | SRT, one cue of 2-byte lines (`x\n`) | 906.3 MiB, 2.58 s, kept | 216.5 MiB, 0.58 s, refused (`TooComplex`) |
 | WebVTT, about 310,000 cues of 27 B | 138.4 MiB, 1.49 s, kept | 129.0 MiB, 1.50 s, kept |
+| ASS, 186,410 cues of 45 B | 87.2 MiB, 1.04 s, kept | 81.6 MiB, 1.04 s, kept |
 | ASS, one cue of `x\N` lines (3 B each) | 607.8 MiB, 1.56 s, kept | 216.7 MiB, 0.77 s, refused (`TooComplex`) |
 
 ### TTML: dense shapes

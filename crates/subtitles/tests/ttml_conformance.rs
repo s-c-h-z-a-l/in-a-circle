@@ -39,8 +39,10 @@
 //! The divergence list is `DIVERGENT_FILES` below: one line per file, with the
 //! reason it is not compared. An entry marked OPEN is a real mismatch the
 //! reader does not fix yet; it is listed so that nothing is left out silently.
-//! The list was written from ttconv's source (1.2.3), not from a run: the
-//! first CI run is the first run of this comparison.
+//! The list was written from ttconv's source (1.2.3), then checked by CI on
+//! both runners. The first CI run compared 240 files and reported 35
+//! differences, all explained here; the second is green, with 229 compared in
+//! SRT and 224 in WebVTT.
 //!
 //! Standard library, the `xml` crate (a dependency of the reader), and the
 //! `tt` command of ttconv 1.2.3 when it is installed (CI only). A missing `tt`
