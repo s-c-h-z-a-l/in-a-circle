@@ -14,9 +14,12 @@
 //!   output is parsed here by a parser of its own, and compared with our own
 //!   SRT and WebVTT output read back by our readers: the same start and end
 //!   in milliseconds, and the same text with its italic, bold and underline.
-//!   Nothing is normalised on both sides. The only markup removed is the
-//!   colour and font markup that the reader drops and counts (`<font …>`,
-//!   `</font>`, `<c.…>`, `</c>`); every other tag is read.
+//!   Nothing is normalised on both sides, with one exception: the white space
+//!   at the two ends of each line is trimmed on both sides (`trim_line`; every
+//!   reader of this crate trims line ends, and ttconv keeps a space there in
+//!   preserve mode). The spacing inside a line is compared as it is. The only
+//!   markup removed is the colour and font markup that the reader drops and
+//!   counts (`<font …>`, `</font>`, `<c.…>`, `</c>`); every other tag is read.
 //! - `ttconv_comparison_set_is_classified_without_the_tool` runs everywhere:
 //!   every file is refused by us, excluded for a stated reason, or compared.
 //!
@@ -604,10 +607,26 @@ fn markup(line: &str) -> Vec<(String, Style)> {
     }
 }
 
+/// A line's pieces without the white space at its two ends, and nothing else.
+/// Every reader of this crate trims the ends of a line (the cue model's rule).
+/// ttconv keeps a space at a line end in preserve mode (linePadding3, Paragraph005,
+/// Tt002), so both sides are compared with their line ends trimmed, and the
+/// spacing inside the line is compared as it is.
+fn trim_line(mut pieces: Vec<(String, Style)>) -> Vec<(String, Style)> {
+    if let Some(first) = pieces.first_mut() {
+        first.0 = first.0.trim_start().to_owned();
+    }
+    if let Some(last) = pieces.last_mut() {
+        last.0 = last.0.trim_end().to_owned();
+    }
+    pieces.retain(|(text, _)| !text.is_empty());
+    pieces
+}
+
 /// The lines of ttconv's output that carry text.
 fn text_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<(String, Style)>> {
     lines
-        .map(markup)
+        .map(|line| trim_line(markup(line)))
         .filter(|l| l.iter().any(|(t, _)| t.chars().any(|c| !c.is_whitespace())))
         .collect()
 }
@@ -727,7 +746,7 @@ fn ours(parsed: &Parsed, vtt: bool) -> Result<Vec<Shown>, String> {
             lines: c
                 .lines
                 .iter()
-                .map(pieces_of)
+                .map(|line| trim_line(pieces_of(line)))
                 .filter(|l| l.iter().any(|(t, _)| t.chars().any(|c| !c.is_whitespace())))
                 .collect(),
         })
@@ -970,6 +989,20 @@ mod parser_self_test {
         let visibility = br#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s">x<set begin="1s" tts:visibility="hidden"/></p></div></body></tt>"#;
         assert!(scan(style).style_animation);
         assert!(!scan(visibility).style_animation);
+    }
+
+    /// Line ends are trimmed and the inside of a line is not.
+    #[test]
+    fn line_ends_are_trimmed_and_the_inside_is_kept() {
+        let piece = |t: &str| (t.to_owned(), (false, false, false));
+        assert_eq!(
+            trim_line(vec![piece("Two lines with   spaces ")]),
+            vec![piece("Two lines with   spaces")]
+        );
+        assert_eq!(
+            trim_line(vec![piece(" must  appear "), piece(" on ")]),
+            vec![piece("must  appear "), piece(" on")]
+        );
     }
 
     /// Touching cues do not overlap; cues that share time do.
