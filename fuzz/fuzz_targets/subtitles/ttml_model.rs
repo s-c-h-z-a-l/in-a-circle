@@ -9,10 +9,12 @@
 //! (each with optional timing, and `xml:space="preserve"` on some), and up to
 //! [`ITEMS`] items per paragraph: words, `br`, white space between the items
 //! (none, one space, several spaces, a line feed and a tab), and `span`s with
-//! their own timing and italic, nested up to [`MAX_DEPTH`] deep. Times are
-//! multiples of [`STEP_MS`], written as milliseconds, seconds or frames.
-//! Every `end` is at or after its `begin`, so the document has no timing
-//! fault: the faults are the unit tests' business.
+//! their own timing and italic, nested up to [`MAX_DEPTH`] deep. A third of the
+//! paragraphs are timed runs instead: two to four timed spans joined by white
+//! space or a `br`, often with no end of their own, which is the shape of the
+//! review's findings. Times are multiples of [`STEP_MS`], written as
+//! milliseconds, seconds or frames. Every `end` is at or after its `begin`, so
+//! the document has no timing fault: the faults are the unit tests' business.
 //!
 //! The model reads the generated tree and never the XML, and it calls no
 //! function of the reader. It applies TTML2 (12.2 timing, 8.2.10 white space).
