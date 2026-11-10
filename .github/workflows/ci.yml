@@ -183,8 +183,15 @@ jobs:
           echo "$TTCONV_SHA256  $wheel" | sha256sum -c -
           pipx install "$RUNNER_TEMP/$wheel"
           pipx list --short | grep -qx "ttconv $TTCONV_VERSION"
-          "$HOME/.local/bin/tt" --help | grep -q convert
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # pipx's bin folder is not assumed: the first run found no tt in ~/.local/bin.
+          # If `tt` is not already on PATH, pipx reports the folder it put the app in,
+          # and that folder goes on PATH for this step and the later ones.
+          if ! command -v tt >/dev/null 2>&1; then
+            bin_dir=$(pipx environment --value PIPX_BIN_DIR)
+            echo "$bin_dir" >> "$GITHUB_PATH"
+            export PATH="$bin_dir:$PATH"
+          fi
+          tt --help | grep -q convert
 
       - name: Test
         if: ${{ !cancelled() }}
