@@ -118,11 +118,21 @@
 # +13400 B file (+11248 B .text) since its own line, which is the subtitle code.
 # Every growth is under the 100 KB explanation threshold and every .text is
 # under the 1 MiB family limit. The aarch64 baseline is not refreshed.
-inacircle 1199304 924600
-inacircle-text 1268024 901043
-inacircle-pages 514648 412179
 # Added with the subtitle family's first binary, inacircle-subtitles, built from
 # commit b2e797e0 plus the new crate's sources, same toolchain and profile: a
 # new binary, so no growth is measured; its .text (343843 B) is far under the
 # 1 MiB family limit. The other lines are not refreshed here.
-inacircle-subtitles 444176 355091
+# Refreshed at the close of the subtitle work, same toolchain and profile, built
+# from commit 666f61b18 (tree clean). Growth since the previous line: inacircle
+# +64 B file (-160 B .text), from the engine's subtitle head search and the
+# engine's check of subtitle outputs as text, both since the previous line;
+# inacircle-text and inacircle-pages are unchanged; inacircle-subtitles +6840 B
+# file (+6272 B .text), the subtitle code since its previous line (the reader
+# fixes from the fuzzing and review rounds: the speaker-name, markup, override
+# and white-space rules, and the WebVTT and ASS fixes). Every growth is under
+# the 100 KB explanation threshold and every .text is under the 1 MiB family
+# limit. The aarch64 baseline is not refreshed.
+inacircle 1199368 924440
+inacircle-text 1268024 901043
+inacircle-pages 514648 412179
+inacircle-subtitles 451016 361363

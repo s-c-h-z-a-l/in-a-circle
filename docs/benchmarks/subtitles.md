@@ -72,17 +72,25 @@ the smallest SRT cues (27 B each, about 310,000 cues of three items), is about
 
 Peak RSS is the child's own `ru_maxrss` from `wait4`, with `RLIMIT_DATA` 1 GiB
 and `RLIMIT_FSIZE` 256 MiB, as the test helper sets them. "Before" and
-"after" are the figures recorded with the change (test build). The two "here"
-columns are the five runs of this page: the release binary, and the test build
-(the dense test's own printed figures). MiB, min / median / max over 5 runs.
+"after" are the figures recorded with the change (test build). The "final"
+column is the series of the final tree (`666f61b18`): the release binary, five
+runs per shape, MiB, min / median / max. It was run with a throw-away parent
+that mirrors the dense test's inputs and limits (see Reproduce). The test-build
+column of the earlier series was not re-run on the final tree and is not shown.
 
-| Shape (8 MiB input) | before | after (recorded) | here, release | here, test build | Outcome |
-|---|---|---|---|---|---|
-| SRT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.7 / 129.0 / 129.0 | 128.5 / 128.8 / 129.1 | kept, exit 0 |
-| SRT, one cue of 2-byte lines (`x\n`) | 906.3 | 216.5 | 216.1 / 216.3 / 216.3 | 216.5 / 216.7 / 216.9 | refused (`TooComplex`), exit 1 |
-| WebVTT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.8 / 128.9 / 129.0 | 128.9 / 129.0 / 129.2 | kept, exit 0 |
-| ASS, about 180,000 cues of 46 B | 87.2 | 81.6 | 81.2 / 81.5 / 81.6 | 81.4 / 81.6 / 81.8 | kept, exit 0 |
-| ASS, one cue of `x\N` lines (3 B each) | 607.8 | 216.7 | 216.3 / 216.4 / 216.5 | 216.4 / 216.5 / 216.6 | refused (`TooComplex`), exit 1 |
+| Shape (8 MiB input) | before | after (recorded) | final, release | Outcome |
+|---|---|---|---|---|
+| SRT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.9 / 129.0 / 129.0 | kept, exit 0 |
+| SRT, one cue of 2-byte lines (`x\n`) | 906.3 | 216.5 | 216.2 / 216.3 / 216.5 | refused (`TooComplex`), exit 1 |
+| WebVTT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.8 / 128.9 / 128.9 | kept, exit 0 |
+| ASS, about 180,000 cues of 46 B | 87.2 | 81.6 | 89.5 / 89.5 / 89.5 | kept, exit 0 |
+| ASS, one cue of `x\N` lines (3 B each) | 607.8 | 216.7 | 216.3 / 216.4 / 216.5 | refused (`TooComplex`), exit 1 |
+
+Against the earlier release series of this page, the four shapes whose
+figures stayed within about 0.3 MiB are unchanged within noise. The ASS cue
+shape moved from 81.2 / 81.5 / 81.6 to 89.5 MiB. The ASS reader changed after
+that series (the bare-override reset and the look-alike rules), and the cause of
+the 8 MiB is not separated here. It is still far under the 1 GiB net.
 
 The two refused shapes are refused whole: their output is not written. The
 speaker-name probe (a 1 MiB name over 400 lines, `vtt-to-srt`) held 406.4 MiB
@@ -90,33 +98,33 @@ before the change and 12.1 MiB after. It was recorded with the change and not
 re-run here; its output is past the 32 MiB ceiling, so it still fails, after
 parsing.
 
-Wall times are not comparable between the two builds: the release binary
-runs in 0.10 to 0.17 s per shape (`Popen` to `wait4`), and the test build in
-0.6 to 1.8 s (its own harness includes reading the pipes in a debug build).
+Wall times of the final release series are 0.10 to 0.18 s per shape (`Popen`
+to `wait4`). The earlier test-build wall times (0.6 to 1.8 s, which include the
+harness's pipe reads in a debug build) are not comparable to them.
 
 ## Binary size
 
 `scripts/check-sizes.sh`, release builds of the shipped binaries at HEAD
-(`780ad0fe6`, clean tree). File bytes against the `inacircle` limit of 1 572 864 B
+(`666f61b18`, clean tree). File bytes against the `inacircle` limit of 1 572 864 B
 (1.5 MB); `.text` bytes against the 1 MiB family limit (`CLAUDE.md`). Growth
-is against the previous line in `scripts/sizes.baseline`.
+is against the previous line in `scripts/sizes.baseline` (the line before this
+refresh).
 
 | Binary | file B, baseline → now (growth) | `.text` B, baseline → now (growth) |
 |---|---|---|
-| `inacircle` | 1,195,944 → 1,199,304 (+3,360) | 922,792 → 924,600 (+1,808) |
-| `inacircle-text` | 1,267,920 → 1,268,024 (+104) | 901,091 → 901,043 (−48) |
-| `inacircle-pages` | 504,208 → 514,648 (+10,440) | 403,763 → 412,179 (+8,416) |
-| `inacircle-subtitles` | 430,776 → 444,176 (+13,400) | 343,843 → 355,091 (+11,248) |
+| `inacircle` | 1,199,304 → 1,199,368 (+64) | 924,600 → 924,440 (−160) |
+| `inacircle-text` | 1,268,024 → 1,268,024 (0) | 901,043 → 901,043 (0) |
+| `inacircle-pages` | 514,648 → 514,648 (0) | 412,179 → 412,179 (0) |
+| `inacircle-subtitles` | 444,176 → 451,016 (+6,840) | 355,091 → 361,363 (+6,272) |
 
-Every growth is under the 100 KB explanation threshold. The `inacircle` growth
-comes from the engine's classifier, which now types subtitles, plus whatever
-else changed since its previous line. `inacircle-subtitles` grew since its
-own line (built from `b2e797e0`), and that growth is the subtitle code. The
-`inacircle-pages` binary does not depend on the engine or the subtitle crate
-(its direct dependencies are `action`, `manifest`, `pdf`, `probe` and `zip`),
-so its growth is not from this work; this page does not attribute it. Every
-`.text` stays under the 1 MiB family limit. The aarch64 baseline was not
-refreshed.
+Every growth is under the 100 KB explanation threshold. The `inacircle` change
+is the engine's subtitle head search in the classifier and its check of
+subtitle outputs as text, both since the previous line; the net change is
++64 B file and −160 B `.text`. `inacircle-subtitles` grew since its previous
+line, and that growth is the subtitle code: the reader fixes from the fuzzing
+and review rounds. The `inacircle-text` and `inacircle-pages` binaries are
+unchanged. Every `.text` stays under the 1 MiB family limit. The aarch64
+baseline was not refreshed.
 
 ## Classifier cost
 
@@ -206,21 +214,39 @@ Recorded results of the closing runs on this branch (not re-run for this page):
 
 - Full workspace suite, with `INACIRCLE_REQUIRE_LANDLOCK=1`,
   `INACIRCLE_REQUIRE_PDF_TOOLS=1` and `INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1`:
-  debug 2285 passed / 0 failed / 6 ignored; release 2291 passed / 0 failed /
+  debug 2330 passed / 0 failed / 6 ignored; release 2330 passed / 0 failed /
   6 ignored.
-- Line coverage (`cargo llvm-cov`, clean profile, all tests): `crates/subtitles`
-  98.72 %; `bins/inacircle-subtitles` 93.55 %; `crates/engine` 92.75 %;
+- Line coverage (`cargo llvm-cov`, clean profile, all tests, final): `crates/subtitles`
+  98.68 %; `bins/inacircle-subtitles` 92.61 %; `crates/engine` 92.82 %;
   `bins/inacircle` 97.04 %.
-- Fuzzing (`scripts/fuzz.sh`, targets `srt`, `vtt`, `ass`, 600 s each):
-  1,030,122 runs (srt), 202,229 (vtt), 796,807 (ass); no crash. The campaign
-  found six defects of the writer and reader round trip before it was green.
-  The corpora were reduced with `cmin` to 1,935,
-  1,502 and 1,845 inputs.
-- Mutation testing (`scripts/mutants.sh diff`, against `main`): 550 mutants,
-  501 caught, 4 timeouts, 35 unviable, 10 missed. Six of the ten were killed
-  afterwards by new tests. Four are equivalent: the first-skip line is only
-  ever moved forward by strictly increasing line numbers, and no test pins
-  that ordering.
+- Fuzzing (`scripts/fuzz.sh`, targets `srt`, `vtt`, `ass`): the final 600 s
+  campaign per target found no crash: 659,122 runs (srt), 184,031 (vtt),
+  877,251 (ass). The round-trip oracle found eight product defects on the way
+  before it was green. Six were found in the first smoke runs: whitespace-only
+  lines, NUL, white-space-only cues in the readers, a tag-like `<`, `{\`
+  override blocks, and timing-shaped text lines in the SRT writer. Two were
+  found in the first 600 s campaign of the final tree: a WebVTT speaker name
+  ending in dashes wrote an arrow, and the reader trimmed a speaker name before
+  decoding with a Unicode trim. The committed seed corpora are 1936 (srt), 1507
+  (vtt) and 1845 (ass) inputs.
+- Mutation testing (`scripts/mutants.sh diff`, against `main`). The first run
+  had 550 mutants: 501 caught, 4 timeouts, 35 unviable, 10 missed. Six of the
+  ten were killed afterwards by new tests. Four are equivalent: the first-skip
+  line is only ever moved forward by strictly increasing line numbers, and no
+  test pins that ordering. The final run, on the final tree, had 632 mutants:
+  592 caught, 3 timeouts (counted as caught), 35 unviable, 2 missed. One of the
+  two was killed by a new boundary test (a WebVTT start of exactly
+  99:59:59.999). The other is equivalent: the text of an internal over-limit
+  error type is never shown, because the size message is built elsewhere and
+  pinned end to end. Survivors of the earlier fix rounds were also resolved,
+  either killed by tests or shown equivalent.
+
+## Review
+
+Two rounds of whole-branch review, each by a reviewer independent of the
+implementation. The first found 2 critical findings (silent content loss in
+the SRT reader and in the WebVTT reader), 4 important and 5 minor. The second
+found no critical or important finding and 4 minor ones. All were fixed.
 
 ## Differential and conformance evidence
 
@@ -271,10 +297,10 @@ Holds on this machine:
 - The item budget bounds the readers. The densest 8 MiB shapes peak at about
   129 MiB or below for the kept inputs, and at about 216.5 MiB for the two
   refused ones, under the 1 GiB net, with the refused output never written.
-- The cue-shaped inputs (the shapes a real subtitle has) run at 81 to 129 MiB,
+- The cue-shaped inputs (the shapes a real subtitle has) run at 89 to 129 MiB,
   far from the net.
-- `inacircle-subtitles` is 444,176 B (355,091 B of `.text`), under the family
-  limit; `inacircle` is 1,199,304 B, under its 1.5 MB limit.
+- `inacircle-subtitles` is 451,016 B (361,363 B of `.text`), under the family
+  limit; `inacircle` is 1,199,368 B, under its 1.5 MB limit.
 - The classifier adds about 3 µs per file, on this machine, in a
   micro-measurement, and about 19 µs to a drop of 50 arrow-less `.srt` files
   (base 172 µs; the first version added 93 µs). The new head search is a
@@ -292,6 +318,10 @@ Open (not measured here, not recorded as passing):
 - **Second-machine memory and size check**: the series here ran on one
   machine. The aarch64 size baseline was not refreshed.
 - **Manual try on a television** of the converted files.
+- **Two known deviations from the standards**: a WebVTT speaker name's internal
+  runs of white space are not collapsed, as the standard collapses them; and
+  WebVTT `STYLE` is recognised only as a block's first line, while the standard
+  also recognises it on the second line, when that line has no arrow.
 
 ## Reproduce
 
