@@ -107,6 +107,18 @@ are in `CLAUDE.md`.
   (`ttp:timeBase="smpte"`) is read with the continuous-marker formula under
   either `ttp:markerMode`: an approximation for discontinuous markers, which
   carry no media time of their own.
+  TTML styles and regions: a `style` attribute names styles that merge left to
+  right (the later one wins), with the element's own inline values last; a
+  style may reference styles, and a chain is read up to 32 entries (a loop or a
+  longer reference is refused and counted as `Styling`). Italic, bold, underline,
+  line-through and overline are inheritable and pass to the paragraph's text, and
+  a region gives a paragraph only the values no ancestor gives. A paragraph is
+  `top` only when its own region is placed in the upper third: its anchor (origin,
+  plus the extent by `displayAlign`) at or within 33 % of the root container's
+  height from the top, where a px placement needs the root's `tts:extent`. Every other declaration is
+  `Styling` (colours, sizes, fonts) or `Position` (placement), counted once per
+  cue. The style and region tables are charged to the item budget before they
+  are stored.
 
 ## Manifest
 

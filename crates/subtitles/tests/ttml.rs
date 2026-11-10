@@ -1,4 +1,5 @@
-//! TTML reader: structure and timing (TTML2 sections 8, 10.4 and 12, Appendix I).
+//! TTML reader: structure, timing, styles and regions (TTML2 sections 8, 10, 11
+//! and 12, Appendix I).
 //! Fixtures are hand-written in `tests/data/ttml`; each test names the rule it
 //! checks and the section that states it.
 
@@ -7,13 +8,14 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use subtitles::{Cue, INPUT_BYTES, ITEM_BUDGET, Parsed, ReadError, read_ttml};
+use subtitles::{Cue, INPUT_BYTES, ITEM_BUDGET, Loss, Parsed, ReadError, read_ttml};
 
 /// Set to `1` on a runner that must have `xmllint`: a missing tool then fails
 /// the test instead of skipping the comparison.
 const REQUIRE_TOOLS: &str = "INACIRCLE_REQUIRE_SUBTITLE_TOOLS";
 
-const TT: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml">"#;
+const TT: &str =
+    r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">"#;
 
 fn read(text: &str) -> Parsed {
     read_ttml(text.as_bytes()).expect("the input has a usable cue")
@@ -634,5 +636,402 @@ fn copies_of_overlapping_pieces_are_charged() {
         .map(|i| format!("<span begin=\"{i}ms\" end=\"100s\"> </span>"))
         .collect();
     let text = doc(&format!("<p begin=\"0s\" end=\"100s\">x{spans}</p>"));
+    assert_eq!(read_ttml(text.as_bytes()), Err(ReadError::TooComplex));
+}
+
+/// A cue's runs as (text, italic, bold, underline), in order.
+fn runs(cue: &Cue) -> Vec<(String, bool, bool, bool)> {
+    cue.lines
+        .iter()
+        .flat_map(|line| &line.runs)
+        .map(|r| (r.text.clone(), r.italic, r.bold, r.underline))
+        .collect()
+}
+
+fn run(text: &str, italic: bool, bold: bool, underline: bool) -> (String, bool, bool, bool) {
+    (text.to_owned(), italic, bold, underline)
+}
+
+const STYLED: &str =
+    r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">"#;
+
+/// A document with `head` as its head content and `body` as its body content.
+fn styled(head: &str, body: &str) -> String {
+    format!("{STYLED}<head>{head}</head><body><div>{body}</div></body></tt>")
+}
+
+fn loss(parsed: &Parsed, kind: Loss) -> usize {
+    parsed.losses.get(&kind).copied().unwrap_or(0)
+}
+
+/// Referenced styles merge left to right, the later one winning (10.4.1.2).
+/// `plain` after `ital` takes the italic off, and `bold` after it adds bold.
+#[test]
+fn referenced_styles_apply_left_to_right_later_wins() {
+    let parsed = read_ttml(&data("style-chain.ttml")).expect("usable");
+    assert_eq!(texts(&parsed)[0], "first");
+    assert_eq!(
+        runs(&parsed.cues[0]),
+        vec![run("first", false, true, false)]
+    );
+    let plain = read(&styled(
+        r#"<styling><style xml:id="a" tts:fontStyle="italic"/><style xml:id="b" tts:fontStyle="normal"/></styling>"#,
+        r#"<p begin="0s" end="1s" style="a b">x</p>"#,
+    ));
+    assert_eq!(runs(&plain.cues[0]), vec![run("x", false, false, false)]);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// A style that references styles merges them under its own declarations (10.4.1.3),
+/// so `both` is italic and bold from its references and underlined from itself.
+#[test]
+fn chained_references_merge_under_the_style_own_declarations() {
+    let parsed = read_ttml(&data("style-chain.ttml")).expect("usable");
+    assert_eq!(runs(&parsed.cues[1]), vec![run("second", true, true, true)]);
+}
+
+/// An inline declaration beats every reference (10.4.1.1): the span's inline
+/// `normal` beats the referenced `italic`. Without it, the reference holds.
+#[test]
+fn inline_overrides_referenced_style() {
+    let parsed = read_ttml(&data("style-chain.ttml")).expect("usable");
+    assert_eq!(texts(&parsed)[2], "third fourth");
+    assert_eq!(
+        runs(&parsed.cues[2]),
+        vec![run("third fourth", false, false, false)]
+    );
+    let referenced = read(&styled(
+        r#"<styling><style xml:id="ital" tts:fontStyle="italic"/></styling>"#,
+        r#"<p begin="0s" end="1s"><span style="ital">x</span></p>"#,
+    ));
+    assert_eq!(
+        runs(&referenced.cues[0]),
+        vec![run("x", true, false, false)]
+    );
+}
+
+/// Region style inheritance (10.4.2.2): a region's inheritable values reach the
+/// paragraph flowed into it when no ancestor gives them.
+#[test]
+fn region_style_applies_below_the_paragraph() {
+    let parsed = read(&format!(
+        "{STYLED}<head><layout><region xml:id=\"r\" tts:fontStyle=\"italic\" tts:fontWeight=\"bold\"/></layout></head>\
+         <body><div><p begin=\"0s\" end=\"1s\" region=\"r\">x</p></div></body></tt>"
+    ));
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", true, true, false)]);
+}
+
+/// Content style inheritance (10.4.2.1): an inheritable value on `body` reaches
+/// the spans of its paragraphs. A value the ancestor gives beats the region's, so
+/// the body's `none` keeps the region's underline off. A non-inheritable value
+/// (`tts:displayAlign`) does not reach the span, and counts once for its cue.
+#[test]
+fn inheritable_properties_flow_to_spans_non_inheritable_do_not() {
+    let parsed = read_ttml(&data("inheritance.ttml")).expect("usable");
+    assert_eq!(
+        runs(&parsed.cues[0]),
+        vec![run("a", true, false, false), run("b", true, true, false)]
+    );
+    assert_eq!(runs(&parsed.cues[1]), vec![run("c", true, true, false)]);
+    assert_eq!(runs(&parsed.cues[2]), vec![run("d", true, true, false)]);
+    assert_eq!(loss(&parsed, Loss::Position), 1, "one cue, one count");
+    let two = read(&doc(
+        r#"<p begin="0s" end="1s" tts:displayAlign="after"><span>a</span><span>b</span></p>"#,
+    ));
+    assert_eq!(loss(&two, Loss::Position), 1, "two spans, still one count");
+}
+
+/// `fontStyle` and `fontWeight` take their values (10.2.22, 10.2.24); `oblique`
+/// is an italic, and `textDecoration` underline is carried (10.3.37).
+#[test]
+fn italic_bold_underline_from_styles_and_inline() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s" tts:fontStyle="oblique" tts:fontWeight="bold" tts:textDecoration="underline">x</p>"#,
+    ));
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", true, true, true)]);
+    assert_eq!(parsed.skipped.count, 0);
+    assert!(parsed.losses.is_empty());
+}
+
+/// TTML2 10.2.24 gives `fontWeight` two values, `normal` and `bold`. A number is
+/// not one of them, so it is not bold, and the value counts as `Styling`.
+#[test]
+fn numeric_font_weight_is_not_bold_and_is_counted() {
+    let parsed = read(&doc(r#"<p begin="0s" end="1s" tts:fontWeight="700">x</p>"#));
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", false, false, false)]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// Each decoration is inherited on its own (10.2.43.1): the span's `noLineThrough`
+/// clears the paragraph's line-through for its text, and the paragraph's text
+/// that has no clearing keeps it, counted in its cue.
+#[test]
+fn decoration_is_inherited_per_component() {
+    let parsed = read(&doc(
+        r#"<p tts:textDecoration="lineThrough"><span begin="0s" end="1s" tts:textDecoration="noLineThrough">x</span><span begin="1s" end="2s">y</span></p>"#,
+    ));
+    assert_eq!(parsed.cues.len(), 2);
+    assert_eq!(
+        loss(&parsed, Loss::Styling),
+        1,
+        "only the second cue keeps line-through"
+    );
+}
+
+/// A style that references styles in a loop is refused at the reference that
+/// closes it, counted as `Styling`, and the rest of the chain is read (10.4.1.3).
+/// A chain of 40 references is cut at the cap ([`MAX_CHAIN`], 32): the style at
+/// its bottom (`s0`, italic) does not reach past it. A chain of 20 is read whole.
+#[test]
+fn style_cycles_and_deep_chains_are_refused_not_followed() {
+    let parsed = read_ttml(&data("style-cycle.ttml")).expect("usable");
+    assert_eq!(runs(&parsed.cues[0]), vec![run("loop", true, true, false)]);
+    assert_eq!(
+        runs(&parsed.cues[1]),
+        vec![run("self", false, false, false)]
+    );
+    assert_eq!(
+        loss(&parsed, Loss::Styling),
+        2,
+        "each cue with a refused reference"
+    );
+
+    let chain = |n: usize, body: &str| {
+        let mut head = String::from(r#"<style xml:id="s0" tts:fontStyle="italic"/>"#);
+        for k in 1..n {
+            head.push_str(&format!(r#"<style xml:id="s{k}" style="s{}"/>"#, k - 1));
+        }
+        read(&styled(
+            &format!("<styling>{head}</styling>"),
+            &format!(r#"<p begin="0s" end="1s" style="s{}">{body}</p>"#, n - 1),
+        ))
+    };
+    let deep = chain(40, "deep");
+    assert_eq!(runs(&deep.cues[0]), vec![run("deep", false, false, false)]);
+    assert_eq!(loss(&deep, Loss::Styling), 1);
+    let short = chain(20, "short");
+    assert_eq!(runs(&short.cues[0]), vec![run("short", true, false, false)]);
+    assert_eq!(loss(&short, Loss::Styling), 0);
+}
+
+/// A `style` reference that names no style is a `Styling` loss (10.4.1.2: each
+/// IDREF must reference a style with a styling ancestor). The text is kept.
+#[test]
+fn unknown_style_reference_is_a_styling_loss() {
+    let parsed = read(&doc(r#"<p begin="0s" end="1s" style="missing">x</p>"#));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// A declaration the reader does not carry is counted in each cue it reaches,
+/// once per cue: the paragraph's colour is in both cues of its two spans.
+#[test]
+fn losses_count_once_per_cue() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="2s" tts:color="red"><span begin="0s" end="1s">a</span><span begin="1s" end="2s">b</span></p>"#,
+    ));
+    assert_eq!(parsed.cues.len(), 2);
+    assert_eq!(loss(&parsed, Loss::Styling), 2);
+}
+
+/// Every `tts:` declaration on a paragraph is carried, or counted as the loss its
+/// kind names (the accounting table of `ttml/mod.rs`). One row each: the value
+/// the reader keeps, or the loss a paragraph carrying it gets.
+#[test]
+fn every_style_declaration_is_carried_or_counted() {
+    let rows: [(&str, Option<Loss>); 15] = [
+        (r#"tts:fontStyle="italic""#, None),
+        (r#"tts:fontWeight="bold""#, None),
+        (r#"tts:textDecoration="underline""#, None),
+        (r#"tts:textDecoration="none""#, None),
+        (r#"tts:textDecoration="lineThrough""#, Some(Loss::Styling)),
+        (r#"tts:fontStyle="sideways""#, Some(Loss::Styling)),
+        (r#"tts:color="red""#, Some(Loss::Styling)),
+        (r#"tts:backgroundColor="blue""#, Some(Loss::Styling)),
+        (r#"tts:fontSize="10px""#, Some(Loss::Styling)),
+        (r#"tts:showBackground="always""#, Some(Loss::Styling)),
+        (r#"tts:unknownThing="1""#, Some(Loss::Styling)),
+        (r#"tts:textAlign="center""#, Some(Loss::Position)),
+        (r#"tts:padding="1px""#, Some(Loss::Position)),
+        (r#"tts:displayAlign="after""#, Some(Loss::Position)),
+        (r#"tts:origin="0% 0%""#, Some(Loss::Position)),
+    ];
+    for (attr, want) in rows {
+        let parsed = read(&doc(&format!(r#"<p begin="0s" end="1s" {attr}>x</p>"#)));
+        let got: Vec<Loss> = parsed.losses.keys().copied().collect();
+        assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{attr}");
+        assert_eq!(texts(&parsed), vec!["x"], "{attr}: the text is kept");
+    }
+}
+
+/// `top` (10.2.15, 10.2.16, 10.2.31): the anchor of the region is in the top third
+/// of the root container. `before` is the origin, `center` the middle, `after` the
+/// far edge. A percentage needs no root size; a px placement is read against the
+/// root's `tts:extent` (1920 by 1080 px in the fixture).
+#[test]
+fn region_in_the_top_third_is_top() {
+    let parsed = read_ttml(&data("regions.ttml")).expect("usable");
+    let tops: Vec<bool> = parsed.cues.iter().map(|c| c.top).collect();
+    assert_eq!(tops, vec![true, true, true, false, true, false]);
+    assert_eq!(
+        loss(&parsed, Loss::Position),
+        1,
+        "the bottom region is placed at the bottom, so its exact place is lost"
+    );
+}
+
+/// A px placement without a root size (no `tts:extent` on `tt`) has no fraction,
+/// so the paragraph is not top, and its placement counts as `Position`.
+#[test]
+fn px_placement_without_root_extent_is_not_top() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="0px 0px"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert!(!parsed.cues[0].top);
+    assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// A paragraph with no region is never top: the layout's default placement is
+/// not the top (a player puts it at the bottom), and a document without a layout
+/// has no region at all.
+#[test]
+fn no_region_is_never_top() {
+    let parsed = read_ttml(&data("regions.ttml")).expect("usable");
+    assert!(!parsed.cues[5].top, "the paragraph without a region");
+    let plain = read(&doc(r#"<p begin="0s" end="1s">x</p>"#));
+    assert!(!plain.cues[0].top);
+    assert!(plain.losses.is_empty());
+}
+
+/// A region named by a paragraph but not defined: the placement is lost (not top,
+/// `Position`). The text is kept.
+#[test]
+fn region_named_but_not_defined_is_a_position_loss() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="0% 0%"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="nope">x</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert!(!parsed.cues[0].top);
+    assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// A duplicate `xml:id` among styles (or among regions) makes a reference
+/// ambiguous, so the document is refused.
+#[test]
+fn duplicate_style_id_is_refused() {
+    assert_eq!(
+        read_ttml(
+            styled(
+                r#"<styling><style xml:id="s"/><style xml:id="s"/></styling>"#,
+                r#"<p begin="0s" end="1s">x</p>"#,
+            )
+            .as_bytes()
+        ),
+        Err(ReadError::Unsupported(
+            "duplicate xml:id of a style or region"
+        ))
+    );
+}
+
+/// A style flood is linear: 100,000 `style` elements (4 MiB), and a paragraph
+/// that references one style a million times (2 MiB of `a a a ...`). The
+/// reference count is charged to no budget, so the time is what bounds it, and
+/// it must grow with the input. Each shape is read at a quarter and in full.
+#[test]
+fn ttml_style_flood_is_linear() {
+    let defs = |n: usize| {
+        let body: String = (0..n)
+            .map(|i| format!(r#"<style xml:id="s{i}" tts:color="red"/>"#))
+            .collect();
+        styled(
+            &format!("<styling>{body}</styling>"),
+            r#"<p begin="0s" end="1s">x</p>"#,
+        )
+    };
+    let refs = |n: usize| {
+        let ids = "a ".repeat(n);
+        styled(
+            r#"<styling><style xml:id="a" tts:fontStyle="italic"/></styling>"#,
+            &format!(r#"<p begin="0s" end="1s" style="{}">x</p>"#, ids.trim_end()),
+        )
+    };
+    for (name, shape, n) in [
+        ("100 000 styles", defs as fn(usize) -> String, 100_000usize),
+        (
+            "1 000 000 references",
+            refs as fn(usize) -> String,
+            1_000_000usize,
+        ),
+    ] {
+        let large = shape(n).into_bytes();
+        let small = shape(n / 4).into_bytes();
+        assert!(large.len() <= INPUT_BYTES, "{name}: under the input limit");
+        assert!(read_ttml(&large).is_ok(), "{name}: the large shape reads");
+        let t_small = best_of_three(&small);
+        let t_large = best_of_three(&large);
+        assert!(
+            t_large < t_small * 8,
+            "{name}: 4x the input took {t_large:?} against {t_small:?}; linear is about 4x"
+        );
+    }
+}
+
+/// The peak resident memory of this process (`VmHWM`, kB), from `/proc`. Zero
+/// where `/proc` is not there, so the figure is printed as unknown then.
+fn peak_rss_kib() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// The densest style table the input limit allows in its simplest form: 784,960
+/// empty `style` elements (about 6 MiB). Each is an element and an entry, two
+/// items, so the budget holds the table. The process peak is printed; run it
+/// alone, since the peak is the whole process's:
+/// `cargo test -p subtitles --test ttml style_flood_peak -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement: run alone with --nocapture"]
+fn style_flood_peak_memory_is_reported() {
+    let text = format!(
+        "{STYLED}<head><styling>{}</styling></head><body><div><p begin=\"0s\" end=\"1s\">x</p></div></body></tt>",
+        "<style/>".repeat(784_960)
+    );
+    assert!(text.len() <= INPUT_BYTES);
+    let before = peak_rss_kib();
+    let outcome = read_ttml(text.as_bytes());
+    let after = peak_rss_kib();
+    println!(
+        "style flood: {} bytes, 784960 styles: {:?}; peak RSS before {:?} kiB, after {:?} kiB",
+        text.len(),
+        outcome.map(|p| p.cues.len()),
+        before,
+        after
+    );
+}
+
+/// The same shape one style past the budget: 1,000,001 styles are 2,000,002
+/// items, so the budget refuses the document, and the refusal allocates no more
+/// than the entries that fit. Run alone, as the one above:
+/// `cargo test -p subtitles --test ttml style_flood_past -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement: run alone with --nocapture"]
+fn style_flood_past_the_budget_is_refused() {
+    let text = format!(
+        "{STYLED}<head><styling>{}</styling></head><body><div><p begin=\"0s\" end=\"1s\">x</p></div></body></tt>",
+        "<style/>".repeat(1_000_001)
+    );
+    assert!(text.len() <= INPUT_BYTES);
+    let before = peak_rss_kib();
+    let outcome = read_ttml(text.as_bytes());
+    let after = peak_rss_kib();
+    println!(
+        "style flood past budget: {} bytes, 1000001 styles: {:?}; peak RSS before {:?} kiB, after {:?} kiB",
+        text.len(),
+        outcome.map(|p| p.cues.len()),
+        before,
+        after
+    );
     assert_eq!(read_ttml(text.as_bytes()), Err(ReadError::TooComplex));
 }

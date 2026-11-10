@@ -2,7 +2,8 @@
 //! TTML 1 is read too, as many files use it). One pass over the `xml` crate's events. The
 //! reader keeps one paragraph's pieces at a time: a paragraph is cut into cues
 //! only when it ends, because its timed spans decide where the cuts are.
-//! `time.rs` reads the time expressions, `slice.rs` cuts a paragraph.
+//! `time.rs` reads the time expressions, `slice.rs` cuts a paragraph, and
+//! `style.rs` holds the styles and regions of the head.
 //!
 //! Timing (12.2, 12.4, I.2.2). An element's `begin`, `end` and `dur` are
 //! relative to its reference begin: the begin of its container for `par` (the
@@ -15,8 +16,16 @@
 //! the earliest explicit end of the element and its ancestors. A paragraph that
 //! is still indefinite has no end time and is skipped.
 //!
-//! Accounting. Nothing is dropped without a count. Each
-//! construct the reader meets, and where its content goes:
+//! Styles (10.4). A style is referenced by a `style` attribute (a list of ids,
+//! merged in order, the later one winning), and its own declarations come last.
+//! The inheritable values (italic, bold, underline, line-through, overline) pass
+//! from an element to its content (10.4.2.1), and a paragraph takes those its
+//! region gives where no ancestor does (10.4.2.2). A paragraph's region is the
+//! `region` of the paragraph or of its nearest ancestor; `top` (see [`top_third`])
+//! is decided by that region's placement.
+//!
+//! Accounting. Nothing is dropped without a count. Each construct the reader
+//! meets, and where its content goes:
 //!
 //! | Construct | Goes to |
 //! |---|---|
@@ -24,37 +33,55 @@
 //! | a DOCTYPE with entity declarations | `Unsupported` (the whole file) |
 //! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
-//! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` | no content: nothing |
-//! | `head` and what is in it | ignored without a count; styling and layout are read later |
+//! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 //! | `metadata` elements, elements of the metadata namespaces | ignored without a count: metadata is not content (14) |
+//! | `head`: `styling` and `layout` are read (below); any other child | `styling`, `layout`: read. Other: `skipped`, `unsupported element` |
+//! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
+//! | `styling`: `initial` | every cue `Styling` (the initial values it sets are not applied) |
+//! | `layout`: each `region` | an entry of the region table, named by its `xml:id`; a duplicate `xml:id` among styles or among regions: the file is refused (`Unsupported`) |
+//! | a `style` or `region` `xml:id` used twice | `Unsupported` (the reference would be ambiguous) |
+//! | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
+//! | a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past [`style::MAX_CHAIN`] sets `Styling` on the element |
+//! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
+//! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
+//! | other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
+//! | `tts:origin`, `tts:extent`, `tts:displayAlign` on a region of a paragraph | the placement of `top`: a `top` paragraph keeps them; otherwise `Position` |
+//! | `tts:origin`, `tts:extent`, `tts:displayAlign` on any other element | `Position` |
+//! | `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
+//! | `tts:extent` on `tt` (10.2.16) | the root container's height in px (`top` of a px placement); `auto`, `contain`, and two px lengths are read; anything else `Position` |
+//! | a region's placement that cannot be computed (`em`, `c`, `rw`, `rh`, a sign, a `px` without a root height) | the paragraph is not `top`; its placement counts as `Position` |
+//! | `region` on `body`, `div` or `p` naming no region | `Position` on the paragraphs it reaches |
+//! | `region` on a `span` | `Position` on the span's text (the span is not placed in its region) |
 //! | `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
 //! | `p` | cues (`slice.rs`), or `skipped` with its line and reason |
 //! | `span` | a container. A `span` with its own timing slices its paragraph |
 //! | `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
 //! | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
 //! | text in `p` or `span`, white space only | spacing only: a piece with no time of its own, not counted |
-//! | visible text directly in `tt`, `body`, `div` or `br` | `skipped`: `text outside any cue` |
+//! | visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
 //! | `condition` on `body`, `div`, `p`, `span` or `br` | the element and its content: `skipped`, `conditional element` (conditions are not evaluated) |
 //! | any other element in `body`, `div`, `p`, `span` or `br` (`set`, `animate`, `image`, foreign elements) | the element and its content: `skipped` once per element, `unsupported element`. A later change counts `set` and `animate` as `Styling`, and foreign content as `Elements` |
-//! | `style`, `region`, `tts:*` attributes | not read yet: styles and regions will count `Styling` and `Position`, the rest later |
-//! | element frames, pieces, copies of pieces in slices, lines and cues | the item budget: past it `TooComplex` |
+//! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries and their references | the item budget: past it `TooComplex` |
 //! | text copied into cues | `TooComplex` past `OUTPUT_BYTES` |
 //!
-//! Lines and runs follow the `Cue` model: a `br` or a line feed in `preserve`
-//! mode ends a line, lines are trimmed, a line with no text is not kept.
+//! A cue's losses are its pieces' flags (`Flags`), counted once per cue. A piece
+//! takes the flags of every element it is in, and a `br` those of its own
+//! element too. Lines and runs follow the `Cue` model: a `br` or a line feed in
+//! `preserve` mode ends a line, lines are trimmed, a line with no text is not
+//! kept. A run ends where its inline style changes.
 
 mod slice;
+mod style;
 mod time;
-
-use std::collections::BTreeMap;
 
 use xml::{Element, ErrorKind, Event, Options, QName, Reader};
 
 use crate::srt::STRAY;
-use crate::{Budget, Cue, MAX_MS, Parsed, ReadError, Skipped};
-use slice::{Content, Piece};
+use crate::{Budget, MAX_MS, Parsed, ReadError, Skipped};
+use slice::{Content, Output, Piece, RunStyle};
+use style::{Css, Flags, Len, Sheet, attrs_css, root_extent, root_extent_is_usable, top_third};
 use time::{Params, TimeError, parse_time};
 
 /// A construct the reader does not convert. The whole document is refused with
@@ -145,11 +172,28 @@ fn xml_error(e: xml::Error) -> ReadError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Root,
+    /// `head`, `styling`, `layout`: containers of the head, with no timing.
+    Head,
+    Styling,
+    Layout,
     Body,
     Div,
     Paragraph,
     Span,
     Break,
+    /// A `style` or a `region`: an entry of the sheet (`Frame::entry`).
+    Style,
+    Region,
+}
+
+/// Where the content of an element is flowed (11.3.1): into a region of the
+/// sheet, into a region named but not defined (`Missing`), or nowhere in
+/// particular (`None`: the default placement).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    None,
+    Region(usize),
+    Missing,
 }
 
 /// The open elements the reader converts, and the `br` frames that only
@@ -177,6 +221,15 @@ struct Frame {
     /// A bad attribute on this element or an ancestor: a paragraph under it
     /// is `skipped` with this reason.
     fault: Option<&'static str>,
+    /// The inheritable values in force here (10.4.2.1): own, else the ancestor's.
+    css: Css,
+    /// The declarations that affect this element's content, its own and its
+    /// ancestors' (see [`Flags`]).
+    flags: Flags,
+    /// The region the content is flowed into.
+    region: Place,
+    /// For a `style` or `region`: its entry in the sheet.
+    entry: Option<usize>,
 }
 
 impl Frame {
@@ -192,6 +245,10 @@ impl Frame {
             explicit: None,
             preserve,
             fault: None,
+            css: Css::default(),
+            flags: Flags::default(),
+            region: Place::None,
+            entry: None,
         }
     }
 
@@ -210,8 +267,18 @@ impl Frame {
         (base, base.and(min_end(own, self.limit)))
     }
 
-    /// This element's active end, clamped by its ancestors. The implicit end of
-    /// a container is its children's (see the module doc).
+    /// The flags of a text piece in this element: the flags of its ancestors
+    /// and this element, and the decorations that this element's text takes
+    /// from the values in force (a line-through or an overline of any ancestor).
+    fn text_flags(&self) -> Flags {
+        Flags {
+            styling: self.flags.styling || decorated(&self.css),
+            position: self.flags.position,
+        }
+    }
+
+    /// This element's end, clamped by its ancestors. The implicit end of a
+    /// container is its children's (see the module doc).
     fn end(&self) -> Option<u64> {
         self.begin?;
         let own = match self.explicit {
@@ -261,17 +328,26 @@ struct Para {
     hidden: bool,
     /// A fault on a `span` inside the paragraph.
     fault: Option<&'static str>,
+    /// The region's placement puts the paragraph at the top (see [`top_third`]).
+    top: bool,
 }
 
 /// What an element is, given the element it is in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
-    /// Its content is metadata or `head` contents: ignored, not counted.
+    /// Its content is metadata: ignored, not counted.
     Silent,
     /// Not converted: the element and its content are `skipped` with this reason.
     Refused(&'static str),
+    /// `body`, `div`, `p`, `span`: a timed element.
     Open(Kind),
     Break,
+    /// `head`, `styling`, `layout`: a container with no timing.
+    Container(Kind),
+    /// `style` (in `styling`, or nested in a `region`) or `region`: an entry.
+    Define(Kind),
+    /// `initial`: its values are not applied, so every cue is `Styling`.
+    Initial,
 }
 
 /// The element's role under a parent of kind `parent`.
@@ -281,14 +357,29 @@ fn role(parent: Kind, name: QName) -> Role {
     }
     let local = if is_tt(name) { name.local } else { "" };
     match (parent, local) {
-        (Kind::Root, "head") => Role::Silent,
+        (Kind::Root, "head") => Role::Container(Kind::Head),
         (Kind::Root, "body") => Role::Open(Kind::Body),
+        (Kind::Head, "styling") => Role::Container(Kind::Styling),
+        (Kind::Head, "layout") => Role::Container(Kind::Layout),
+        (Kind::Styling | Kind::Region, "style") => Role::Define(Kind::Style),
+        (Kind::Styling, "initial") => Role::Initial,
+        (Kind::Layout, "region") => Role::Define(Kind::Region),
         (Kind::Body | Kind::Div, "div") => Role::Open(Kind::Div),
         (Kind::Body | Kind::Div, "p") => Role::Open(Kind::Paragraph),
         (Kind::Paragraph | Kind::Span, "span") => Role::Open(Kind::Span),
         (Kind::Paragraph | Kind::Span, "br") => Role::Break,
         _ => Role::Refused(UNSUPPORTED_ELEMENT),
     }
+}
+
+/// The head's elements and the sheet's (`styling`, `layout`, `style`, `region`,
+/// `initial`). After the body they are refused: the sheet is resolved then.
+fn is_structure(name: QName) -> bool {
+    is_tt(name)
+        && matches!(
+            name.local,
+            "head" | "styling" | "layout" | "style" | "region" | "initial"
+        )
 }
 
 fn is_tt(name: QName) -> bool {
@@ -377,6 +468,25 @@ fn note(slot: &mut Option<&'static str>, reason: &'static str) {
     }
 }
 
+/// Whether a computed set has a line-through or an overline: the decorations
+/// the reader does not draw. They are inherited one by one (10.2.43.1), so they
+/// are read from the computed values, not OR-ed down the element chain.
+fn decorated(css: &Css) -> bool {
+    css.line_through == Some(true) || css.overline == Some(true)
+}
+
+/// The flags an element's own declarations give its content: a declaration the
+/// reader does not carry (`Styling`), or a placement it does not use (`Position`).
+fn own_flags(decl: &Css) -> Flags {
+    Flags {
+        styling: decl.styling,
+        position: decl.position
+            || decl.origin.is_some()
+            || decl.extent.is_some()
+            || decl.align.is_some(),
+    }
+}
+
 /// The state of one document being read.
 struct Doc<'b> {
     budget: &'b mut Budget,
@@ -388,10 +498,17 @@ struct Doc<'b> {
     /// Open elements inside an ignored one, the ignored one included. Their
     /// events are not read.
     ignoring: usize,
-    cues: Vec<Cue>,
     skipped: Skipped,
-    /// Text copied into cues so far, in bytes (see `slice::append`).
-    copied: u64,
+    /// The cues, their losses and the text copied into them (see `slice.rs`).
+    out: Output,
+    /// The styles and regions of the head, resolved when the body begins.
+    sheet: Sheet,
+    /// The body has begun: the sheet is resolved, and no head element is read.
+    frozen: bool,
+    /// The root container's height, when `tt` gives it in px (10.2.16).
+    root_height: Option<Len>,
+    /// The losses that hold for every cue: an `initial` element.
+    doc_flags: Flags,
 }
 
 impl<'b> Doc<'b> {
@@ -402,9 +519,12 @@ impl<'b> Doc<'b> {
             stack: Vec::new(),
             para: None,
             ignoring: 0,
-            cues: Vec::new(),
             skipped: Skipped::default(),
-            copied: 0,
+            out: Output::default(),
+            sheet: Sheet::default(),
+            frozen: false,
+            root_height: None,
+            doc_flags: Flags::default(),
         }
     }
 
@@ -416,7 +536,12 @@ impl<'b> Doc<'b> {
         let Some(parent) = self.stack.last().map(|f| f.kind) else {
             return self.root(el);
         };
-        let role = match role(parent, el.name) {
+        let role = if self.frozen && is_structure(el.name) {
+            Role::Refused(UNSUPPORTED_ELEMENT)
+        } else {
+            role(parent, el.name)
+        };
+        let role = match role {
             // Conditions are not evaluated, so a conditional element is refused
             // whole rather than guessed at.
             Role::Open(_) | Role::Break if el.attr(None, "condition").is_some() => {
@@ -430,8 +555,14 @@ impl<'b> Doc<'b> {
                 self.skip(line, reason);
                 self.ignoring = 1;
             }
-            Role::Break => self.line_break()?,
+            Role::Break => self.line_break(el)?,
             Role::Open(kind) => self.open(kind, el, line)?,
+            Role::Container(kind) => self.container(kind)?,
+            Role::Define(kind) => self.define(kind, el)?,
+            Role::Initial => {
+                self.doc_flags.styling = true;
+                self.ignoring = 1;
+            }
         }
         Ok(())
     }
@@ -451,24 +582,84 @@ impl<'b> Doc<'b> {
         self.params = Some(params);
         let (preserve, bad_space) = space(el, false);
         self.budget.charge()?;
+        // 10.2.16: `tts:extent` on `tt` is the root container's size. Only two px
+        // lengths give a height; `auto` and `contain` are read as the default.
+        let extent = style::tts_value(el, "extent").map(str::trim);
+        self.root_height = extent.and_then(root_extent);
+        let decl = attrs_css(el);
         let mut frame = Frame::bare(Kind::Root, preserve);
         // 12.2: the document's time begins at zero.
         frame.begin = Some(0);
         frame.cursor = Some(0);
         frame.fault = bad_space;
+        frame.css = decl.over(&Css::default());
+        // `tts:extent` is consumed above, so it is not a placement of the content.
+        frame.flags = Flags {
+            styling: decl.styling,
+            position: decl.position
+                || decl.origin.is_some()
+                || decl.align.is_some()
+                || extent.is_some_and(|v| !root_extent_is_usable(v)),
+        };
+        self.stack.push(frame);
+        Ok(())
+    }
+
+    /// Opens a `head`, `styling` or `layout`: a container with no timing.
+    fn container(&mut self, kind: Kind) -> Result<(), ReadError> {
+        self.budget.charge()?;
+        let preserve = self.stack.last().is_some_and(|f| f.preserve);
+        self.stack.push(Frame::bare(kind, preserve));
+        Ok(())
+    }
+
+    /// Opens a `style` or a `region`: an entry of the sheet. Its `style`
+    /// attribute references are recorded in order; its own declarations come
+    /// last. A `style` in a region is a nested declaration of it (10.4.1.4): an
+    /// unnamed entry the region references after the attribute's styles.
+    fn define(&mut self, kind: Kind, el: &Element) -> Result<(), ReadError> {
+        let own = attrs_css(el);
+        let id = el.attr(Some(xml::XML_NS), "id");
+        let parent = self.stack.last().map(|f| (f.kind, f.entry));
+        let entry = match (kind, parent) {
+            (Kind::Region, _) => self.sheet.define_region(self.budget, id, own)?,
+            (_, Some((Kind::Region, Some(region)))) => {
+                let nested = self.sheet.define_style(self.budget, None, own)?;
+                self.sheet.push_ref(self.budget, region, nested)?;
+                nested
+            }
+            _ => self.sheet.define_style(self.budget, id, own)?,
+        };
+        if let Some(refs) = el.attr(None, "style") {
+            for name in refs.split_ascii_whitespace() {
+                let target = self.sheet.style_ref(self.budget, name)?;
+                self.sheet.push_ref(self.budget, entry, target)?;
+            }
+        }
+        self.budget.charge()?;
+        let preserve = self.stack.last().is_some_and(|f| f.preserve);
+        let mut frame = Frame::bare(kind, preserve);
+        frame.entry = Some(entry);
         self.stack.push(frame);
         Ok(())
     }
 
     /// Opens a `body`, `div`, `p` or `span`. Its time is resolved here from
     /// its parent; its end is known only at its end tag (see [`Frame::end`]).
+    /// The first `body` resolves the sheet, so the head is read before any
+    /// style is used.
     fn open(&mut self, kind: Kind, el: &Element, line: u32) -> Result<(), ReadError> {
+        if kind == Kind::Body && !self.frozen {
+            self.sheet.freeze();
+            self.frozen = true;
+        }
         let params = self.params.ok_or(ReadError::NotTtml)?;
         let Some(parent) = self.stack.last() else {
             return Err(ReadError::NotTtml);
         };
         let (base, parent_limit, parent_preserve) = (parent.base(), parent.limit, parent.preserve);
-        let mut fault = parent.fault;
+        let (mut fault, parent_css, parent_flags, parent_region) =
+            (parent.fault, parent.css, parent.flags, parent.region);
         let begin = stamp(el, "begin", &params)?;
         let end = stamp(el, "end", &params)?;
         let dur = stamp(el, "dur", &params)?;
@@ -485,6 +676,47 @@ impl<'b> Doc<'b> {
         if let Some(reason) = bad_space {
             note(&mut fault, reason);
         }
+        let decl = self.sheet.declared(el);
+        let mut flags = parent_flags.join(own_flags(&decl));
+        let mut css = decl.over(&parent_css);
+        // A `region` names the region of the element and its content; a span's
+        // is not used (its text is not placed in it), which is a `Position` loss.
+        let region = match (kind, el.attr(None, "region")) {
+            (Kind::Span, Some(_)) => {
+                flags.position = true;
+                parent_region
+            }
+            (_, Some(name)) => match self.sheet.region_named(name) {
+                Some(entry) => Place::Region(entry),
+                None => Place::Missing,
+            },
+            (_, None) => parent_region,
+        };
+        let mut top = false;
+        if kind == Kind::Paragraph {
+            match region {
+                Place::None => {}
+                // A region that is named and not defined: the placement is lost.
+                Place::Missing => flags.position = true,
+                Place::Region(entry) => {
+                    let placed = *self.sheet.css(entry);
+                    // 10.4.2.2: the region gives the values no ancestor does.
+                    css = css.over(&placed);
+                    flags = flags.join(Flags {
+                        styling: placed.styling,
+                        position: placed.position,
+                    });
+                    top = top_third(&placed, self.root_height) == Some(true);
+                    if !top
+                        && (placed.origin.is_some()
+                            || placed.extent.is_some()
+                            || placed.align.is_some())
+                    {
+                        flags.position = true;
+                    }
+                }
+            }
+        }
         let mut frame = Frame::bare(kind, preserve);
         frame.begin = begin_at;
         frame.cursor = begin_at;
@@ -492,6 +724,9 @@ impl<'b> Doc<'b> {
         frame.limit = min_end(parent_limit, explicit.flatten());
         frame.explicit = explicit;
         frame.fault = fault;
+        frame.css = css;
+        frame.flags = flags;
+        frame.region = region;
         // Charged before the frame is pushed: an element is an item.
         self.budget.charge()?;
         if kind == Kind::Paragraph {
@@ -501,6 +736,7 @@ impl<'b> Doc<'b> {
                 visible: false,
                 hidden: false,
                 fault: None,
+                top,
             });
         }
         self.stack.push(frame);
@@ -509,12 +745,18 @@ impl<'b> Doc<'b> {
 
     /// A `br` in a paragraph or span: a line break in the parent's interval.
     /// Its own content is metadata and is read by the frame that holds it.
-    fn line_break(&mut self) -> Result<(), ReadError> {
+    fn line_break(&mut self, el: &Element) -> Result<(), ReadError> {
         let Some(top) = self.stack.last() else {
             return Ok(());
         };
         let (base, end) = top.leaf_time();
         let preserve = top.preserve;
+        let decl = self.sheet.declared(el);
+        let own = Flags {
+            styling: decorated(&decl),
+            position: false,
+        };
+        let flags = top.text_flags().join(own_flags(&decl)).join(own);
         self.child_ended(end);
         if let (Some(begin), Some(end)) = (base, end)
             && end > begin
@@ -524,6 +766,8 @@ impl<'b> Doc<'b> {
                 begin,
                 end,
                 content: Content::Break,
+                style: RunStyle::default(),
+                flags,
             });
         }
         self.budget.charge()?;
@@ -540,6 +784,7 @@ impl<'b> Doc<'b> {
         };
         let (kind, preserve) = (top.kind, top.preserve);
         let (base, end) = top.leaf_time();
+        let (flags, style) = (top.text_flags(), RunStyle::of(&top.css));
         let visible = text.chars().any(|c| !c.is_whitespace());
         if !matches!(kind, Kind::Paragraph | Kind::Span) {
             if visible {
@@ -561,6 +806,8 @@ impl<'b> Doc<'b> {
                     begin,
                     end,
                     content,
+                    style,
+                    flags,
                 });
             }
             _ if visible => {
@@ -584,8 +831,18 @@ impl<'b> Doc<'b> {
         let Some(frame) = self.stack.pop() else {
             return Ok(());
         };
-        // A `br`'s line break was placed at its start, and the root has no parent.
-        if matches!(frame.kind, Kind::Root | Kind::Break) {
+        // A `br`'s line break was placed at its start. The root, the head's
+        // containers and the sheet's entries have no timing of their own.
+        if matches!(
+            frame.kind,
+            Kind::Root
+                | Kind::Break
+                | Kind::Head
+                | Kind::Styling
+                | Kind::Layout
+                | Kind::Style
+                | Kind::Region
+        ) {
             return Ok(());
         }
         let end = frame.end();
@@ -626,11 +883,11 @@ impl<'b> Doc<'b> {
         }
         slice::cues(
             &para.pieces,
-            begin,
-            end,
+            (begin, end),
+            para.top,
+            self.doc_flags,
             self.budget,
-            &mut self.copied,
-            &mut self.cues,
+            &mut self.out,
         )?;
         if para.hidden {
             self.skip(para.line, NO_DISPLAY);
@@ -662,8 +919,8 @@ impl<'b> Doc<'b> {
 
     fn finish(self) -> Parsed {
         Parsed {
-            cues: self.cues,
-            losses: BTreeMap::new(),
+            cues: self.out.cues,
+            losses: self.out.losses,
             skipped: self.skipped,
         }
     }

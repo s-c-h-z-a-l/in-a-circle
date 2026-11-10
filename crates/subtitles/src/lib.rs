@@ -328,6 +328,50 @@ mod tests {
         );
     }
 
+    /// The style table is charged entry by entry, before it is stored. A `style`
+    /// is its element and its entry (two items); each reference a style makes is
+    /// one more. The least budget that reads the document is therefore exact:
+    /// one more style costs two items, one more reference one item, and a budget
+    /// one below the least refuses the document as too complex.
+    #[test]
+    fn ttml_style_table_is_charged_exactly() {
+        let styles = |n: usize| {
+            let defs: String = (0..n)
+                .map(|i| format!(r#"<style xml:id="s{i}" tts:color="red"/>"#))
+                .collect();
+            format!(
+                r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><head><styling>{defs}</styling></head><body><div><p begin="0s" end="1s">x</p></div></body></tt>"#
+            )
+        };
+        let refs = |n: usize| {
+            let ids = vec!["s0"; n].join(" ");
+            format!(
+                r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><head><styling><style xml:id="s0"/><style xml:id="x" style="{ids}"/></styling></head><body><div><p begin="0s" end="1s">x</p></div></body></tt>"#
+            )
+        };
+        let least = |text: &str| {
+            (1..)
+                .find(|&b| ttml::parse(text.as_bytes(), &mut Budget::new(b)).is_ok())
+                .expect("some budget reads the document")
+        };
+        assert_eq!(
+            least(&styles(3)) - least(&styles(2)),
+            2,
+            "element and entry"
+        );
+        assert_eq!(
+            least(&refs(3)) - least(&refs(2)),
+            1,
+            "one item per reference"
+        );
+        let text = styles(5);
+        let need = least(&text);
+        assert_eq!(
+            ttml::parse(text.as_bytes(), &mut Budget::new(need - 1)).map(|p| p.cues.len()),
+            Err(ReadError::TooComplex)
+        );
+    }
+
     /// A SRT line break is a line: `x<br>y` is one cue, two lines and two runs,
     /// five items. A budget of four refuses it.
     #[test]

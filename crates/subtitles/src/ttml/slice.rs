@@ -9,17 +9,24 @@
 //! bounded by the item budget, and their text by [`OUTPUT_BYTES`]: the cues
 //! of a paragraph are the output, and past that size the conversion would be
 //! refused anyway.
+//!
+//! Losses: a cue counts each loss kind once, if any piece active in it carries
+//! that kind of declaration (see [`Flags`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Budget, Cue, Line, OUTPUT_BYTES, ReadError, Run, has_text};
+use super::style::{Css, Flags};
+use crate::{Budget, Cue, Line, Loss, OUTPUT_BYTES, ReadError, Run, has_text};
 
 /// One stored piece of a paragraph: its active interval in milliseconds
-/// (never empty) and what it holds.
+/// (never empty), what it holds, the inline style of its text, and the
+/// declarations that affect it.
 pub(super) struct Piece {
     pub(super) begin: u64,
     pub(super) end: u64,
     pub(super) content: Content,
+    pub(super) style: RunStyle,
+    pub(super) flags: Flags,
 }
 
 pub(super) enum Content {
@@ -27,6 +34,39 @@ pub(super) enum Content {
     Text { text: String, preserve: bool },
     /// A `br`: a forced line break.
     Break,
+}
+
+/// The inline styles a run can carry (the `Run` fields).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RunStyle {
+    pub(super) italic: bool,
+    pub(super) bold: bool,
+    pub(super) underline: bool,
+}
+
+impl RunStyle {
+    /// The run style of a computed style set. An unset value is not on
+    /// (10.2.22 to 10.2.24, 10.2.43: the initial values are `normal` and `none`).
+    pub(super) fn of(css: &Css) -> RunStyle {
+        RunStyle {
+            italic: css.italic == Some(true),
+            bold: css.bold == Some(true),
+            underline: css.underline == Some(true),
+        }
+    }
+
+    fn matches(self, run: &Run) -> bool {
+        run.italic == self.italic && run.bold == self.bold && run.underline == self.underline
+    }
+}
+
+/// What a paragraph's cues come to: the cues in document order, the count of
+/// each loss kind (once per cue), and the text copied into cues so far.
+#[derive(Default)]
+pub(super) struct Output {
+    pub(super) cues: Vec<Cue>,
+    pub(super) losses: BTreeMap<Loss, usize>,
+    pub(super) copied: u64,
 }
 
 /// The text as TTML's white space rules read it (8.2.10). In `default`, every
@@ -55,14 +95,16 @@ pub(super) fn normalize(raw: &str, preserve: bool) -> String {
 }
 
 /// Writes the cues of the paragraph that runs from `begin` to `end`, both
-/// checked by the caller with `begin < end`, into `out`, in time order.
+/// checked by the caller with `begin < end`, into `out`, in time order. `top`
+/// is the paragraph's placement; `doc` holds the losses that hold for every
+/// cue of the document.
 pub(super) fn cues(
     pieces: &[Piece],
-    begin: u64,
-    end: u64,
+    (begin, end): (u64, u64),
+    top: bool,
+    doc: Flags,
     budget: &mut Budget,
-    copied: &mut u64,
-    out: &mut Vec<Cue>,
+    out: &mut Output,
 ) -> Result<(), ReadError> {
     // Each piece starts (true) and stops (false) once. At equal times the
     // order does not matter: every event at a time is applied before its slice.
@@ -90,38 +132,48 @@ pub(super) fn cues(
         // The next event after `at` ends this slice, or the paragraph does.
         let stop = events.get(next).map_or(end, |&(time, _, _)| time.min(end));
         if !active.is_empty()
-            && let Some(cue) = slice(pieces, &active, at, stop, budget, copied)?
+            && let Some(flags) = slice(pieces, &active, (at, stop), top, budget, out)?
         {
-            out.push(cue);
+            let flags = flags.join(doc);
+            if flags.styling {
+                *out.losses.entry(Loss::Styling).or_insert(0) += 1;
+            }
+            if flags.position {
+                *out.losses.entry(Loss::Position).or_insert(0) += 1;
+            }
         }
         at = stop;
     }
     Ok(())
 }
 
-/// The cue of one slice, or `None` when the active pieces hold no text.
+/// The cue of one slice, pushed to `out`, with the flags of its active pieces;
+/// `None` when the active pieces hold no text.
 fn slice(
     pieces: &[Piece],
     active: &BTreeSet<usize>,
-    start: u64,
-    stop: u64,
+    (start, stop): (u64, u64),
+    top: bool,
     budget: &mut Budget,
-    copied: &mut u64,
-) -> Result<Option<Cue>, ReadError> {
+    out: &mut Output,
+) -> Result<Option<Flags>, ReadError> {
     let mut lines = Vec::new();
-    let mut runs = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut flags = Flags::default();
     for &i in active {
         // One item per copy: the work of this slice is charged even when the
         // piece holds only white space, so no slice is free.
         budget.charge()?;
-        match &pieces[i].content {
+        let piece = &pieces[i];
+        flags = flags.join(piece.flags);
+        match &piece.content {
             Content::Break => finish_line(&mut runs, &mut lines, budget)?,
             Content::Text { text, preserve } => {
                 for (n, part) in text.split('\n').enumerate() {
                     if n > 0 {
                         finish_line(&mut runs, &mut lines, budget)?;
                     }
-                    append(&mut runs, part, !*preserve, copied)?;
+                    append(&mut runs, part, !*preserve, piece.style, &mut out.copied)?;
                 }
             }
         }
@@ -131,21 +183,24 @@ fn slice(
         return Ok(None);
     }
     budget.charge()?;
-    Ok(Some(Cue {
+    out.cues.push(Cue {
         start_ms: start,
         end_ms: stop,
-        top: false,
+        top,
         lines,
-    }))
+    });
+    Ok(Some(flags))
 }
 
-/// Adds text to the current line. With `collapse` (the `default` mode), a
-/// space that follows a space already on the line is dropped, so two pieces
-/// that each end or start with a space give one space between them.
+/// Adds text to the current line, in `style`. With `collapse` (the `default`
+/// mode), a space that follows a space already on the line is dropped, so two
+/// pieces that each end or start with a space give one space between them.
+/// Text of the same style joins the last run; a new style starts a new run.
 fn append(
     runs: &mut Vec<Run>,
     part: &str,
     collapse: bool,
+    style: RunStyle,
     copied: &mut u64,
 ) -> Result<(), ReadError> {
     let after_space = runs.last().is_some_and(|r| r.text.ends_with(' '));
@@ -162,12 +217,12 @@ fn append(
     }
     *copied += bytes;
     match runs.last_mut() {
-        Some(run) => run.text.push_str(part),
-        None => runs.push(Run {
+        Some(run) if style.matches(run) => run.text.push_str(part),
+        _ => runs.push(Run {
             text: part.to_owned(),
-            italic: false,
-            bold: false,
-            underline: false,
+            italic: style.italic,
+            bold: style.bold,
+            underline: style.underline,
         }),
     }
     Ok(())

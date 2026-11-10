@@ -5,10 +5,13 @@
 //! verdicts on the whole document. The input is read as it is, so the XML
 //! corpus (the seeds in `fuzz/corpus/ttml`) is mutated as XML. It is also read
 //! inside a fixed document, as the text of one paragraph, so a mutated text
-//! reaches the paragraph, span and break code, not only the root check. The
-//! timing of one paragraph is checked against its own model (see
-//! [`check_paragraph_timing`]), the one check of the reader's arithmetic that
-//! the other checks cannot make.
+//! reaches the paragraph, span and break code, not only the root check. A second
+//! fixed document has a head with a style and a region, and its paragraph refers to
+//! both, so a mutated text reaches the style and region code too. The timing of
+//! one paragraph is checked against its own model (see [`check_paragraph_timing`]),
+//! and the italic of one paragraph against another (see [`check_italic`]): the
+//! checks of the reader's arithmetic and of its style that the shared checks
+//! cannot make.
 
 use libfuzzer_sys::fuzz_target;
 use subtitles::ReadError;
@@ -20,6 +23,11 @@ mod common;
 /// `MAX_MS`), so the input is that paragraph's content.
 const HEAD: &[u8] = br#"<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="1h">"#;
 const TAIL: &[u8] = b"</p></div></body></tt>";
+
+/// The same paragraph timing, with a head that holds a style (italic) and a
+/// region covering the top half, and a paragraph that refers to both.
+const STYLED_HEAD: &[u8] = br#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><head><styling><style xml:id="s" tts:fontStyle="italic"/></styling><layout><region xml:id="r" tts:origin="0% 0%" tts:extent="100% 50%"/></layout></head><body><div><p begin="0s" end="1h" region="r" style="s">"#;
+const STYLED_TAIL: &[u8] = b"</p></div></body></tt>";
 
 /// A paragraph with `begin`, `end` and `dur` in milliseconds, taken from the
 /// first six bytes of the input as little-endian `u16` (at most 65 s each, so
@@ -51,8 +59,48 @@ fn check_paragraph_timing(data: &[u8]) {
     }
 }
 
+/// Italic (10.2.22) against its own model, written out here: a paragraph of two
+/// spans of text, `a` and `b`, that is italic when its `tts:fontStyle` is
+/// `italic` and is not otherwise. Its one cue must have the text `ab`, and each
+/// of its runs has the italic of the flag in the first byte of the input (the
+/// flag decides the attribute). A run that is not italic, or an italic run where
+/// there should be none, fails the target.
+fn check_italic(data: &[u8]) {
+    let Some(&flag) = data.first() else {
+        return;
+    };
+    let italic = flag & 1 == 1;
+    let style = if italic {
+        r#" tts:fontStyle="italic""#
+    } else {
+        ""
+    };
+    let doc = format!(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s"{style}>a<span>b</span></p></div></body></tt>"#
+    );
+    let parsed = subtitles::read_ttml(doc.as_bytes())
+        .unwrap_or_else(|e| panic!("{doc}: a usable paragraph, got {e:?}"));
+    assert_eq!(parsed.cues.len(), 1, "one cue in {doc}");
+    let runs: Vec<_> = parsed.cues[0]
+        .lines
+        .iter()
+        .flat_map(|line| &line.runs)
+        .collect();
+    let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(text, "ab", "text of {doc}");
+    assert!(
+        runs.iter().all(|r| r.italic == italic),
+        "every run of {doc} is italic={italic}"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     common::check(data, subtitles::read_ttml);
     common::check(&[HEAD, data, TAIL].concat(), subtitles::read_ttml);
+    common::check(
+        &[STYLED_HEAD, data, STYLED_TAIL].concat(),
+        subtitles::read_ttml,
+    );
     check_paragraph_timing(data);
+    check_italic(data);
 });
