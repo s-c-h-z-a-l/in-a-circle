@@ -1261,6 +1261,10 @@ mod tests {
             b"<tt xmlnsx=\"http://www.w3.org/ns/ttml\"/>",
             b"<tt xmlns=\"http://www.w3.org/ns/ttml-x\"/>",
             b"<tt xmlns:tt=\"http://www.w3.org/ns/ttml\"/>",
+            // A prefix is a name: `:tt` has none, and `x:foo` is not `tt`, even
+            // with its prefix declared to the TTML namespace.
+            b"<:tt xmlns:=\"http://www.w3.org/ns/ttml\"/>",
+            b"<x:foo xmlns:x=\"http://www.w3.org/ns/ttml\"/>",
         ];
         for (i, head) in no.iter().enumerate() {
             let p = d.file(&format!("no{i}.xml"), head);
