@@ -114,6 +114,54 @@ Wall times of the final release series are 0.10 to 0.18 s per shape (`Popen`
 to `wait4`). The earlier test-build wall times (0.6 to 1.8 s, which include the
 harness's pipe reads in a debug build) are not comparable to them.
 
+### Dense TTML shapes
+
+The dense TTML test (`dense_ttml_shapes_stay_within_the_data_limit`) runs
+fourteen inputs, each the densest its shape allows in the 8 MiB limit, through
+the release binary (`subtitles.ttml-to-srt`), five runs each, under
+`RLIMIT_DATA` 1 GiB and `RLIMIT_FSIZE` 256 MiB. The plan's counts that do not
+fit are replaced by the densest that do: 599,176 spans (not 4 M: 56 MB), 1,677,693
+breaks (not 4 M: 20 MB), and 391,791 named styles (a named style costs 18 B plus
+its name; the unnamed `<style/>` reaches 784,960). The units are the reader's
+charges; bytes per unit is (median peak minus the baseline's median) / units,
+the baseline being one cue in the same padded input (10.70 MiB). A refused
+shape's units are the most the budget keeps, found by bisection on the release
+binary.
+
+Measured with a minimal C parent (about 1 MB resident) that forks, sets the
+limits and execs the binary, reaping it with `wait4`: a fork reports at least
+its parent's resident set, and a parent that held the inputs in memory made
+every child report about 130 MiB, so the inputs are written to disk and the
+parent holds none. Run alone, the test prints peaks up to 3 MB higher on the
+small shapes and within 0.2 % on the large ones. In the full CLI suite its
+process is shared with the parallel tests, so the small shapes can read higher
+(67 MiB in one debug run); the table is from the isolated runs.
+
+| shape (8 MiB input) | units | min / median / max (MiB) | outcome | B per unit |
+|---|---|---|---|---|
+| baseline: one cue, padded | 1 | 10.68 / 10.70 / 10.71 | kept | |
+| run-dense: one paragraph of 599,176 `<span>x</span>` | 599,176 spans | 100.73 / 100.98 / 101.10 | kept | 158 per span |
+| cue-dense: 299,589 `<p begin="0s" end="1s">x</p>` | 299,589 cues | 124.81 / 124.97 / 125.11 | kept | 400 per cue |
+| depth-dense: 2,738 blocks, each 254 elements, 256 open at the deepest | 695,452 elements | 11.71 / 11.71 / 11.91 | kept | 1.5 per element |
+| table-dense: 391,791 named `<style xml:id>` | 391,791 styles | 82.09 / 82.30 / 82.34 | kept | 192 per style |
+| table-dense: 784,960 unnamed `<style/>` | 784,960 styles | 83.24 / 83.36 / 83.39 | kept | 97 per style |
+| region-dense: 374,757 named `<region>` | 374,757 regions | 79.08 / 79.18 / 79.21 | kept | 192 per region |
+| reference-dense, in a paragraph: 1,723,886 distinct undefined ids in one `style` | 1,723,886 ids | 10.64 / 10.70 / 10.75 | kept | 0 (not charged) |
+| reference-dense, in the head: 1,723,876 distinct undefined ids on a `style` element | 999,994 kept at most | 200.05 / 200.10 / 200.16 | refused, `TooComplex` (exit 1) | 199 per id (2 items each) |
+| break-dense: 1,677,693 `<br/>` in one paragraph | 666,664 kept at most | 63.96 / 64.09 / 64.25 | refused, `TooComplex` (exit 1) | 84 per `br` (about 3 items each) |
+| one 1 MiB attribute value: a style id, referenced by a paragraph | 1 value | 11.61 / 11.71 / 11.79 | kept | 1.0 per byte of value |
+| chain-dense: 149,920 styles, each referring to the one before | 149,920 styles | 44.80 / 44.93 / 44.98 | kept | 239 per style |
+| overlap-dense, nested: 177,074 spans, each inside the one before | 1,411 spans kept at most | 36.42 / 36.51 / 36.63 | refused, `TooComplex` (exit 1) | about 14 per copy (N² copies, about 2,000,000) |
+| overlap-dense, staggered: 179,389 spans, 10 ms apart, 15 ms long | 179,389 spans | 170.56 / 170.73 / 170.82 | kept | 935 per span |
+
+Reading: the highest kept peak is 170.8 MiB (the staggered overlaps, kept at
+the most spans the input holds), the highest refused one 200.2 MiB
+(the head reference list at the budget). Both are under the 400 MiB ceiling and
+a fifth of the 1 GiB net. The nested overlap is bounded by the copy charge:
+the budget stops it at 1,411 spans (about N² = 2,000,000 copies). A paragraph's
+`style` references are not charged, and cost one lookup and one merge each,
+bounded by the input. The 1 MiB attribute value costs its own size once.
+
 ## Binary size
 
 `scripts/check-sizes.sh`, release builds of the shipped binaries at HEAD
@@ -219,6 +267,75 @@ classifier, not from the scan. I did not find its cause; code layout is the
 likely suspect, and that is not verified. The no-arrow case is a broken or
 non-subtitle `.srt` with a text head, which the wheel would classify as text
 anyway, so this is the worst case of the search, not the common one.
+
+### TTML and `.xml` (plan-19)
+
+The TTML rules add a head search for `.xml`: the root start tag is read after
+the prolog (`<?…?>`, comments, a `<!DOCTYPE …>`), with `find` for the ends of
+those declarations. A `.ttml` or `.dfxp` costs nothing new (its head is checked
+for a leading `<`). Base is `c7125a9a`, the plan-18 head; the new tree is
+`a99732836` (the plan-19 head before this page). Both are `git archive`s built
+with their own target directories, and the same harness as above
+(`classify_bench`, 2,000 drops, two alternating rounds with the order swapped).
+
+Inputs: `nottml`, a `.xml` of 3,992 B (a 3,890 B XML comment, then
+`<catalog xmlns="urn:example:catalog">`, so the root is inside the head but
+is not `tt`); `ttml-xml`, a 403 B TTML document as `.xml`; `ttml`, the same as
+`.ttml`; `srt`, 94 B; `txt`, 51 B. "1 file" is one file per drop; "50 files" is
+50 copies per drop. Times in µs, round 1 / round 2; the delta is the mean of
+the two medians against the mean of base.
+
+| Case | Tree | median | p95 | median delta |
+|---|---|---|---|---|
+| `.xml` without TTML, 1 file | base | 1.88 / 1.88 | 2.35 / 2.42 | |
+| `.xml` without TTML, 1 file | new | 3.60 / 3.60 | 4.57 / 3.72 | +91.5 % |
+| `.xml` without TTML, 50 files | base | 93.89 / 94.10 | 96.07 / 96.94 | |
+| `.xml` without TTML, 50 files | new | 180.07 / 179.64 | 183.27 / 182.10 | +91.3 % |
+| `.xml` TTML, 1 file | base | 1.60 / 1.59 | 2.09 / 2.05 | |
+| `.xml` TTML, 1 file | new | 1.67 / 1.65 | 2.15 / 2.13 | +4.1 % |
+| `.xml` TTML, 50 files | base | 78.37 / 78.68 | 79.95 / 80.17 | |
+| `.xml` TTML, 50 files | new | 82.18 / 82.02 | 83.39 / 83.89 | +4.6 % |
+| `.ttml`, 1 file | base | 1.57 / 1.57 | 2.03 / 2.02 | |
+| `.ttml`, 1 file | new | 1.54 / 1.58 | 1.99 / 1.96 | -0.6 % |
+| `.ttml`, 50 files | base | 78.86 / 78.30 | 81.06 / 79.77 | |
+| `.ttml`, 50 files | new | 76.73 / 76.94 | 78.11 / 78.33 | -2.2 % |
+| `.srt`, 1 file | base | 1.54 / 1.54 | 2.00 / 1.98 | |
+| `.srt`, 1 file | new | 1.52 / 1.54 | 1.96 / 1.99 | -0.6 % |
+| `.srt`, 50 files | base | 76.51 / 77.23 | 77.74 / 78.36 | |
+| `.srt`, 50 files | new | 76.47 / 76.85 | 78.24 / 78.96 | -0.3 % |
+| `.txt`, 1 file | base | 1.51 / 1.51 | 1.95 / 1.95 | |
+| `.txt`, 1 file | new | 1.50 / 1.51 | 1.87 / 1.95 | -0.3 % |
+| `.txt`, 50 files | base | 74.09 / 74.33 | 75.72 / 75.62 | |
+| `.txt`, 50 files | new | 74.54 / 74.21 | 75.90 / 75.21 | +0.2 % |
+
+The TTML-less `.xml` costs +1.7 µs per file, +91 % on the 50-file drop (about
++86 µs): the goal of +10 % is not met as the tree stands. The `.ttml` and
+`.srt`/`.txt` paths are within the noise of the two trees. The `.xml` TTML
+drop costs +3.6 µs, about 0.07 µs per file.
+
+The cost is the search itself: `find` is `hay.windows(needle.len()).position`,
+one slice compare per byte, and the comment's `-->` is searched across about
+3.9 KB. The block search that fixed the subtitle search in plan-18 (`in_head`)
+is the fix. It was measured in a scratch copy of the new tree only, with `find`
+replaced by the same 128-byte block scan (the same first match by
+construction; the scratch copy was not differentially tested):
+
+| Case | Tree | median | p95 | median delta |
+|---|---|---|---|---|
+| `.xml` without TTML, 1 file | base / block scan | 1.89 / 1.88 vs 2.06 / 2.06 | 2.45 / 2.44 vs 2.68 / 2.66 | +9.3 % |
+| `.xml` without TTML, 50 files | base / block scan | 94.00 / 94.49 vs 103.03 / 103.28 | 95.58 / 98.04 vs 105.96 / 106.26 | +9.5 % |
+| `.xml` TTML, 1 file | base / block scan | 1.58 / 1.59 vs 1.66 / 1.67 | 2.06 / 2.07 vs 2.16 / 2.16 | +5.0 % |
+| `.xml` TTML, 50 files | base / block scan | 78.98 / 79.44 vs 81.70 / 81.30 | 80.23 / 81.47 vs 82.87 / 82.48 | +2.9 % |
+
+With the block scan the TTML-less 50-file drop is at +9.5 %: inside the goal,
+but at its edge and on this machine only. The rest (about 9 µs per 50 files)
+is the prolog walk and the reads. The change is not in the tree: it needs the
+same kind of differential test as `in_head_matches_the_naive_scan`.
+
+These are CPU micro-measurements on this machine (Ryzen 7 5700X, Linux
+7.3.1-1-cachyos, rustc 1.98.1, release examples). They are not the acceptance
+measurement of the wheel's budget, which is still open: two machines, about 50
+manual drags each.
 
 ## Test and verification evidence
 
@@ -375,6 +492,13 @@ scripts/check-sizes.sh
 for i in 1 2 3 4 5; do
   $MEM cargo test -p inacircle-subtitles --test cli dense_8_mib_input -- --nocapture
 done
+
+# Dense TTML shapes: the test runs the fourteen inputs (five runs each) and
+# prints min / median / max per shape. The table above was measured with the
+# release build (`--release`) from a minimal parent (a C program that forks,
+# sets the limits and execs the binary, reading `ru_maxrss` by `wait4`). That
+# parent is a throw-away and not committed.
+$MEM cargo test --release -p inacircle-subtitles --test cli dense_ttml -- --nocapture
 
 # Release binary: the same five shapes from a parent that sets RLIMIT_DATA
 # (1 GiB) and RLIMIT_FSIZE (256 MiB) on each child, runs
