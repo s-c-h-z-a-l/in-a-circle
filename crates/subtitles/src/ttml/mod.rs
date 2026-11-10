@@ -39,10 +39,10 @@
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
-//! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements` on every cue of the document (see the rule for document-level counts below) |
+//! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
 //! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
-//! | `styling`: any other child | `Elements` on every cue of the document |
+//! | `styling`: any other child | `Elements`, once (an item) |
 //! | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
 //! | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
 //! | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
@@ -77,9 +77,9 @@
 //! | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
 //! | `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
 //! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
-//! | a foreign-namespace element in a paragraph or span with no visible text | `Elements` on each cue of that paragraph |
+//! | a foreign-namespace element in a paragraph or span with no visible text | `Elements`, once (an item), wherever it sits in the paragraph |
 //! | a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
-//! | a foreign or unknown tt element in `body` or `div` with no visible text | `Elements` on every cue of the document (an upper bound, as above) |
+//! | a foreign or unknown tt element in `body` or `div` with no visible text | `Elements`, once (an item) |
 //! | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
 //! | an `image` element in `body` or `div` | an image unit: `Elements` once |
 //! | `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
@@ -93,11 +93,13 @@
 //! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
 //! | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 //!
-//! Document-level counts. A kind counted on every cue of the document (a
-//! `Styling` or `Position` from `initial` (a property the reader does not carry) or from an ignored element outside a paragraph, an
-//! `Elements` likewise) is the cue count: it replaces the per-cue counts the
-//! paragraphs made, so a document never counts a cue twice. Image units add to
-//! `Elements` on top of that, and only when a text cue remains.
+//! Document-level counts. A `Styling` or `Position` that holds for every cue of
+//! the document (from `initial`, a property the reader does not carry, or from
+//! a `set` or `animate` outside a paragraph) is the cue count: it replaces the
+//! per-cue counts the paragraphs made, so a document never counts a cue twice.
+//! `Elements` counts items, not cues: each ignored element with no visible text
+//! and each image unit is one, however many cues it lies over. Image units and
+//! ignored elements count only when a text cue remains.
 //!
 //! A cue's losses are its pieces' flags (`Flags`), counted once per cue. A piece
 //! takes the flags of every element it is in, and a `br` those of its own
@@ -400,7 +402,6 @@ impl Frame {
         Flags {
             styling: self.flags.styling || decorated(&self.css),
             position: self.flags.position,
-            elements: false,
         }
     }
 
@@ -457,8 +458,8 @@ struct Para {
     fault: Option<&'static str>,
     /// The region's placement puts the paragraph at the top (see [`top_third`]).
     top: bool,
-    /// Losses of the paragraph's own ignored elements (`set`, foreign content):
-    /// every cue the paragraph is cut into carries them.
+    /// Losses of the paragraph's own ignored `set` and `animate` elements: every
+    /// cue the paragraph is cut into carries them.
     flags: Flags,
     /// The paragraph holds an image (an image element, or a `backgroundImage`
     /// on it or on a span or `br` in it): one `Elements` unit. Its text is
@@ -684,9 +685,12 @@ struct Doc<'b> {
     frozen: bool,
     /// The root container's height, when `tt` gives it in px (10.2.16).
     root_height: Option<Len>,
-    /// The losses that hold for every cue: an `initial` element, and an ignored
-    /// element outside any paragraph (see `finish`).
+    /// The losses that hold for every cue: an `initial` element, and a `set` or
+    /// `animate` outside any paragraph (see `finish`).
     doc_flags: Flags,
+    /// Ignored elements with no visible text, each one item (`Loss::Elements`,
+    /// counted once wherever it sits; see `pruned_done`).
+    elements: usize,
     /// Image units outside a paragraph: an image element, or a `div` or `body`
     /// with a background image. Each is one `Elements` count; the paragraph
     /// units are counted at their end. A document with image units and no
@@ -719,6 +723,7 @@ impl<'b> Doc<'b> {
             frozen: false,
             root_height: None,
             doc_flags: Flags::default(),
+            elements: 0,
             images: 0,
         }
     }
@@ -846,7 +851,6 @@ impl<'b> Doc<'b> {
                 || decl.origin.is_some()
                 || decl.align.is_some()
                 || extent.is_some_and(|v| !root_extent_is_usable(v)),
-            elements: false,
         };
         self.stack.push(frame);
         Ok(())
@@ -1297,11 +1301,10 @@ impl<'b> Doc<'b> {
     fn ignore(&mut self, what: Ignore) {
         match (self.para.as_mut(), what) {
             (Some(para), Ignore::Styling) => para.flags.styling = true,
-            (Some(para), Ignore::Elements) => para.flags.elements = true,
             (Some(para), Ignore::Image) => para.unit = true,
             (None, Ignore::Styling) => self.doc_flags.styling = true,
-            (None, Ignore::Elements) => self.doc_flags.elements = true,
             (None, Ignore::Image) => self.images += 1,
+            (_, Ignore::Elements) => self.elements += 1,
         }
     }
 
@@ -1343,14 +1346,15 @@ impl<'b> Doc<'b> {
         for (set, loss) in [
             (self.doc_flags.styling, Loss::Styling),
             (self.doc_flags.position, Loss::Position),
-            (self.doc_flags.elements, Loss::Elements),
         ] {
             if set && cues > 0 {
                 out.losses.insert(loss, cues);
             }
         }
-        if cues > 0 && self.images > 0 {
-            *out.losses.entry(Loss::Elements).or_insert(0) += self.images;
+        // `Elements` counts items, not cues: each ignored element and each image unit once.
+        let items = self.elements + self.images;
+        if cues > 0 && items > 0 {
+            *out.losses.entry(Loss::Elements).or_insert(0) += items;
         }
         Ok(Parsed {
             cues: out.cues,

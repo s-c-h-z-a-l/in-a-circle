@@ -206,7 +206,8 @@ pub enum Loss {
     VoiceNames,
     Brackets,
     /// Elements the reader ignores whole (foreign namespaces, unsupported
-    /// vocabulary), and images, which a text file cannot show. The text around
+    /// vocabulary), and images, which a text file cannot show. Counted in items,
+    /// not cues: each ignored element and each image is one. The text around
     /// an image is converted and counted as usual.
     Elements,
 }
@@ -241,7 +242,8 @@ pub struct Parsed {
     /// Usable cues, in the order the file gives them. Callers sort them with
     /// [`sort_cues`].
     pub cues: Vec<Cue>,
-    /// Losses found while reading, counted in cues.
+    /// Losses found while reading: counted in cues, except [`Loss::Elements`],
+    /// which counts items.
     pub losses: BTreeMap<Loss, usize>,
     pub skipped: Skipped,
 }

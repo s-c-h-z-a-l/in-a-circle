@@ -147,9 +147,6 @@ pub(super) fn cues(
             if flags.position {
                 *out.losses.entry(Loss::Position).or_insert(0) += 1;
             }
-            if flags.elements {
-                *out.losses.entry(Loss::Elements).or_insert(0) += 1;
-            }
         }
         at = stop;
     }

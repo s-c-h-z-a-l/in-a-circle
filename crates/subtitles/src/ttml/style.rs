@@ -132,13 +132,11 @@ pub(super) fn hiding_declared(decl: &Css) -> bool {
 }
 
 /// What a text piece or a `br` is affected by: a `Styling` or a `Position`
-/// declaration on it or on an element it is in, or an ignored element
-/// (`Elements`) it contains. Each counts once per cue.
+/// declaration on it or on an element it is in. Each counts once per cue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Flags {
     pub(super) styling: bool,
     pub(super) position: bool,
-    pub(super) elements: bool,
 }
 
 impl Flags {
@@ -146,7 +144,6 @@ impl Flags {
         Flags {
             styling: self.styling || other.styling,
             position: self.position || other.position,
-            elements: self.elements || other.elements,
         }
     }
 }
@@ -212,7 +209,6 @@ pub(super) fn own_flags(decl: &Css) -> Flags {
             || decl.origin.is_some()
             || decl.extent.is_some()
             || decl.align.is_some(),
-        elements: false,
     }
 }
 
@@ -664,7 +660,6 @@ impl Sheet {
         Flags {
             styling: e.css.styling || e.dup.styling,
             position: e.css.position || e.dup.position,
-            elements: false,
         }
     }
 

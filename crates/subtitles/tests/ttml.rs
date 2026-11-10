@@ -1594,9 +1594,18 @@ fn accounting_rows() -> Vec<Row> {
             None,
         ),
         row(
-            "foreign element in a div: Elements on every cue",
+            "foreign element in a div: Elements once, not per cue",
             doc(
                 r#"<x:foo xmlns:x="urn:x"/><p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "two foreign elements in a paragraph cut into three cues: Elements 2, not 6",
+            doc(
+                r#"<p begin="0s" end="3s">a<x:foo xmlns:x="urn:x"/><span begin="1s" end="2s">b</span><x:foo xmlns:x="urn:x"/>c</p>"#,
             ),
             &[(Loss::Elements, 2)],
             0,
