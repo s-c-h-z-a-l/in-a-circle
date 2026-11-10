@@ -98,6 +98,7 @@
 //! | the document has no cue, and skipped items (a stray image does not change this) | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
 //! | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 //! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
+//! | the animation pass, before the reading: each `body`, `div`, `region` or `tt` a visibility `set` or `animate` reaches outside a paragraph (one item each); each element an `animate` attribute names, on `body`, `div`, `p`, `span` or `region` (one item each); each IDREF of an `animate` attribute (one item each); each out-of-line `set` or `animate` in an `animation`, once per distinct `xml:id` | the item budget: past it `TooComplex`. A visibility `set` or `animate` inside a paragraph or span costs nothing |
 //! | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 //!
 //! Document-level counts. A `Styling` or `Position` that holds for every cue of
@@ -349,11 +350,13 @@ fn scope<'m>(
     budget: &mut Budget,
     ord: u32,
 ) -> Result<&'m mut Anim, ReadError> {
-    if !scopes.contains_key(&ord) {
-        budget.charge()?;
-        scopes.insert(ord, Anim::default());
+    match scopes.entry(ord) {
+        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            budget.charge()?;
+            Ok(entry.insert(Anim::default()))
+        }
     }
-    Ok(scopes.entry(ord).or_default())
 }
 
 /// The `xml` crate's refusal as the reader's. A declared encoding other than

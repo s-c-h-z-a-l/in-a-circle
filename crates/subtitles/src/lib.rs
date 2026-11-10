@@ -469,4 +469,61 @@ mod tests {
         };
         assert_eq!(least(r#"<set begin="0s" tts:display="none"/>"#), least(""),);
     }
+
+    /// The animated scope pass charges one item per element it scopes, and one
+    /// per IDREF of an `animate` attribute plus its element's entry (see
+    /// `animated_scopes`). Each document has the same hidden paragraphs (their
+    /// text is not kept, so their cost is the same), and a head animation that
+    /// is named is charged the same in both: the difference is the scope alone.
+    /// The least budget that is not refused for lack of items is the measure.
+    #[test]
+    fn the_animated_scope_pass_charges_one_item_per_scope() {
+        let least = |text: &str| {
+            (1..)
+                .find(|&b| {
+                    !matches!(
+                        ttml::parse(text.as_bytes(), &mut Budget::new(b)),
+                        Err(ReadError::TooComplex)
+                    )
+                })
+                .expect("some budget reads the document")
+        };
+        let doc = |head: &str, body: &str| {
+            format!(
+                r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><head>{head}</head><body>{body}</body></tt>"#
+            )
+        };
+        let hidden = r#"<p begin="0s" end="1s" tts:display="none">a</p>"#;
+        let set = r#"<set begin="0s" tts:visibility="hidden"/>"#;
+        let base = least(&doc("", &format!("<div>{hidden}</div>")));
+        assert_eq!(
+            least(&doc("", &format!("<div>{set}{hidden}</div>"))) - base,
+            1,
+            "a division"
+        );
+        assert_eq!(
+            least(&doc("", &format!("{set}<div>{hidden}</div>"))) - base,
+            1,
+            "the body"
+        );
+        let body = r#"<div><p begin="0s" end="1s" region="r" tts:display="none">a</p></div>"#;
+        let region = least(&doc(r#"<layout><region xml:id="r"/></layout>"#, body));
+        assert_eq!(
+            least(&doc(
+                &format!(r#"<layout><region xml:id="r">{set}</region></layout>"#),
+                body
+            )) - region,
+            1,
+            "a region"
+        );
+        let anim =
+            r#"<animation><set xml:id="a1" begin="0s" tts:visibility="hidden"/></animation>"#;
+        let named = least(&doc(anim, &format!("<div>{hidden}</div>")));
+        let p_named = r#"<div><p begin="0s" end="1s" tts:display="none" animate="a1">a</p></div>"#;
+        assert_eq!(
+            least(&doc(anim, p_named)) - named,
+            2,
+            "one IDREF and the paragraph's entry"
+        );
+    }
 }

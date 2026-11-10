@@ -205,6 +205,7 @@ whatever else it holds (a hidden or animated one included).
 | the document has no cue, and skipped items (a stray image does not change this) | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
 | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
+| the animation pass, before the reading: each `body`, `div`, `region` or `tt` a visibility `set` or `animate` reaches outside a paragraph (one item each); each element an `animate` attribute names, on `body`, `div`, `p`, `span` or `region` (one item each); each IDREF of an `animate` attribute (one item each); each out-of-line `set` or `animate` in an `animation`, once per distinct `xml:id` | the item budget: past it `TooComplex`. A visibility `set` or `animate` inside a paragraph or span costs nothing |
 | each element outside a paragraph that holds a `set` or `animate` of `display`, `visibility` or `opacity` (the animated-visibility scope pass: a division, the body, a region, the root, or a head element, one item each); a `set` inside a paragraph or span is free | the item budget, charged in a pre-pass before the read (`animated_scopes`) |
 | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 
