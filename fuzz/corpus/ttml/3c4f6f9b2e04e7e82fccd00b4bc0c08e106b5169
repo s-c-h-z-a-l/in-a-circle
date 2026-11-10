@@ -1,0 +1,4 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body begin="2900ms" dur="12f"><div end="30f" dur="200ms"><p end="3000ms" xml:space="preserve"><span begin="700ms" end="90f" tts:fontStyle="italic">w2</span>   <span begin="2900ms" end="3300ms" tts:fontStyle="italic">é</span>
+	<span begin="2400ms" end="2500ms" tts:fontStyle="italic">w0</span>   <span begin="100ms" end="2700ms">w0</span></p>
+<p><span begin="2700ms" end="3800ms" tts:fontStyle="italic">w2</span><span begin="12f" end="42f" tts:fontStyle="italic">w5</span></p>
+</div></body></tt>

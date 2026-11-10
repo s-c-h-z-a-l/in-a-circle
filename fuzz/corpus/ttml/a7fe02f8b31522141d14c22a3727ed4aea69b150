@@ -1,0 +1,13 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body end="1800ms"><div end="99f"><p end="1300ms" dur="1500ms">   <span tts:fontStyle="italic"> <span begin="45f" end="3300ms" tts:fontStyle="italic">w5 w7 w6   </span> <br/><br/>
+	<span tts:fontStyle="italic">w9</span> w4   </span>   w7w1
+	w6
+	w9</p>
+<p begin="45f" end="2500ms">   日本 <span><span begin="1000ms" end="4900ms" dur="1100ms">
+	w0 <br/> w2w6 <br/>   w7 </span>
+	<span begin="2800ms" tts:fontStyle="italic">   w4
+	</span>w7<br/>w2 </span> é
+	日本w1<br/>
+	<br/> </p>
+<p begin="4200ms" end="165f"> é
+	</p>
+</div></body></tt>

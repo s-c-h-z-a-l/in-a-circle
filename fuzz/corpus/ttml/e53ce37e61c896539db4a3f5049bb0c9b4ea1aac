@@ -1,0 +1,11 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div begin="2900ms" end="2900ms" timeContainer="seq"><p end="3800ms"> <span> <span>
+	<span end="114f">w5éw6
+	w4 <br/> w8
+	</span> <span>   <br/> w9w1w0
+	w1 w6
+	w6 é</span>
+	<span begin="4600ms" end="5800ms"> <br/> w6   <br/> w6 日本
+	</span>   </span>   </span>   </p>
+<p end="2500ms" dur="2100ms"> <br/>é w3
+	</p>
+</div></body></tt>
