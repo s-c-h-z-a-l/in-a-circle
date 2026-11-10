@@ -63,19 +63,29 @@ fn write_runs(out: &mut impl Write, line: &Line, vtt: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// The text as `write_text` writes it: each CR or LF is one space.
+fn spaced(text: &str) -> Cow<'_, str> {
+    if text.contains(['\r', '\n']) {
+        Cow::Owned(text.replace(['\r', '\n'], " "))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// The line as the SRT reader reads it back. Each `<` the reader would take as a
 /// tag and each `{` it would take as an override block becomes a look-alike
 /// that no reader takes for markup (`tag::look_alikes`, the reader's own rules).
-/// The decision is made on the line's plain text, the speaker's `Name: ` prefix
-/// included, so a bracket at the end of a run is judged by the text after it in
-/// the next run. The line is borrowed when no bracket needs changing.
+/// The decision is made on the line's plain text as the writer writes it (line
+/// breaks as spaces, see [`spaced`]), the speaker's `Name: ` prefix included, so
+/// a bracket at the end of a run is judged by the text after it in the next
+/// run. The line is borrowed when no bracket needs changing.
 fn srt_safe(line: &Line) -> Cow<'_, Line> {
-    let mut pieces: Vec<&str> = Vec::new();
+    let mut pieces: Vec<Cow<str>> = Vec::new();
     if let Some(name) = &line.voice {
-        pieces.push(name);
-        pieces.push(": ");
+        pieces.push(spaced(name));
+        pieces.push(Cow::Borrowed(": "));
     }
-    pieces.extend(line.runs.iter().map(|r| r.text.as_str()));
+    pieces.extend(line.runs.iter().map(|r| spaced(&r.text)));
     let plain = pieces.concat();
     let looks = look_alikes(&plain);
     if looks.is_empty() {
@@ -94,7 +104,10 @@ fn srt_safe(line: &Line) -> Cow<'_, Line> {
         at += text.len();
         fixed
     };
-    let voice: Option<Rc<str>> = line.voice.as_deref().map(|name| Rc::from(next(name)));
+    let voice: Option<Rc<str>> = line
+        .voice
+        .as_deref()
+        .map(|name| Rc::from(next(&spaced(name))));
     if line.voice.is_some() {
         next(": ");
     }
@@ -102,7 +115,7 @@ fn srt_safe(line: &Line) -> Cow<'_, Line> {
         .runs
         .iter()
         .map(|r| Run {
-            text: next(&r.text),
+            text: next(&spaced(&r.text)),
             italic: r.italic,
             bold: r.bold,
             underline: r.underline,

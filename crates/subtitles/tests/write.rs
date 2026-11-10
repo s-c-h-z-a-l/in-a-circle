@@ -314,6 +314,37 @@ fn line_breaks_in_text_become_spaces() {
     assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\na  b\n\n");
 }
 
+/// A line break inside a run is written as a space, so the look-alike choice
+/// must judge the space too: `<b` and `x>` joined by a break is `<b x>`, a bold
+/// tag, once the break is written. Judged with the break, it is not a tag and
+/// nothing is rewritten, so the reader would take `<b x>` for markup and lose
+/// the text. The `<` is rewritten instead, and the text reads back whole.
+#[test]
+fn line_break_inside_a_tag_like_run_is_judged_as_the_space_it_is_written_as() {
+    // Each CR or LF is written as one space, so `\r\n` is two.
+    for (brk, gap) in [("\n", " "), ("\r", " "), ("\r\n", "  ")] {
+        let cues = [cue(0, 1_000, vec![plain(&format!("a <b{brk}x> c"))])];
+        let (s, losses) = srt(&cues);
+        let visible = format!("a \u{ff1c}b{gap}x> c");
+        assert_eq!(
+            s,
+            format!("\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\n{visible}\r\n\r\n"),
+            "{brk:?}"
+        );
+        assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]), "{brk:?}");
+        let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+        assert_eq!(back.skipped.count, 0, "{brk:?}");
+        assert_eq!(
+            back.cues[0].lines,
+            vec![Line {
+                voice: None,
+                runs: vec![run(&visible)],
+            }],
+            "{brk:?}"
+        );
+    }
+}
+
 /// The text of each line of a cue, runs joined.
 fn texts(cue: &Cue) -> Vec<String> {
     cue.lines
