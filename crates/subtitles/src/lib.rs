@@ -62,15 +62,26 @@ pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
 /// decoded by the `xml` crate. A document that is not well-formed is refused
 /// whole, with the line, and so is a time base the reader does not convert (a
 /// clock or drop-frame time code). A document whose subtitles are images is
-/// refused as [`ReadError::ImageBased`]. An element the reader does not convert
-/// is skipped or counted in its losses. See `ttml/mod.rs` for the accounting.
+/// refused as [`ReadError::ImageBased`], and one whose text is all skipped as
+/// [`ReadError::TtmlAllSkipped`], with the first skip. An element the reader
+/// does not convert is skipped or counted in its losses. See `ttml/mod.rs` for
+/// the accounting.
 pub fn read_ttml(bytes: &[u8]) -> Result<Parsed, ReadError> {
     if bytes.len() > INPUT_BYTES {
         return Err(ReadError::TooLarge);
     }
     let parsed = ttml::parse(bytes, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
-        return Err(ReadError::NoCues);
+        // A skipped item is always kept with its line, so `first` is set
+        // exactly when something was skipped: the reason is then shown.
+        return Err(match parsed.skipped.first {
+            Some((line, reason)) => ReadError::TtmlAllSkipped {
+                count: parsed.skipped.count,
+                line,
+                reason,
+            },
+            None => ReadError::NoCues,
+        });
     }
     Ok(parsed)
 }
@@ -249,6 +260,17 @@ pub enum ReadError {
     /// The document has image subtitles (`smpte:backgroundImage`, `image`
     /// elements) and no text cue: the images cannot be converted.
     ImageBased,
+    /// The document has text, but no cue in it is usable: `count` items were
+    /// skipped, the first at `line` (1-based) for `reason`. Shown in place of
+    /// `NoCues`, which would hide the reason.
+    TtmlAllSkipped {
+        count: usize,
+        line: usize,
+        reason: &'static str,
+    },
+    /// The text copied into cues (a paragraph's text is copied into each slice
+    /// it is active in) passes [`OUTPUT_BYTES`]: the output could not be written.
+    TextTooLarge,
 }
 
 impl fmt::Display for ReadError {
@@ -269,6 +291,15 @@ impl fmt::Display for ReadError {
             ReadError::NotTtml => f.write_str("not a TTML document"),
             ReadError::Unsupported(reason) => write!(f, "unsupported TTML: {reason}"),
             ReadError::ImageBased => f.write_str("no text subtitles found (image-based)"),
+            ReadError::TtmlAllSkipped {
+                count,
+                line,
+                reason,
+            } => write!(
+                f,
+                "no subtitles found ({count} items skipped, first at line {line}: {reason})"
+            ),
+            ReadError::TextTooLarge => f.write_str("subtitle text would be larger than 32 MiB"),
         }
     }
 }

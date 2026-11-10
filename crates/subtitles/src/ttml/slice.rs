@@ -217,7 +217,7 @@ fn append(
     }
     let bytes = u64::try_from(part.len()).unwrap_or(u64::MAX);
     if copied.saturating_add(bytes) > OUTPUT_BYTES {
-        return Err(ReadError::TooComplex);
+        return Err(ReadError::TextTooLarge);
     }
     *copied += bytes;
     match runs.last_mut() {

@@ -78,9 +78,10 @@
 //! | a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
 //! | the document has image units and no text cue | `ReadError::ImageBased` (the whole file) |
 //! | the document has no cue and no image unit | `ReadError::NoCues` (the whole file) |
+//! | the document has text but no cue, and skipped items | `ReadError::TtmlAllSkipped`: the count and the first skipped item (the whole file) |
 //! | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 //! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
-//! | text copied into cues | `TooComplex` past `OUTPUT_BYTES` |
+//! | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 //!
 //! Document-level counts. A kind counted on every cue of the document (a
 //! `Styling` from `initial` or from an ignored element outside a paragraph, an

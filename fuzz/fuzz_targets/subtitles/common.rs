@@ -7,10 +7,11 @@
 //!   not white space, the skipped count and its first line agree (the line is
 //!   within the input's lines), and every loss is counted at least once;
 //! - `NotUtf8` names the first bad byte of the input, `TooLarge` comes only
-//!   past `INPUT_BYTES`; `TooComplex`, `NoCues` and `ImageBased` are valid
-//!   verdicts;
+//!   past `INPUT_BYTES`; `TooComplex`, `NoCues`, `ImageBased` and `TextTooLarge`
+//!   are valid verdicts;
 //! - `Malformed` (TTML) names a line of the input and says why, and
-//!   `NotTtml` and `Unsupported` are verdicts on the whole document.
+//!   `NotTtml` and `Unsupported` are verdicts on the whole document, and
+//!   `TtmlAllSkipped` names a line of the input and says why.
 //!
 //! The cues, sorted as the caller sorts them, are then written as SRT and as
 //! WebVTT and read back by the matching reader. This is own consistency, not
@@ -297,8 +298,29 @@ pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
         // crates/subtitles; a fuzz input rarely reaches ITEM_BUDGET, and when
         // it does the verdict is still checked here.
         Err(
-            ReadError::TooComplex | ReadError::NoCues | ReadError::ImageBased | ReadError::NotTtml,
+            ReadError::TooComplex
+            | ReadError::NoCues
+            | ReadError::ImageBased
+            | ReadError::NotTtml
+            | ReadError::TextTooLarge,
         ) => {}
+        // Every skipped item is counted, and the first one names a line that
+        // exists and says why it was skipped.
+        Err(ReadError::TtmlAllSkipped {
+            count,
+            line,
+            reason,
+        }) => {
+            assert!(
+                count >= 1 && !reason.is_empty(),
+                "TtmlAllSkipped with no item"
+            );
+            assert!(
+                (1..=line_bound(data)).contains(&line),
+                "TtmlAllSkipped names line {line} of an input with {} lines",
+                line_bound(data)
+            );
+        }
         Err(ReadError::Unsupported(reason)) => {
             assert!(!reason.is_empty(), "Unsupported with no reason");
         }

@@ -584,7 +584,7 @@ fn copied_text_is_capped_at_the_output_size() {
         .collect();
     let timed = doc(&format!("<p begin=\"0s\" end=\"20s\">{text}{spans}</p>"));
     assert!(timed.len() <= INPUT_BYTES);
-    assert_eq!(read_ttml(timed.as_bytes()), Err(ReadError::TooComplex));
+    assert_eq!(read_ttml(timed.as_bytes()), Err(ReadError::TextTooLarge));
     let whole = doc(&format!("<p begin=\"0s\" end=\"20s\">{text}</p>"));
     assert_eq!(read(&whole).cues.len(), 1);
 }
@@ -1106,12 +1106,17 @@ fn image_only_document_is_refused() {
 
 /// 12.4 and 12.4.1: a paragraph in a body with no timing has no end (its
 /// implicit duration is indefinite, and the document has no end to give it).
-/// It is skipped with its reason, and a document with nothing else is refused.
+/// It is skipped with its reason, and a document with nothing else is refused
+/// with that reason, not as having no cue.
 #[test]
 fn paragraph_without_any_timing_has_no_end() {
     assert_eq!(
         read_ttml(doc("<p>x</p>").as_bytes()),
-        Err(ReadError::NoCues)
+        Err(ReadError::TtmlAllSkipped {
+            count: 1,
+            line: 1,
+            reason: "no end time"
+        })
     );
     let parsed = read(&doc("<p>x</p><p begin=\"0s\" end=\"1s\">y</p>"));
     assert_eq!(texts(&parsed), vec!["y"]);

@@ -74,6 +74,26 @@ fn read_errors_say_what_the_user_sees() {
         ReadError::ImageBased.to_string(),
         "no text subtitles found (image-based)"
     );
+    // The reason of a document whose every item is skipped is shown, not hidden
+    // behind `no subtitles found`.
+    assert_eq!(
+        ReadError::TtmlAllSkipped {
+            count: 3,
+            line: 7,
+            reason: "no end time"
+        }
+        .to_string(),
+        "no subtitles found (3 items skipped, first at line 7: no end time)"
+    );
+    // The text copied into cues past the output size is not the item budget.
+    assert_eq!(
+        ReadError::TextTooLarge.to_string(),
+        "subtitle text would be larger than 32 MiB"
+    );
+    assert_ne!(
+        ReadError::TextTooLarge.to_string(),
+        ReadError::TooComplex.to_string()
+    );
 }
 
 #[test]
