@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 
 use subtitles::{Cue, INPUT_BYTES, ITEM_BUDGET, Loss, Parsed, ReadError, read_ttml};
 
+/// The text oracle the fuzz target runs too (`fuzz/fuzz_targets/ttml.rs`): the
+/// generator and the model of what the reader must return.
+#[path = "../../../fuzz/fuzz_targets/subtitles/ttml_model.rs"]
+mod ttml_model;
+
 /// Set to `1` on a runner that must have `xmllint`: a missing tool then fails
 /// the test instead of skipping the comparison.
 const REQUIRE_TOOLS: &str = "INACIRCLE_REQUIRE_SUBTITLE_TOOLS";
@@ -2441,5 +2446,69 @@ fn profile_declarations_are_not_content() {
         ));
         assert_eq!(texts(&parsed), vec!["a"], "{ns}");
         assert!(parsed.losses.is_empty(), "{ns}");
+    }
+}
+
+/// A fixed-seed generator (xorshift64*): the same documents on every run, so a
+/// failure reproduces.
+struct Rng(u64);
+
+impl Rng {
+    fn pick(&mut self, n: u32) -> u32 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        let v = self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32;
+        (v % u64::from(n)) as u32
+    }
+}
+
+/// Generated documents per run: about a second in a debug build.
+const GENERATED: usize = 4_000;
+
+/// Text conservation against the model (`ttml_model`): each generated document
+/// gives the cues, their intervals and lines, and the skipped paragraphs the
+/// model says, and each visible word of a usable paragraph is in a cue on screen
+/// while it is visible. The generator's documents are mostly usable, so the
+/// property is not vacuous: most of them must have a cue.
+#[test]
+fn generated_documents_keep_their_text() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut with_cues = 0;
+    for _ in 0..GENERATED {
+        let doc = ttml_model::document(&mut |n| rng.pick(n));
+        if !ttml_model::expected(&doc).cues.is_empty() {
+            with_cues += 1;
+        }
+        ttml_model::check(&doc);
+    }
+    assert!(
+        with_cues * 2 > GENERATED,
+        "most generated documents should have a cue, {with_cues} of {GENERATED} do"
+    );
+}
+
+/// The shapes of the review findings (R1, R2) and the preserved white-space
+/// line, each checked against the model.
+#[test]
+fn review_shapes_keep_their_text() {
+    for (_, doc) in ttml_model::named() {
+        ttml_model::check(&doc);
+    }
+}
+
+/// The model itself on the named shapes, against the text the standard gives
+/// (R1: the white space between two timed spans is shown; R2: the `br` breaks
+/// the line; P1: the trimmed line). A model wrong here would pass the property
+/// vacuously.
+#[test]
+fn model_gives_the_standard_text_for_the_named_shapes() {
+    let want = [
+        vec![(1000, 2000, vec!["w1 w2".to_owned()])],
+        vec![(1000, 2000, vec!["w1".to_owned(), "w2".to_owned()])],
+        vec![(0, 1000, vec!["w1".to_owned()])],
+    ];
+    for ((_, doc), want) in ttml_model::named().iter().zip(want) {
+        assert_eq!(ttml_model::expected(doc).cues, want);
     }
 }

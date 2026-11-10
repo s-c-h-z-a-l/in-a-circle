@@ -119,7 +119,13 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
     let count = 1 + pick(3);
     let mut paras = Vec::new();
     for _ in 0..count {
-        let timing = timing(pick);
+        // Most paragraphs get an end, so the cues are not all skipped; the rest
+        // (about one in five) have none, which is the review's shape.
+        let mut timing = timing(pick);
+        if timing.end.is_none() && pick(3) != 0 {
+            let from = timing.begin.map_or(0, |s| s.ms);
+            timing.end = Some(stamp(from + u64::from(pick(41)) * STEP_MS, pick));
+        }
         let preserve = pick(3) == 0;
         let mut budget = ITEMS;
         let children = nodes(pick, 0, &mut budget);
