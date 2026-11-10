@@ -119,16 +119,20 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
     let count = 1 + pick(3);
     let mut paras = Vec::new();
     for _ in 0..count {
-        // Most paragraphs get an end, so the cues are not all skipped; the rest
-        // (about one in five) have none, which is the review's shape.
-        let mut timing = timing(pick);
-        if timing.end.is_none() && pick(3) != 0 {
-            let from = timing.begin.map_or(0, |s| s.ms);
-            timing.end = Some(stamp(from + u64::from(pick(41)) * STEP_MS, pick));
-        }
+        let (timing, children) = if pick(3) == 0 {
+            timed_runs(pick)
+        } else {
+            // Most paragraphs get an end, so the cues are not all skipped; the
+            // rest (about one in five) have none, which is the review's shape.
+            let mut timing = timing(pick);
+            if timing.end.is_none() && pick(3) != 0 {
+                let from = timing.begin.map_or(0, |s| s.ms);
+                timing.end = Some(stamp(from + u64::from(pick(41)) * STEP_MS, pick));
+            }
+            let mut budget = ITEMS;
+            (timing, nodes(pick, 0, &mut budget))
+        };
         let preserve = pick(3) == 0;
-        let mut budget = ITEMS;
-        let children = nodes(pick, 0, &mut budget);
         paras.push(Para {
             timing,
             preserve,
@@ -141,6 +145,41 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
         seq,
         paras,
     }
+}
+
+/// Timed spans with white space or a `br` between them, one word each, and
+/// often no end on the paragraph: the shape of the review's findings (R1 and
+/// R2). Each span begins in the first 3 s and lasts up to 3 s, so two of them
+/// often overlap, which is where white space between words can be lost.
+fn timed_runs(pick: &mut dyn FnMut(u32) -> u32) -> (Timing, Vec<Node>) {
+    let mut children = Vec::new();
+    for i in 0..2 + pick(3) {
+        if i > 0 {
+            if pick(4) == 0 {
+                children.push(Node::Br);
+            } else {
+                gap(pick, &mut children);
+            }
+        }
+        let begin = u64::from(pick(31)) * STEP_MS;
+        let end = begin + u64::from(pick(31)) * STEP_MS;
+        children.push(Node::Span(Span {
+            timing: Timing {
+                begin: Some(stamp(begin, pick)),
+                end: Some(stamp(end, pick)),
+                dur: None,
+            },
+            italic: pick(3) == 0,
+            children: vec![Node::Word(WORDS[pick(WORDS.len() as u32) as usize])],
+        }));
+    }
+    let end = (pick(2) == 0).then(|| stamp(u64::from(pick(41)) * STEP_MS, pick));
+    let timing = Timing {
+        begin: None,
+        end,
+        dur: None,
+    };
+    (timing, children)
 }
 
 /// A begin of 0 to 6 s, an end of 0 to 4 s after the begin, a duration of 0 to
