@@ -312,11 +312,13 @@ found no critical or important finding and 4 minor ones. All were fixed.
     not silent: 3 by a rule the spec decides (a paragraph with no end; an oblique
     carried as italic), and 6 that are refused because a `set` changes their
     visibility over time (the reader does not play that timeline);
-  - ttconv 1.2.3 (`tt convert`, CI only): 242 files are compared in SRT and
-    WebVTT, on start and end in milliseconds and on the text with its italic,
-    bold and underline. Nothing is normalised on either side; colour and font
+  - ttconv 1.2.3 (`tt convert`, CI only): 229 files are compared in SRT, and
+    224 of them in WebVTT (five nested-division files are SRT only), on start
+    and end in milliseconds and on the text with its italic, bold and
+    underline. Only the white space at the two ends of a line is trimmed, on
+    both sides, as every reader of the crate trims lines; colour and font
     markup, which the reader drops and counts, is the only markup removed. The
-    list of files left out and why is at the top of `ttml_conformance.rs`.
+    files left out and why are at the top of `ttml_conformance.rs`.
 
   Static visibility is honoured: `display="none"`, `visibility="hidden"` and
   `opacity="0"` hide the text they reach (10.2.14, 10.2.49, 10.2.30), and each

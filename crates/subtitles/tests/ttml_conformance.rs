@@ -23,11 +23,18 @@
 //! - `ttconv_comparison_set_is_classified_without_the_tool` runs everywhere:
 //!   every file is refused by us, excluded for a stated reason, or compared.
 //!
-//! Structural exclusions, found by the test. A file whose cues overlap in
-//! time is not compared: ttconv merges the paragraphs on screen at one moment
-//! into one cue, and the reader keeps one cue per paragraph. A file with a
-//! `span` that has its own timing is not compared either: the reader slices
-//! the paragraph by such spans, and ttconv snapshots the whole document.
+//! Structural exclusions, found by the test. A file is not compared when:
+//! - its cues overlap in time: ttconv merges the paragraphs on screen at one
+//!   moment into one cue, and the reader keeps one cue per paragraph;
+//! - a `span` has its own timing: the reader slices the paragraph by such
+//!   spans, and ttconv snapshots the whole document;
+//! - it animates a style property (`set` or `animate`, not visibility, display
+//!   or opacity): ttconv starts a cue at each animation step;
+//! - the reader skipped a paragraph with no end time: ttconv keeps it open-ended.
+//!
+//! The WebVTT comparison alone is left out for the files in
+//! `VTT_DIVERGENT_FILES`: ttconv's WebVTT writer drops a paragraph in a nested
+//! division. Their SRT comparison stays.
 //!
 //! The divergence list is `DIVERGENT_FILES` below: one line per file, with the
 //! reason it is not compared. An entry marked OPEN is a real mismatch the
