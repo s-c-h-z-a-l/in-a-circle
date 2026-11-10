@@ -68,6 +68,8 @@
 //! | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
 //! | text in `p` or `span`, white space only | spacing only: a piece over its container's interval; with no end of its own it lasts as long as the paragraph (8.2.10, 12.4), and the space is trimmed where a line starts or ends. Not counted |
 //! | visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
+//! | `begin`, `end`, `dur` with a time at or past 100 hours, in one expression or summed through the containers | a fault on the element: its paragraphs are `skipped`, `time is 100 hours or more` (the same reason wherever the time comes from)
+//! | `begin`, `end`, `dur` with a field past its range (minutes or seconds of 60 or more, a frame past the frame rate) | a fault on the element: its paragraphs are `skipped`, `time out of range`
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
 //! | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
@@ -145,7 +147,8 @@ const BAD_TIMESTAMP: &str = "bad timestamp";
 /// A time expression out of its field's range (12.3.1), or in a unit the
 /// reader does not count (the attribute is refused, not the document).
 const TIME_RANGE: &str = "time out of range";
-/// An absolute time at or past 100 hours: [`MAX_MS`] is the largest one.
+/// A time at or past 100 hours, in one expression or summed through the
+/// containers: [`MAX_MS`] is the largest time kept.
 const LATE: &str = "time is 100 hours or more";
 const ENDS_BEFORE_START: &str = "ends before it starts";
 /// An element whose end is indefinite, or that follows one in its sequence.
@@ -584,6 +587,7 @@ fn stamp(el: &Element, name: &str, params: &Params) -> Result<Stamp, ReadError> 
         Ok(ms) => Ok(Stamp::Time(ms)),
         Err(TimeError::Syntax) => Ok(Stamp::Bad(BAD_TIMESTAMP)),
         Err(TimeError::OutOfRange) => Ok(Stamp::Bad(TIME_RANGE)),
+        Err(TimeError::Late) => Ok(Stamp::Bad(LATE)),
         Err(TimeError::Unsupported(Unsupported(reason))) => Err(ReadError::Unsupported(reason)),
     }
 }

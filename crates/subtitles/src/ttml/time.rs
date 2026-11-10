@@ -51,10 +51,14 @@ pub(crate) struct Params {
 pub(crate) enum TimeError {
     /// Not the grammar of 12.3.1.
     Syntax,
-    /// The grammar is right, but a field breaks its constraint, or the time is
-    /// 100 hours or more ([`MAX_MS`]), or the arithmetic does not fit in `u128`.
-    /// The expression is skipped; the document is still read.
+    /// The grammar is right, but a field breaks its constraint (12.3.1: minutes
+    /// past 59, a frame past the frame rate, and so on). The expression is
+    /// skipped; the document is still read.
     OutOfRange,
+    /// The grammar is right and every field is in range, but the time is 100
+    /// hours or more ([`MAX_MS`]). A count too large for `u128` is such a time
+    /// too, so it is late as well. The expression is skipped.
+    Late,
     /// A form the reader does not convert. The whole document is refused,
     /// because a time converted from a different time base would be wrong.
     Unsupported(Unsupported),
@@ -201,7 +205,7 @@ fn clock(expr: &str, p: &Params) -> Result<Count, TimeError> {
     if parts.next().is_some() {
         return Err(TimeError::Syntax);
     }
-    let hours = digits(hours, 2, usize::MAX)?;
+    let hours = count(hours, 2)?;
     let minutes = digits(minutes, 2, 2)?;
     if minutes > MAX_MINUTE {
         return Err(TimeError::OutOfRange);
@@ -262,10 +266,8 @@ fn offset(expr: &str) -> Result<Count, TimeError> {
         .unwrap_or(expr.len());
     let (number, metric) = expr.split_at(end);
     let count = match number.split_once('.') {
-        None => Ratio::int(digits(number, 1, usize::MAX)?),
-        Some((whole, fraction)) => {
-            Ratio::int(digits(whole, 1, usize::MAX)?).plus(decimal(fraction)?)?
-        }
+        None => Ratio::int(count(number, 1)?),
+        Some((whole, fraction)) => Ratio::int(count(whole, 1)?).plus(decimal(fraction)?)?,
     };
     let (seconds, frames) = match metric {
         "h" => (count.times(Ratio::int(SECONDS_PER_HOUR))?, Ratio::int(0)),
@@ -280,7 +282,8 @@ fn offset(expr: &str) -> Result<Count, TimeError> {
 }
 
 /// `digit+` with a length in `min..=max`, as a value. Anything that is not a
-/// digit is a syntax error; a value past `u128` is out of range.
+/// digit is a syntax error; a value past `u128` is out of range (for a field
+/// with a bound, see [`count`] for the unbounded ones).
 fn digits(s: &str, min: usize, max: usize) -> Result<u128, TimeError> {
     if !(min..=max).contains(&s.len()) || !is_digits(s) {
         return Err(TimeError::Syntax);
@@ -290,6 +293,15 @@ fn digits(s: &str, min: usize, max: usize) -> Result<u128, TimeError> {
             n.checked_mul(10)?.checked_add(u128::from(b - b'0'))
         })
         .ok_or(TimeError::OutOfRange)
+}
+
+/// A count with no field limit (hours, the number of an offset time): one past
+/// `u128` is a time far past [`MAX_MS`], so it is late, not out of range.
+fn count(s: &str, min: usize) -> Result<u128, TimeError> {
+    digits(s, min, usize::MAX).map_err(|e| match e {
+        TimeError::OutOfRange => TimeError::Late,
+        other => other,
+    })
 }
 
 /// The digits after a decimal point, as a fraction of one unit. Only the first
@@ -343,8 +355,10 @@ fn gcd(mut a: u128, mut b: u128) -> u128 {
     a
 }
 
+/// A value past `u128` is a time far past [`MAX_MS`]: the counts that reach
+/// here are hours, offsets and ticks, and the fields are small.
 fn checked(v: Option<u128>) -> Result<u128, TimeError> {
-    v.ok_or(TimeError::OutOfRange)
+    v.ok_or(TimeError::Late)
 }
 
 /// An exact non-negative rational, `num / den`, kept reduced. Every operation
@@ -404,13 +418,13 @@ impl Ratio {
 
     /// Whole milliseconds, rounded half up: floor(x + 1/2) for x = num * 1000 /
     /// den, computed as (2 * num * 1000 + den) / (2 * den) so no half is lost.
-    /// A value at or past [`MAX_MS`] is out of range.
+    /// A value past [`MAX_MS`] is late.
     fn ms(self) -> Result<u64, TimeError> {
         let twice_ms = checked(self.num.checked_mul(2 * MS_PER_SECOND))?;
         let rounded = checked(twice_ms.checked_add(self.den))? / checked(self.den.checked_mul(2))?;
-        let ms = u64::try_from(rounded).map_err(|_| TimeError::OutOfRange)?;
+        let ms = u64::try_from(rounded).map_err(|_| TimeError::Late)?;
         if ms > MAX_MS {
-            return Err(TimeError::OutOfRange);
+            return Err(TimeError::Late);
         }
         Ok(ms)
     }
@@ -659,7 +673,7 @@ mod tests {
     /// A value that is well formed but out of range: a time from 100 hours on,
     /// including values past `u128`, which must not panic.
     #[test]
-    fn values_from_one_hundred_hours_are_out_of_range() {
+    fn values_from_one_hundred_hours_are_late() {
         let forty_nines = "9".repeat(40);
         let cases = [
             "100:00:00".to_string(),
@@ -671,7 +685,7 @@ mod tests {
             format!("{forty_nines}:00:00"),
         ];
         for expr in cases {
-            assert_eq!(read(&expr, &[]), Err(TimeError::OutOfRange), "{expr}");
+            assert_eq!(read(&expr, &[]), Err(TimeError::Late), "{expr}");
         }
     }
 

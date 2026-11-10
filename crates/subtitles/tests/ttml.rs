@@ -438,9 +438,10 @@ fn empty_interval_is_not_end_before_begin() {
     assert_eq!(parsed.skipped.first, Some((1, "text with no display time")));
 }
 
-/// 100 hours or more is past what a subtitle can carry. An
-/// expression that says so is out of range; a paragraph whose time adds up to
-/// it through its containers is past [`subtitles::MAX_MS`].
+/// 100 hours or more is past what a subtitle can carry. An expression that says
+/// so is late, whichever form it takes; a paragraph whose time adds up to it
+/// through its containers is late too (past [`subtitles::MAX_MS`]). A field
+/// past its range (minutes of 60 or more) is out of range, another reason.
 #[test]
 fn time_at_or_past_100_hours_is_skipped() {
     let parsed = read(&doc(
@@ -448,6 +449,9 @@ fn time_at_or_past_100_hours_is_skipped() {
          <p begin=\"0s\" end=\"1s\">ok</p>",
     ));
     assert_eq!(texts(&parsed), vec!["ok"]);
+    assert_eq!(parsed.skipped.first, Some((1, "time is 100 hours or more")));
+    let parsed = read(&doc("<p begin=\"00:60:00\" end=\"1s\">field</p>\
+         <p begin=\"0s\" end=\"1s\">ok</p>"));
     assert_eq!(parsed.skipped.first, Some((1, "time out of range")));
     let parsed = read(&format!(
         "{TT}<body><div begin=\"60:00:00.000\">\
@@ -1786,6 +1790,20 @@ fn accounting_rows() -> Vec<Row> {
             &[],
             1,
             Some((1, "time is 100 hours or more")),
+        ),
+        row(
+            "time at or past 100 hours in one expression: skipped",
+            doc(r#"<p begin="0s" end="100:00:01.000">late</p><p begin="0s" end="1s">ok</p>"#),
+            &[],
+            1,
+            Some((1, "time is 100 hours or more")),
+        ),
+        row(
+            "time field past its range (minutes of 60): skipped",
+            doc(r#"<p begin="00:60:00" end="1s">bad</p><p begin="0s" end="1s">ok</p>"#),
+            &[],
+            1,
+            Some((1, "time out of range")),
         ),
         row(
             "display none on a paragraph: hidden, counted",
