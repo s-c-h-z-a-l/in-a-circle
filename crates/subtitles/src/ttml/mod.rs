@@ -68,8 +68,9 @@
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
 //! | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
-//! | `set`, `animate`, `animation` in a paragraph or span | `Styling` on each cue of that paragraph |
-//! | `set`, `animate`, `animation` in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+//! | `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
+//! | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+//! | `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
 //! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
 //! | a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
 //! | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
@@ -101,14 +102,16 @@ mod slice;
 mod style;
 mod time;
 
+use std::collections::BTreeSet;
+
 use xml::{Element, ErrorKind, Event, Options, QName, Reader};
 
 use crate::srt::STRAY;
 use crate::{Budget, Loss, MAX_MS, Parsed, ReadError, Skipped};
 use slice::{Content, Output, Piece, RunStyle};
 use style::{
-    Css, Flags, Len, Opacity, Sheet, attrs_css, hiding_declared, own_flags, root_extent,
-    root_extent_is_usable, top_third,
+    Css, Flags, Len, Opacity, Sheet, animates_visibility, attrs_css, hiding_declared, own_flags,
+    root_extent, root_extent_is_usable, top_third,
 };
 use time::{Params, TimeError, parse_time};
 
@@ -154,12 +157,17 @@ const UNSUPPORTED_ELEMENT: &str = "unsupported element";
 /// not shown, so it is counted, not converted. The hidden paragraph (or each
 /// hidden span of a shown one) is one item.
 const HIDDEN: &str = "hidden by the document";
+/// A paragraph whose visibility a `set` or `animate` changes over time. The
+/// reader does not play that timeline, so the paragraph is refused: showing it
+/// or hiding it would be wrong for part of its time.
+const VARIES: &str = "visibility changes over time";
 
 /// Reads a whole TTML document. The `xml` crate decodes it (UTF-8, or UTF-16
 /// with a byte order mark) and checks its declared encoding. Cues come out in
 /// document order; the caller sorts them.
 pub(crate) fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Parsed, ReadError> {
     let input = xml::decode(bytes).map_err(xml_error)?;
+    let scopes = animated_scopes(&input, budget)?;
     let mut reader = Reader::new(
         &input,
         Options {
@@ -167,7 +175,7 @@ pub(crate) fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Parsed, ReadErr
             html_entities: false,
         },
     );
-    let mut doc = Doc::new(budget);
+    let mut doc = Doc::new(budget, scopes);
     loop {
         let event = match reader.next() {
             Ok(Some(event)) => event,
@@ -183,6 +191,56 @@ pub(crate) fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Parsed, ReadErr
         }
     }
     doc.finish()
+}
+
+/// The ordinals of the elements that a `set` or `animate` changing visibility
+/// is a child of, when that animation is not inside a paragraph. A paragraph
+/// inside such an element is refused, including the ones that come before the
+/// animation in the document, so the scopes are found before the reading
+/// starts. Elements are numbered by their start tags in document order, the
+/// root being 0, and the reading numbers them the same way (`Doc::start`). A
+/// paragraph's own animations are seen when they are read, so they are not
+/// listed. This pass is linear in the document.
+fn animated_scopes(input: &str, budget: &mut Budget) -> Result<BTreeSet<u32>, ReadError> {
+    let mut reader = Reader::new(
+        input,
+        Options {
+            max_depth: xml::MAX_DEPTH,
+            html_entities: false,
+        },
+    );
+    // One entry per open element: its ordinal, and whether it is in a paragraph.
+    let mut open: Vec<(u32, bool)> = Vec::new();
+    let mut scopes = BTreeSet::new();
+    let mut next: u32 = 0;
+    loop {
+        match reader.next() {
+            Ok(Some(Event::Start(el))) => {
+                let ord = next;
+                next += 1;
+                let parent = open.last().copied();
+                let in_para = parent.is_some_and(|(_, para)| para);
+                let animation =
+                    is_tt(el.name) && matches!(el.name.local, "set" | "animate" | "animation");
+                if !in_para && animation && animates_visibility(&el) {
+                    let target = parent.map_or(0, |(o, _)| o);
+                    if !scopes.contains(&target) {
+                        budget.charge()?;
+                        scopes.insert(target);
+                    }
+                }
+                let para = in_para || (is_tt(el.name) && el.name.local == "p");
+                open.push((ord, para));
+            }
+            Ok(Some(Event::End(_))) => {
+                open.pop();
+            }
+            Ok(Some(Event::Text(_))) => {}
+            // The reading reports the error; this pass only finds the scopes.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    Ok(scopes)
 }
 
 /// The `xml` crate's refusal as the reader's. A declared encoding other than
@@ -272,6 +330,10 @@ struct Frame {
     concealed: bool,
     /// Visible text was hidden directly in this element (see `Doc::end`).
     hidden_text: bool,
+    /// A `set` or `animate` changing visibility applies to this element's
+    /// content: an ancestor of it has one, or its region does (see
+    /// [`animated_scopes`]).
+    animated: bool,
     /// The start tag's line, for a hidden span's item.
     line: u32,
 }
@@ -303,6 +365,7 @@ impl Frame {
             entry: None,
             concealed: false,
             hidden_text: false,
+            animated: false,
             line: 0,
         }
     }
@@ -393,6 +456,9 @@ struct Para {
     /// on it or on a span or `br` in it): one `Elements` unit. Its text is
     /// converted all the same.
     unit: bool,
+    /// A `set` or `animate` changing visibility applies to the paragraph (see
+    /// [`Frame::animated`]): it is refused whole (see `paragraph`).
+    animated: bool,
     /// The start lines of the outermost hidden spans of a shown paragraph: one
     /// `skipped` item each, counted when the paragraph is kept (see `paragraph`).
     hidden_spans: Vec<u32>,
@@ -596,12 +662,21 @@ struct Doc<'b> {
     /// units are counted at their end. A document with image units and no
     /// text cue is image subtitles, refused as such.
     images: usize,
+    /// The containers a visibility-changing animation applies to (see
+    /// [`animated_scopes`]), by ordinal.
+    animated_scopes: BTreeSet<u32>,
+    /// The ordinal the next start tag takes, and the one of the current element.
+    next_ord: u32,
+    ord: u32,
 }
 
 impl<'b> Doc<'b> {
-    fn new(budget: &'b mut Budget) -> Doc<'b> {
+    fn new(budget: &'b mut Budget, animated_scopes: BTreeSet<u32>) -> Doc<'b> {
         Doc {
             budget,
+            animated_scopes,
+            next_ord: 0,
+            ord: 0,
             params: None,
             stack: Vec::new(),
             para: None,
@@ -617,6 +692,9 @@ impl<'b> Doc<'b> {
     }
 
     fn start(&mut self, el: &Element, line: u32) -> Result<(), ReadError> {
+        // Every start tag takes an ordinal, read or not: `animated_scopes` numbers them the same way.
+        self.ord = self.next_ord;
+        self.next_ord += 1;
         if self.ignoring > 0 {
             self.ignoring += 1;
             return Ok(());
@@ -642,6 +720,25 @@ impl<'b> Doc<'b> {
             Role::Silent => self.ignoring = 1,
             Role::Refused(reason) => {
                 self.skip(line, reason);
+                self.ignoring = 1;
+            }
+            // A set or animate that changes visibility is not counted as styling:
+            // the paragraphs it reaches are refused instead (`paragraph`).
+            Role::Ignored(Ignore::Styling)
+                if animates_visibility(el)
+                    && matches!(
+                        parent,
+                        Kind::Root
+                            | Kind::Body
+                            | Kind::Div
+                            | Kind::Region
+                            | Kind::Paragraph
+                            | Kind::Span
+                    ) =>
+            {
+                if let Some(para) = self.para.as_mut() {
+                    para.animated = true;
+                }
                 self.ignoring = 1;
             }
             Role::Ignored(what) => {
@@ -695,6 +792,7 @@ impl<'b> Doc<'b> {
         frame.css = decl.over(&Css::default());
         // The root takes no visibility (10.2.49 applies to body, div, p, region and span).
         frame.css.hidden = None;
+        frame.animated = self.animated_scopes.contains(&self.ord);
         // `tts:extent` is consumed above, so it is not a placement of the content.
         frame.flags = Flags {
             styling: decl.styling || hiding_declared(&decl),
@@ -739,6 +837,9 @@ impl<'b> Doc<'b> {
                 self.sheet.push_ref(self.budget, entry, target)?;
             }
         }
+        if kind == Kind::Region && self.animated_scopes.contains(&self.ord) {
+            self.sheet.mark_animated(entry);
+        }
         self.budget.charge()?;
         let preserve = self.stack.last().is_some_and(|f| f.preserve);
         let mut frame = Frame::bare(kind, preserve);
@@ -763,7 +864,7 @@ impl<'b> Doc<'b> {
         let (base, parent_limit, parent_preserve) = (parent.base(), parent.limit, parent.preserve);
         let (mut fault, parent_css, parent_flags, parent_region) =
             (parent.fault, parent.css, parent.flags, parent.region);
-        let parent_concealed = parent.concealed;
+        let (parent_concealed, parent_animated) = (parent.concealed, parent.animated);
         let begin = stamp(el, "begin", &params)?;
         let end = stamp(el, "end", &params)?;
         let dur = stamp(el, "dur", &params)?;
@@ -787,6 +888,7 @@ impl<'b> Doc<'b> {
         let mut concealed = parent_concealed
             || decl.display_none == Some(true)
             || decl.opacity == Some(Opacity::Zero);
+        let mut animated = parent_animated || self.animated_scopes.contains(&self.ord);
         // A `region` names the region of the element and its content; a span's
         // is not used (its text is not placed in it), which is a `Position` loss.
         let region = match (kind, el.attr(None, "region")) {
@@ -813,6 +915,7 @@ impl<'b> Doc<'b> {
                     // A region's own display and opacity hide its paragraphs (10.2.14, 10.2.30).
                     concealed |=
                         placed.display_none == Some(true) || placed.opacity == Some(Opacity::Zero);
+                    animated |= self.sheet.animated(entry);
                     flags = flags.join(self.sheet.flags(entry));
                     top = top_third(&placed, self.root_height) == Some(true);
                     if !top
@@ -846,6 +949,7 @@ impl<'b> Doc<'b> {
         frame.flags = flags;
         frame.region = region;
         frame.concealed = concealed;
+        frame.animated = animated;
         frame.line = line;
         // Charged before the frame is pushed: an element is an item.
         self.budget.charge()?;
@@ -859,6 +963,7 @@ impl<'b> Doc<'b> {
                 top,
                 flags: Flags::default(),
                 unit: own_image,
+                animated,
                 hidden_spans: Vec::new(),
             });
         }
@@ -1037,6 +1142,10 @@ impl<'b> Doc<'b> {
             self.images += 1;
         }
         if !para.visible {
+            return Ok(());
+        }
+        if para.animated {
+            self.skip(para.line, VARIES);
             return Ok(());
         }
         // display and opacity hide the whole paragraph. Its visibility does not:

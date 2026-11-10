@@ -173,8 +173,9 @@ element reaches. The image units of a text document are added to `Elements`.
 | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 | `xml:space` | white-space mode (8.2.10); another value is a fault |
 | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
-| `set`, `animate`, `animation` in a paragraph or span | `Styling` on each cue of that paragraph |
-| `set`, `animate`, `animation` in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+| `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
+| `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+| `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
 | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
 | a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
 | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |

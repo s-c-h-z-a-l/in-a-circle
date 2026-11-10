@@ -67,23 +67,15 @@ const REQUIRE_TTCONV: &str = "INACIRCLE_REQUIRE_TTCONV";
 /// open finding; a difference nobody has explained is a failure, not a line in
 /// this table.
 const DIVERGENT_FILES: &[(&str, &str)] = &[
-    // OPEN: a `set` that changes visibility is not played yet; the next change
-    // refuses those paragraphs. ttconv plays the set, so the comparison cannot hold.
-    (
-        "imsc1/ttml/animation/Animation003.ttml",
-        "OPEN: a set changing visibility is not played yet",
-    ),
+    // A paragraph that a `set` changes in visibility is refused and counted (13.1.3);
+    // ttconv plays the set and shows that paragraph, so these files cannot match.
     (
         "imsc1/ttml/timing/MediaParTiming002.ttml",
-        "OPEN: a set changing visibility is not played yet",
-    ),
-    (
-        "imsc1/ttml/document/DocumentExample825.ttml",
-        "OPEN: a set changing visibility is not played yet",
+        "a paragraph refused by its set (visibility changes over time): ttconv shows it",
     ),
     (
         "imsc1/ttml/timing/MediaSeqTiming007.ttml",
-        "OPEN: a set changing visibility is not played yet",
+        "a paragraph refused by its set (visibility changes over time): ttconv shows it",
     ),
     // tts:visibility: ttconv's ISD prunes only `display="none"`, so it keeps the
     // text that `visibility="hidden"` hides; we do not show it.
@@ -188,10 +180,10 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
 ];
 
 /// The number of files the comparison covers on the vendored set: the
-/// classification gives 241 compared, 19 refused, 22 overlapping, 12 with timed
-/// spans and 27 listed. A file that leaves the comparison changes this count and
+/// classification gives 240 compared, 22 refused, 22 overlapping, 12 with timed
+/// spans and 25 listed. A file that leaves the comparison changes this count and
 /// fails the run until the count and the reasons are reviewed together.
-const COMPARED_FLOOR: usize = 241;
+const COMPARED_FLOOR: usize = 240;
 
 /// Every vendored `.ttml` file, as its path under the data folder, sorted.
 fn ttml_files() -> Vec<String> {

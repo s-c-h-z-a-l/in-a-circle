@@ -307,20 +307,22 @@ found no critical or important finding and 4 minor ones. All were fixed.
   - a regression guard (`expected.tsv`): the outcome, cue count and first cue of
     each file as the reader gives them. It catches a change; it is not evidence
     that the reader is right;
-  - hand-checks (`hand-checked.tsv`): 39 files read against their own
-    description and the rule that applies. 32 agree, 3 differ by a rule the
-    spec decides (a paragraph with no end; an oblique carried as italic), and 4
-    are open findings (below);
+  - hand-checks (`hand-checked.tsv`): 45 files read against their own
+    description and the rule that applies. 36 agree. 9 differ, each counted and
+    not silent: 3 by a rule the spec decides (a paragraph with no end; an oblique
+    carried as italic), and 6 that are refused because a `set` changes their
+    visibility over time (the reader does not play that timeline);
   - ttconv 1.2.3 (`tt convert`, CI only): 242 files are compared in SRT and
     WebVTT, on start and end in milliseconds and on the text with its italic,
     bold and underline. Nothing is normalised on either side; colour and font
     markup, which the reader drops and counts, is the only markup removed. The
     list of files left out and why is at the top of `ttml_conformance.rs`.
 
-  Open findings from the hand-checks: `tts:display` is not honoured (a static
-  `none` hides a paragraph in a player, and the reader shows it), and a
-  paragraph hidden until a `set` shows from its begin. The reader counts both as
-  styling, which does not say that the timing changed. A decision is pending.
+  Static visibility is honoured: `display="none"`, `visibility="hidden"` and
+  `opacity="0"` hide the text they reach (10.2.14, 10.2.49, 10.2.30), and each
+  hidden paragraph or outermost hidden span is one `skipped` item. A paragraph
+  that a `set` or `animate` changes in visibility is refused, one `skipped`
+  item, rather than shown or hidden for part of its time.
 
 ## Verdict
 

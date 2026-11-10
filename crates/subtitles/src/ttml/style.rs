@@ -197,6 +197,12 @@ pub(super) fn tts_value<'e>(el: &'e Element<'_>, local: &str) -> Option<&'e str>
         .map(|(_, value)| value)
 }
 
+/// Whether an animation element (`set`, `animate`) targets `display`,
+/// `visibility` or `opacity`: its `tts:` attribute names the target (13.1.3, 13.1.1).
+pub(super) fn animates_visibility(el: &Element) -> bool {
+    tts_attrs(el).any(|(local, _)| matches!(local, "display" | "visibility" | "opacity"))
+}
+
 /// The flags an element's own declarations give its content: a declaration the
 /// reader does not carry (`Styling`), or a placement it does not use (`Position`).
 pub(super) fn own_flags(decl: &Css) -> Flags {
@@ -501,6 +507,9 @@ struct Entry {
     /// The flags of the ignored duplicate definitions of this entry's name
     /// (see [`Sheet::define_style`]): every reference to the name carries them.
     dup: Flags,
+    /// A `set` or `animate` in this region changes its visibility over time:
+    /// every paragraph placed in it is refused (see `mod.rs`).
+    animated: bool,
 }
 
 /// The styles and regions of the head. Names are the `xml:id`s: styles and
@@ -532,6 +541,7 @@ impl Sheet {
             defined,
             height: 0,
             dup: Flags::default(),
+            animated: false,
         });
         Ok(self.entries.len() - 1)
     }
@@ -563,6 +573,7 @@ impl Sheet {
                     defined: true,
                     height: 0,
                     dup: Flags::default(),
+                    animated: false,
                 };
                 Ok(i)
             }
@@ -615,6 +626,16 @@ impl Sheet {
         budget.charge()?;
         self.entries[from].refs.push(to);
         Ok(())
+    }
+
+    /// Marks a region entry as one whose visibility changes over time.
+    pub(super) fn mark_animated(&mut self, entry: usize) {
+        self.entries[entry].animated = true;
+    }
+
+    /// Whether a region entry's visibility changes over time (see [`Entry`]).
+    pub(super) fn animated(&self, entry: usize) -> bool {
+        self.entries[entry].animated
     }
 
     /// The region an `xml:id` names, if one is defined.

@@ -1510,6 +1510,31 @@ fn accounting_rows() -> Vec<Row> {
             0,
             None,
         ),
+        row(
+            "set toggling display on a paragraph: refused, counted",
+            doc(
+                r#"<p begin="0s" end="5s" tts:display="none"><set begin="1s" tts:display="auto"/>a</p><p begin="6s" end="7s">b</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "visibility changes over time")),
+        ),
+        row(
+            "set on a division's visibility: each paragraph under it refused",
+            body(
+                r#"<div><p begin="0s" end="1s">a</p><set begin="2s" tts:visibility="hidden"/><p begin="3s" end="4s">b</p></div><div><p begin="5s" end="6s">c</p></div>"#,
+            ),
+            &[],
+            2,
+            Some((1, "visibility changes over time")),
+        ),
+        row(
+            "set on another property: styling, paragraph kept",
+            doc(r#"<p begin="0s" end="1s">a<set begin="0.5s" tts:color="red"/></p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
     ]
 }
 
@@ -1614,6 +1639,50 @@ fn visibility_hidden_and_opacity_zero_hide_text() {
     // Between 0 and 1 the text is shown, and the value is styling.
     let parsed = read(&doc(r#"<p begin="0s" end="1s" tts:opacity="0.5">x</p>"#));
     assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// 13.1.3, 10.2.14: a `set` that shows a paragraph hidden at the start is not
+/// played. The paragraph is refused (one item) rather than shown from its begin
+/// or hidden for good; a paragraph the set does not reach is shown.
+#[test]
+fn a_set_that_toggles_display_refuses_the_paragraph() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="5s" tts:display="none"><set begin="1s" tts:display="auto"/>toggled</p><p begin="6s" end="7s">plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// 13.1.3: a `set` on a `div` changes the visibility of every paragraph under
+/// it, including the ones that come before the `set` in the document. Paragraphs
+/// in another division are not affected.
+#[test]
+fn a_set_in_a_division_refuses_its_paragraphs_only() {
+    let parsed = read(&format!(
+        r#"{TT}<body><div><p begin="0s" end="1s">before</p><set begin="2s" tts:visibility="hidden"/><p begin="3s" end="4s">after</p></div><div><p begin="5s" end="6s">other</p></div></body></tt>"#
+    ));
+    assert_eq!(texts(&parsed), vec!["other"]);
+    assert_eq!(parsed.skipped.count, 2);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// 13.1.3, 10.4: a `set` on any other property is not a visibility change: it
+/// stays a `Styling` count, and the paragraph is kept.
+#[test]
+fn a_set_on_another_property_still_only_counts_styling() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">colour<set begin="0.5s" tts:color="red"/></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["colour"]);
     assert_eq!(loss(&parsed, Loss::Styling), 1);
     assert_eq!(parsed.skipped.count, 0);
 }
