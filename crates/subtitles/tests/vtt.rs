@@ -550,6 +550,23 @@ fn end_at_100_hours_is_skipped_and_99_59_59_999_is_kept() {
 }
 
 #[test]
+fn start_at_99_59_59_999_is_kept_and_100_hours_is_skipped() {
+    // The start is checked against the limit as the end is: 99:59:59.999 is
+    // the last time a cue may start, and 100:00:00.000 the first refused.
+    let parsed = read(
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nearly\n\n99:59:59.999 --> 99:59:59.999\nlast\n\n100:00:00.000 --> 100:00:01.000\nlate\n",
+    );
+    assert_eq!(texts(&parsed), vec!["early", "last"]);
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            count: 1,
+            first: Some((9, "time is 100 hours or more")),
+        }
+    );
+}
+
+#[test]
 fn timing_line_ends_an_ignored_block_without_a_blank_line() {
     // A STYLE, REGION or NOTE block runs to a blank line. Without one, a valid
     // timing line still starts a cue, as the standard has it (a `-->` line
