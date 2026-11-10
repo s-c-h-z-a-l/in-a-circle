@@ -185,8 +185,8 @@ element reaches. The image units of a text document are added to `Elements`.
 | `smpte:backgroundImage` on a `span` or `br` | its paragraph is one image unit (as above) |
 | a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
 | the document has image units and no text cue | `ReadError::ImageBased` (the whole file) |
-| the document has no cue and no image unit | `ReadError::NoCues` (the whole file) |
-| the document has text but no cue, and skipped items | `ReadError::TtmlAllSkipped`: the count and the first skipped item (the whole file) |
+| the document has no cue, no image unit and nothing skipped | `ReadError::NoCues` (the whole file) |
+| the document has no cue, and skipped items | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
 | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
 | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
@@ -763,9 +763,10 @@ entry) the whole file is refused as `TooComplex`; nothing is converted in part.
   each element, piece and copy of a piece), each charged before it is stored; past it the input fails with `too many lines and styled runs (more
   than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
   the lines of its cue. A file that is not UTF-8 fails
-  with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
-  with no usable cue fails with `no subtitles found`, and a TTML file whose
-  every item was skipped says how many and the first one's line and reason
+  with `not UTF-8 text (byte at N): convert it with Encoding first`. A file
+  with no usable cue fails with `no subtitles found` when nothing in it was
+  skipped (empty, or no cue at all), and otherwise says how many items were
+  skipped and the first one's line and reason, in every format
   (`no subtitles found (N items skipped, first at line L: <reason>)`). A TTML
   file fails with `not well-formed TTML (line L): <reason>`, `not a TTML
   document`, `unsupported TTML: <reason>` (a clock time base, a drop-frame time

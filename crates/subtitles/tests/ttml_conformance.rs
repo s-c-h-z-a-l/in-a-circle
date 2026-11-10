@@ -220,7 +220,7 @@ fn outcome(result: &Result<Parsed, ReadError>) -> String {
             ReadError::NotTtml => "not-ttml".into(),
             ReadError::Unsupported(reason) => format!("unsupported: {reason}"),
             ReadError::ImageBased => "image-based".into(),
-            ReadError::TtmlAllSkipped { reason, .. } => format!("all-skipped: {reason}"),
+            ReadError::AllSkipped { reason, .. } => format!("all-skipped: {reason}"),
             ReadError::TextTooLarge => "text-too-large".into(),
         },
     }

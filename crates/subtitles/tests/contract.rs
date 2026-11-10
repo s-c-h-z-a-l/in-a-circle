@@ -74,10 +74,10 @@ fn read_errors_say_what_the_user_sees() {
         ReadError::ImageBased.to_string(),
         "no text subtitles found (image-based)"
     );
-    // The reason of a document whose every item is skipped is shown, not hidden
+    // The reason of a file whose every item is skipped is shown, not hidden
     // behind `no subtitles found`.
     assert_eq!(
-        ReadError::TtmlAllSkipped {
+        ReadError::AllSkipped {
             count: 3,
             line: 7,
             reason: "no end time"

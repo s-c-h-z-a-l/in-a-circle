@@ -11,7 +11,7 @@
 //!   are valid verdicts;
 //! - `Malformed` (TTML) names a line of the input and says why, and
 //!   `NotTtml` and `Unsupported` are verdicts on the whole document, and
-//!   `TtmlAllSkipped` names a line of the input and says why.
+//!   `AllSkipped` names a line of the input and says why, in every format.
 //!
 //! The cues, sorted as the caller sorts them, are then written as SRT and as
 //! WebVTT and read back by the matching reader. This is own consistency, not
@@ -306,18 +306,15 @@ pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
         ) => {}
         // Every skipped item is counted, and the first one names a line that
         // exists and says why it was skipped.
-        Err(ReadError::TtmlAllSkipped {
+        Err(ReadError::AllSkipped {
             count,
             line,
             reason,
         }) => {
-            assert!(
-                count >= 1 && !reason.is_empty(),
-                "TtmlAllSkipped with no item"
-            );
+            assert!(count >= 1 && !reason.is_empty(), "AllSkipped with no item");
             assert!(
                 (1..=line_bound(data)).contains(&line),
-                "TtmlAllSkipped names line {line} of an input with {} lines",
+                "AllSkipped names line {line} of an input with {} lines",
                 line_bound(data)
             );
         }

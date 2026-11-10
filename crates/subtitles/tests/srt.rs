@@ -262,9 +262,35 @@ fn lone_index_number_is_silent() {
 }
 
 #[test]
-fn only_stray_text_is_no_cues() {
-    // Every block is stray and no cue remains: the file has no subtitles.
-    assert_eq!(read_srt(b"Title only\n\nstray\n"), Err(ReadError::NoCues));
+fn only_stray_text_is_all_skipped() {
+    // Every block is stray and no cue remains: each block is skipped, and the
+    // first one's line and reason are named.
+    assert_eq!(
+        read_srt(b"Title only\n\nstray\n"),
+        Err(ReadError::AllSkipped {
+            count: 2,
+            line: 1,
+            reason: "text outside any cue"
+        })
+    );
+}
+
+/// A file whose cues are all unusable says why, with the first skipped cue's
+/// line: here the timing line on line 2 ends before it starts, and a second
+/// cue is skipped too.
+#[test]
+fn every_cue_unusable_names_the_first_reason() {
+    assert_eq!(
+        read_srt(
+            b"1\n00:00:05,000 --> 00:00:04,000\nbackwards\n\n\
+              2\n00:00:09,000 --> 00:00:08,000\nalso\n"
+        ),
+        Err(ReadError::AllSkipped {
+            count: 2,
+            line: 2,
+            reason: "ends before it starts"
+        })
+    );
 }
 
 #[test]
@@ -406,11 +432,6 @@ fn empty_file_is_no_cues() {
     assert_eq!(read_srt(b""), Err(ReadError::NoCues));
     assert_eq!(
         read_srt("\u{feff}\r\n \r\n".as_bytes()),
-        Err(ReadError::NoCues)
-    );
-    // Nothing usable is the same answer as nothing at all.
-    assert_eq!(
-        read_srt(b"1\n00:00:05,000 --> 00:00:04,000\nbackwards\n"),
         Err(ReadError::NoCues)
     );
 }

@@ -1104,6 +1104,22 @@ fn image_only_document_is_refused() {
     );
 }
 
+/// A document whose every paragraph is skipped says why: the count, and the
+/// first skipped paragraph's line (line 2 here).
+#[test]
+fn every_cue_unusable_names_the_first_reason() {
+    assert_eq!(
+        read_ttml(
+            b"<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\n<p>x</p>\n<p>y</p>\n</div></body></tt>"
+        ),
+        Err(ReadError::AllSkipped {
+            count: 2,
+            line: 2,
+            reason: "no end time"
+        })
+    );
+}
+
 /// 12.4 and 12.4.1: a paragraph in a body with no timing has no end (its
 /// implicit duration is indefinite, and the document has no end to give it).
 /// It is skipped with its reason, and a document with nothing else is refused
@@ -1112,7 +1128,7 @@ fn image_only_document_is_refused() {
 fn paragraph_without_any_timing_has_no_end() {
     assert_eq!(
         read_ttml(doc("<p>x</p>").as_bytes()),
-        Err(ReadError::TtmlAllSkipped {
+        Err(ReadError::AllSkipped {
             count: 1,
             line: 1,
             reason: "no end time"
@@ -1600,7 +1616,7 @@ fn descendants_of_a_hidden_division_are_hidden() {
         .as_bytes(),
     );
     assert!(
-        matches!(refused, Err(ReadError::TtmlAllSkipped { count: 1, .. })),
+        matches!(refused, Err(ReadError::AllSkipped { count: 1, .. })),
         "{refused:?}"
     );
 }

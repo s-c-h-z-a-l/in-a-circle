@@ -1164,10 +1164,19 @@ fn no_dialogue_is_no_cues() {
         read_ass(b"[Script Info]\nTitle: nothing here\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"),
         Err(ReadError::NoCues)
     );
-    // Dialogue with a bad time is nothing usable either.
+}
+
+/// A dialogue line with a bad time is skipped, and a file whose dialogue is
+/// all skipped says why, with the first one's line (line 10 here).
+#[test]
+fn every_cue_unusable_names_the_first_reason() {
     assert_eq!(
         read_ass(plain("Dialogue: 0,0:00:05.00,0:00:04.00,Default,,0,0,0,,backwards\n").as_bytes()),
-        Err(ReadError::NoCues)
+        Err(ReadError::AllSkipped {
+            count: 1,
+            line: 10,
+            reason: "ends before it starts"
+        })
     );
 }
 

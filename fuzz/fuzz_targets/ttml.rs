@@ -55,7 +55,7 @@ fn check_paragraph_timing(data: &[u8]) {
             assert_eq!(parsed.skipped.count, 0, "a skip in {doc}");
         }
         // An empty or inverted paragraph is skipped, so the document has no cue.
-        Err(ReadError::NoCues | ReadError::TtmlAllSkipped { .. }) if want_end <= begin => {}
+        Err(ReadError::NoCues | ReadError::AllSkipped { .. }) if want_end <= begin => {}
         other => panic!("{doc}: want [{begin}, {want_end}) or no cue, got {other:?}"),
     }
 }

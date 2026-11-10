@@ -287,8 +287,8 @@ fn vtt_output_has_no_bom_and_lf() {
     assert!(bytes.starts_with(b"WEBVTT\n\n"));
 }
 
-/// RF 2: a file with no usable cue fails with the reason, and nothing is
-/// left in the work folder.
+/// RF 2: a file with no usable cue fails with the count, the first skipped
+/// item's line and its reason, and nothing is left in the work folder.
 #[test]
 fn nothing_usable_fails_and_leaves_nothing() {
     let root = tmp("nothing");
@@ -302,7 +302,11 @@ fn nothing_usable_fails_and_leaves_nothing() {
     let o = run("subtitles.srt-to-vtt", &work, &[&a]);
     assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
     let out = stdout(&o);
-    assert_eq!(lines(&out, "fail")[0][2], "no subtitles found", "{out}");
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no subtitles found (1 items skipped, first at line 2: ends before it starts)",
+        "{out}"
+    );
     assert!(lines(&out, "done").is_empty());
     assert!(files(&work).is_empty());
 }
@@ -460,7 +464,10 @@ fn batch_of_three_one_bad_goes_on() {
     assert_eq!(lines(&out, "done").len(), 2, "{out}");
     assert_eq!(lines(&out, "fail").len(), 1, "{out}");
     assert_eq!(lines(&out, "fail")[0][1], b.to_str().unwrap());
-    assert_eq!(lines(&out, "fail")[0][2], "no subtitles found");
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no subtitles found (1 items skipped, first at line 1: text outside any cue)"
+    );
 }
 
 /// `progress 0` opens the run, then one line per input: the fraction of the

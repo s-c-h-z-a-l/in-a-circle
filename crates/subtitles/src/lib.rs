@@ -19,40 +19,42 @@ pub use write::{write_srt, write_vtt};
 
 /// Reads an SRT file as a media player would. Refused past [`INPUT_BYTES`]
 /// before anything is parsed, refused when it is not UTF-8, refused past
-/// [`ITEM_BUDGET`] items, and refused with [`ReadError::NoCues`] when no cue in
-/// it is usable. A byte order mark is skipped. Everything else is read
-/// leniently: see `srt.rs` for the rules.
+/// [`ITEM_BUDGET`] items, and refused when no cue in it is usable: with
+/// [`ReadError::AllSkipped`] if items were skipped, else [`ReadError::NoCues`].
+/// A byte order mark is skipped. Everything else is read leniently: see
+/// `srt.rs` for the rules.
 pub fn read_srt(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
     let parsed = srt::parse(text, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
-        return Err(ReadError::NoCues);
+        return Err(no_cues(parsed.skipped));
     }
     Ok(parsed)
 }
 
 /// Reads a WebVTT file as a browser would. The limits and the byte order mark
 /// are as in [`read_srt`]. A file without the `WEBVTT` signature is not WebVTT,
-/// so it has no cues and is refused with [`ReadError::NoCues`], as is one whose
-/// cues are all unusable. See `vtt.rs` for the rules.
+/// so it has no cues and is refused with [`ReadError::NoCues`]; one whose cues
+/// are all unusable is refused as [`read_srt`] refuses it. See `vtt.rs` for the
+/// rules.
 pub fn read_vtt(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
     let parsed = vtt::parse(text, &mut Budget::new(ITEM_BUDGET))?.ok_or(ReadError::NoCues)?;
     if parsed.cues.is_empty() {
-        return Err(ReadError::NoCues);
+        return Err(no_cues(parsed.skipped));
     }
     Ok(parsed)
 }
 
 /// Reads an ASS or SSA file for its text, its times and the styling that
 /// carries over. The limits and the byte order mark are as in [`read_srt`]. A
-/// file with no usable dialogue is refused with [`ReadError::NoCues`]. See
+/// file with no usable dialogue is refused as [`read_srt`] refuses it. See
 /// `ass.rs` for the rules and the choices made where the format leaves room.
 pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
     let text = text_of(bytes)?;
     let parsed = ass::parse(text, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
-        return Err(ReadError::NoCues);
+        return Err(no_cues(parsed.skipped));
     }
     Ok(parsed)
 }
@@ -62,28 +64,33 @@ pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
 /// decoded by the `xml` crate. A document that is not well-formed is refused
 /// whole, with the line, and so is a time base the reader does not convert (a
 /// clock or drop-frame time code). A document whose subtitles are images is
-/// refused as [`ReadError::ImageBased`], and one whose text is all skipped as
-/// [`ReadError::TtmlAllSkipped`], with the first skip. An element the reader
-/// does not convert is skipped or counted in its losses. See `ttml/mod.rs` for
-/// the accounting.
+/// refused as [`ReadError::ImageBased`], and one whose items are all skipped as
+/// [`ReadError::AllSkipped`], with the first skip. An element the reader does
+/// not convert is skipped or counted in its losses. See `ttml/mod.rs` for the
+/// accounting.
 pub fn read_ttml(bytes: &[u8]) -> Result<Parsed, ReadError> {
     if bytes.len() > INPUT_BYTES {
         return Err(ReadError::TooLarge);
     }
     let parsed = ttml::parse(bytes, &mut Budget::new(ITEM_BUDGET))?;
     if parsed.cues.is_empty() {
-        // A skipped item is always kept with its line, so `first` is set
-        // exactly when something was skipped: the reason is then shown.
-        return Err(match parsed.skipped.first {
-            Some((line, reason)) => ReadError::TtmlAllSkipped {
-                count: parsed.skipped.count,
-                line,
-                reason,
-            },
-            None => ReadError::NoCues,
-        });
+        return Err(no_cues(parsed.skipped));
     }
     Ok(parsed)
+}
+
+/// The refusal of a file with no usable cue. A skipped item is always kept
+/// with its line, so `first` is set exactly when something was skipped: then
+/// the count and the first reason are shown, not the bare `NoCues`.
+fn no_cues(skipped: Skipped) -> ReadError {
+    match skipped.first {
+        Some((line, reason)) => ReadError::AllSkipped {
+            count: skipped.count,
+            line,
+            reason,
+        },
+        None => ReadError::NoCues,
+    }
 }
 
 /// The input as text: refused past [`INPUT_BYTES`], refused when it is not
@@ -249,7 +256,8 @@ pub enum ReadError {
     /// The input needs more than [`ITEM_BUDGET`] items. Nothing is kept: the
     /// readers do not truncate, so a partial result is never converted.
     TooComplex,
-    /// The input parsed, but no cue in it is usable.
+    /// The input has no cue and nothing in it was skipped: it is empty, or it
+    /// has no cue at all (no dialogue, no `WEBVTT` signature).
     NoCues,
     /// The XML is not well-formed, at `line` (1-based); `reason` says what.
     Malformed { line: u32, reason: &'static str },
@@ -260,10 +268,10 @@ pub enum ReadError {
     /// The document has image subtitles (`smpte:backgroundImage`, `image`
     /// elements) and no text cue: the images cannot be converted.
     ImageBased,
-    /// The document has text, but no cue in it is usable: `count` items were
-    /// skipped, the first at `line` (1-based) for `reason`. Shown in place of
-    /// `NoCues`, which would hide the reason.
-    TtmlAllSkipped {
+    /// The input has items to read, but no cue in it is usable: `count` items
+    /// were skipped, the first at `line` (1-based) for `reason`. Shown in place
+    /// of `NoCues`, which would hide the reason.
+    AllSkipped {
         count: usize,
         line: usize,
         reason: &'static str,
@@ -291,7 +299,7 @@ impl fmt::Display for ReadError {
             ReadError::NotTtml => f.write_str("not a TTML document"),
             ReadError::Unsupported(reason) => write!(f, "unsupported TTML: {reason}"),
             ReadError::ImageBased => f.write_str("no text subtitles found (image-based)"),
-            ReadError::TtmlAllSkipped {
+            ReadError::AllSkipped {
                 count,
                 line,
                 reason,
