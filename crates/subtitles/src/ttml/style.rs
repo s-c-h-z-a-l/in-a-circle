@@ -14,11 +14,15 @@ use std::collections::BTreeMap;
 
 use xml::Element;
 
+use super::{DFXP_TTM_NS, DFXP_TTP_NS, SMPTE_NS, TTM_NS, TTP_NS, XSI_NS};
 use crate::{Budget, ReadError};
 
 /// The styling namespace (TTML2 Table 5-1) and the DFXP one of TTML 1.
 const TTS_NS: &str = "http://www.w3.org/ns/ttml#styling";
 const DFXP_TTS_NS: &str = "http://www.w3.org/2006/10/ttaf1#styling";
+/// The EBU-TT-D style namespace (`ebutts:linePadding`, `ebutts:multiRowAlign`),
+/// as IMSC 1.2 (9.5.14, 9.5.15) gives it.
+const EBU_STYLE_NS: &str = "urn:ebu:tt:style";
 
 /// Longest chain of entries one reference path may hold: an entry at height
 /// 32 is read, a reference that would make a chain of 33 is refused and
@@ -283,7 +287,37 @@ pub(super) fn attrs_css(el: &Element) -> Css {
             _ => css.styling = true,
         }
     }
+    // An attribute in any other namespace is not TTML's, so it is not carried:
+    // counted, not dropped. The two EBU-TT-D placements are Position (IMSC 1.2,
+    // 9.5.14 and 9.5.15): a line's padding and the alignment of its rows.
+    for (name, _) in el.attrs() {
+        let Some(ns) = name.ns else { continue };
+        if ns == EBU_STYLE_NS && matches!(name.local, "linePadding" | "multiRowAlign") {
+            css.position = true;
+        } else if !is_read_ns(ns) {
+            css.styling = true;
+        }
+    }
     css
+}
+
+/// Whether an attribute's namespace is one the reader handles by its own rules:
+/// the TTML and DFXP styling, parameter and metadata namespaces, XML's own
+/// attributes, schema instances, and SMPTE's `backgroundImage` (an image unit,
+/// see `mod.rs`). Any other namespace is foreign to TTML.
+fn is_read_ns(ns: &str) -> bool {
+    matches!(
+        ns,
+        TTS_NS
+            | DFXP_TTS_NS
+            | TTP_NS
+            | DFXP_TTP_NS
+            | TTM_NS
+            | DFXP_TTM_NS
+            | SMPTE_NS
+            | xml::XML_NS
+            | XSI_NS
+    )
 }
 
 /// `textDecoration` (10.3.37): `none`, or each group once in any order, with

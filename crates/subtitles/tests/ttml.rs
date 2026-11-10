@@ -225,6 +225,27 @@ fn old_dfxp_styling_namespace_styles_the_text() {
     assert_eq!(parsed.skipped.first, Some((1, "hidden by the document")));
 }
 
+/// An attribute in a namespace that is not TTML's is not carried: it is counted
+/// once per cue, not dropped. The EBU-TT-D placements (IMSC 1.2, 9.5.14 and
+/// 9.5.15) are Position. A `tts:display` in a namespace that is not TTML's is not
+/// the TTML property, so it hides nothing and the text is kept. XML's own
+/// attributes (`xml:lang`) are read without a count.
+#[test]
+fn foreign_attributes_are_counted_by_their_meaning() {
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="urn:other" xmlns:ebutts="urn:ebu:tt:style" xmlns:v="urn:v"><body><div>
+        <p begin="0s" end="1s" v:x="1">a</p>
+        <p begin="2s" end="3s" ebutts:multiRowAlign="center">b</p>
+        <p begin="4s" end="5s" tts:display="none">c</p>
+        <p begin="6s" end="7s" xml:lang="en">d</p>
+        </div></body></tt>"#,
+    );
+    assert_eq!(texts(&parsed), vec!["a", "b", "c", "d"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 2, "v:x and tts:display");
+    assert_eq!(loss(&parsed, Loss::Position), 1, "ebutts:multiRowAlign");
+    assert_eq!(parsed.skipped.count, 0);
+}
+
 /// Namespace prefixes are the XML crate's job: `tt:p` is the TTML `p`.
 #[test]
 fn prefixed_tt_elements_are_read() {
@@ -1853,6 +1874,27 @@ fn accounting_rows() -> Vec<Row> {
             &[],
             1,
             Some((1, "hidden by the document")),
+        ),
+        row(
+            "attribute of another namespace on a paragraph: Styling, text kept",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:v=\"urn:v\"><body><div><p begin=\"0s\" end=\"1s\" v:x=\"1\">a</p></div></body></tt>".to_owned(),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "ebutts:multiRowAlign: Position, text kept",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ebutts=\"urn:ebu:tt:style\"><body><div><p begin=\"0s\" end=\"1s\" ebutts:multiRowAlign=\"center\">a</p></div></body></tt>".to_owned(),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
+            "tts:display in a namespace that is not TTML's: not applied, Styling, text kept",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"urn:other\"><body><div><p begin=\"0s\" end=\"1s\" tts:display=\"none\">a</p></div></body></tt>".to_owned(),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
         ),
         row(
             "initial: fontStyle, fontWeight and textDecoration are the base (document)",
