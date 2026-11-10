@@ -180,10 +180,11 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
 ];
 
 /// The number of files the comparison covers on the vendored set: the
-/// classification gives 240 compared, 22 refused, 22 overlapping, 12 with timed
-/// spans and 25 listed. A file that leaves the comparison changes this count and
-/// fails the run until the count and the reasons are reviewed together.
-const COMPARED_FLOOR: usize = 240;
+/// classification gives 230 compared, 22 refused, 22 overlapping, 12 with timed
+/// spans, 10 with a style animation and 25 listed. A file that leaves the
+/// comparison changes this count and fails the run until the count and the
+/// reasons are reviewed together.
+const COMPARED_FLOOR: usize = 230;
 
 /// Every vendored `.ttml` file, as its path under the data folder, sorted.
 fn ttml_files() -> Vec<String> {
@@ -360,6 +361,8 @@ enum Excluded {
     Overlapping,
     /// It has a `span` with its own `begin`, `end` or `dur`.
     TimedSpans,
+    /// It animates a style property (see [`Scan::style_animation`]).
+    StyleAnimation,
     /// It is listed in `DIVERGENT_FILES`.
     Listed,
 }
@@ -398,11 +401,31 @@ fn overlapping(cues: &[Cue]) -> bool {
     false
 }
 
-/// True if the document has a `span` with its own timing. The reader slices a
-/// paragraph by such spans; ttconv does not slice it the same way.
-fn timed_spans(bytes: &[u8]) -> bool {
+/// What the document's markup holds that the comparison has to leave out.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Scan {
+    /// A `span` with its own `begin`, `end` or `dur`. The reader slices a
+    /// paragraph by such spans; ttconv does not slice it the same way.
+    timed_spans: bool,
+    /// A `set` or `animate` that changes a style property other than
+    /// visibility, display or opacity. The reader does not play it and counts it
+    /// as styling, while ttconv starts a new cue at each time the animation
+    /// changes the style (its ISD adds the animation's times as significant
+    /// times, `isd.py`, `compute_sig_times`), so the cues cannot be matched.
+    style_animation: bool,
+}
+
+/// The TTML styling namespaces (the TTML 2 and the DFXP one).
+const STYLING_NS: [&str; 2] = [
+    "http://www.w3.org/ns/ttml#styling",
+    "http://www.w3.org/2006/10/ttaf1#styling",
+];
+
+/// Scans the markup for what the comparison leaves out (see [`Scan`]).
+fn scan(bytes: &[u8]) -> Scan {
+    let mut out = Scan::default();
     let Ok(text) = xml::decode(bytes) else {
-        return false;
+        return out;
     };
     let mut reader = xml::Reader::new(&text, xml::Options::default());
     while let Ok(Some(event)) = reader.next() {
@@ -411,11 +434,19 @@ fn timed_spans(bytes: &[u8]) -> bool {
                 .iter()
                 .any(|name| element.attr(None, name).is_some());
             if element.name.local == "span" && timed {
-                return true;
+                out.timed_spans = true;
+            }
+            let animation = matches!(element.name.local, "set" | "animate" | "animation");
+            let changes_style = element.attrs().any(|(name, _)| {
+                name.ns.is_some_and(|ns| STYLING_NS.contains(&ns))
+                    && !matches!(name.local, "display" | "visibility" | "opacity")
+            });
+            if animation && changes_style {
+                out.style_animation = true;
             }
         }
     }
-    false
+    out
 }
 
 /// The file's parsed cues, or why the file is not compared.
@@ -425,8 +456,12 @@ fn read_for_comparison(path: &str) -> Result<Parsed, Excluded> {
     }
     let bytes = fs::read(Path::new(ROOT).join(path)).expect("a vendored file");
     let parsed = read_ttml(&bytes).map_err(|_| Excluded::Refused)?;
-    if timed_spans(&bytes) {
+    let scan = scan(&bytes);
+    if scan.timed_spans {
         return Err(Excluded::TimedSpans);
+    }
+    if scan.style_animation {
+        return Err(Excluded::StyleAnimation);
     }
     if overlapping(&parsed.cues) {
         return Err(Excluded::Overlapping);
@@ -862,6 +897,15 @@ mod parser_self_test {
     #[test]
     fn a_wrong_block_number_is_an_error() {
         assert!(ttconv_srt("2\n00:00:01,000 --> 00:00:02,000\nx\n").is_err());
+    }
+
+    /// The animation rule: a style animation is found, a visibility one is not.
+    #[test]
+    fn style_animation_is_scanned_and_visibility_is_not() {
+        let style = br#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s">x<set begin="1s" tts:color="red"/></p></div></body></tt>"#;
+        let visibility = br#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s">x<set begin="1s" tts:visibility="hidden"/></p></div></body></tt>"#;
+        assert!(scan(style).style_animation);
+        assert!(!scan(visibility).style_animation);
     }
 
     /// Touching cues do not overlap; cues that share time do.
