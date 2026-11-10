@@ -177,9 +177,11 @@ jobs:
           TTCONV_SHA256: 5cc41ae017cfbb036cd07358a20d2181893a57151f02e23dfcc4e7a972542bff
         run: |
           cd "$RUNNER_TEMP"
-          curl -fsSLo ttconv.whl "https://files.pythonhosted.org/packages/8e/dc/abb76aa54c2bb3ed29fd42fb10395e3cba3f480614973ccfc67a68a5f8a8/ttconv-$TTCONV_VERSION-py3-none-any.whl"
-          echo "$TTCONV_SHA256  ttconv.whl" | sha256sum -c -
-          pipx install "$RUNNER_TEMP/ttconv.whl"
+          # pipx reads the package name and version from the wheel's file name, so the file keeps it.
+          wheel="ttconv-$TTCONV_VERSION-py3-none-any.whl"
+          curl -fsSLo "$wheel" "https://files.pythonhosted.org/packages/8e/dc/abb76aa54c2bb3ed29fd42fb10395e3cba3f480614973ccfc67a68a5f8a8/$wheel"
+          echo "$TTCONV_SHA256  $wheel" | sha256sum -c -
+          pipx install "$RUNNER_TEMP/$wheel"
           pipx list --short | grep -qx "ttconv $TTCONV_VERSION"
           "$HOME/.local/bin/tt" --help | grep -q convert
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
