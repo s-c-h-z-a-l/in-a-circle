@@ -1459,6 +1459,57 @@ fn accounting_rows() -> Vec<Row> {
             1,
             Some((1, "time is 100 hours or more")),
         ),
+        row(
+            "display none on a paragraph: hidden, counted",
+            doc(r#"<p begin="0s" end="1s" tts:display="none">a</p><p begin="2s" end="3s">b</p>"#),
+            &[],
+            1,
+            Some((1, "hidden by the document")),
+        ),
+        row(
+            "display auto: the initial value, nothing counted",
+            doc(r#"<p begin="0s" end="1s" tts:display="auto">a</p>"#),
+            &[],
+            0,
+            None,
+        ),
+        row(
+            "visibility hidden on a span: its text hidden, counted once",
+            doc(r#"<p begin="0s" end="1s">a<span tts:visibility="hidden">b</span></p>"#),
+            &[],
+            1,
+            Some((1, "hidden by the document")),
+        ),
+        row(
+            "opacity 0 on a division: its paragraphs hidden, counted",
+            doc(
+                r#"<div tts:opacity="0"><p begin="0s" end="1s">a</p></div><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "hidden by the document")),
+        ),
+        row(
+            "opacity between 0 and 1: styling, text kept",
+            doc(r#"<p begin="0s" end="1s" tts:opacity="0.5">a</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "display inlineBlock: styling, text kept",
+            doc(r#"<p begin="0s" end="1s" tts:display="inlineBlock">a</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "display, visibility or opacity on br: not applicable, styling",
+            doc(r#"<p begin="0s" end="1s">a<br tts:visibility="hidden"/>b</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
     ]
 }
 
@@ -1482,4 +1533,87 @@ fn every_ignored_construct_is_counted() {
             row.construct
         );
     }
+}
+
+/// 10.2.14: `display="none"` makes the element ineligible for layout, so the
+/// paragraph is not shown. It is one `skipped` item, not a cue. `auto` is the
+/// initial value and counts nothing.
+#[test]
+fn static_display_none_hides_the_paragraph_and_counts_it() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s" tts:display="none">hidden</p><p begin="2s" end="3s" tts:display="auto">shown</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["shown"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(parsed.skipped.first, Some((1, "hidden by the document")));
+    assert_eq!(loss(&parsed, Loss::Styling), 0, "auto counts nothing");
+    // A span hidden in a shown paragraph is one item too, and a span nested in
+    // it is part of that item: the outermost hidden element is what is counted.
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">a<span tts:display="none">b<span>c</span></span>d</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["ad"]);
+    assert_eq!(parsed.skipped.count, 1, "the span, once");
+}
+
+/// 10.2.14: `display="none"` makes the element and all its descendants
+/// ineligible, so every ancestor counts: a hidden `div` hides the paragraphs in
+/// it, however deep. A hidden `body` hides the document, which is then refused
+/// as having nothing to show.
+#[test]
+fn descendants_of_a_hidden_division_are_hidden() {
+    let parsed = read(&format!(
+        r#"{TT}<body><div tts:display="none"><p begin="0s" end="1s">a</p><div><div><p begin="0s" end="1s">b</p></div></div></div><div><p begin="2s" end="3s">c</p></div></body></tt>"#
+    ));
+    assert_eq!(texts(&parsed), vec!["c"]);
+    assert_eq!(parsed.skipped.count, 2, "each hidden paragraph, once");
+    assert_eq!(parsed.skipped.first, Some((1, "hidden by the document")));
+    let refused = read_ttml(
+        format!(
+            r#"{TT}<body tts:display="none"><div><p begin="0s" end="1s">a</p></div></body></tt>"#
+        )
+        .as_bytes(),
+    );
+    assert!(
+        matches!(refused, Err(ReadError::TtmlAllSkipped { count: 1, .. })),
+        "{refused:?}"
+    );
+}
+
+/// 10.2.49, 10.2.30: `visibility` is inherited, and a descendant with `visible`
+/// is shown; `opacity="0"` hides the element and its content; any other opacity
+/// is styling, and its text is kept.
+#[test]
+fn visibility_hidden_and_opacity_zero_hide_text() {
+    // Hidden by inheritance: the paragraph's own text is hidden (one item), and
+    // the span that says `visible` is shown.
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s" tts:visibility="hidden">x<span tts:visibility="visible">shown</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["shown"]);
+    assert_eq!(parsed.skipped.count, 1, "the paragraph's own hidden text");
+    // A span with `hidden` in a shown paragraph: one item, the text is not kept.
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">shown<span tts:visibility="hidden"> hid</span>.</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["shown."]);
+    assert_eq!(parsed.skipped.count, 1);
+    // opacity 0 on a region hides the paragraphs that use it.
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:opacity="0"/></layout>"#,
+        r#"<p region="r" begin="0s" end="1s">hidden</p><p begin="2s" end="3s">shown</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["shown"]);
+    assert_eq!(parsed.skipped.count, 1);
+    // opacity 0 on a span hides that span only.
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">a<span tts:opacity="0">b</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert_eq!(parsed.skipped.count, 1);
+    // Between 0 and 1 the text is shown, and the value is styling.
+    let parsed = read(&doc(r#"<p begin="0s" end="1s" tts:opacity="0.5">x</p>"#));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+    assert_eq!(parsed.skipped.count, 0);
 }

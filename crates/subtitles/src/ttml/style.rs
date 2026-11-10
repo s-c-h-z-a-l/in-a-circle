@@ -84,8 +84,51 @@ pub(super) struct Css {
     pub(super) origin: Option<Pos>,
     pub(super) extent: Option<Pos>,
     pub(super) align: Option<Align>,
+    /// `tts:display="none"` (10.2.14). Not inherited: the element and its
+    /// content are not shown, which [`Frame::concealed`](super) carries down.
+    pub(super) display_none: Option<bool>,
+    /// `tts:visibility` (10.2.49), inherited: `Some(true)` is `hidden`.
+    pub(super) hidden: Option<bool>,
+    /// `tts:opacity` (10.2.30), not inherited. Only the two values that change
+    /// nothing or hide everything are carried; any other value is `Styling`.
+    pub(super) opacity: Option<Opacity>,
     pub(super) styling: bool,
     pub(super) position: bool,
+}
+
+/// The opacities the reader acts on: 0 makes the content transparent (it is
+/// not shown), 1 is the initial value (10.2.30) and changes nothing. A value
+/// between them cannot be drawn in a text file and is `Styling`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Opacity {
+    Zero,
+    One,
+}
+
+/// `<alpha>` (10.3.1), a decimal number from 0 to 1. Read exactly, with no
+/// floating point: a whole part of zeros or of one, and a fraction of zeros
+/// (`0`, `0.00`, `1`, `1.0`). Any other spelling is `None`, and the caller
+/// counts it.
+fn opacity(value: &str) -> Option<Opacity> {
+    let (whole, frac) = value.split_once('.').unwrap_or((value, ""));
+    if !frac.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    if !whole.is_empty() && whole.bytes().all(|b| b == b'0') {
+        Some(Opacity::Zero)
+    } else if whole == "1" {
+        Some(Opacity::One)
+    } else {
+        None
+    }
+}
+
+/// Whether an element's declarations hide or show content by `display`,
+/// `visibility` or `opacity`. Those apply to `body`, `div`, `p`, `span` and
+/// `region` only (10.2.14, 10.2.30, 10.2.49); a `br`, or the root `tt`, carrying
+/// one is a declaration the reader does not apply, so it is `Styling`.
+pub(super) fn hiding_declared(decl: &Css) -> bool {
+    decl.display_none.is_some() || decl.hidden.is_some() || decl.opacity.is_some()
 }
 
 /// What a text piece or a `br` is affected by: a `Styling` or a `Position`
@@ -175,7 +218,8 @@ pub(super) fn dropped_flags(decl: &Css) -> Flags {
         || decl.bold.is_some()
         || decl.underline.is_some()
         || decl.line_through.is_some()
-        || decl.overline.is_some();
+        || decl.overline.is_some()
+        || hiding_declared(decl);
     let flags = own_flags(decl);
     Flags {
         styling: flags.styling || carried,
@@ -208,6 +252,22 @@ pub(super) fn attrs_css(el: &Element) -> Css {
                     css.styling = true;
                 }
             }
+            // 10.2.14: `inlineBlock` is a layout candidate the reader does not
+            // draw, so it is `Styling` like any value outside the grammar.
+            "display" => match value {
+                "auto" => css.display_none = Some(false),
+                "none" => css.display_none = Some(true),
+                _ => css.styling = true,
+            },
+            "visibility" => match value {
+                "visible" => css.hidden = Some(false),
+                "hidden" => css.hidden = Some(true),
+                _ => css.styling = true,
+            },
+            "opacity" => match opacity(value) {
+                Some(o) => css.opacity = Some(o),
+                None => css.styling = true,
+            },
             "origin" => css.origin = Some(origin(value)),
             "extent" => css.extent = Some(extent(value)),
             "displayAlign" => match value {
@@ -403,6 +463,7 @@ impl Css {
             underline: self.underline.or(below.underline),
             line_through: self.line_through.or(below.line_through),
             overline: self.overline.or(below.overline),
+            hidden: self.hidden.or(below.hidden),
             ..Css::default()
         }
     }
@@ -418,6 +479,9 @@ impl Css {
         self.origin = from.origin.or(self.origin);
         self.extent = from.extent.or(self.extent);
         self.align = from.align.or(self.align);
+        self.display_none = from.display_none.or(self.display_none);
+        self.hidden = from.hidden.or(self.hidden);
+        self.opacity = from.opacity.or(self.opacity);
         self.styling |= from.styling;
         self.position |= from.position;
     }

@@ -7,7 +7,7 @@ imsc1/ttml/activeArea/ActiveArea001.ttml	ok	3	0	This region is within the editor
 imsc1/ttml/altText/altText1.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
 imsc1/ttml/animation/Animation001.ttml	ok	1	0	This background of this sentence should change from red to blue at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
 imsc1/ttml/animation/Animation002.ttml	ok	1	0	This text of this sentence should change from white to yellow at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
-imsc1/ttml/animation/Animation003.ttml	ok	1	0	This text of this sentence should appear at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation003.ttml	all-skipped: hidden by the document	0	-	-	set or animate changing visibility: not yet refused (next change); the static part is hidden (hand-checked.tsv, OPEN)
 imsc1/ttml/animation/Animation004.ttml	ok	1	0	This text of this sentence should change from a serif to a sans serif font at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
 imsc1/ttml/animation/Animation007.ttml	ok	1	0	This font of this sentence should go from normal to bold at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
 imsc1/ttml/animation/Animation008.ttml	ok	1	0	This line height of this sentence should\ngo from normal to zero at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
@@ -56,8 +56,8 @@ imsc1/ttml/direction/Direction004.ttml	ok	1	0	The last three words are displayed
 imsc1/ttml/direction/Direction005.ttml	ok	1	0	This text is displayed right to left.	
 imsc1/ttml/direction/Direction006.ttml	ok	1	0	The last three words are displayed\nleft to right.	
 imsc1/ttml/display/Display001.ttml	ok	1	0	This text is displayed.	
-imsc1/ttml/display/Display002.ttml	ok	2	0	Only the first caption is visible.	OPEN: tts:display="none" not honoured (hand-checked.tsv)
-imsc1/ttml/display/Display004.ttml	ok	1	0	This text is not displayed.	OPEN: tts:display="none" in the style not honoured (hand-checked.tsv)
+imsc1/ttml/display/Display002.ttml	ok	1	0	Only the first caption is visible.	tts:display="none" on the second paragraph: hidden by the document (hand-checked.tsv)
+imsc1/ttml/display/Display004.ttml	all-skipped: hidden by the document	0	-	-	static display="none" in the style: hidden by the document (hand-checked.tsv)
 imsc1/ttml/displayAlign/DisplayAlign001.ttml	ok	1	0	This text is aligned with\nthe before edge of the region.	
 imsc1/ttml/displayAlign/DisplayAlign002.ttml	ok	1	0	This text is aligned with\nthe after edge of the region.	
 imsc1/ttml/displayAlign/DisplayAlign003.ttml	ok	1	0	This text is aligned in\nthe center of the region.	
@@ -73,7 +73,7 @@ imsc1/ttml/document/DocumentExample120.ttml	ok	11	760	It seems a paradox, does i
 imsc1/ttml/document/DocumentExample822.ttml	ok	1	0	Twinkle, twinkle, little bat!\nHow I wonder where you're at!	
 imsc1/ttml/document/DocumentExample823.ttml	ok	1	0	In spring, when woods are getting green,\nI'll try and tell you what I mean.	
 imsc1/ttml/document/DocumentExample824.ttml	ok	1	0	Little birds are playing\nBagpipes on the shore,\nwhere the tourists snore.	
-imsc1/ttml/document/DocumentExample825.ttml	ok	1	0	[[[ Beautiful soup, so rich and green, waiting in a hot tureen! ]]]	OPEN: tts:display and set not honoured (hand-checked.tsv)
+imsc1/ttml/document/DocumentExample825.ttml	ok	1	0	[[[ ]]]	set or animate changing visibility: not yet refused (next change); the static part is hidden (hand-checked.tsv, OPEN)
 imsc1/ttml/extent/Extent001.ttml	ok	1	0	The extent of this region has\nthe same dimensions as the root container.	
 imsc1/ttml/extent/Extent002.ttml	ok	1	0	The extent of this region is\n150px wide by 75px tall.	
 imsc1/ttml/fillLineGap/FillLineGap001.ttml	ok	1	0	##Line gaps##\nThe quick brown fox\njumps over the lazy dog\n##Line gaps##	
@@ -218,7 +218,7 @@ imsc1/ttml/timing/BasicTimeContainment004.ttml	ok	1	5000	This first sentence beg
 imsc1/ttml/timing/BasicTiming001.ttml	ok	1	10000	This text must appear at 10 seconds\nand be remain visible to 20 seconds.	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/BasicTiming002.ttml	ok	1	10000	This text must appear at 10 seconds\nand remain visible to 20 seconds	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/BasicTiming003.ttml	ok	1	10000	This text must appear at 10 seconds\nand remain visible to 20 seconds	timing: cue times checked in hand-checked.tsv where listed
-imsc1/ttml/timing/BasicTiming005.ttml	ok	1	0	This text must start to appear at 1 seconds\nand fade in to 10 seconds then fade out to 15 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming005.ttml	all-skipped: hidden by the document	0	-	-	set or animate changing visibility: not yet refused (next change); the static part is hidden (hand-checked.tsv, OPEN)
 imsc1/ttml/timing/BasicTiming006.ttml	ok	1	0	This text must appear at 0 seconds and disappear at 15 seconds\nThis text must also appear at 0 seconds and disappear at 15 seconds	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/BasicTiming007.ttml	ok	1	5000	This text should appear at 5 seconds and stay till 15 seconds	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/BasicTiming008.ttml	ok	6	1000	This text must appear at 1 seconds and disappear at 15 seconds	timing: cue times checked in hand-checked.tsv where listed
@@ -231,7 +231,7 @@ imsc1/ttml/timing/BeginEnd002.ttml	ok	1	11000	This test is over.	timing: cue tim
 imsc1/ttml/timing/BeginEnd003.ttml	ok	9	0	This test is going to display a message\nevery other second.	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/FixedBeginEnd002.ttml	ok	1	11000	This test is over.	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/MediaParTiming001.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 15 seconds,	timing: cue times checked in hand-checked.tsv where listed
-imsc1/ttml/timing/MediaParTiming002.ttml	ok	3	0	This text must appear at 5 seconds\nand remain visible to 10 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaParTiming002.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	set or animate changing visibility: not yet refused (next change); the static part is hidden (hand-checked.tsv, OPEN)
 imsc1/ttml/timing/MediaParTiming003.ttml	ok	4	0	This text must appear at 0 seconds\nand be remain visible to 5 seconds,	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/MediaSeqTiming001.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/MediaSeqTiming002.ttml	ok	4	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
@@ -239,7 +239,7 @@ imsc1/ttml/timing/MediaSeqTiming003.ttml	ok	2	25000	This text must appear at 25 
 imsc1/ttml/timing/MediaSeqTiming004.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/MediaSeqTiming005.ttml	ok	3	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/MediaSeqTiming006.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
-imsc1/ttml/timing/MediaSeqTiming007.ttml	ok	2	0	This text must appear at 5 seconds\nand remain visible to 10 seconds	OPEN: tts:display and set not honoured (hand-checked.tsv)
+imsc1/ttml/timing/MediaSeqTiming007.ttml	ok	1	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	set or animate changing visibility: not yet refused (next change); the static part is hidden (hand-checked.tsv, OPEN)
 imsc1/ttml/timing/TimeExpressions001.ttml	ok	9	0	1.2s = 1.2s	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/timing-on-span-001.ttml	ok	1	0	One line Subtitle.	timing: cue times checked in hand-checked.tsv where listed
 imsc1/ttml/timing/timing-on-span-002.ttml	ok	2	0	One line Subtitle.	timing: cue times checked in hand-checked.tsv where listed
@@ -255,7 +255,7 @@ imsc1/ttml/unicodeBidi/unicode-bidi-embed-direction-rtl-001.ttml	ok	1	0	The titl
 imsc1/ttml/unicodeBidi/unicode-bidi-override-direction-rtl-001.ttml	ok	1	0	Inline direction LTR and LTR inside.	
 imsc1/ttml/visibility/Visibility001.ttml	ok	1	0	This text is visible.	
 imsc1/ttml/visibility/Visibility002.ttml	ok	1	0	All the words in this caption are visible.	
-imsc1/ttml/visibility/Visibility003.ttml	ok	1	0	The second row of text is invisible:\ninvisible text.	
+imsc1/ttml/visibility/Visibility003.ttml	ok	1	0	The second row of text is invisible:	tts:visibility="hidden" on the second span: its text is not shown (hand-checked.tsv)
 imsc1/ttml/wrap/WrapOption001.ttml	ok	1	0	The text in this caption wraps automatically no matter how much text is in the paragraph.	
 imsc1/ttml/wrap/WrapOption002.ttml	ok	1	0	The text in this caption does not wrap, so some of the text is not visible.	
 imsc1/ttml/wrap/WrapOption003.ttml	ok	1	0	The text in this caption does not wrap, so some of the text is not visible.	

@@ -153,6 +153,8 @@ element reaches. The image units of a text document are added to `Elements`.
 | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
 | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
 | other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
+| `tts:display` `none`, `tts:visibility` `hidden`, `tts:opacity` `0`, on `body`, `div`, `p`, `region` or `span` (10.2.14, 10.2.49, 10.2.30) | the content is not shown: `none` and `0` hide the element and everything in it, `hidden` is inherited and a descendant with `visible` is shown. A hidden paragraph is `skipped`: `hidden by the document`; a paragraph with its own hidden text, or a hidden span in a shown paragraph, counts once (the outermost element holding the hidden text). Opacity counts the whole element; the other values are initial values and count nothing |
+| `tts:opacity` with a value between 0 and 1, `tts:display="inlineBlock"`, a `tts:display`, `tts:visibility` or `tts:opacity` on `br` or `tt` (not applicable there) | `Styling`; the text is kept |
 | `tts:origin`, `tts:extent`, `tts:displayAlign` on a region of a paragraph | the placement of `top`: a `top` paragraph keeps them; otherwise `Position` |
 | `tts:origin`, `tts:extent`, `tts:displayAlign` on any other element | `Position` |
 | `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |

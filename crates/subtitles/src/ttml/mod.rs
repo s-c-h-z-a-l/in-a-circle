@@ -48,6 +48,8 @@
 //! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
 //! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
 //! | other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
+//! | `tts:display` `none`, `tts:visibility` `hidden`, `tts:opacity` `0`, on `body`, `div`, `p`, `region` or `span` (10.2.14, 10.2.49, 10.2.30) | the content is not shown: `none` and `0` hide the element and everything in it, `hidden` is inherited and a descendant with `visible` is shown. A hidden paragraph is `skipped`: `hidden by the document`; a paragraph with its own hidden text, or a hidden span in a shown paragraph, counts once (the outermost element holding the hidden text). Opacity counts the whole element; the other values are initial values and count nothing |
+//! | `tts:opacity` with a value between 0 and 1, `tts:display="inlineBlock"`, a `tts:display`, `tts:visibility` or `tts:opacity` on `br` or `tt` (not applicable there) | `Styling`; the text is kept |
 //! | `tts:origin`, `tts:extent`, `tts:displayAlign` on a region of a paragraph | the placement of `top`: a `top` paragraph keeps them; otherwise `Position` |
 //! | `tts:origin`, `tts:extent`, `tts:displayAlign` on any other element | `Position` |
 //! | `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
@@ -105,7 +107,8 @@ use crate::srt::STRAY;
 use crate::{Budget, Loss, MAX_MS, Parsed, ReadError, Skipped};
 use slice::{Content, Output, Piece, RunStyle};
 use style::{
-    Css, Flags, Len, Sheet, attrs_css, own_flags, root_extent, root_extent_is_usable, top_third,
+    Css, Flags, Len, Opacity, Sheet, attrs_css, hiding_declared, own_flags, root_extent,
+    root_extent_is_usable, top_third,
 };
 use time::{Params, TimeError, parse_time};
 
@@ -146,6 +149,11 @@ const BAD_TIME_CONTAINER: &str = "invalid timeContainer";
 const BAD_SPACE: &str = "invalid xml:space";
 const CONDITIONAL: &str = "conditional element";
 const UNSUPPORTED_ELEMENT: &str = "unsupported element";
+/// Text the document hides: `display="none"` on it or an ancestor (10.2.14),
+/// `visibility="hidden"` (10.2.49, inherited), or `opacity="0"` (10.2.30). It is
+/// not shown, so it is counted, not converted. The hidden paragraph (or each
+/// hidden span of a shown one) is one item.
+const HIDDEN: &str = "hidden by the document";
 
 /// Reads a whole TTML document. The `xml` crate decodes it (UTF-8, or UTF-16
 /// with a byte order mark) and checks its declared encoding. Cues come out in
@@ -258,6 +266,22 @@ struct Frame {
     region: Place,
     /// For a `style` or `region`: its entry in the sheet.
     entry: Option<usize>,
+    /// Hidden by `display="none"` or `opacity="0"` on this element or an
+    /// ancestor, or a region of it (see [`is_hidden`]). Not inherited as a value:
+    /// the effect reaches the content, so it is carried down.
+    concealed: bool,
+    /// Visible text was hidden directly in this element (see `Doc::end`).
+    hidden_text: bool,
+    /// The start tag's line, for a hidden span's item.
+    line: u32,
+}
+
+/// Whether a frame's text is hidden by the document: its element, or an
+/// ancestor, has `display="none"` or `opacity="0"` (`concealed`), or its
+/// visibility is `hidden` (inherited, and a descendant with `visible` is shown,
+/// 10.2.49).
+fn is_hidden(frame: &Frame) -> bool {
+    frame.concealed || frame.css.hidden == Some(true)
 }
 
 impl Frame {
@@ -277,6 +301,9 @@ impl Frame {
             flags: Flags::default(),
             region: Place::None,
             entry: None,
+            concealed: false,
+            hidden_text: false,
+            line: 0,
         }
     }
 
@@ -366,6 +393,9 @@ struct Para {
     /// on it or on a span or `br` in it): one `Elements` unit. Its text is
     /// converted all the same.
     unit: bool,
+    /// The start lines of the outermost hidden spans of a shown paragraph: one
+    /// `skipped` item each, counted when the paragraph is kept (see `paragraph`).
+    hidden_spans: Vec<u32>,
 }
 
 /// What an element is, given the element it is in.
@@ -663,9 +693,11 @@ impl<'b> Doc<'b> {
         frame.cursor = Some(0);
         frame.fault = bad_space;
         frame.css = decl.over(&Css::default());
+        // The root takes no visibility (10.2.49 applies to body, div, p, region and span).
+        frame.css.hidden = None;
         // `tts:extent` is consumed above, so it is not a placement of the content.
         frame.flags = Flags {
-            styling: decl.styling,
+            styling: decl.styling || hiding_declared(&decl),
             position: decl.position
                 || decl.origin.is_some()
                 || decl.align.is_some()
@@ -731,6 +763,7 @@ impl<'b> Doc<'b> {
         let (base, parent_limit, parent_preserve) = (parent.base(), parent.limit, parent.preserve);
         let (mut fault, parent_css, parent_flags, parent_region) =
             (parent.fault, parent.css, parent.flags, parent.region);
+        let parent_concealed = parent.concealed;
         let begin = stamp(el, "begin", &params)?;
         let end = stamp(el, "end", &params)?;
         let dur = stamp(el, "dur", &params)?;
@@ -750,6 +783,10 @@ impl<'b> Doc<'b> {
         let decl = self.sheet.declared(el);
         let mut flags = parent_flags.join(own_flags(&decl));
         let mut css = decl.over(&parent_css);
+        // display and opacity reach the content (10.2.14, 10.2.30); visibility is in `css`.
+        let mut concealed = parent_concealed
+            || decl.display_none == Some(true)
+            || decl.opacity == Some(Opacity::Zero);
         // A `region` names the region of the element and its content; a span's
         // is not used (its text is not placed in it), which is a `Position` loss.
         let region = match (kind, el.attr(None, "region")) {
@@ -773,6 +810,9 @@ impl<'b> Doc<'b> {
                     let placed = *self.sheet.css(entry);
                     // 10.4.2.2: the region gives the values no ancestor does.
                     css = css.over(&placed);
+                    // A region's own display and opacity hide its paragraphs (10.2.14, 10.2.30).
+                    concealed |=
+                        placed.display_none == Some(true) || placed.opacity == Some(Opacity::Zero);
                     flags = flags.join(self.sheet.flags(entry));
                     top = top_third(&placed, self.root_height) == Some(true);
                     if !top
@@ -805,6 +845,8 @@ impl<'b> Doc<'b> {
         frame.css = css;
         frame.flags = flags;
         frame.region = region;
+        frame.concealed = concealed;
+        frame.line = line;
         // Charged before the frame is pushed: an element is an item.
         self.budget.charge()?;
         if kind == Kind::Paragraph {
@@ -817,6 +859,7 @@ impl<'b> Doc<'b> {
                 top,
                 flags: Flags::default(),
                 unit: own_image,
+                hidden_spans: Vec::new(),
             });
         }
         self.stack.push(frame);
@@ -835,8 +878,9 @@ impl<'b> Doc<'b> {
         let (base, end) = top.leaf_time();
         let preserve = top.preserve;
         let decl = self.sheet.declared(el);
+        // A `br` takes no display, visibility or opacity (10.2.14, 10.2.30, 10.2.49): counted as styling.
         let own = Flags {
-            styling: decorated(&decl),
+            styling: decorated(&decl) || hiding_declared(&decl),
             ..Flags::default()
         };
         let flags = top.text_flags().join(own_flags(&decl)).join(own);
@@ -868,6 +912,7 @@ impl<'b> Doc<'b> {
         let (kind, preserve) = (top.kind, top.preserve);
         let (base, end) = top.leaf_time();
         let (flags, style) = (top.text_flags(), RunStyle::of(&top.css));
+        let hidden = is_hidden(top);
         let visible = text.chars().any(|c| !c.is_whitespace());
         if !matches!(kind, Kind::Paragraph | Kind::Span) {
             if visible {
@@ -878,6 +923,32 @@ impl<'b> Doc<'b> {
         if visible {
             self.child_ended(end);
         }
+        if hidden {
+            // Not shown: nothing is kept, and the element is counted when it ends.
+            if visible && let Some(top) = self.stack.last_mut() {
+                top.hidden_text = true;
+            }
+        } else {
+            self.keep_text(base, end, text, preserve, style, flags)?;
+        }
+        if visible && let Some(para) = self.para.as_mut() {
+            para.visible = true;
+        }
+        Ok(())
+    }
+
+    /// Keeps a piece of text in the open paragraph; visible text with no display
+    /// time is counted (`NO_DISPLAY`, see `paragraph`).
+    fn keep_text(
+        &mut self,
+        base: Option<u64>,
+        end: Option<u64>,
+        text: &str,
+        preserve: bool,
+        style: RunStyle,
+        flags: Flags,
+    ) -> Result<(), ReadError> {
+        let visible = text.chars().any(|c| !c.is_whitespace());
         match (base, end) {
             (Some(begin), Some(end)) if end > begin => {
                 self.budget.charge()?;
@@ -899,9 +970,6 @@ impl<'b> Doc<'b> {
                 }
             }
             _ => {}
-        }
-        if visible && let Some(para) = self.para.as_mut() {
-            para.visible = true;
         }
         Ok(())
     }
@@ -928,6 +996,14 @@ impl<'b> Doc<'b> {
         ) {
             return Ok(());
         }
+        // A span that hid its own text is one item, unless the element it is in
+        // is hidden too: then the outermost hidden element is the one counted.
+        if frame.kind == Kind::Span && frame.hidden_text {
+            match self.stack.last_mut() {
+                Some(parent) if is_hidden(parent) => parent.hidden_text = true,
+                _ => self.hidden_span(frame.line)?,
+            }
+        }
         let end = frame.end();
         if frame.kind == Kind::Paragraph {
             self.paragraph(&frame, end)?;
@@ -939,8 +1015,20 @@ impl<'b> Doc<'b> {
         Ok(())
     }
 
+    /// Records a hidden span of the open paragraph, by its start line. It is
+    /// counted if the paragraph is kept (see `paragraph`).
+    fn hidden_span(&mut self, line: u32) -> Result<(), ReadError> {
+        if let Some(para) = self.para.as_mut() {
+            self.budget.charge()?;
+            para.hidden_spans.push(line);
+        }
+        Ok(())
+    }
+
     /// Cuts a finished paragraph into cues, or skips it with a reason. A
     /// paragraph with no visible text has nothing to lose and is not counted.
+    /// Refusals come first: a paragraph refused for its visibility or its hidden
+    /// text counts once, and its hidden spans are not counted separately.
     fn paragraph(&mut self, frame: &Frame, end: Option<u64>) -> Result<(), ReadError> {
         let Some(para) = self.para.take() else {
             return Ok(());
@@ -949,6 +1037,12 @@ impl<'b> Doc<'b> {
             self.images += 1;
         }
         if !para.visible {
+            return Ok(());
+        }
+        // display and opacity hide the whole paragraph. Its visibility does not:
+        // a span may set `visible` again, so the paragraph's own text is counted below.
+        if frame.concealed {
+            self.skip(para.line, HIDDEN);
             return Ok(());
         }
         if let Some(reason) = frame.fault.or(para.fault) {
@@ -966,6 +1060,12 @@ impl<'b> Doc<'b> {
         if end <= begin {
             self.skip(para.line, NO_DISPLAY);
             return Ok(());
+        }
+        if frame.hidden_text {
+            self.skip(para.line, HIDDEN);
+        }
+        for line in para.hidden_spans {
+            self.skip(line, HIDDEN);
         }
         slice::cues(
             &para.pieces,

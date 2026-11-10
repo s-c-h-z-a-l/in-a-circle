@@ -67,32 +67,29 @@ const REQUIRE_TTCONV: &str = "INACIRCLE_REQUIRE_TTCONV";
 /// open finding; a difference nobody has explained is a failure, not a line in
 /// this table.
 const DIVERGENT_FILES: &[(&str, &str)] = &[
-    // OPEN: the reader ignores `tts:display` (a static `none` hides the
-    // paragraph in a player) and `set` (the paragraph shows from the `set`).
-    // ttconv honours both, so our text shows early or where it must be hidden.
-    (
-        "imsc1/ttml/display/Display002.ttml",
-        "OPEN: tts:display=\"none\" not honoured",
-    ),
-    (
-        "imsc1/ttml/display/Display004.ttml",
-        "OPEN: tts:display=\"none\" in the style not honoured",
-    ),
+    // OPEN: a `set` that changes visibility is not played yet; the next change
+    // refuses those paragraphs. ttconv plays the set, so the comparison cannot hold.
     (
         "imsc1/ttml/animation/Animation003.ttml",
-        "OPEN: tts:display and set not honoured",
+        "OPEN: a set changing visibility is not played yet",
     ),
     (
         "imsc1/ttml/timing/MediaParTiming002.ttml",
-        "OPEN: tts:display and set not honoured",
+        "OPEN: a set changing visibility is not played yet",
     ),
     (
         "imsc1/ttml/document/DocumentExample825.ttml",
-        "OPEN: tts:display and set not honoured",
+        "OPEN: a set changing visibility is not played yet",
     ),
     (
         "imsc1/ttml/timing/MediaSeqTiming007.ttml",
-        "OPEN: tts:display and set not honoured",
+        "OPEN: a set changing visibility is not played yet",
+    ),
+    // tts:visibility: ttconv's ISD prunes only `display="none"`, so it keeps the
+    // text that `visibility="hidden"` hides; we do not show it.
+    (
+        "imsc1/ttml/visibility/Visibility003.ttml",
+        "visibility hidden text: ttconv keeps it, we hide it",
     ),
     // oblique: ttconv's writers keep only normal and italic; the reader carries oblique as italic (the spec).
     (
@@ -191,10 +188,10 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
 ];
 
 /// The number of files the comparison covers on the vendored set: the
-/// classification gives 242 compared, 17 refused, 22 overlapping, 12 with timed
-/// spans and 28 listed. A file that leaves the comparison changes this count and
+/// classification gives 241 compared, 19 refused, 22 overlapping, 12 with timed
+/// spans and 27 listed. A file that leaves the comparison changes this count and
 /// fails the run until the count and the reasons are reviewed together.
-const COMPARED_FLOOR: usize = 242;
+const COMPARED_FLOOR: usize = 241;
 
 /// Every vendored `.ttml` file, as its path under the data folder, sorted.
 fn ttml_files() -> Vec<String> {
