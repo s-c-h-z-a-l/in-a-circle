@@ -174,6 +174,35 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Files whose WebVTT comparison is left out, with the reason; their SRT
+/// comparison stays. Every one has a `div` inside a `div` (checked by the
+/// classification test). ttconv's WebVTT writer visits only the paragraphs that
+/// are direct children of a `div` (`vtt/writer.py`, `add_isd`), so a single
+/// paragraph inside nested divisions is dropped from its output, while its SRT
+/// writer recurses (`srt/writer.py`, `append_element`) and agrees with us.
+const VTT_DIVERGENT_FILES: &[(&str, &str)] = &[
+    (
+        "imsc1/ttml/div/Div001.ttml",
+        "ttconv's WebVTT writer drops a paragraph in a nested div",
+    ),
+    (
+        "imsc1/ttml/timing/MediaSeqTiming002.ttml",
+        "ttconv's WebVTT writer drops a paragraph in a nested div",
+    ),
+    (
+        "imsc1/ttml/timing/MediaSeqTiming003.ttml",
+        "ttconv's WebVTT writer drops a paragraph in a nested div",
+    ),
+    (
+        "imsc1/ttml/timing/MediaSeqTiming004.ttml",
+        "ttconv's WebVTT writer drops a paragraph in a nested div",
+    ),
+    (
+        "imsc1/ttml/timing/MediaSeqTiming005.ttml",
+        "ttconv's WebVTT writer drops a paragraph in a nested div",
+    ),
+];
+
 /// The number of files the comparison covers on the vendored set: the
 /// classification gives 229 compared, 22 refused, 22 overlapping, 12 with timed
 /// spans, 10 with a style animation, 2 with no end and 24 listed. A file that
@@ -413,6 +442,10 @@ struct Scan {
     /// changes the style (its ISD adds the animation's times as significant
     /// times, `isd.py`, `compute_sig_times`), so the cues cannot be matched.
     style_animation: bool,
+    /// A `div` inside a `div`. ttconv's WebVTT writer reads only the paragraphs
+    /// that are direct children of a `div` (`vtt/writer.py`, `add_isd`), so a
+    /// single paragraph inside nested divisions is lost from its output.
+    div_in_div: bool,
 }
 
 /// The TTML styling namespaces (the TTML 2 and the DFXP one).
@@ -428,8 +461,18 @@ fn scan(bytes: &[u8]) -> Scan {
         return out;
     };
     let mut reader = xml::Reader::new(&text, xml::Options::default());
+    let mut divs_open = 0usize;
     while let Ok(Some(event)) = reader.next() {
+        if let xml::Event::End(name) = &event
+            && name.local == "div"
+        {
+            divs_open -= 1;
+        }
         if let xml::Event::Start(element) = event {
+            if element.name.local == "div" {
+                out.div_in_div |= divs_open > 0;
+                divs_open += 1;
+            }
             let timed = ["begin", "end", "dur"]
                 .iter()
                 .any(|name| element.attr(None, name).is_some());
@@ -752,6 +795,17 @@ fn ttconv_comparison_set_is_classified_without_the_tool() {
             "{file} is listed but not vendored"
         );
     }
+    for (file, _) in VTT_DIVERGENT_FILES {
+        assert!(
+            read_for_comparison(file).is_ok(),
+            "{file} is WebVTT-listed but not compared"
+        );
+        let found = scan(&fs::read(Path::new(ROOT).join(file)).expect("a vendored file"));
+        assert!(
+            found.div_in_div,
+            "{file} is WebVTT-listed but has no div in a div"
+        );
+    }
     let mut counts: BTreeMap<Excluded, usize> = BTreeMap::new();
     let mut compared = 0;
     for path in &files {
@@ -789,6 +843,9 @@ fn ttconv_agrees_on_times_and_text() {
         let input = Path::new(ROOT).join(&path);
         let stem = path.replace('/', "_");
         for (vtt, otype, ext) in [(false, "SRT", "srt"), (true, "VTT", "vtt")] {
+            if vtt && VTT_DIVERGENT_FILES.iter().any(|(file, _)| *file == path) {
+                continue;
+            }
             let output = work.join(format!("{stem}.{ext}"));
             let theirs = run_tt(&input, &output, otype).and_then(|text| {
                 if vtt {
