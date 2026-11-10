@@ -193,6 +193,13 @@ the classifier's TTML root scan and the menu's TTML rows. The `inacircle-text`
 and `inacircle-pages` binaries are unchanged. The aarch64 baseline was not
 refreshed.
 
+The HTML5 entity table was then made relocation-free (see the open items).
+Against the TTML line: `inacircle-subtitles` 804,792 → 663,768 B (−141,024: the
+table −151,152, the subtitle code's changes since the TTML line +10,128), `.text`
+507,381 → 516,773 (+9,392); `inacircle-text` 1,268,024 → 1,116,872 (−151,152),
+`.text` 901,043 → 900,819 (−224). `inacircle` and `inacircle-pages` are
+unchanged. Every growth is under the 100 KB threshold.
+
 ## Classifier cost
 
 `classify_with` runs on every dropped file before the wheel shows it. The
@@ -557,7 +564,7 @@ Holds on this machine:
   never written.
 - The cue-shaped inputs (the shapes a real subtitle has) run at 89 to 129 MiB,
   far from the net. A dense TTML cue shape (299,589 cues) peaks at 125.0 MiB.
-- `inacircle-subtitles` is 804,792 B (507,381 B of `.text`), under the family
+- `inacircle-subtitles` is 663,768 B (516,773 B of `.text`), under the family
   limit; `inacircle` is 1,200,856 B, under its 1.5 MB limit.
 - The classifier adds about 3 µs per file, on this machine, in a
   micro-measurement, and about 19 µs to a drop of 50 arrow-less `.srt` files
@@ -583,10 +590,14 @@ Open (not measured here, not recorded as passing):
   is at the 10 % investigation line and under the 15 % blocking line. The
   residual is the scan of a long head comment, about 0.25 µs per file. It is
   left open, not fixed.
-- **The HTML5 entity table of the `xml` crate is linked into the subtitle
-  binary**, although TTML reads with `html_entities` off: about 77 KB of data
-  (in `.data.rel.ro`, measured on the first TTML build). A feature switch in the
-  `xml` crate would remove it. Not made here: it is a change to the crate.
+- **The HTML5 entity table of the `xml` crate**, which TTML reads with
+  `html_entities` off, was 77 KB of relocated data and 114,576 B of `.rela.dyn`
+  in the subtitle binary. It is now relocation-free (one string of names and
+  characters and a `(u32, u16, u16)` offset table): `.rela.dyn` 12,672 B,
+  `.data.rel.ro` 9,616 B. What remains is 37 KB of read-only `.rodata` (17,000 B
+  of offsets, 20,220 B of names and characters), never relocated or written at
+  startup. A feature switch in the `xml` crate would save that file size and no
+  startup time: not made.
 - **Two known deviations from the standards**: a WebVTT speaker name's internal
   runs of white space are not collapsed, as the standard collapses them; and
   WebVTT `STYLE` is recognised only as a block's first line, while the standard

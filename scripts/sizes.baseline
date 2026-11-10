@@ -140,9 +140,10 @@
 # the TTML reader (the subtitles::ttml module); the xml crate, linked into this
 # binary for the first time, shows about 4.8 KB by name, so most of its code is
 # inlined into the TTML symbols and is not split further. The HTML5 entity table
-# of the xml crate is linked as well (about 77 KB of relocated data in
-# .data.rel.ro), though TTML reads with html_entities off: a candidate for a
-# later change to the xml crate, not made here. The .text (497717 B) stays far
+# of the xml crate is linked as well: about 77 KB of .data.rel.ro and 114576 B
+# of .rela.dyn (two relocated pointers per entry), though TTML reads with
+# html_entities off. The next refresh made the table relocation-free (the
+# block below). The .text (497717 B) stays far
 # under the 1 MiB family limit. inacircle grew 1760 B (file, 1552 B of .text)
 # since its previous line, under the threshold; inacircle-text and
 # inacircle-pages are unchanged.
@@ -155,7 +156,20 @@
 # -272 B file (-848 B .text) net, from the classifier's TTML root scan and
 # the menu's TTML rows since that line. The other two binaries are unchanged.
 # The aarch64 baseline is not refreshed.
+# Refreshed after the xml crate's HTML5 entity table became relocation-free (one
+# string of names and characters, a (u32, u16, u16) offset table in place of
+# 2,125 pointer pairs), same toolchain and profile, built from the tree this
+# commit records (on 33f451312). inacircle-text and inacircle-subtitles each
+# shrink by 151152 B (file): the table change alone. Their .rela.dyn goes from
+# 123360 B and 114576 B to 21456 B and 12672 B (inacircle-pages: 11928 B), and
+# their .data.rel.ro from 84880 B and 77520 B to 16976 B and 9616 B. What
+# remains is 17000 B of offsets and 20220 B of names and characters in
+# .rodata: read-only, never relocated or written at startup, touched only by a
+# lookup. inacircle-subtitles against the TTML line above: file -141024 B (the
+# table -151152 B, the subtitle code's changes since that line +10128 B), .text
+# +9392 B from those changes, under the 100 KB threshold. inacircle and
+# inacircle-pages are unchanged; the .text of inacircle-text falls by 224 B.
 inacircle 1200856 925144
-inacircle-text 1268024 901043
+inacircle-text 1116872 900819
 inacircle-pages 514648 412179
-inacircle-subtitles 804792 507381
+inacircle-subtitles 663768 516773
