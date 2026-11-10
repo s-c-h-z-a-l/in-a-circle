@@ -49,6 +49,12 @@ pub const WEBVTT_MIME: &str = "text/vtt";
 /// section (ASCII case-insensitive).
 pub const SSA_MIME: &str = "text/x-ssa";
 
+/// A TTML subtitle (W3C Timed Text Markup Language, DFXP and IMSC): a
+/// `.ttml` or `.dfxp` whose head is XML, or a `.xml` whose head's root is
+/// `tt` in a TTML namespace. Whether the XML is well formed, and a TTML
+/// document at all, is the reader's to say.
+pub const TTML_MIME: &str = "application/ttml+xml";
+
 /// How far a text-named file with an all-ASCII head is read on, the head
 /// included: a whole film subtitle (a feature-length `.srt` is 50-150 KiB).
 /// Valid UTF-8 accents do not stop the read-on; it stops after the chunk
@@ -72,12 +78,13 @@ const CHUNK: usize = 16 * 1024;
 const CUT_MAX: usize = 3;
 
 /// Extensions of text that may be in a legacy 8-bit code page: the plain
-/// text and Markdown names, subtitles, tables, logs and configuration.
-/// `nfo` is left out: it is usually CP437 art with escape codes, which the
+/// text and Markdown names, subtitles (TTML included, so a code page one
+/// is decoded like any other), tables, logs and configuration. `nfo` is
+/// left out: it is usually CP437 art with escape codes, which the
 /// Windows-1250 and ISO-8859-2 actions would turn into the wrong letters.
 const X8BIT_EXT: &[&str] = &[
-    "txt", "text", "md", "markdown", "mdown", "mkd", "srt", "vtt", "ass", "ssa", "sub", "csv",
-    "tsv", "log", "ini", "cfg", "conf", "me", "1st", "readme", "diz",
+    "txt", "text", "md", "markdown", "mdown", "mkd", "srt", "vtt", "ass", "ssa", "ttml", "dfxp",
+    "sub", "csv", "tsv", "log", "ini", "cfg", "conf", "me", "1st", "readme", "diz",
 ];
 
 /// The SUB byte (Ctrl-Z) DOS editors wrote as an end-of-file mark: allowed
@@ -263,6 +270,10 @@ fn subtitle(ext: Option<&str>, head: &[u8]) -> Option<Kind> {
         "srt" if in_head(head, b"-->") => (SUBRIP_MIME, "SRT subtitles"),
         "vtt" if webvtt_signature(unbom) => (WEBVTT_MIME, "WebVTT subtitles"),
         "ass" | "ssa" if in_head(head, b"[Script Info]") => (SSA_MIME, "ASS subtitles"),
+        "ttml" | "dfxp" if unbom.trim_ascii_start().starts_with(b"<") => {
+            (TTML_MIME, "TTML subtitles")
+        }
+        "xml" if ttml_root(unbom) => (TTML_MIME, "TTML subtitles"),
         _ => return None,
     };
     Some(Kind {
@@ -280,6 +291,97 @@ fn webvtt_signature(head: &[u8]) -> bool {
         rest.first()
             .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
     })
+}
+
+/// The TTML namespaces a `.xml` root may declare: the W3C one, and the 2006
+/// DFXP draft's, which older DFXP files carry and which is read the same.
+const TTML_NAMESPACES: [&[u8]; 2] = [
+    b"http://www.w3.org/ns/ttml",
+    b"http://www.w3.org/2006/10/ttaf1",
+];
+
+/// Whether an XML head's root element is `tt` (or `prefix:tt`) with a TTML
+/// namespace declared on its own start tag. Text search only: the reader
+/// checks the document.
+fn ttml_root(head: &[u8]) -> bool {
+    root_start_tag(head).is_some_and(is_ttml_tag)
+}
+
+/// The text between `<` and `>` of the root's start tag, after the
+/// declarations before it: `<?…?>`, comments and a `<!DOCTYPE …>`. `None`
+/// if the head ends before the tag does, or a declaration is cut.
+fn root_start_tag(head: &[u8]) -> Option<&[u8]> {
+    let mut rest = head.trim_ascii_start();
+    loop {
+        let body = rest.strip_prefix(b"<")?;
+        let end = if body.starts_with(b"?") {
+            find(body, b"?>")? + 2
+        } else if body.starts_with(b"!--") {
+            find(body, b"-->")? + 3
+        } else if body.starts_with(b"!") {
+            declaration_end(body)?
+        } else {
+            return Some(&body[..find(body, b">")?]);
+        };
+        rest = body[end..].trim_ascii_start();
+    }
+}
+
+/// The end of a `<!…>` declaration: its first `>` outside an internal
+/// subset `[ … ]`, so a `>` inside the subset does not end it early.
+fn declaration_end(body: &[u8]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, &b) in body.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            b'>' if depth == 0 => return Some(at + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a start tag (the text between `<` and `>`) is `tt` or
+/// `prefix:tt`, and declares a TTML namespace for that name on the tag: the
+/// default one for `tt`, `xmlns:prefix` for `prefix:tt`.
+fn is_ttml_tag(tag: &[u8]) -> bool {
+    let tag = tag.strip_suffix(b"/").unwrap_or(tag);
+    let name_end = tag
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(tag.len());
+    let (name, attributes) = tag.split_at(name_end);
+    let prefix = match name.iter().position(|&b| b == b':') {
+        None if name == b"tt" => None,
+        Some(at) if at > 0 && &name[at + 1..] == b"tt" => Some(&name[..at]),
+        _ => return false,
+    };
+    attributes
+        .split(u8::is_ascii_whitespace)
+        .any(|token| ns_declaration(token, prefix).is_some_and(|ns| TTML_NAMESPACES.contains(&ns)))
+}
+
+/// The value of an `xmlns` (or `xmlns:prefix`) attribute that is one
+/// whitespace-separated token of a start tag, quoted with `"` or `'`.
+/// shortcut: a spaced `xmlns = "…"` is not read, so such a `.xml` is not
+/// offered (fail closed), upgrade when a real file of that shape turns up.
+fn ns_declaration<'a>(token: &'a [u8], prefix: Option<&[u8]>) -> Option<&'a [u8]> {
+    let rest = match prefix {
+        None => token.strip_prefix(b"xmlns")?,
+        Some(p) => token.strip_prefix(b"xmlns:")?.strip_prefix(p)?,
+    };
+    let (&quote, value) = rest.strip_prefix(b"=")?.split_first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    value.strip_suffix(&[quote])
+}
+
+/// The first place `needle` occurs in `hay`. The head is 4 KiB and the
+/// needles are two or three bytes, so a plain scan is cheap.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Bytes per block of the head search. A block without the needle's first
@@ -1080,6 +1182,189 @@ mod tests {
         assert_eq!(kind(&p), is(None, ".vtt file"));
         let p = d.file("c.ass", b"[Script Info]\0binary");
         assert_eq!(kind(&p), is(None, ".ass file"));
+    }
+
+    #[test]
+    fn ttml_and_dfxp_with_an_xml_head_are_ttml() {
+        let d = Dir::new("ttml");
+        let body: &[u8] = b"<?xml version=\"1.0\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"/>\n";
+        let bom = [b"\xef\xbb\xbf".as_slice(), body].concat();
+        let spaced = [b" \t\n".as_slice(), body].concat();
+        let cases = [
+            ("a.ttml", body.to_vec()),
+            ("B.TTML", bom),
+            ("c.dfxp", body.to_vec()),
+            ("D.Dfxp", spaced),
+        ];
+        for (n, bytes) in cases {
+            let p = d.file(n, &bytes);
+            assert_eq!(kind(&p), is(Some(TTML_MIME), "TTML subtitles"), "{n}");
+        }
+    }
+
+    #[test]
+    fn ttml_name_without_an_xml_head_stays_unknown_text() {
+        let d = Dir::new("ttml-no");
+        let p = d.file("a.ttml", b"just some text\n");
+        assert_eq!(kind(&p), is(None, ".ttml text"));
+        // The head must open with `<` after the white space: a word first defeats it.
+        let p = d.file("b.dfxp", b"WEBVTT\n<tt/>\n");
+        assert_eq!(kind(&p), is(None, ".dfxp text"));
+        let p = d.file("c.ttml", b"\xef\xbb\xbf");
+        assert_eq!(kind(&p), is(None, ".ttml text"));
+    }
+
+    #[test]
+    fn xml_with_the_ttml_namespace_and_tt_root_is_ttml() {
+        let d = Dir::new("ttml-xml");
+        let ok: [&[u8]; 7] = [
+            b"<tt xmlns=\"http://www.w3.org/ns/ttml\">",
+            b"<tt:tt xmlns:tt=\"http://www.w3.org/ns/ttml\">",
+            b"<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xml:lang=\"en\">",
+            b"<tt:tt xmlns:tt='http://www.w3.org/2006/10/ttaf1'/>",
+            b"<tt\n  xml:lang=\"en\"\n  xmlns=\"http://www.w3.org/ns/ttml\"\n>",
+            b"<tt xmlns:ttp=\"x\" xmlns=\"http://www.w3.org/ns/ttml\"/>",
+            b"<t:tt xmlns:t=\"http://www.w3.org/ns/ttml\"/>",
+        ];
+        for (i, head) in ok.iter().enumerate() {
+            let p = d.file(&format!("ok{i}.xml"), head);
+            assert_eq!(kind(&p), is(Some(TTML_MIME), "TTML subtitles"), "{i}");
+        }
+    }
+
+    #[test]
+    fn xml_with_another_root_or_namespace_is_not_ttml() {
+        let d = Dir::new("ttml-other");
+        let no: &[&[u8]] = &[
+            b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body/></html>",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            b"<tt xmlns=\"http://example.com/tt\"/>",
+            b"<tt/>",
+            // The namespace is declared on a child, not on the root.
+            b"<tt><p xmlns=\"http://www.w3.org/ns/ttml\"/></tt>",
+            // A prefixed root needs its own prefix declared on it.
+            b"<tt:tt xmlns=\"http://www.w3.org/ns/ttml\"/>",
+            b"<x:tt xmlns:tt=\"http://www.w3.org/ns/ttml\"/>",
+            b"<ttx xmlns=\"http://www.w3.org/ns/ttml\"/>",
+            b"<tt xmlnsx=\"http://www.w3.org/ns/ttml\"/>",
+            b"<tt xmlns=\"http://www.w3.org/ns/ttml-x\"/>",
+            b"<tt xmlns:tt=\"http://www.w3.org/ns/ttml\"/>",
+        ];
+        for (i, head) in no.iter().enumerate() {
+            let p = d.file(&format!("no{i}.xml"), head);
+            assert_eq!(kind(&p), is(None, ".xml text"), "{i}");
+        }
+    }
+
+    #[test]
+    fn xml_root_past_the_head_is_not_recognised() {
+        let d = Dir::new("ttml-deep");
+        let root: &[u8] = b"<tt xmlns=\"http://www.w3.org/ns/ttml\"/>";
+        // The root's start tag ends exactly at the head's end: recognised.
+        let edge = [b"\n".repeat(HEAD - root.len()), root.to_vec()].concat();
+        let p = d.file("edge.xml", &edge);
+        assert_eq!(kind(&p), is(Some(TTML_MIME), "TTML subtitles"));
+        // One byte more and the tag is cut by the head's end.
+        let cut = [b"\n".repeat(HEAD - root.len() + 1), root.to_vec()].concat();
+        let p = d.file("cut.xml", &cut);
+        assert_eq!(kind(&p), is(None, ".xml text"));
+        // Comments past the head's end hide the root just the same.
+        let far = [b"<!-- padding -->\n".repeat(300), root.to_vec()].concat();
+        let p = d.file("far.xml", &far);
+        assert_eq!(kind(&p), is(None, ".xml text"));
+    }
+
+    #[test]
+    fn comments_and_doctype_before_the_root_are_skipped() {
+        let d = Dir::new("ttml-skip");
+        let head: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE tt PUBLIC \"-//W3C//DTD TT//EN\" \"tt.dtd\">\n<!-- <html> is not the root -->\n<tt xmlns=\"http://www.w3.org/ns/ttml\"/>";
+        let p = d.file("a.xml", head);
+        assert_eq!(kind(&p), is(Some(TTML_MIME), "TTML subtitles"));
+        // An internal subset ends at its `]`: the `>` inside its literal does not end the DOCTYPE.
+        let subset: &[u8] =
+            b"<!DOCTYPE tt [<!ENTITY e \"x>y\">]>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"/>";
+        let p = d.file("b.xml", subset);
+        assert_eq!(kind(&p), is(Some(TTML_MIME), "TTML subtitles"));
+        // A comment naming the namespace is not a root.
+        let fake: &[u8] = b"<!-- <tt xmlns=\"http://www.w3.org/ns/ttml\"/> -->\n<html xmlns=\"http://www.w3.org/1999/xhtml\"/>";
+        let p = d.file("c.xml", fake);
+        assert_eq!(kind(&p), is(None, ".xml text"));
+    }
+
+    #[test]
+    fn utf16_ttml_is_not_offered() {
+        let d = Dir::new("ttml-utf16");
+        let text = "<?xml version=\"1.0\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"/>";
+        let le: Vec<u8> = [0xffu8, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let be: Vec<u8> = [0xfeu8, 0xff]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        for bytes in [&le, &be] {
+            let p = d.file("a.ttml", bytes);
+            assert_eq!(kind(&p), is(None, ".ttml file"));
+            let p = d.file("b.dfxp", bytes);
+            assert_eq!(kind(&p), is(None, ".dfxp file"));
+            let p = d.file("c.xml", bytes);
+            assert_eq!(kind(&p), is(None, ".xml file"));
+        }
+    }
+
+    #[test]
+    fn non_utf8_ttml_is_still_8bit() {
+        let d = Dir::new("ttml8");
+        let mut ttml = b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n".to_vec();
+        ttml.extend_from_slice(CP1250);
+        let p = d.file("a.ttml", &ttml);
+        assert_eq!(kind(&p), x8bit());
+        let mut dfxp = b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n".to_vec();
+        dfxp.extend_from_slice(ISO);
+        let p = d.file("b.dfxp", &dfxp);
+        assert_eq!(kind(&p), x8bit());
+        // An `.xml` is no candidate by its name: its code page is not judged.
+        let p = d.file("c.xml", &ttml);
+        assert_eq!(kind(&p), is(None, ".xml file"));
+    }
+
+    #[test]
+    fn binaries_named_as_ttml_are_not_ttml() {
+        let d = Dir::new("ttml-bin");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(b"<tt xmlns=\"http://www.w3.org/ns/ttml\"/>");
+        let p = d.file("a.ttml", &png);
+        assert_eq!(kind(&p), is(Some("image/png"), "PNG"));
+        let p = d.file("b.dfxp", &png);
+        assert_eq!(kind(&p), is(Some("image/png"), "PNG"));
+        let p = d.file("c.xml", &png);
+        assert_eq!(kind(&p), is(Some("image/png"), "PNG"));
+        // A NUL makes the file not text, so no subtitle type either.
+        let p = d.file("d.xml", b"<tt xmlns=\"http://www.w3.org/ns/ttml\"/>\0");
+        assert_eq!(kind(&p), is(None, ".xml file"));
+        let p = d.file("e.ttml", b"<tt xmlns=\"http://www.w3.org/ns/ttml\"/>\0");
+        assert_eq!(kind(&p), is(None, ".ttml file"));
+    }
+
+    #[test]
+    fn existing_subtitle_types_are_unchanged() {
+        let d = Dir::new("ttml-keep");
+        let ttml: &[u8] = b"<?xml version=\"1.0\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"/>\n";
+        // The rule is by name: a TTML head under another name is still text.
+        let p = d.file("a.srt", ttml);
+        assert_eq!(kind(&p), is(None, ".srt text"));
+        let p = d.file("b.vtt", ttml);
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        let p = d.file("c.ass", ttml);
+        assert_eq!(kind(&p), is(None, ".ass text"));
+        let p = d.file("d.txt", ttml);
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+        // And the subtitle types keep their own heads.
+        let p = d.file("e.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n");
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
+        let p = d.file("f.vtt", b"WEBVTT\n");
+        assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"));
     }
 
     /// Differential test: `in_head` against the plain window scan it
