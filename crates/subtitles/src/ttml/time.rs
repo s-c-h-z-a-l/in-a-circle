@@ -535,6 +535,17 @@ mod tests {
         assert_eq!(read("00:00:01:15", &[]), Ok(1_500));
     }
 
+    /// A `Ratio` is kept in lowest terms, so one value has one form, and zero is
+    /// `0/1` whatever its denominator (`gcd(0, d)` is `d`).
+    #[test]
+    fn ratio_is_kept_in_lowest_terms() {
+        let ratio = |num, den| Ratio::new(num, den).expect("a non-zero denominator");
+        assert_eq!(ratio(6, 4), Ratio { num: 3, den: 2 });
+        assert_eq!(ratio(5, 5), Ratio { num: 1, den: 1 });
+        assert_eq!(ratio(0, 7), Ratio { num: 0, den: 1 });
+        assert_eq!(ratio(7, 1), Ratio::int(7));
+    }
+
     /// 29.97 fps: `00:00:01:15` is 1 + 15 * 1001 / 30000 = 1.5005 s, which is
     /// 1500.5 ms, a tie that rounds up to 1501 (half up, as everywhere here).
     #[test]
