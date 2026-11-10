@@ -146,7 +146,16 @@
 # under the 1 MiB family limit. inacircle grew 1760 B (file, 1552 B of .text)
 # since its previous line, under the threshold; inacircle-text and
 # inacircle-pages are unchanged.
-inacircle 1201128 925992
+# Refreshed at the close of the TTML work, same toolchain and profile, built
+# from commit 379f4bdb5 (tree clean). Growth since the previous line:
+# inacircle-subtitles +10424 B file (+9664 B .text): the TTML reader's fixes
+# since that line (hidden text, refused animated visibility, the initial
+# values, the reasons for no subtitles); under the 100 KB explanation
+# threshold, and its .text stays under the 1 MiB family limit. inacircle
+# -272 B file (-848 B .text) net, from the classifier's TTML root scan and
+# the menu's TTML rows since that line. The other two binaries are unchanged.
+# The aarch64 baseline is not refreshed.
+inacircle 1200856 925144
 inacircle-text 1268024 901043
 inacircle-pages 514648 412179
-inacircle-subtitles 794368 497717
+inacircle-subtitles 804792 507381

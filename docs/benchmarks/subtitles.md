@@ -1,15 +1,17 @@
 # Subtitle actions
 
-What the subtitle family (SRT, WebVTT, ASS/SSA conversions) costs in memory,
-binary size and classifier time, what its limits protect, and what is still
-open. Gates and rules: [acceptance.md](acceptance.md); limits:
-[`resource-limits.md`](../resource-limits.md#subtitles).
+What the subtitle family (SRT, WebVTT, ASS/SSA and TTML conversions) costs in
+memory, binary size and classifier time, what its limits protect, and what is
+still open. Gates and rules: [acceptance.md](acceptance.md); limits:
+[`resource-limits.md`](../resource-limits.md#subtitles); the TTML rows of the
+reader's accounting are under [architecture.md](../architecture.md#ttml-accounting).
 
 **Status: measured here, on one machine.** The memory series, the size check
 and the classifier micro-measurement below were run for this page. The test,
 coverage, fuzzing, mutation and differential figures are the recorded results
-of the closing runs on this branch. The two-machine drag timings, the second
-machine and the TV check are **open** (see [Verdict](#verdict)).
+of the closing runs on this branch (the workspace suite, the coverage and the
+mutation runs were not repeated for this page). The two-machine drag timings,
+the second machine and the TV check are **open** (see [Verdict](#verdict)).
 
 ## Machine
 
@@ -28,27 +30,32 @@ diagnostic for memory and size, and a CPU micro-measurement for the classifier.
 
 ## What was built
 
-Four actions, one format in and one out: `subtitles.srt-to-vtt`,
-`subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and `subtitles.ass-to-vtt`.
-The classifier types a file by its head: a `.srt` with a `-->` timing
-(`application/x-subrip`), a `.vtt` with the `WEBVTT` signature (`text/vtt`),
-and a `.ass` or `.ssa` with a `[Script Info]` section (`text/x-ssa`). The
-readers are in `crates/subtitles` (standard library, and the `xml` crate for
-TTML); the action binary is
-`inacircle-subtitles`.
+Six actions, one format in and one out: `subtitles.srt-to-vtt`,
+`subtitles.vtt-to-srt`, `subtitles.ass-to-srt`, `subtitles.ass-to-vtt`,
+`subtitles.ttml-to-srt` and `subtitles.ttml-to-vtt`. The classifier types a
+file by its head: a `.srt` with a `-->` timing (`application/x-subrip`), a
+`.vtt` with the `WEBVTT` signature (`text/vtt`), a `.ass` or `.ssa` with a
+`[Script Info]` section (`text/x-ssa`), and a `.ttml` or `.dfxp` (or a `.xml`
+whose root is `tt` in a TTML namespace) as `application/ttml+xml`. The readers
+are in `crates/subtitles` (standard library, and the `xml` crate for TTML); the
+action binary is `inacircle-subtitles`.
 
 Every conversion is lossy where the target cannot carry a feature. The notice
 names the loss, one line per kind: colours, fonts and sizes; exact positions;
 karaoke effects; drawings; style and region blocks; speaker names written as
-`Name:` prefixes; and characters that look like markup, written as look-alikes.
+`Name:` prefixes; characters that look like markup, written as look-alikes;
+and unsupported elements ignored (TTML elements the reader does not convert,
+and images).
 
 | Limit | Value | Past it |
 |---|---|---|
 | input | 8 MiB (`INPUT_BYTES`) | refused before parsing |
 | output | 32 MiB (`OUTPUT_BYTES`) | refused while writing; the file is removed |
 | time | 99:59:59.999 (`MAX_MS`) | the cue is skipped with a warning |
-| items | 2,000,000 (`ITEM_BUDGET`) | refused whole (`too many lines and styled runs (more than 2,000,000)`); nothing is truncated |
-| warnings | seven loss kinds and one for skipped cues | at most eight lines per input |
+| items | 2,000,000 (`ITEM_BUDGET`) | refused whole (`too many lines and styled runs (more than 2,000,000)`); nothing is truncated. TTML also charges its elements, pieces, slice copies, style and region entries, and the animated-visibility scopes (see [TTML accounting](../architecture.md#ttml-accounting)) |
+| TTML element depth | 256 (`xml::MAX_DEPTH`) | refused whole as `not well-formed TTML (line N): elements nested too deeply` |
+| TTML style chain | 32 entries (`MAX_CHAIN`) | a longer chain or a loop is not followed; the element gets `Styling` |
+| warnings | eight loss kinds and one for skipped items | at most nine lines per input |
 
 ## Memory: why an item budget
 
@@ -119,7 +126,7 @@ harness's pipe reads in a debug build) are not comparable to them.
 The dense TTML test (`dense_ttml_shapes_stay_within_the_data_limit`) runs
 fourteen inputs, each the densest its shape allows in the 8 MiB limit, through
 the release binary (`subtitles.ttml-to-srt`), five runs each, under
-`RLIMIT_DATA` 1 GiB and `RLIMIT_FSIZE` 256 MiB. The plan's counts that do not
+`RLIMIT_DATA` 1 GiB and `RLIMIT_FSIZE` 256 MiB. The design's counts that do not
 fit are replaced by the densest that do: 599,176 spans (not 4 M: 56 MB), 1,677,693
 breaks (not 4 M: 20 MB), and 391,791 named styles (a named style costs 18 B plus
 its name; the unnamed `<style/>` reaches 784,960). The units are the reader's
@@ -164,27 +171,27 @@ bounded by the input. The 1 MiB attribute value costs its own size once.
 
 ## Binary size
 
-`scripts/check-sizes.sh`, release builds of the shipped binaries at HEAD
-(`666f61b18`, clean tree). File bytes against the `inacircle` limit of 1 572 864 B
+`scripts/check-sizes.sh`, release builds of the shipped binaries at commit
+`379f4bdb5` (clean tree; the refresh commit changes only documentation and
+`scripts/sizes.baseline`). File bytes against the `inacircle` limit of 1 572 864 B
 (1.5 MB); `.text` bytes against the 1 MiB family limit (`CLAUDE.md`). Growth
 is against the previous line in `scripts/sizes.baseline` (the line before this
-refresh).
+refresh, the TTML line).
 
 | Binary | file B, baseline → now (growth) | `.text` B, baseline → now (growth) |
 |---|---|---|
-| `inacircle` | 1,199,304 → 1,199,368 (+64) | 924,600 → 924,440 (−160) |
+| `inacircle` | 1,201,128 → 1,200,856 (−272) | 925,992 → 925,144 (−848) |
 | `inacircle-text` | 1,268,024 → 1,268,024 (0) | 901,043 → 901,043 (0) |
 | `inacircle-pages` | 514,648 → 514,648 (0) | 412,179 → 412,179 (0) |
-| `inacircle-subtitles` | 444,176 → 451,016 (+6,840) | 355,091 → 361,363 (+6,272) |
+| `inacircle-subtitles` | 794,368 → 804,792 (+10,424) | 497,717 → 507,381 (+9,664) |
 
-Every growth is under the 100 KB explanation threshold. The `inacircle` change
-is the engine's subtitle head search in the classifier and its check of
-subtitle outputs as text, both since the previous line; the net change is
-+64 B file and −160 B `.text`. `inacircle-subtitles` grew since its previous
-line, and that growth is the subtitle code: the reader fixes from the fuzzing
-and review rounds. The `inacircle-text` and `inacircle-pages` binaries are
-unchanged. Every `.text` stays under the 1 MiB family limit. The aarch64
-baseline was not refreshed.
+Every growth is under the 100 KB explanation threshold, and every `.text` stays
+under the 1 MiB family limit. `inacircle-subtitles` grew since the TTML line by
+the TTML reader's fixes (hidden text, refused animated visibility, the values of
+`initial`, the reasons for no subtitles). `inacircle` shrank a little, net, from
+the classifier's TTML root scan and the menu's TTML rows. The `inacircle-text`
+and `inacircle-pages` binaries are unchanged. The aarch64 baseline was not
+refreshed.
 
 ## Classifier cost
 
@@ -268,13 +275,13 @@ likely suspect, and that is not verified. The no-arrow case is a broken or
 non-subtitle `.srt` with a text head, which the wheel would classify as text
 anyway, so this is the worst case of the search, not the common one.
 
-### TTML and `.xml` (plan-19)
+### TTML and `.xml`
 
 The TTML rules add a head search for `.xml`: the root start tag is read after
 the prolog (`<?…?>`, comments, a `<!DOCTYPE …>`), with `find` for the ends of
 those declarations. A `.ttml` or `.dfxp` costs nothing new (its head is checked
-for a leading `<`). Base is `c7125a9a`, the plan-18 head, a `git archive` with
-its own target directory. The harness is the same as above (`classify_bench`,
+for a leading `<`). Base is `c7125a9a`, the head before the TTML classifier
+work, a `git archive` with its own target directory. The harness is the same as above (`classify_bench`,
 2,000 drops, two alternating rounds with the order swapped in round 2).
 
 Inputs: `nottml`, a `.xml` of 3,992 B (a 3,900 B XML comment, then
@@ -284,17 +291,17 @@ is not `tt`); `ttml-xml`, a 403 B TTML document as `.xml`; `ttml`, the same as
 50 copies per drop. Times in µs, round 1 / round 2. The delta is the mean of
 the two medians against the mean of base.
 
-**History.** The first plan-19 head searched the head byte by byte, one slice
+**History.** The first TTML head searched the head byte by byte, one slice
 compare per position, with `find()`: `.xml` without TTML, 50 files, +91 %
 (94 → 180 µs). The cost is the comment's `-->` search across about 3.9 KB, the
-same window scan that plan-18 replaced in `in_head`. The fix is the shared
+same window scan that the subtitle head search had replaced in `in_head`. The fix is the shared
 block search (`first_match`, used by `find` and `in_head`): 128-byte blocks,
 an OR-fold of first-byte compares, and a full compare only in a block that
 holds the first byte. Three variants were measured in the same harness:
 
 | Variant | `.xml` without TTML, 50 files, delta (median) |
 |---|---|
-| window scan (first plan-19 head) | +91.3 % (one run, two rounds) |
+| window scan (first TTML head) | +91.3 % (one run, two rounds) |
 | block scan in `find()` only, scratch copy | +9.5 % (two rounds, same session as base) |
 | block scan, comparison by a closure on the bytes after the first | +13.1 % (four rounds, same session) |
 | block scan, comparison of the whole window (committed) | +8.2 % (four rounds, same session); +11.8 % in the final full run |
@@ -335,13 +342,17 @@ medians of that row agree. The `.ttml`, `.srt` and `.txt` paths are within the
 noise of the two trees, and the `.xml` TTML drop costs about 0.06 µs per file.
 
 **Verdict.** The shared block search takes the TTML-less `.xml` 50-file drop
-from +91 % to between +8 % and +12 % on this machine, in runs of the committed
-code. The goal of +10 % is at its edge and not robustly met. What remains is
-the scan of the 3.9 KB comment: about 0.25 µs per file, which is the block
-fold's speed on this machine (roughly 15 bytes per ns). A cheaper scan would
-need a wider compare (AVX2 with a runtime check, which is unsafe code), and it
-was not done. The input is a worst case for this path: a long comment in a
-`.xml` that is not TTML, read to its end before the root is found.
+from +91 % to between +8 % and +12 % (p50) against the base, on this machine,
+in runs of the committed code. Stated plainly: that is above the 10 % goal in
+part of the runs and under the 15 % level that blocks a merge, so it sits at the
+investigation line. It is not robustly under the goal, and it is left open.
+What remains is the scan of the 3.9 KB comment: about 0.25 µs per file, which
+is the block fold's speed on this machine (roughly 15 bytes per ns). A cheaper
+scan would need a wider compare (AVX2 with a runtime check, which is unsafe
+code), and it was not done. The input is a worst case for this path: a long
+comment in a `.xml` that is not TTML, read to its end before the root is found.
+A TTML `.xml` drop costs +3.6 % (the root is found early), and the `.ttml`,
+`.srt` and `.txt` drops are within the noise of the two trees.
 
 These are CPU micro-measurements on this machine (Ryzen 7 5700X, Linux
 7.3.1-1-cachyos, rustc 1.98.1, release examples). They are not the acceptance
@@ -354,32 +365,51 @@ Recorded results of the closing runs on this branch (not re-run for this page):
 
 - Full workspace suite, with `INACIRCLE_REQUIRE_LANDLOCK=1`,
   `INACIRCLE_REQUIRE_PDF_TOOLS=1` and `INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1`:
-  debug 2330 passed / 0 failed / 6 ignored; release 2330 passed / 0 failed /
-  6 ignored.
-- Line coverage (`cargo llvm-cov`, clean profile, all tests, final): `crates/subtitles`
-  98.68 %; `bins/inacircle-subtitles` 92.61 %; `crates/engine` 92.82 %;
-  `bins/inacircle` 97.04 %.
-- Fuzzing (`scripts/fuzz.sh`, targets `srt`, `vtt`, `ass`): the final 600 s
-  campaign per target found no crash: 659,122 runs (srt), 184,031 (vtt),
-  877,251 (ass). The round-trip oracle found eight product defects on the way
-  before it was green. Six were found in the first smoke runs: whitespace-only
-  lines, NUL, white-space-only cues in the readers, a tag-like `<`, `{\`
-  override blocks, and timing-shaped text lines in the SRT writer. Two were
-  found in the first 600 s campaign of the final tree: a WebVTT speaker name
-  ending in dashes wrote an arrow, and the reader trimmed a speaker name before
-  decoding with a Unicode trim. The committed seed corpora are 1936 (srt), 1507
-  (vtt) and 1845 (ass) inputs.
+  debug 2475 passed / 0 failed / 9 ignored; release 2475 passed / 0 failed /
+  9 ignored. The ignored tests are measurement tests, run by hand.
+- Line coverage (`cargo llvm-cov`, clean profile, all tests): `crates/subtitles`
+  98.51 %; `bins/inacircle-subtitles` 93.87 %; `crates/engine` 92.90 %;
+  `bins/inacircle` 97.05 %; `crates/xml` 99.40 %. The TTML modules:
+  `ttml/mod.rs` 98.15 %, `ttml/slice.rs` 100 %, `ttml/style.rs` 97.36 %,
+  `ttml/time.rs` 99.35 %.
+- Fuzzing (`scripts/fuzz.sh`, targets `srt`, `vtt`, `ass`, `ttml`): the final
+  600 s campaign per target found no crash: 331,856 runs (ttml), 773,669 (srt),
+  189,920 (vtt), 831,116 (ass). The round-trip oracle found eight product
+  defects on the way before it was green. Six were found in the first smoke
+  runs: whitespace-only lines, NUL, white-space-only cues in the readers, a
+  tag-like `<`, `{\` override blocks, and timing-shaped text lines in the SRT
+  writer. Two were found in the first 600 s campaign of the final tree: a
+  WebVTT speaker name ending in dashes wrote an arrow, and the reader trimmed a
+  speaker name before decoding with a Unicode trim. The committed seed corpora
+  are 1936 (srt), 1507 (vtt), 1845 (ass) and 338 (ttml) inputs.
+- The TTML target carries a model of its own. It was written right after the
+  reader core, and its first plain run did not find a deliberately broken
+  end-time computation in 138,000 runs: the oracle had no time model, so the
+  shared checks (no panic, the round trip) could not see a wrong end. A small
+  independent model of
+  one paragraph's timing (TTML2 12.2.2: the interval is the begin to the earlier
+  of the end and begin plus dur) was added to the target, and it found the
+  break at once. That is why the target carries the model
+  (`check_paragraph_timing`, in `fuzz/fuzz_targets/ttml.rs`).
 - Mutation testing (`scripts/mutants.sh diff`, against `main`). The first run
   had 550 mutants: 501 caught, 4 timeouts, 35 unviable, 10 missed. Six of the
   ten were killed afterwards by new tests. Four are equivalent: the first-skip
   line is only ever moved forward by strictly increasing line numbers, and no
-  test pins that ordering. The final run, on the final tree, had 632 mutants:
-  592 caught, 3 timeouts (counted as caught), 35 unviable, 2 missed. One of the
-  two was killed by a new boundary test (a WebVTT start of exactly
-  99:59:59.999). The other is equivalent: the text of an internal over-limit
-  error type is never shown, because the size message is built elsewhere and
-  pinned end to end. Survivors of the earlier fix rounds were also resolved,
-  either killed by tests or shown equivalent.
+  test pins that ordering. The run on the final tree of the subtitle work had
+  632 mutants: 592 caught, 3 timeouts (counted as caught), 35 unviable, 2
+  missed. One of the two was killed by a new boundary test (a WebVTT start of
+  exactly 99:59:59.999). The other is equivalent: the text of an internal
+  over-limit error type is never shown, because the size message is built
+  elsewhere and pinned end to end. Survivors of the earlier fix rounds were
+  also resolved, either killed by tests or shown equivalent.
+- Mutation testing of the TTML work (`scripts/mutants.sh diff`, against the
+  head before the TTML work, whole workspace tests): 660 mutants: 593 caught,
+  7 timeouts, 35 unviable, 25 missed. All 25 survivors were killed afterwards by
+  new tests: three classifier ones by a classify test, the rest by TTML tests,
+  one of them a pure `Ratio` lowest-terms test. The 7 timeouts are legitimate
+  catches: each mutation makes a loop stop advancing, so the hang is the
+  detection (the `time.rs` gcd one now also has a direct assertion test). The
+  run took six hours, because every mutant ran the whole workspace suite.
 
 ## Review
 
@@ -387,6 +417,7 @@ Two rounds of whole-branch review, each by a reviewer independent of the
 implementation. The first found 2 critical findings (silent content loss in
 the SRT reader and in the WebVTT reader), 4 important and 5 minor. The second
 found no critical or important finding and 4 minor ones. All were fixed.
+The reviewer rounds of the TTML work are summarized here when complete.
 
 ## Differential and conformance evidence
 
@@ -440,13 +471,36 @@ found no critical or important finding and 4 minor ones. All were fixed.
     not silent: 3 by a rule the spec decides (a paragraph with no end; an oblique
     carried as italic), and 6 that are refused because a `set` changes their
     visibility over time (the reader does not play that timeline);
-  - ttconv 1.2.3 (`tt convert`, CI only): 229 files are compared in SRT, and
-    224 of them in WebVTT (five nested-division files are SRT only), on start
-    and end in milliseconds and on the text with its italic, bold and
-    underline. Only the white space at the two ends of a line is trimmed, on
-    both sides, as every reader of the crate trims lines; colour and font
-    markup, which the reader drops and counts, is the only markup removed. The
-    files left out and why are at the top of `ttml_conformance.rs`.
+  - ttconv 1.2.3 (`tt convert`, CI only; a pinned wheel, verified by its
+    SHA-256 in the workflow, with no dependencies of its own): 229 files are
+    compared in SRT, and 224 of them in WebVTT (five nested-division files are
+    SRT only), on start and end in milliseconds and on the text with its
+    italic, bold and underline. Only the white space at the two ends of a line
+    is trimmed, on both sides, as every reader of the crate trims lines; colour
+    and font markup, which the reader drops and counts, is the only markup
+    removed. The files left out and why are at the top of
+    `ttml_conformance.rs`.
+    - The first CI run that really executed the comparison reported 240 files
+      compared and 35 differences. Each was reviewed against the standard and
+      against ttconv's source. One was a real product gap: the values of the
+      `initial` element were not applied (fixed). The others are ttconv
+      behaviours, comparison rules, or the reader's own stated choices (the
+      refusals and skips in the accounting table). Files are left out of the
+      comparison by structure, for the reason the test header gives: cues that
+      overlap (22), timed spans (12), a style animation (10), and a paragraph
+      with no end time (2); the 22 files the reader refuses are not compared
+      either. The 24 files of the divergence list are compared with a stated
+      reason: visibility (three files: two have a paragraph refused by a
+      `set`, and one has `visibility="hidden"` text that the reader hides and
+      ttconv keeps); oblique and underline with other decorations (three
+      files); ruby text, which ttconv drops (sixteen files); times of 100 hours
+      or more, which the reader skips and counts (one file); white space before
+      a line end in preserve mode (one file). Five nested-division files are
+      left out of the WebVTT comparison alone: ttconv's WebVTT writer visits
+      only the direct children of a `div`.
+    - The second run passed on both runners, with the test required to run
+      (`INACIRCLE_REQUIRE_TTCONV=1`), not skipped: 229 files compared in SRT,
+      224 in WebVTT.
 
   Static visibility is honoured: `display="none"`, `visibility="hidden"` and
   `opacity="0"` hide the text they reach (10.2.14, 10.2.49, 10.2.30), and each
@@ -454,17 +508,57 @@ found no critical or important finding and 4 minor ones. All were fixed.
   that a `set` or `animate` changes in visibility is refused, one `skipped`
   item, rather than shown or hidden for part of its time.
 
+## What the TTML reader does that you may not expect
+
+Each line is checked against the reader's accounting table
+([TTML accounting](../architecture.md#ttml-accounting)) and the tests of
+`crates/subtitles/tests/ttml.rs`.
+
+- A SMPTE time code (`ttp:timeBase="smpte"`) is read under either
+  `ttp:markerMode`, as continuous: an approximation for discontinuous markers,
+  which carry no media time of their own.
+- A `clock` time base, a `wallclock(...)` time and a drop-frame
+  `ttp:dropMode` are refused: `unsupported TTML`, the whole file.
+- A paragraph with no end time is skipped and counted (`no end time`). When no
+  paragraph is usable, the whole file fails with the count and the first
+  reason.
+- Text the document hides (`tts:display="none"`, `tts:visibility="hidden"`,
+  `tts:opacity="0"`) is not shown. It is counted (`hidden by the document`).
+- A paragraph whose visibility a `set` or `animate` changes is refused and
+  counted (`visibility changes over time`). An opacity fade is one of these,
+  so a faded paragraph loses its text, and the count says so.
+- A `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` is not evaluated.
+  The element is skipped and counted (`conditional element`).
+- Text beside an image is converted; the image is counted. A file with only
+  images fails with `no text subtitles found (image-based)`.
+- Styles: a paragraph's own declarations and those of its content ancestors
+  come before its region's (10.4.2). The values of `initial` are the lowest
+  layer, and each property takes the last `initial` that names it.
+- `fontWeight` is `normal` or `bold` only; any other value is counted as
+  `Styling`. `fontStyle="oblique"` is carried as italic.
+- A duplicate `xml:id` among styles or among regions: the first definition
+  stands, and a reference to the name counts the dropped one's declarations.
+- A paragraph with no region (a document with no `layout`, or none named) is
+  never `top`.
+- A style reference chain past 32 entries, or a loop, is not followed; the
+  element gets `Styling`.
+- A paragraph with no visible text has nothing to lose, so no count is made
+  for it whatever else it holds.
+
 ## Verdict
 
 Holds on this machine:
 
-- The item budget bounds the readers. The densest 8 MiB shapes peak at about
-  129 MiB or below for the kept inputs, and at about 216.5 MiB for the two
-  refused ones, under the 1 GiB net, with the refused output never written.
+- The item budget bounds the readers. The densest 8 MiB SRT, WebVTT and ASS
+  shapes peak at about 129 MiB or below for the kept inputs, and at about
+  216.5 MiB for the refused ones. The dense TTML shapes peak at 170.8 MiB at
+  most when kept (the staggered overlaps) and at 200.2 MiB when refused (the
+  head reference list). All are under the 1 GiB net, and the refused output is
+  never written.
 - The cue-shaped inputs (the shapes a real subtitle has) run at 89 to 129 MiB,
-  far from the net.
-- `inacircle-subtitles` is 451,016 B (361,363 B of `.text`), under the family
-  limit; `inacircle` is 1,199,368 B, under its 1.5 MB limit.
+  far from the net. A dense TTML cue shape (299,589 cues) peaks at 125.0 MiB.
+- `inacircle-subtitles` is 804,792 B (507,381 B of `.text`), under the family
+  limit; `inacircle` is 1,200,856 B, under its 1.5 MB limit.
 - The classifier adds about 3 µs per file, on this machine, in a
   micro-measurement, and about 19 µs to a drop of 50 arrow-less `.srt` files
   (base 172 µs; the first version added 93 µs). The new head search is a
@@ -477,11 +571,22 @@ Open (not measured here, not recorded as passing):
 - **Two-machine drag timings** (the user's manual series): a `.srt` and an
   `.ass` dragged into the circle, about 50 manual drags per machine, measuring
   the drop to the stage-2 wheel commit and the choice to the action's start,
-  per [acceptance.md](acceptance.md). The classifier figure above is not that
-  measurement.
+  per [acceptance.md](acceptance.md). The TTML series is the same measurement
+  for an `.xml` TTML and a `.ttml`, about 50 drags each. The classifier figure
+  above is not that measurement.
 - **Second-machine memory and size check**: the series here ran on one
-  machine. The aarch64 size baseline was not refreshed.
-- **Manual try on a television** of the converted files.
+  machine, including the dense TTML shapes. The aarch64 size baseline was not
+  refreshed.
+- **Manual try on a television** of the converted files, TTML ones included.
+- **The classifier cost of a TTML-less `.xml`**: +8 % to +12 % p50 on a 50-file
+  drop against the head before the TTML work (see the classifier section). That
+  is at the 10 % investigation line and under the 15 % blocking line. The
+  residual is the scan of a long head comment, about 0.25 µs per file. It is
+  left open, not fixed.
+- **The HTML5 entity table of the `xml` crate is linked into the subtitle
+  binary**, although TTML reads with `html_entities` off: about 77 KB of data
+  (in `.data.rel.ro`, measured on the first TTML build). A feature switch in the
+  `xml` crate would remove it. Not made here: it is a change to the crate.
 - **Two known deviations from the standards**: a WebVTT speaker name's internal
   runs of white space are not collapsed, as the standard collapses them; and
   WebVTT `STYLE` is recognised only as a block's first line, while the standard
@@ -537,6 +642,14 @@ INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUB
   $MEM cargo test --workspace
 INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 \
   $MEM cargo test --release --workspace
+
+# Fuzzing: the four targets, 600 s each, in parallel (the script runs the
+# nightly from its pin; the seed corpora are in fuzz/corpus/<target>)
+$MEM scripts/fuzz.sh close srt vtt ass ttml
+
+# Mutation testing of the change only, against the commit it started from
+# (`main` by default); the whole workspace suite runs for each mutant
+$MEM scripts/mutants.sh diff <base>
 
 # Classifier micro-measurement: the throw-away example in a copy of each tree
 #   git archive bdb66403 | tar -x -C <base>   # then add crates/engine/examples/classify_bench.rs

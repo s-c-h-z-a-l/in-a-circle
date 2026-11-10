@@ -131,6 +131,8 @@ paragraphs, text blocks) with the first one's line and reason. A count on every
 cue of the document (`initial`, an ignored element outside a paragraph) is the
 cue count, an upper bound where the reader does not track which paragraphs the
 element reaches. The image units of a text document are added to `Elements`.
+A paragraph with no visible text has nothing to lose, so it is not counted,
+whatever else it holds (a hidden or animated one included).
 
 | Construct | Goes to |
 |---|---|
@@ -138,19 +140,19 @@ element reaches. The image units of a text document are added to `Elements`.
 | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
 | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
 | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
-| `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
+| `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
 | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
 | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
-| `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue | |
+| `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue | |
 | `styling`: any other child | `Elements` on every cue of the document |
 | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
 | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
 | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
 | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
 | a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past 32 entries sets `Styling` on the element |
-| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
+| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic (`oblique` too), bold (`normal` or `bold` only, 10.2.24) and the decorations of the text, inherited as 10.2 says |
 | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
 | other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
 | `tts:display` `none`, `tts:visibility` `hidden`, `tts:opacity` `0`, on `body`, `div`, `p`, `region` or `span` (10.2.14, 10.2.49, 10.2.30) | the content is not shown: `none` and `0` hide the element and everything in it, `hidden` is inherited and a descendant with `visible` is shown. A hidden paragraph is `skipped`: `hidden by the document`; a paragraph with its own hidden text, or a hidden span in a shown paragraph, counts once (the outermost element holding the hidden text). Opacity counts the whole element; the other values are initial values and count nothing |
@@ -160,6 +162,7 @@ element reaches. The image units of a text document are added to `Elements`.
 | `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
 | `tts:extent` on `tt` (10.2.16) | the root container's height in px (`top` of a px placement); `auto`, `contain`, and two px lengths are read; anything else `Position` |
 | a region's placement that cannot be computed (`em`, `c`, `rw`, `rh`, a sign, a `px` without a root height) | the paragraph is not `top`; its placement counts as `Position` |
+| a paragraph with no region (no `layout`, or none named on it or its ancestors) | never `top`; no count (a region named and not defined counts `Position`, as below) |
 | `region` on `body`, `div` or `p` naming no region | `Position` on the paragraphs it reaches |
 | `region` on a `span` | `Position` on the span's text (the span is not placed in its region) |
 | `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
@@ -175,7 +178,7 @@ element reaches. The image units of a text document are added to `Elements`.
 | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
 | `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
 | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
-| `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
+| `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
 | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
 | a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
 | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
@@ -189,6 +192,7 @@ element reaches. The image units of a text document are added to `Elements`.
 | the document has no cue, and skipped items | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
 | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
+| each element outside a paragraph that holds a `set` or `animate` of `display`, `visibility` or `opacity` (the animated-visibility scope pass: a division, the body, a region, the root, or a head element, one item each); a `set` inside a paragraph or span is free | the item budget, charged in a pre-pass before the read (`animated_scopes`) |
 | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 
 Past `ITEM_BUDGET` (2,000,000 items: every element, piece, copy, cue and table
@@ -760,7 +764,8 @@ entry) the whole file is refused as `TooComplex`; nothing is converted in part.
   `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
   is larger than 8 MiB`) before any parsing. The readers store at most
   2,000,000 items (each cue, line and run is one; the TTML reader also charges
-  each element, piece and copy of a piece), each charged before it is stored; past it the input fails with `too many lines and styled runs (more
+  each element, piece and copy of a piece, and each element that holds a
+  visibility `set` or `animate` outside a paragraph), each charged before it is stored; past it the input fails with `too many lines and styled runs (more
   than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
   the lines of its cue. A file that is not UTF-8 fails
   with `not UTF-8 text (byte at N): convert it with Encoding first`. A file
