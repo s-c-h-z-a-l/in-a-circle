@@ -401,9 +401,9 @@ fn nul_is_written_as_the_replacement_character() {
     assert_eq!(v, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\u{fffd}y\n\n");
 }
 
-/// Text the SRT reader keeps as text gets no look-alike: a `<` followed by a
-/// URL or an address is not a tag for the reader, so nothing is written
-/// differently and no `Brackets` loss is reported.
+/// Single-run text the SRT reader keeps as text gets no look-alike: a `<`
+/// followed by a URL or an address is not a tag for the reader, so nothing is
+/// written differently and no `Brackets` loss is reported.
 #[test]
 fn angle_text_that_is_not_a_tag_is_written_as_it_is() {
     let cues = [cue(
@@ -749,23 +749,38 @@ fn unclosed_override_is_text_and_a_closed_one_is_rewritten() {
 /// Every line of one to six characters over brackets, a slash, `b` and a space
 /// (no timing line can come of it: there is no `-->`), except those the reader
 /// trims. The SRT output reads back as the same text, where each change is a
-/// look-alike for a `<` or `{`, and a line the reader keeps as plain text is
-/// written unchanged with no `Brackets` loss. Covers `<b <b>` and `<b y< z>`.
+/// look-alike for a `<` or `{`. A line of one run has no style boundary, so the
+/// writer rewrites exactly the reader's markup, and a line the reader keeps as
+/// plain text is written unchanged with no `Brackets` loss. Covers `<b <b>` and
+/// `<b y< z>`: 299,592 lines at most.
+///
+/// Then two runs of different styles, over the same alphabet, up to five
+/// characters in all, for four style pairs: 219,345 splits each, 877,380 at
+/// most (fewer after the trim filter). The debug build spends about 10 s on
+/// them: the test went from about 4 s to about 15 s. Only the guaranteed half
+/// is asserted: the output reads back with the same visible text and the same
+/// style on each character, and every change is a look-alike. At a style
+/// boundary the writer may rewrite a bracket the reader would keep
+/// (`tag::look_alikes`), so the test does not require that it does not.
 #[test]
-fn every_short_line_reads_back_and_only_real_markup_is_rewritten() {
+fn every_short_line_reads_back_and_no_markup_is_left_unrewritten() {
     const ALPHABET: [char; 8] = ['<', '>', '{', '\\', '}', '/', 'b', ' '];
     const MAX_CHARS: usize = 6;
-    let mut level = vec![String::new()];
-    let mut lines = Vec::new();
+    // `levels[n]` holds every string of `n` characters.
+    let mut levels = vec![vec![String::new()]];
     for _ in 0..MAX_CHARS {
-        level = level
+        let next: Vec<String> = levels
+            .last()
+            .expect("levels starts non-empty")
             .iter()
             .flat_map(|s| ALPHABET.iter().map(move |c| format!("{s}{c}")))
             .collect();
-        lines.extend(level.iter().cloned());
+        levels.push(next);
     }
-    for t in lines
+    for t in levels
         .iter()
+        .skip(1)
+        .flatten()
         .filter(|t| !t.starts_with(' ') && !t.ends_with(' '))
     {
         let (s, losses) = srt(&[cue(0, 1_000, vec![plain(t)])]);
@@ -810,4 +825,110 @@ fn every_short_line_reads_back_and_only_real_markup_is_rewritten() {
             assert!(!rewritten, "{t:?} is plain text to the reader: {s:?}");
         }
     }
+
+    // Two runs of different styles: (italic, bold, underline) for each.
+    type Style = (bool, bool, bool);
+    const PAIR_CHARS: usize = 5;
+    let style_pairs: [(Style, Style); 4] = [
+        ((false, false, false), (true, false, false)),
+        ((false, true, false), (false, false, true)),
+        ((true, false, false), (false, true, true)),
+        ((false, false, true), (true, true, false)),
+    ];
+    let styled = |text: &str, (italic, bold, underline): Style| Run {
+        text: text.into(),
+        italic,
+        bold,
+        underline,
+    };
+    for (first, second) in style_pairs {
+        for total in 0..=PAIR_CHARS {
+            for split in 0..=total {
+                for a in &levels[split] {
+                    for b in &levels[total - split] {
+                        let joined = format!("{a}{b}");
+                        if joined.is_empty() || joined.starts_with(' ') || joined.ends_with(' ') {
+                            continue;
+                        }
+                        let runs = [styled(a, first), styled(b, second)];
+                        let line = Line {
+                            voice: None,
+                            runs: runs.to_vec(),
+                        };
+                        let (s, _) = srt(&[cue(0, 1_000, vec![line])]);
+                        let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+                        assert_eq!(back.skipped.count, 0, "{a:?} {b:?}: {s:?}");
+                        let [only] = back.cues.as_slice() else {
+                            panic!("{a:?} {b:?}: {s:?}")
+                        };
+                        let [read] = only.lines.as_slice() else {
+                            panic!("{a:?} {b:?}: {s:?}")
+                        };
+                        let want = chars_with_style(&runs);
+                        let got = chars_with_style(&read.runs);
+                        assert_eq!(got.len(), want.len(), "{a:?} {b:?}: {s:?}");
+                        for ((w, ws), (g, gs)) in want.into_iter().zip(got) {
+                            assert_eq!(ws, gs, "{a:?} {b:?}: {s:?}");
+                            assert!(
+                                w == g || matches!((w, g), ('<', '\u{ff1c}') | ('{', '\u{ff5b}')),
+                                "{a:?} {b:?} reads back as {g:?}: {s:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Each character of the runs with its style (italic, bold, underline).
+fn chars_with_style(runs: &[Run]) -> Vec<(char, (bool, bool, bool))> {
+    runs.iter()
+        .flat_map(|r| {
+            r.text
+                .chars()
+                .map(move |c| (c, (r.italic, r.bold, r.underline)))
+        })
+        .collect()
+}
+
+/// The accepted over-rewrite at a style boundary. The writer decides on the
+/// plain text `x<y>`, where `<y>` is a tag to it, but the rendered line is
+/// `x<<i>y></i>`, where the `<` is followed by `<` and is text: the reader
+/// would keep `x<` and italic `y>` as they are. The `<` is written as a
+/// look-alike anyway, and the loss is counted. Accepted, not a bug: deciding on
+/// the rendered line would need a map from the plain text back to the runs.
+#[test]
+fn style_boundary_over_rewrite_is_accepted_and_counted() {
+    let line = Line {
+        voice: None,
+        runs: vec![
+            run("x<"),
+            Run {
+                text: "y>".into(),
+                italic: true,
+                bold: false,
+                underline: false,
+            },
+        ],
+    };
+    let (s, losses) = srt(&[cue(0, 1_000, vec![line])]);
+    assert_eq!(
+        s,
+        "\u{feff}1\r\n00:00:00,000 --> 00:00:01,000\r\nx\u{ff1c}<i>y></i>\r\n\r\n"
+    );
+    assert_eq!(losses, BTreeMap::from([(Loss::Brackets, 1)]));
+    let back = read_srt(s.as_bytes()).expect("the SRT output reads back");
+    assert_eq!(
+        back.cues[0].lines[0].runs,
+        vec![
+            run("x\u{ff1c}"),
+            Run {
+                text: "y>".into(),
+                italic: true,
+                bold: false,
+                underline: false,
+            },
+        ]
+    );
 }

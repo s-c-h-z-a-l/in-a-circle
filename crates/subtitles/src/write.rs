@@ -78,7 +78,10 @@ fn spaced(text: &str) -> Cow<'_, str> {
 /// The decision is made on the line's plain text as the writer writes it (line
 /// breaks as spaces, see [`spaced`]), the speaker's `Name: ` prefix included, so
 /// a bracket at the end of a run is judged by the text after it in the next
-/// run. The line is borrowed when no bracket needs changing.
+/// run. The writer's style tags are not in that text, so at a style boundary a
+/// bracket the reader would keep may be rewritten (`tag::look_alikes`); the
+/// writer never leaves one the reader would take as markup. The line is
+/// borrowed when no bracket needs changing.
 fn srt_safe(line: &Line) -> Cow<'_, Line> {
     let mut pieces: Vec<Cow<str>> = Vec::new();
     if let Some(name) = &line.voice {

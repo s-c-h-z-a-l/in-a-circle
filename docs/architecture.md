@@ -739,9 +739,13 @@ are in `CLAUDE.md`.
   override block (with a `}` after it) as U+FF5B, both look-alikes, counted
   once per cue as `Brackets`. A rewritten `<` no longer stops the reader's
   search for `>`, so the choice runs from the end of the line back; `<` with
-  no `>` after it, `{\` with no `}`, stay text. The `{\an8}` the writer
-  puts before a top cue is not text and is kept. A text line that the reader
-  would take for a timing line (`-->` with a start that parses as a time, the
+  no `>` after it, `{\` with no `}`, stay text. The choice is made on the
+  plain text, without the writer's own `<i>` and `</i>`, so at a style
+  boundary a `<` or `{\` the reader would keep as text can be rewritten
+  too: a counted look-alike, accepted. The guarantee is that the writer never
+  leaves unrewritten anything its reader would take as markup. The `{\an8}`
+  the writer puts before a top cue is not text and is kept. A text line that
+  the reader would take for a timing line (`-->` with a start that parses as a time, the
   reader's own test on the line as written, marker and tags included) would
   start a cue on read back, so the `>` of each of its `-->` is written as
   U+FF1E, also counted as `Brackets`; the writer's own timing lines are not

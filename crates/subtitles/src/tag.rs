@@ -47,8 +47,12 @@ pub(crate) fn takes_override(tail: &str, closed: bool) -> bool {
 /// A `<` is judged by the first `<` or `>` after it, and a look-alike is not a
 /// `<`. So the line is judged from its end back: each `<` sees the brackets as
 /// they will stand after the rewrites to its right, and a rewritten `<` no
-/// longer stops the search. The writer's own `<i>` tags only add a `<` that
-/// stops a search, so the plain text decides.
+/// longer stops the search. The writer's own `<i>` and `</i>` tags are not in
+/// the plain text, and at a style boundary they add a `<` that stops a search
+/// the plain text does not have: a `<` or `{\` the reader would keep as text
+/// may be rewritten there. Accepted: deciding on the rendered line would need a
+/// map back to the runs. The guarantee is the other half: nothing the reader
+/// would take as markup is left unrewritten.
 pub(crate) fn look_alikes(plain: &str) -> Vec<(usize, char)> {
     let last_close = plain.rfind('}');
     // The first `<` or `>` after the position, as it will stand in the line.
