@@ -284,6 +284,21 @@ fn whitespace_default_and_preserve() {
     assert_eq!(lines_of(&parsed.cues[1]), vec!["x y"]);
 }
 
+/// 8.2.10: a `preserve` line keeps its spaces, but a line is trimmed at both
+/// ends, across its runs. A run of only white space (the space before an italic
+/// span, or a span's end) must not leave the other run's spaces on the line.
+#[test]
+fn preserved_line_is_trimmed_across_its_runs() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s" xml:space="preserve"> <span tts:fontStyle="italic">  w1</span></p>"#,
+    ));
+    assert_eq!(lines_of(&parsed.cues[0]), vec!["w1"]);
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s" xml:space="preserve"><span tts:fontStyle="italic">w1  </span> </p>"#,
+    ));
+    assert_eq!(lines_of(&parsed.cues[0]), vec!["w1"]);
+}
+
 /// 8.2.10, 12.4: white space between two timed spans is part of the
 /// paragraph's interval, not of either span. With no end on the paragraph or
 /// its ancestors, that interval ends with the paragraph, so the space stays

@@ -242,13 +242,21 @@ fn finish_line(
     lines: &mut Vec<Line>,
     budget: &mut Budget,
 ) -> Result<(), ReadError> {
-    if let Some(first) = runs.first_mut() {
-        let cut = first.text.len() - first.text.trim_start().len();
-        first.text.drain(..cut);
+    // Trimmed across the runs: a run of only white space (a style change in
+    // `preserve` mode) must not leave the next run's leading spaces on the line.
+    for run in runs.iter_mut() {
+        let cut = run.text.len() - run.text.trim_start().len();
+        run.text.drain(..cut);
+        if !run.text.is_empty() {
+            break;
+        }
     }
-    if let Some(last) = runs.last_mut() {
-        let keep = last.text.trim_end().len();
-        last.text.truncate(keep);
+    for run in runs.iter_mut().rev() {
+        let keep = run.text.trim_end().len();
+        run.text.truncate(keep);
+        if !run.text.is_empty() {
+            break;
+        }
     }
     runs.retain(|r| !r.text.is_empty());
     let line = Line {
