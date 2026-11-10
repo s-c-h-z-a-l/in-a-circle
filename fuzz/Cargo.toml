@@ -151,3 +151,10 @@ path = "fuzz_targets/ass.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ttml"
+path = "fuzz_targets/ttml.rs"
+test = false
+doc = false
+bench = false

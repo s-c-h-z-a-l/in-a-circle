@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md codepage srt vtt ass"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md codepage srt vtt ass ttml"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -208,6 +208,18 @@ limits() {
         # about 40 B each, 80 MB at the budget); a larger allocation is a
         # bug. 1024 MB RSS ceiling.
         srt|vtt|ass) echo "1048576 2 512 1024" ;;
+        # The TTML reader takes the whole file as the subtitle readers do
+        # (INPUT_BYTES, 8 MiB). 1 MiB for the same reason as the rows above:
+        # an 8 MiB input is too slow under ASan, and the linear behaviour at
+        # full size is pinned by the linearity tests in crates/subtitles/tests
+        # (ttml_linear_on_hostile_shapes). 2 s: linear parsing; each input is
+        # read twice (as is and wrapped), and each successful read also runs
+        # both writers and both readers on its cues, plus one small timing
+        # document. 512 MB malloc limit: the XML decode (UTF-16 into a
+        # String), the element and piece storage up to ITEM_BUDGET items of
+        # about 40 B, and the cues, all charged before they are allocated;
+        # a larger single allocation is a bug. 1024 MB RSS ceiling.
+        ttml) echo "1048576 2 512 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

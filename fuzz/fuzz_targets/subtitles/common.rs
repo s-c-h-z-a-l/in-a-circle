@@ -1,13 +1,15 @@
-//! The checks the three subtitle reader targets (`srt`, `vtt`, `ass`) share.
+//! The checks the subtitle reader targets (`srt`, `vtt`, `ass`, `ttml`) share.
 //! Each target hands its reader the same bytes and calls [`check`]. On every
 //! verdict the reader must keep its promises:
 //!
 //! - the same bytes give the same verdict;
 //! - `Ok` has cues, each with `start <= end <= MAX_MS` and some text that is
-//!   not white space, the skipped count and its first line agree, and every loss is
-//!   counted at least once;
+//!   not white space, the skipped count and its first line agree (the line is
+//!   within the input's lines), and every loss is counted at least once;
 //! - `NotUtf8` names the first bad byte of the input, `TooLarge` comes only
-//!   past `INPUT_BYTES`; `TooComplex` and `NoCues` are valid verdicts.
+//!   past `INPUT_BYTES`; `TooComplex` and `NoCues` are valid verdicts;
+//! - `Malformed` (TTML) names a line of the input and says why, and
+//!   `NotTtml` and `Unsupported` are verdicts on the whole document.
 //!
 //! The cues, sorted as the caller sorts them, are then written as SRT and as
 //! WebVTT and read back by the matching reader. This is own consistency, not
@@ -249,13 +251,22 @@ fn shape(cues: &[Cue], srt: bool, original: bool) -> Shape {
         .collect()
 }
 
+/// The most lines the input can have, counted without the reader's rules: one
+/// more than its line feeds and carriage returns. The XML reader counts a lone
+/// CR as a line break and a CRLF as one, so counting both bytes only gives a
+/// larger bound, which is all a check needs. UTF-16 keeps one LF or CR byte per
+/// newline unit (the other byte is zero), so the bound holds there too.
+fn line_bound(data: &[u8]) -> usize {
+    1 + data.iter().filter(|&&b| b == b'\n' || b == b'\r').count()
+}
+
 /// Checks the reader `read` on `data`, then the round trip of its cues.
 pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
     let verdict = read(data);
     assert_eq!(verdict, read(data), "the same bytes gave another verdict");
     match verdict {
         Ok(mut parsed) => {
-            assert_usable(&parsed);
+            assert_usable(&parsed, data);
             sort_cues(&mut parsed.cues);
             assert!(
                 parsed
@@ -272,18 +283,28 @@ pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
             "NotUtf8 names a byte that is not the first bad one"
         ),
         Err(ReadError::TooLarge) => assert!(data.len() > INPUT_BYTES, "TooLarge under the limit"),
-        // A malformed document names a line that exists.
-        Err(ReadError::Malformed { line, .. }) => assert!(line >= 1, "Malformed names line 0"),
-        // A valid verdict. TooComplex needs more than ITEM_BUDGET items, which
-        // a fuzz input (at most 1 MiB, about one item per byte) cannot reach;
-        // the budget boundary is pinned by the unit test in crates/subtitles.
+        // A malformed document names a line that exists, and says why.
+        Err(ReadError::Malformed { line, reason }) => {
+            assert!(!reason.is_empty(), "Malformed with no reason");
+            assert!(
+                (1..=line_bound(data)).contains(&(line as usize)),
+                "Malformed names line {line} of an input with {} lines",
+                line_bound(data)
+            );
+        }
+        // A valid verdict. The budget boundary is pinned by the unit tests in
+        // crates/subtitles; a fuzz input rarely reaches ITEM_BUDGET, and when
+        // it does the verdict is still checked here.
         Err(ReadError::TooComplex | ReadError::NoCues | ReadError::NotTtml) => {}
-        Err(ReadError::Unsupported(_)) => {}
+        Err(ReadError::Unsupported(reason)) => {
+            assert!(!reason.is_empty(), "Unsupported with no reason");
+        }
     }
 }
 
-fn assert_usable(parsed: &Parsed) {
+fn assert_usable(parsed: &Parsed, data: &[u8]) {
     assert!(!parsed.cues.is_empty(), "an Ok verdict with no cues");
+    let bound = line_bound(data);
     for cue in &parsed.cues {
         assert!(
             cue.start_ms <= cue.end_ms && cue.end_ms <= MAX_MS,
@@ -304,8 +325,8 @@ fn assert_usable(parsed: &Parsed) {
     );
     if let Some((line, reason)) = parsed.skipped.first {
         assert!(
-            line >= 1 && !reason.is_empty(),
-            "bad first skip: {line} {reason:?}"
+            (1..=bound).contains(&line) && !reason.is_empty(),
+            "bad first skip: {line} {reason:?} in {bound} lines"
         );
     }
     assert!(
