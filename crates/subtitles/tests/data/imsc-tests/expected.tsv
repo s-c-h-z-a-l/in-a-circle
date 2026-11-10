@@ -1,0 +1,326 @@
+# REGRESSION GUARD, not evidence: each row is what the reader gave for the file when this
+# guard was written (ttml_conformance.rs, regenerate_expected_tsv). A change in a row is a change
+# in behaviour to review; a row is not proof that the behaviour is right. The evidence is
+# hand-checked.tsv, where a person read the file against its own description.
+file	outcome	cues	first_start_ms	first_text	note
+imsc1/ttml/activeArea/ActiveArea001.ttml	ok	3	0	This region is within the editorial area.	
+imsc1/ttml/altText/altText1.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1/ttml/animation/Animation001.ttml	ok	1	0	This background of this sentence should change from red to blue at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation002.ttml	ok	1	0	This text of this sentence should change from white to yellow at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation003.ttml	ok	1	0	This text of this sentence should appear at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation004.ttml	ok	1	0	This text of this sentence should change from a serif to a sans serif font at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation007.ttml	ok	1	0	This font of this sentence should go from normal to bold at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation008.ttml	ok	1	0	This line height of this sentence should\ngo from normal to zero at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation012.ttml	ok	2	0	This sentence should move right at 5s for 5 seconds	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation013.ttml	ok	1	0	The line should move progressively down through this sentence every 2 seconds	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation014.ttml	ok	1	0	This text should be outlined in blurred red from 5s to 10s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation015.ttml	ok	1	0	This text should become invisible from 3s to 8s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation016.ttml	ok	1	0	This text should start to wrap from 3s to 8s it is a very long piece of text in order to ensure that it does in fact hit the region edges and thus require some wrapping action. Wrapping is not required to support hyphenation, so this text should wrap at whole word boundaries.	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/animation/Animation018.ttml	ok	1	0	The font family should become "proportionalSansSerif" at 5s	SMIL animation (set, animate): ignored and counted as Styling; a visibility set by set is not honoured (hand-checked.tsv, OPEN)
+imsc1/ttml/aspectRatio/aspectRatio1.ttml	ok	1	1000	This region should have (a) an aspect ratio of 4:3, (b) be centered within the related video object and (c) be entirely within the related video object frame, and (d) have a height or width equal to that of the related video object frame.	aspect-ratio hint: no effect on text; image-only files are refused (image-based)
+imsc1/ttml/aspectRatio/aspectRatio2.ttml	ok	1	1000	This region should have (a) an aspect ratio of 16:9, (b) be centered within the related video object and (c) be entirely within the related video object frame, and (d) have a height or width equal to that of the related video object frame.	aspect-ratio hint: no effect on text; image-only files are refused (image-based)
+imsc1/ttml/aspectRatio/aspectRatio3.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1/ttml/aspectRatio/aspectRatio4.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1/ttml/aspectRatio/aspectRatio5.ttml	ok	1	1000	This region should fill the entire related video object frame.	aspect-ratio hint: no effect on text; image-only files are refused (image-based)
+imsc1/ttml/aspectRatio/aspectRatio6.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1/ttml/backgroundColor/BackgroundColor001.ttml	ok	1	0	The background is green.	
+imsc1/ttml/backgroundColor/BackgroundColor002.ttml	ok	1	0	The background is light green.	
+imsc1/ttml/backgroundColor/BackgroundColor003.ttml	ok	1	0	The background is green with 50% opacity. This text is 100% green.	
+imsc1/ttml/backgroundColor/BackgroundColor004.ttml	ok	1	0	The background is magenta.	
+imsc1/ttml/backgroundColor/BackgroundColor005.ttml	ok	1	0	The background is magenta with 50% opacity.\nThis text is 100% magenta.	
+imsc1/ttml/backgroundColor/BackgroundColor006.ttml	ok	1	0	The background is transparent.	
+imsc1/ttml/backgroundColor/BackgroundColor007.ttml	ok	1	0	The background color is blue.	
+imsc1/ttml/backgroundColor/BackgroundColor008.ttml	ok	1	0	The background is green.	
+imsc1/ttml/backgroundColor/BackgroundColor009.ttml	ok	1	0	The background color is magenta.	
+imsc1/ttml/backgroundColor/BackgroundColor010.ttml	ok	23	0	#FFFFFF	
+imsc1/ttml/backgroundColor/backgroundColor-region-p-span-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/backgroundColor/backgroundColor-region-p-span-002.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/backgroundColor/backgroundcolor-rgba-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/br/Br001.ttml	ok	1	0	This text must be on the first line.\nThis text on a second line.	
+imsc1/ttml/br/br-in-p-001.ttml	ok	1	0	Two-\nline Subtitle.	
+imsc1/ttml/br/br-in-span-001.ttml	ok	1	0	Two-\nline Subtitle.	
+imsc1/ttml/cellResolution/cellresolution-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/cellResolution/initial-value-cellresolution-001.ttml	ok	1	0	The initial cell grid has 15 rows.	
+imsc1/ttml/color/Color001.ttml	ok	1	0	This text must be red.	
+imsc1/ttml/color/Color002.ttml	ok	1	0	This text must be red.	
+imsc1/ttml/color/Color003.ttml	ok	1	0	This is the red color as a reference.\nThis text must be semi-transparent red.	
+imsc1/ttml/color/Color004.ttml	ok	1	0	This text must be green.	
+imsc1/ttml/color/Color005.ttml	ok	1	0	This is the green color as a reference.\nThis text must be semi-transparent green.	
+imsc1/ttml/color/Color007.ttml	ok	1	0	You must not see the word "transparent".	
+imsc1/ttml/color/Color008.ttml	ok	1	0	This word must be red\nand this one green.	
+imsc1/ttml/color/Color009.ttml	ok	1	0	This text must be red.	
+imsc1/ttml/direction/Direction001.ttml	ok	1	0	This text is displayed left to right.	
+imsc1/ttml/direction/Direction002.ttml	ok	1	0	This text is displayed left to right.	
+imsc1/ttml/direction/Direction003.ttml	ok	1	0	This text is displayed right to left.	
+imsc1/ttml/direction/Direction004.ttml	ok	1	0	The last three words are displayed\nright to left.	
+imsc1/ttml/direction/Direction005.ttml	ok	1	0	This text is displayed right to left.	
+imsc1/ttml/direction/Direction006.ttml	ok	1	0	The last three words are displayed\nleft to right.	
+imsc1/ttml/display/Display001.ttml	ok	1	0	This text is displayed.	
+imsc1/ttml/display/Display002.ttml	ok	2	0	Only the first caption is visible.	OPEN: tts:display="none" not honoured (hand-checked.tsv)
+imsc1/ttml/display/Display004.ttml	ok	1	0	This text is not displayed.	OPEN: tts:display="none" in the style not honoured (hand-checked.tsv)
+imsc1/ttml/displayAlign/DisplayAlign001.ttml	ok	1	0	This text is aligned with\nthe before edge of the region.	
+imsc1/ttml/displayAlign/DisplayAlign002.ttml	ok	1	0	This text is aligned with\nthe after edge of the region.	
+imsc1/ttml/displayAlign/DisplayAlign003.ttml	ok	1	0	This text is aligned in\nthe center of the region.	
+imsc1/ttml/displayAlign/DisplayAlign004.ttml	ok	1	0	あいAB34三四	
+imsc1/ttml/displayAlign/displayalign-after-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/displayAlign/displayalign-before-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/displayAlign/displayalign-center-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/div/Div001.ttml	ok	3	0	This text must be red.	
+imsc1/ttml/div/Div002.ttml	ok	4	0	This text must be red.	
+imsc1/ttml/div/Div003.ttml	ok	4	0	This text must be red.	
+imsc1/ttml/div/content-in-multiple-div-001.ttml	ok	2	0	A line within one div element.	
+imsc1/ttml/document/DocumentExample120.ttml	ok	11	760	It seems a paradox, does it not,	
+imsc1/ttml/document/DocumentExample822.ttml	ok	1	0	Twinkle, twinkle, little bat!\nHow I wonder where you're at!	
+imsc1/ttml/document/DocumentExample823.ttml	ok	1	0	In spring, when woods are getting green,\nI'll try and tell you what I mean.	
+imsc1/ttml/document/DocumentExample824.ttml	ok	1	0	Little birds are playing\nBagpipes on the shore,\nwhere the tourists snore.	
+imsc1/ttml/document/DocumentExample825.ttml	ok	1	0	[[[ Beautiful soup, so rich and green, waiting in a hot tureen! ]]]	OPEN: tts:display and set not honoured (hand-checked.tsv)
+imsc1/ttml/extent/Extent001.ttml	ok	1	0	The extent of this region has\nthe same dimensions as the root container.	
+imsc1/ttml/extent/Extent002.ttml	ok	1	0	The extent of this region is\n150px wide by 75px tall.	
+imsc1/ttml/fillLineGap/FillLineGap001.ttml	ok	1	0	##Line gaps##\nThe quick brown fox\njumps over the lazy dog\n##Line gaps##	
+imsc1/ttml/fillLineGap/FillLineGap002.ttml	ok	4	0	Paragraph 1	
+imsc1/ttml/fillLineGap/FillLineGap003.ttml	ok	8	0	tts:wrapOption = wrap Line break inside the span:\nSecond line. Line break between spans:\nSecond line.	
+imsc1/ttml/fillLineGap/FillLineGap004.ttml	ok	1	0	hello みなさん、\nこんにちは	
+imsc1/ttml/fillLineGap/FillLineGap005.ttml	ok	1	0	##Line gaps##\nThe quick brown fox\njumps over the lazy dog\n##Line gaps##	
+imsc1/ttml/fontFamily/FontFamily001.ttml	ok	1	0	The last words must be using a monospace font.	
+imsc1/ttml/fontFamily/FontFamily002.ttml	ok	1	0	The last words must be using a sansSerif font.	
+imsc1/ttml/fontFamily/FontFamily003.ttml	ok	1	0	The last words must be using a serif font.	
+imsc1/ttml/fontFamily/FontFamily004.ttml	ok	1	0	The last words must be using a monospaceSansSerif font.	
+imsc1/ttml/fontFamily/FontFamily005.ttml	ok	1	0	The last words must be using a monospaceSerif font.	
+imsc1/ttml/fontFamily/FontFamily006.ttml	ok	1	0	The last words must be using a proportionalSansSerif font.	
+imsc1/ttml/fontFamily/FontFamily007.ttml	ok	1	0	The last words must be using a proportionalSerif font.	
+imsc1/ttml/fontFamily/FontFamily008.ttml	ok	1	0	The last words must be using a Times New Roman font.	
+imsc1/ttml/fontFamily/FontFamily009.ttml	ok	1	0	The last words must be using a Times New Roman font.	
+imsc1/ttml/fontSize/FontSize001.ttml	ok	1	0	The last word must be in 24px.	
+imsc1/ttml/fontSize/FontSize002.ttml	ok	1	0	The last word must be in 2em.	
+imsc1/ttml/fontSize/FontSize004.ttml	ok	1	0	The last word must be in 150%.	
+imsc1/ttml/fontSize/fontsize-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/fontStyle/FontStyle001.ttml	ok	1	0	The last words must not be italic.	
+imsc1/ttml/fontStyle/FontStyle002.ttml	ok	1	0	The last word must be in italic.	
+imsc1/ttml/fontStyle/FontStyle003.ttml	ok	1	0	The last word must be in oblique.	
+imsc1/ttml/fontStyle/font-style-normal-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/fontWeight/FontWeight001.ttml	ok	1	0	The last words must not be bold.	
+imsc1/ttml/fontWeight/FontWeight002.ttml	ok	1	0	The last word must be bold.	
+imsc1/ttml/fontWeight/font-weight-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/fontWeight/font-weight-normal-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/forcedDisplay/forcedDisplay1.ttml	ok	2	1000	Hidden if displayForcedOnlyMode is true.	forced-only mode is a player setting; the default mode shows every text
+imsc1/ttml/foreign/Foreign001.ttml	ok	1	0	This text must be visible.	foreign namespace content: pruned and counted (Elements)
+imsc1/ttml/foreign/Parameters006.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/foreign/foreign-namespace-in-header-001.ttml	ok	1	0	Foreign namespace test.	foreign namespace content: pruned and counted (Elements)
+imsc1/ttml/foreign/foreign-namespace-in-p-001.ttml	ok	1	0	Foreign namespace test.	foreign namespace content: pruned and counted (Elements)
+imsc1/ttml/lineHeight/LineHeight001.ttml	ok	1	0	The line height of this\ntwo-row caption is normal.	
+imsc1/ttml/lineHeight/LineHeight002.ttml	ok	1	0	The line height of this\ntwo-row caption is normal.	
+imsc1/ttml/lineHeight/LineHeight003.ttml	ok	1	0	The line height of this\ntwo-row caption is 30 pixels.	
+imsc1/ttml/lineHeight/LineHeight006.ttml	ok	1	0	The line height of this\ntwo-row caption is 2em.	
+imsc1/ttml/lineHeight/lineheight-001.ttml	ok	1	0	A subtitles with a lineheight of 125%.\nThe subtitle has two lines.	
+imsc1/ttml/linePadding/LinePadding005.ttml	ok	2	0	نشاط التدويل، W3C	
+imsc1/ttml/linePadding/LinePadding006.ttml	ok	1	2459	Lorem ipsum dolor sit amet, consectetur\nadipiscing elit	
+imsc1/ttml/linePadding/linePadding1.ttml	ok	2	1000	Centered text on two lines\nwithout padding.	
+imsc1/ttml/linePadding/linePadding2.ttml	ok	1	0	There should be\none line break	
+imsc1/ttml/linePadding/linePadding3.ttml	ok	1	0	No spaces\nTwo lines with   spaces	
+imsc1/ttml/linePadding/linePadding4.ttml	ok	1	0	This subtitle uses\nlinepadding	
+imsc1/ttml/linePadding/linepadding-001.ttml	ok	1	0	This subtitle uses\nlinepadding	
+imsc1/ttml/misc/cumulative-rows-001.ttml	ok	3	0	These lines appear step-by-step.	
+imsc1/ttml/misc/cumulative-rows-002.ttml	ok	6	0	These lines appear step-by-step.	
+imsc1/ttml/misc/cumulative-words-001.ttml	ok	4	0	These	
+imsc1/ttml/misc/cumulative-words-002.ttml	ok	4	2000	These	
+imsc1/ttml/misc/special-character-001.ttml	ok	1	0	Ç ü é â ä à å ç ê ë è ï î ì Ä Å æ Æ ô ö ò\nû ù ÿ Ö Ü ø £ Ø × ƒ á í ó ú ñ Ñ ª º ¿	
+imsc1/ttml/misc/unicode-non-bmp-character.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/multiRowAlign/multiRowAlign1.ttml	ok	2	1000	multiRowAlign="end"\ntextAlign="start"	
+imsc1/ttml/multiRowAlign/multirow-align-center-auto-001.ttml	ok	1	0	textAlign is center\nand multirowAlign is auto	
+imsc1/ttml/multiRowAlign/multirow-align-center-center-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nCenter Center	
+imsc1/ttml/multiRowAlign/multirow-align-center-end-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nCenter End	
+imsc1/ttml/multiRowAlign/multirow-align-center-start-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nCenter Start	
+imsc1/ttml/multiRowAlign/multirow-align-end-center-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nEnd Center	
+imsc1/ttml/multiRowAlign/multirow-align-end-start-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nEnd Start	
+imsc1/ttml/multiRowAlign/multirow-align-start-center-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nStart Center	
+imsc1/ttml/multiRowAlign/multirow-align-start-end-001.ttml	ok	1	0	This subtitle's multiRowAlign is\nStart End	
+imsc1/ttml/opacity/Opacity001.ttml	ok	1	0	This region and text have an opacity of 1.00 (100% opaque).	
+imsc1/ttml/opacity/Opacity002.ttml	ok	1	0	This region and text have an opacity of 0.50 (50% opaque).	
+imsc1/ttml/opacity/Opacity003.ttml	ok	1	0	This region and text have an opacity of 0.10 (10% opaque).	
+imsc1/ttml/opacity/Opacity004.ttml	ok	1	0	The red region and text have an opacity of 0.60 (60% opaque).	
+imsc1/ttml/origin/Origin001.ttml	ok	1	0	This region originates at the same X and Y coordinates as the root container.	
+imsc1/ttml/origin/Origin002.ttml	ok	1	0	This region originates at X=30px and Y=30px.	
+imsc1/ttml/overflow/Overflow001.ttml	ok	1	0	None of this text is visible outside the text region.	
+imsc1/ttml/overflow/Overflow002.ttml	ok	1	0	Some of this text is visible outside the text region.	
+imsc1/ttml/overflow/Overflow003.ttml	ok	1	0	Text is visible below the after edge of the text region.	
+imsc1/ttml/overflow/Overflow004.ttml	ok	1	0	Text is not visible below the after edge of the text region.	
+imsc1/ttml/overflow/Overflow005.ttml	ok	1	0	Text is not visible below the after edge of the text region.	
+imsc1/ttml/overflow/overflow-hidden-001.ttml	ok	1	0	Overflow is hidden. One long long long long long long Subtitle.	
+imsc1/ttml/overflow/overflow-visible-001.ttml	ok	1	0	Overflow is visible. One long long long long long long Subtitle.	
+imsc1/ttml/p/Paragraph001.ttml	ok	1	0	This text must be visible.	
+imsc1/ttml/p/Paragraph002.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/p/Paragraph003.ttml	ok	1	0	This text must be red.	
+imsc1/ttml/p/Paragraph004.ttml	ok	1	0	This text must appear on one line.	
+imsc1/ttml/p/Paragraph005.ttml	ok	1	0	This text\nmust appear on two lines.	
+imsc1/ttml/padding/Padding001.ttml	ok	1	0	All the edges are padded\nby 20 pixels.	
+imsc1/ttml/padding/Padding002.ttml	ok	2	0	The before and after edges\nare padded by 10 pixels.	
+imsc1/ttml/padding/Padding003.ttml	ok	3	0	The before edge\nis padded by 10 pixels.	
+imsc1/ttml/padding/Padding004.ttml	ok	4	0	The before edge\nis padded by 10 pixels.	
+imsc1/ttml/padding/Padding006.ttml	ok	1	0	All the edges are padded\nby 2em.	
+imsc1/ttml/padding/Padding007.ttml	ok	1	0	All the edges are padded\nby 20%.	
+imsc1/ttml/padding/padding-four-values-001.ttml	ok	1	0	Region padding, four values.	
+imsc1/ttml/padding/padding-one-value-001.ttml	ok	1	0	Region padding, one value.	
+imsc1/ttml/padding/padding-three-values-001.ttml	ok	1	0	Region padding, three values.	
+imsc1/ttml/padding/padding-two-values-001.ttml	ok	1	0	Region padding, two values.	
+imsc1/ttml/progressivelyDecodable/progressivelyDecodable1.ttml	ok	4	1000	One.	IMSC 1.1 profile feature: no text form
+imsc1/ttml/referenceFonts/referenceFonts1.ttml	ok	2	0	Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed vitae tincidunt lacus. Pellentesque quis lorem est. Curabitur a lectus ut diam aliquam volutpat ut id ante. Vestibulum ac congue massa, in ornare velit.	IMSC 1.1 font feature: no text form, Styling counted
+imsc1/ttml/region/four-active-regions-001.ttml	ok	4	0	start/before	
+imsc1/ttml/region/mutiple-regions-sequence-001.ttml	ok	4	0	start/before	
+imsc1/ttml/region/nested-region-001.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/region/region-timing.ttml	ok	4	5000	This text should only appear during the interval [10s,15s)	
+imsc1/ttml/showBackground/ShowBackground001.ttml	ok	2	0	The magenta background is always visible,	
+imsc1/ttml/showBackground/ShowBackground002.ttml	ok	2	0	The magenta background is only visible	
+imsc1/ttml/space/space-preserve-001.ttml	ok	1	0	Two-\nline Subtitle.	
+imsc1/ttml/span/Span001.ttml	ok	1	0	This text must be visible.	
+imsc1/ttml/span/Span002.ttml	ok	1	0	This word must be red.	
+imsc1/ttml/span/Span003.ttml	ok	1	0	This text must be green.	
+imsc1/ttml/span/Span004.ttml	ok	1	0	Some of this text must red and green.	
+imsc1/ttml/span/Span005.ttml	ok	1	0	This text must appear\non two lines.	
+imsc1/ttml/structure/Structure001.ttml	ok	1	0	This text must be visible.	document structure
+imsc1/ttml/structure/Structure002.ttml	no-cues	0	-	-	document with no body: nothing to show
+imsc1/ttml/styling/Style001.ttml	ok	1	0	This caption is aligned in the center, has a blue background and undecorated yellow text.	
+imsc1/ttml/styling/Styling001.ttml	ok	2	0	This caption is aligned in the center, has a blue background, red text and no decoration.	
+imsc1/ttml/styling/idrefs-style-001.ttml	ok	1	0	Should be: background black, text: bold, italic, yellow color	
+imsc1/ttml/styling/styleInheritance-001.ttml	ok	1	0	Inherited styles	
+imsc1/ttml/textAlign/TextAlign001.ttml	ok	1	0	This caption is on the right.	
+imsc1/ttml/textAlign/TextAlign002.ttml	ok	1	0	This caption is on the left.	
+imsc1/ttml/textAlign/TextAlign003.ttml	ok	1	0	This caption is in the center.	
+imsc1/ttml/textAlign/TextAlign004.ttml	ok	1	1000	This caption is placed\nin the center.	
+imsc1/ttml/textAlign/TextAlign005.ttml	ok	1	0	This caption is aligned\nwith the start edge.	
+imsc1/ttml/textAlign/TextAlign006.ttml	ok	1	0	This caption is aligned\nwith the end edge.	
+imsc1/ttml/textAlign/textalign-center-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textAlign/textalign-end-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textAlign/textalign-left-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textAlign/textalign-right-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textAlign/textalign-start-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textDecoration/TextDecoration001.ttml	ok	1	0	This text has no decoration.	
+imsc1/ttml/textDecoration/TextDecoration002.ttml	ok	1	0	The last word in this caption is underlined.	
+imsc1/ttml/textDecoration/TextDecoration003.ttml	ok	1	0	The last two words in this caption are\nnot underlined.	
+imsc1/ttml/textDecoration/TextDecoration004.ttml	ok	1	0	All the words in this caption are underlined.	
+imsc1/ttml/textDecoration/TextDecoration005.ttml	ok	1	0	All the words in this caption are underlined.	
+imsc1/ttml/textDecoration/TextDecoration006.ttml	ok	1	0	All the words in this caption are underlined.	
+imsc1/ttml/textDecoration/TextDecoration007.ttml	ok	1	0	The last two words in this caption are\nnot underlined.	
+imsc1/ttml/textDecoration/TextDecoration008.ttml	ok	1	0	This text contains a throughline.	
+imsc1/ttml/textDecoration/TextDecoration009.ttml	ok	1	0	The last four words have\nno line through them.	
+imsc1/ttml/textDecoration/TextDecoration010.ttml	ok	1	0	This entire caption contains an overline.	
+imsc1/ttml/textDecoration/TextDecoration011.ttml	ok	1	0	The first row contains an overline,\nbut the second row does not.	
+imsc1/ttml/textDecoration/TextDecoration012.ttml	ok	1	0	The first text has an underline and a line through.	
+imsc1/ttml/textDecoration/TextDecoration013.ttml	ok	1	0	The first text has an underline, overline and a line through.	
+imsc1/ttml/textDecoration/text-decoration-none-001.ttml	ok	1	0	One line Subtitle.	
+imsc1/ttml/textOutline/TextOutline001.ttml	ok	1	0	This text has no outline.	
+imsc1/ttml/textOutline/TextOutline002.ttml	ok	1	0	This text has a three-pixel outline that is the same color as the text.	
+imsc1/ttml/textOutline/TextOutline004.ttml	ok	1	0	This text has a red, two-pixel outline.	
+imsc1/ttml/textOutline/TextOutline005.ttml	ok	2	0	This text has a red, 5% outline.	
+imsc1/ttml/timing/BasicTimeContainment001.ttml	ok	2	0	This first sentence persists for 5 seconds. This second sentence persists for 10 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTimeContainment002.ttml	ok	3	0	This first sentence persists for 5 seconds. This second sentence persists for 10 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTimeContainment003.ttml	ok	1	5000	This first sentence begins at 5 seconds and persists for 5 seconds.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTimeContainment004.ttml	ok	1	5000	This first sentence begins at 5 seconds and persists for 5 seconds.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming001.ttml	ok	1	10000	This text must appear at 10 seconds\nand be remain visible to 20 seconds.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming002.ttml	ok	1	10000	This text must appear at 10 seconds\nand remain visible to 20 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming003.ttml	ok	1	10000	This text must appear at 10 seconds\nand remain visible to 20 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming005.ttml	ok	1	0	This text must start to appear at 1 seconds\nand fade in to 10 seconds then fade out to 15 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming006.ttml	ok	1	0	This text must appear at 0 seconds and disappear at 15 seconds\nThis text must also appear at 0 seconds and disappear at 15 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming007.ttml	ok	1	5000	This text should appear at 5 seconds and stay till 15 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming008.ttml	ok	6	1000	This text must appear at 1 seconds and disappear at 15 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming010.ttml	ok	2	10000	This text must appear at 10 seconds and disappear at 24.4 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BasicTiming011.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/timing/BasicTiming012.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1/ttml/timing/BeginDur001.ttml	ok	9	0	This test is going to display a message\nevery other second.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BeginEnd001.ttml	ok	9	0	This test is going to display a message\nevery other second.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BeginEnd002.ttml	ok	1	11000	This test is over.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/BeginEnd003.ttml	ok	9	0	This test is going to display a message\nevery other second.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/FixedBeginEnd002.ttml	ok	1	11000	This test is over.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaParTiming001.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 15 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaParTiming002.ttml	ok	3	0	This text must appear at 5 seconds\nand remain visible to 10 seconds	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaParTiming003.ttml	ok	4	0	This text must appear at 0 seconds\nand be remain visible to 5 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming001.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming002.ttml	ok	4	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming003.ttml	ok	2	25000	This text must appear at 25 seconds\nand be remain visible to 30 seconds.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming004.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming005.ttml	ok	3	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming006.ttml	ok	2	5000	This text must appear at 5 seconds\nand be remain visible to 10 seconds,	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/MediaSeqTiming007.ttml	ok	2	0	This text must appear at 5 seconds\nand remain visible to 10 seconds	OPEN: tts:display and set not honoured (hand-checked.tsv)
+imsc1/ttml/timing/TimeExpressions001.ttml	ok	9	0	1.2s = 1.2s	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/timing-on-span-001.ttml	ok	1	0	One line Subtitle.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/timing/timing-on-span-002.ttml	ok	2	0	One line Subtitle.	timing: cue times checked in hand-checked.tsv where listed
+imsc1/ttml/tt/Tt001.ttml	ok	1	0	This text must appear on one line.	
+imsc1/ttml/tt/Tt002.ttml	ok	1	0	This text\nmust appear on two lines.	
+imsc1/ttml/tt/Tt003.ttml	ok	1	0	This text must appear on one line.	
+imsc1/ttml/unicodeBidi/UnicodeBidi001.ttml	ok	1	0	This text is displayed left to right.	
+imsc1/ttml/unicodeBidi/UnicodeBidi002.ttml	ok	1	0	The last three words are displayed\nright to left.	
+imsc1/ttml/unicodeBidi/UnicodeBidi003.ttml	ok	1	0	This text is displayed right to left.	
+imsc1/ttml/unicodeBidi/UnicodeBidi005.ttml	ok	2	0	This text is displayed left to right.	
+imsc1/ttml/unicodeBidi/unicode-bidi-embed-direction-ltr-001.ttml	ok	1	0	bahrain مصر 2015 kuwait	
+imsc1/ttml/unicodeBidi/unicode-bidi-embed-direction-rtl-001.ttml	ok	1	0	The title of the book is "نشاط التدويل، W3C"	
+imsc1/ttml/unicodeBidi/unicode-bidi-override-direction-rtl-001.ttml	ok	1	0	Inline direction LTR and LTR inside.	
+imsc1/ttml/visibility/Visibility001.ttml	ok	1	0	This text is visible.	
+imsc1/ttml/visibility/Visibility002.ttml	ok	1	0	All the words in this caption are visible.	
+imsc1/ttml/visibility/Visibility003.ttml	ok	1	0	The second row of text is invisible:\ninvisible text.	
+imsc1/ttml/wrap/WrapOption001.ttml	ok	1	0	The text in this caption wraps automatically no matter how much text is in the paragraph.	
+imsc1/ttml/wrap/WrapOption002.ttml	ok	1	0	The text in this caption does not wrap, so some of the text is not visible.	
+imsc1/ttml/wrap/WrapOption003.ttml	ok	1	0	The text in this caption does not wrap, so some of the text is not visible.	
+imsc1/ttml/wrap/WrapOption004.ttml	ok	2	0	The text in this caption does not wrap, extending beyond the end edge of the text region.	
+imsc1/ttml/wrap/WrapOption005.ttml	ok	2	0	The text in this caption wraps, staying within the text region.	
+imsc1/ttml/wrap/wrapoption-nowrap-001.ttml	ok	1	0	If a line overflows the extent of the region automated line wrapping shall not apply.	
+imsc1/ttml/wrap/wrapoption-wrap-001.ttml	ok	1	0	If a line overflows the extent of the region automated line wrapping shall apply.	
+imsc1/ttml/writingMode/WritingMode001.ttml	ok	1	0	This text is displayed left to right\nand top to bottom.	
+imsc1/ttml/writingMode/WritingMode002.ttml	ok	2	0	This text is displayed right to left\nand top to bottom,	
+imsc1/ttml/writingMode/WritingMode003.ttml	ok	2	0	This text is displayed right to left\nand top to bottom,	
+imsc1/ttml/writingMode/WritingMode004.ttml	ok	1	0	This text is displayed top to bottom in the inline progression direction\nand right to left in the block progression direction.	
+imsc1/ttml/writingMode/WritingMode005.ttml	ok	1	0	This text is displayed top to bottom\nand left to right.	
+imsc1/ttml/writingMode/WritingMode006.ttml	ok	1	0	This text is displayed left to right\nand top to bottom.	
+imsc1/ttml/writingMode/WritingMode007.ttml	ok	2	0	This text is displayed right to left\nand top to bottom,	
+imsc1/ttml/writingMode/WritingMode008.ttml	ok	2	0	This text is displayed right to left\nand top to bottom,	
+imsc1/ttml/writingMode/WritingMode009.ttml	ok	1	0	This text is displayed top to bottom in the inline progression direction\nand right to left in the block progression direction.	
+imsc1/ttml/writingMode/WritingMode010.ttml	ok	2	0	نشاط التدويل، W3C	
+imsc1/ttml/writingMode/writing-mode-lr-001.ttml	ok	1	0	first line\nsecond line	
+imsc1/ttml/writingMode/writing-mode-lrtb-001.ttml	ok	1	0	bahrain مصر kuwait	
+imsc1/ttml/writingMode/writing-mode-rl-001.ttml	ok	1	0	first line\nsecond line	
+imsc1/ttml/writingMode/writing-mode-rltb-001.ttml	ok	1	0	bahrain مصر kuwait	
+imsc1/ttml/writingMode/writing-mode-tb-001.ttml	ok	2	0	first line	
+imsc1/ttml/writingMode/writing-mode-tbrl-001.ttml	ok	2	0	first line	
+imsc1/ttml/zIndex/ZIndex001.ttml	ok	6	0	tts:zIndex="1000"	
+imsc1_1/ttml/disparity/disparity001.ttml	ok	1	0	Disparity of 2%	stereo disparity has no text form; counted as Position
+imsc1_1/ttml/displayAspectRatio/displayAspectRatio001.ttml	ok	1	1000	This region should have (a) an aspect ratio of 4:3, (b) be centered within the related video object and (c) be entirely within the related video object frame, and (d) have a height or width equal to that of the related video object frame.	display aspect ratio: no effect on text; image-only files are refused (image-based)
+imsc1_1/ttml/displayAspectRatio/displayAspectRatio002.ttml	ok	1	1000	This region should have (a) an aspect ratio of 16:9, (b) be centered within the related video object and (c) be entirely within the related video object frame, and (d) have a height or width equal to that of the related video object frame.	display aspect ratio: no effect on text; image-only files are refused (image-based)
+imsc1_1/ttml/displayAspectRatio/displayAspectRatio003.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1_1/ttml/displayAspectRatio/displayAspectRatio004.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1_1/ttml/image/image001.ttml	image-based	0	-	-	image subtitle: the document has no text cue (spec, ImageBased)
+imsc1_1/ttml/initial/initial001.ttml	ok	2	0	Text should be green	initial values: not applied, Styling counted
+imsc1_1/ttml/initial/initial002.ttml	ok	2	0	Text should be green and italic	initial values: not applied, Styling counted
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative001.ttml	ok	1	0	tts:extent="50rw 50rh"	IMSC 1.1 length units: text kept, placement counted (Position)
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative002.ttml	ok	1	0	10rh 20rh	IMSC 1.1 length units: text kept, placement counted (Position)
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative003.ttml	ok	2	0	lineHeight="7rh"\nlineHeight="7rh"\nlineHeight="7rh"	IMSC 1.1 length units: text kept, placement counted (Position)
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative004.ttml	ok	2	0	tts:padding="0rh 5rw 10rh 20rw"\ntts:displayAlign="before"	IMSC 1.1 length units: text kept, placement counted (Position)
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative005.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1_1/ttml/lengthRootContainerRelative/lengthRootContainerRelative006.ttml	ok	1	0	This text has a 10% outline that is black.	IMSC 1.1 length units: text kept, placement counted (Position)
+imsc1_1/ttml/linePadding/linepadding002.ttml	ok	1	0	ruby container boxed with padding0.25em\na span on a 2nd line	
+imsc1_1/ttml/luminanceGain/luminanceGain001.ttml	ok	1	0	█\nPixels at the center of the rectangle above must have an RGB value of (0xA0, 0xA0, 0xA0) when encoded using the Reference PQ EOTF and full-range quantization over 8-bits.	IMSC 1.1 vocabulary: no text form; counted when not carried
+imsc1_1/ttml/position/position001.ttml	ok	62	0	center	IMSC 1.1 placement: not carried (Position counted)
+imsc1_1/ttml/position/position002.ttml	ok	62	0	center	IMSC 1.1 placement: not carried (Position counted)
+imsc1_1/ttml/position/position003.ttml	ok	62	0	center	IMSC 1.1 placement: not carried (Position counted)
+imsc1_1/ttml/ruby/ruby001.ttml	ok	1	0	利用許諾 ライセンス	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/ruby/ruby002.ttml	ok	1	0	東南 とうなん たつみ の方角	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/ruby/ruby003.ttml	ok	1	0	Lorem ipsum\n利用許諾 ライセンス\ndolor sit amet	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/ruby/ruby004.ttml	ok	1	0	利用許諾 (ライセンス)	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/ruby/ruby005.ttml	ok	6	0	base base base 50% base font size	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/ruby/ruby006.ttml	ok	2	0	single underline base default	ruby: base and text kept as text, Styling counted
+imsc1_1/ttml/rubyAlign/rubyAlign001.ttml	ok	1	0	利用許諾 ライセンス	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyAlign/rubyAlign002.ttml	ok	1	0	利用許諾 ライセンス	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyAlign/rubyAlign003.ttml	ok	1	0	利用許諾 ライセンス	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyAlign/rubyAlign004.ttml	ok	6	0	利用許諾 ライセンス	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyReserve/rubyReserve001.ttml	ok	4	0	スペイン外人部隊の歌うたです\n遠征でよく歌うたいました	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyReserve/rubyReserve002.ttml	ok	5	0	rubyReservedefault length\nrubyReserveoutside	ruby: text kept, Styling counted
+imsc1_1/ttml/rubyReserve/rubyReserve003.ttml	ok	8	0	outside	ruby: text kept, Styling counted
+imsc1_1/ttml/shear/shear001.ttml	ok	18	0	Positive shear	IMSC 1.1 vocabulary: no text form; counted when not carried
+imsc1_1/ttml/shear/shear002.ttml	ok	2	0	利用許諾 ライセンス	IMSC 1.1 vocabulary: no text form; counted when not carried
+imsc1_1/ttml/shear/shear003.ttml	ok	1	0	山 やまの\n最多1998年 ルビサンプル	IMSC 1.1 vocabulary: no text form; counted when not carried
+imsc1_1/ttml/textCombine/textCombine001.ttml	ok	2	0	あいAB34三四	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textCombine/textCombine002.ttml	ok	2	0	あいAB342nd三四	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textEmphasis/textEmphasis001.ttml	ok	1	0	花 よ り だ ん ご\n花 よ り だ ん ご	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textEmphasis/textEmphasis002.ttml	ok	1	0	hello bonjour	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textEmphasis/textEmphasis003.ttml	ok	1	0	花より\n花より	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textEmphasis/textEmphasis004.ttml	ok	8	0	tbrl before	IMSC 1.1 styling: text kept, Styling counted
+imsc1_1/ttml/textShadow/textShadow001.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)
+imsc1_2/ttml/region/region-extent.ttml	ok	4	0	Region with tts:origin="5% 5%" and tts:extent="80% 20%"	
+imsc1_3/ttml/fontVariant/fontVariant001.ttml	all-skipped: no end time	0	-	-	spec: a p with no end, dur or finite parent is skipped and counted (divergence, hand-checked.tsv)

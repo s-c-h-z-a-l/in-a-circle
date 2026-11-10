@@ -1,0 +1,43 @@
+# EVIDENCE, hand-checked by reading each file against its own description (ttm:desc, the text, and its begin/end/dur) and the spec rule that applies. A row is written by a person from the file; it is not generated from the reader.
+# verdict: ok = the reader does what the file asks (or what the spec says where the file leaves room);
+#          divergence: <reason> = a known difference that the spec decides (counted, not silent); OPEN: = a real mismatch that needs a decision (see the test file).
+file	should	reader gives	verdict
+imsc1/ttml/br/Br001.ttml	0 to 10 s; two lines, break at br	0-10000, two lines, same text	ok
+imsc1/ttml/br/br-in-span-001.ttml	two lines; the space before br is removed	0-10000, "Two-" / "line Subtitle."	ok
+imsc1/ttml/p/Paragraph005.ttml	xml:space=preserve: the line feed is a line break ("two lines")	0-10000, two lines	ok
+imsc1/ttml/span/Span005.ttml	br inside a span: two lines	0-10000, two lines	ok
+imsc1/ttml/space/space-preserve-001.ttml	preserve mode: the line feed breaks the line; the text kept	0-10000, "Two-" / "line Subtitle."	ok
+imsc1/ttml/misc/special-character-001.ttml	every listed character is kept	0-10000, all characters kept over two lines	ok
+imsc1/ttml/p/Paragraph003.ttml	text is red (colour is not carried); the text stays	0-10000, text kept, Styling counted	ok
+imsc1/ttml/span/Span002.ttml	red word: text kept, colour not carried	0-10000, text kept, Styling counted	ok
+imsc1/ttml/fontStyle/FontStyle002.ttml	last word italic	0-10000, last word italic	ok
+imsc1/ttml/fontStyle/FontStyle003.ttml	last word oblique	0-10000, last word italic	divergence: the spec carries oblique as italic (the format has no oblique face in SRT/VTT)
+imsc1/ttml/fontWeight/FontWeight002.ttml	last word bold	0-10000, last word bold	ok
+imsc1/ttml/textDecoration/TextDecoration002.ttml	last word underlined	0-10000, last word underlined	ok
+imsc1/ttml/textDecoration/TextDecoration004.ttml	whole caption underlined	0-10000, whole caption underlined	ok
+imsc1/ttml/textDecoration/TextDecoration008.ttml	line-through: text kept, decoration not carried	0-10000, text kept, Styling counted	ok
+imsc1/ttml/timing/BasicTimeContainment001.ttml	par: first sentence 5 s, second 10 s (span dur)	0-5000 both sentences; 5000-10000 second only	ok
+imsc1/ttml/timing/BasicTimeContainment003.ttml	span begins at 5 s, lasts 5 s; the later spans must not appear	5000-10000 first sentence; later texts not shown, counted	ok
+imsc1/ttml/timing/BasicTiming010.ttml	appears at 10 s, span end 0.004h = 14.4 s after begin (24.4 s); second at 25 s, 10 s long (300f)	10000-24400, 25000-35000	ok
+imsc1/ttml/timing/BeginDur001.ttml	a message every other second (begin and dur)	nine cues at 0, 6, 8, ..., 20 s	ok
+imsc1/ttml/timing/MediaSeqTiming003.ttml	seq div: texts appear at 25 s and 35 s; the earlier seq texts must not appear	25000-30000, 35000-40000; earlier texts counted and not shown	ok
+imsc1/ttml/timing/TimeExpressions001.ttml	durations: 1.2s, 1.2m, 1.2h, 24f at 24000/1001, 120t at tickRate 60, clock with frames; 100 h is out of range	each duration exact in ms; the two 100 h items skipped and counted	ok
+imsc1/ttml/timing/timing-on-span-002.ttml	span timing slices the paragraph: 0-4 s and 4-10 s	0-4000 and 4000-10000, same text	ok
+imsc1/ttml/misc/cumulative-words-001.ttml	words appear one by one at 0, 2, 4, 6 s (span begin)	0-2000, 2000-4000, 4000-6000, 6000-10000	ok
+imsc1/ttml/forcedDisplay/forcedDisplay1.ttml	default mode: both texts shown (the forced-only mode is a player setting and is not applied)	1000-9000 both texts, the forced one at top	ok
+imsc1/ttml/region/four-active-regions-001.ttml	four regions: before = top, after = bottom	four cues 0-10000; top for the two before regions only	ok
+imsc1/ttml/displayAlign/displayalign-before-001.ttml	region at 10%, displayAlign before: top	0-10000, top	ok
+imsc1/ttml/linePadding/linePadding1.ttml	two texts with the same timing, one with padding (padding is not carried)	two cues 1000-9000, same text lines, Position counted	ok
+imsc1/ttml/foreign/foreign-namespace-in-p-001.ttml	foreign namespace element pruned, text kept	0-10000, text kept, Elements counted	ok
+imsc1/ttml/animation/Animation001.ttml	background colour changes at 5 s (animation, not carried)	0-10000, text kept, Styling counted	ok
+imsc1/ttml/animation/Animation003.ttml	paragraph hidden (display none) until a set at 5 s shows it	0-10000: shown from 0 s, Styling counted	OPEN: tts:display and set are ignored, so the text shows 5 s early; the count says only Styling. Needs a decision (honour the visibility or refuse the paragraph). Repro: the guard row (first_start_ms 0 for this file).
+imsc1/ttml/timing/MediaParTiming002.ttml	paragraph 3 hidden until a set at 5 s; paragraphs 1 and 2 at 5-10 s (end truncated by div end)	paragraphs 1 and 2 at 5000-10000 (duplicates); paragraph 3 at 0-10000	OPEN: the same set/display finding as Animation003. Paragraphs 1 and 2 are right. Repro: the guard row (paragraph 3 starts at 0).
+imsc1/ttml/display/Display002.ttml	the first caption shows, the second (tts:display none) must not	two cues 0-5000 and 5000-10000; the second is shown	OPEN: tts:display none is not honoured, so the second caption shows. Repro: the guard row (2 cues). ttconv hides it.
+imsc1/ttml/display/Display004.ttml	style with tts:display none: the text must not be displayed	one cue 0-10000 shown	OPEN: tts:display none in the style is not honoured. Repro: the guard row (1 cue).
+imsc1/ttml/p/Paragraph002.ttml	p with no timing in a seq: the text must be visible	refused, all-skipped: no end time	divergence: spec rule (a p with no end, dur or finite parent is skipped and counted), not silent
+imsc1/ttml/timing/BeginEnd002.ttml	p with begin and no end: each text shown from its begin	one cue 11000-20000 ("This test is over."); the eleven unbounded texts skipped and counted, no end time	divergence: spec rule as above; eleven texts are counted and not shown
+imsc1/ttml/structure/Structure002.ttml	no body element: nothing to show	refused, no-cues	ok
+imsc1/ttml/altText/altText1.ttml	image subtitle: the alt text in metadata is not displayed	refused, image-based	ok
+imsc1_1/ttml/image/image001.ttml	image element only: no text subtitle	refused, image-based	ok
+imsc1_1/ttml/ruby/ruby001.ttml	ruby: base and text kept; ruby rendering not carried	one cue 0-1000, base and text with the source space, Styling counted	ok
+imsc1_1/ttml/disparity/disparity001.ttml	disparity has no SRT or VTT form; the text stays	0-1000, text kept, losses counted	ok

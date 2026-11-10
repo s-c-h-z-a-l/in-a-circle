@@ -301,6 +301,26 @@ found no critical or important finding and 4 minor ones. All were fixed.
   own; `NOTE` blocks are silent; `STYLE` and `REGION` blocks are reported as
   `Settings`; a `-->` in cue text starts the next cue; `<v>` names become
   `VoiceNames`; timing hours of any length, milliseconds exactly three digits.
+- **TTML against the W3C imsc-tests and ttconv**: 321 files of the `imsc1`,
+  `imsc1_1`, `imsc1_2` and `imsc1_3` suites (commit `b7f88fe`, in
+  `crates/subtitles/tests/data/imsc-tests`). Three checks, with different weight:
+  - a regression guard (`expected.tsv`): the outcome, cue count and first cue of
+    each file as the reader gives them. It catches a change; it is not evidence
+    that the reader is right;
+  - hand-checks (`hand-checked.tsv`): 39 files read against their own
+    description and the rule that applies. 32 agree, 3 differ by a rule the
+    spec decides (a paragraph with no end; an oblique carried as italic), and 4
+    are open findings (below);
+  - ttconv 1.2.3 (`tt convert`, CI only): 242 files are compared in SRT and
+    WebVTT, on start and end in milliseconds and on the text with its italic,
+    bold and underline. Nothing is normalised on either side; colour and font
+    markup, which the reader drops and counts, is the only markup removed. The
+    list of files left out and why is at the top of `ttml_conformance.rs`.
+
+  Open findings from the hand-checks: `tts:display` is not honoured (a static
+  `none` hides a paragraph in a player, and the reader shows it), and a
+  paragraph hidden until a `set` shows from its begin. The reader counts both as
+  styling, which does not say that the timing changed. A decision is pending.
 
 ## Verdict
 
@@ -369,6 +389,9 @@ $MEM cargo test -p inacircle-subtitles --test cli too_complex_fails_and_leaves_n
 
 # Conformance: SRT and ASS against ffmpeg, WebVTT against the WPT files
 INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 $MEM cargo test -p subtitles --test srt --test ass --test vtt
+
+# TTML against the imsc-tests guard, the hand-checks and ttconv (`tt` on PATH)
+INACIRCLE_REQUIRE_TTCONV=1 $MEM cargo test -p subtitles --test ttml_conformance -- --nocapture
 
 # Full suite, debug and release, with the required-tool switches
 INACIRCLE_REQUIRE_LANDLOCK=1 INACIRCLE_REQUIRE_PDF_TOOLS=1 INACIRCLE_REQUIRE_SUBTITLE_TOOLS=1 \
