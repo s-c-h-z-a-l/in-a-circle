@@ -1331,18 +1331,16 @@ mod tests {
         assert_eq!((s.label.as_str(), s.applicable), ("SRT", 1));
     }
 
-    /// The TTML actions add nothing to the SRT, VTT and ASS offers: every
-    /// slice (preset, label, count, reason) and the hub are what they were
-    /// with the four older actions installed alone.
+    /// Every slice of the SRT, VTT and ASS offers, dim ones included, is
+    /// what the four older presets give. The TTML presets are appended to
+    /// the table, so a dim slice of theirs ties to the earlier preset and
+    /// loses the slot: the expected values are the ones of the table before
+    /// they were added (a dim slice is "no matching file").
     #[test]
     fn existing_subtitle_offers_are_unchanged() {
-        let all = subtitle_catalog();
-        let mut old = all.clone();
-        old.actions.retain(|a| !a.input.contains("ttml"));
-        assert_eq!(old.actions.len(), 4);
-        let slots = |o: &Offer| {
-            let slices: Vec<_> = o
-                .slices
+        /// (direction, preset, label, applicable, reason) of every slice.
+        fn slots(o: &Offer) -> Vec<(usize, &str, &str, usize, Option<&str>)> {
+            o.slices
                 .iter()
                 .enumerate()
                 .filter_map(|(k, s)| {
@@ -1350,25 +1348,44 @@ mod tests {
                         (
                             k,
                             s.preset,
-                            s.label.clone(),
+                            s.label.as_str(),
                             s.applicable,
-                            s.disabled.clone(),
+                            s.disabled.as_deref(),
                         )
                     })
                 })
-                .collect();
-            (o.hub.clone(), slices)
-        };
-        for (name, mime) in [
-            ("Film.srt", "application/x-subrip"),
-            ("Film.vtt", "text/vtt"),
-            ("Film.ass", "text/x-ssa"),
-        ] {
-            let t = tally(&[(name, mime)]);
-            let before = slots(&offer_group(&old, &t, "subtitles"));
-            assert_eq!(slots(&offer_group(&all, &t, "subtitles")), before, "{name}");
-            assert!(!before.1.is_empty(), "{name}");
+                .collect()
         }
+        let cat = subtitle_catalog();
+        let srt = offer_group(
+            &cat,
+            &tally(&[("Film.srt", "application/x-subrip")]),
+            "subtitles",
+        );
+        assert_eq!(srt.hub, "Subtitles");
+        assert_eq!(
+            slots(&srt),
+            [
+                (0, "vtt-srt", "VTT", 1, None),
+                (4, "srt-vtt", "SRT", 0, Some("no matching file")),
+            ]
+        );
+        let vtt = offer_group(&cat, &tally(&[("Film.vtt", "text/vtt")]), "subtitles");
+        assert_eq!(
+            slots(&vtt),
+            [
+                (0, "vtt-srt", "VTT", 0, Some("no matching file")),
+                (4, "srt-vtt", "SRT", 1, None),
+            ]
+        );
+        let ass = offer_group(&cat, &tally(&[("Film.ass", "text/x-ssa")]), "subtitles");
+        assert_eq!(
+            slots(&ass),
+            [
+                (0, "vtt-ass", "VTT", 1, None),
+                (4, "srt-ass", "SRT", 1, None),
+            ]
+        );
     }
 
     /// UTF-8 text is not a subtitle: Subtitles stays dim and no target
