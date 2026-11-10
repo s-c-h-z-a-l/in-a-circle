@@ -244,6 +244,49 @@ fn whitespace_default_and_preserve() {
     assert_eq!(lines_of(&parsed.cues[1]), vec!["x y"]);
 }
 
+/// 8.2.10, 12.4: white space between two timed spans is part of the
+/// paragraph's interval, not of either span. With no end on the paragraph or
+/// its ancestors, that interval ends with the paragraph, so the space stays
+/// between the words it separates. Default white space is one space (XSL-FO
+/// `white-space-collapse`), trimmed where a line starts or ends
+/// (`suppress-at-line-break="auto"`).
+#[test]
+fn white_space_between_timed_spans_is_kept() {
+    // Both words show from 1 s to 2 s: the space between them shows too.
+    let parsed = read(&doc(
+        r#"<p><span begin="1s" end="2s">Hello</span> <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello world"]);
+    assert_eq!(spans(&parsed), vec![(1_000, 2_000)]);
+    assert_eq!(parsed.skipped.count, 0);
+    // A tab and a line feed are white space too: a line feed is a space (8.2.10).
+    let parsed = read(&doc(
+        "<p><span begin=\"1s\" end=\"2s\">Hello</span>\t\n<span begin=\"1s\" end=\"2s\">world</span></p>",
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello world"]);
+    // `preserve` keeps every space; `default` collapses them to one.
+    let parsed = read(&doc(
+        r#"<p xml:space="preserve"><span begin="1s" end="2s">Hello</span>  <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello  world"]);
+    let parsed = read(&doc(
+        r#"<p><span begin="1s" end="2s">Hello</span>  <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello world"]);
+    // Spans with different times: the space is active while both are not
+    // shown, so each cue holds it at one of its edges, where it is trimmed.
+    let parsed = read(&doc(
+        r#"<p><span begin="0s" end="1s">Hello</span> <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello", "world"]);
+    assert_eq!(spans(&parsed), vec![(0, 1_000), (1_000, 2_000)]);
+    // Text with an end of its own is not affected: the paragraph's own end is the same.
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="3s"><span begin="1s" end="2s">Hello</span> <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello world"]);
+}
+
 /// 8.1.7: `br` is a forced line break. Two in a row make no empty line.
 #[test]
 fn br_is_a_line_break() {

@@ -63,7 +63,7 @@
 //! | `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
 //! | `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
 //! | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
-//! | text in `p` or `span`, white space only | spacing only: a piece with no time of its own, not counted |
+//! | text in `p` or `span`, white space only | spacing only: a piece over its container's interval; with no end of its own it lasts as long as the paragraph (8.2.10, 12.4), and the space is trimmed where a line starts or ends. Not counted |
 //! | visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
@@ -1021,7 +1021,7 @@ impl<'b> Doc<'b> {
             self.budget.charge()?;
             self.push_piece(Piece {
                 begin,
-                end,
+                end: Some(end),
                 content: Content::Break,
                 style: RunStyle::default(),
                 flags,
@@ -1068,7 +1068,9 @@ impl<'b> Doc<'b> {
     }
 
     /// Keeps a piece of text in the open paragraph; visible text with no display
-    /// time is counted (`NO_DISPLAY`, see `paragraph`).
+    /// time is counted (`NO_DISPLAY`, see `paragraph`). Text with no end of its
+    /// own (white space between timed spans, say) lasts as long as the
+    /// paragraph: it is kept with an open end, and `slice::cues` ends it.
     fn keep_text(
         &mut self,
         base: Option<u64>,
@@ -1080,7 +1082,7 @@ impl<'b> Doc<'b> {
     ) -> Result<(), ReadError> {
         let visible = text.chars().any(|c| !c.is_whitespace());
         match (base, end) {
-            (Some(begin), Some(end)) if end > begin => {
+            (Some(begin), end) if end.is_none_or(|end| end > begin) => {
                 self.budget.charge()?;
                 let content = Content::Text {
                     text: slice::normalize(text, preserve),

@@ -19,12 +19,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::style::{Css, Flags};
 use crate::{Budget, Cue, Line, Loss, OUTPUT_BYTES, ReadError, Run, has_text};
 
-/// One stored piece of a paragraph: its active interval in milliseconds
-/// (never empty), what it holds, the inline style of its text, and the
-/// declarations that affect it.
+/// One stored piece of a paragraph: its active interval in milliseconds, what
+/// it holds, the inline style of its text, and the declarations that affect
+/// it. An `end` of `None` is the paragraph's own end, known only when the
+/// paragraph closes (white space and text with no time of their own, 12.4).
 pub(super) struct Piece {
     pub(super) begin: u64,
-    pub(super) end: u64,
+    pub(super) end: Option<u64>,
     pub(super) content: Content,
     pub(super) style: RunStyle,
     pub(super) flags: Flags,
@@ -109,10 +110,14 @@ pub(super) fn cues(
 ) -> Result<(), ReadError> {
     // Each piece starts (true) and stops (false) once. At equal times the
     // order does not matter: every event at a time is applied before its slice.
+    // A piece with no end of its own lasts to the paragraph's end; one that
+    // begins at or after its end is never active, so it has no events.
+    let until = |p: &Piece| p.end.unwrap_or(end);
     let mut events: Vec<(u64, bool, usize)> = pieces
         .iter()
         .enumerate()
-        .flat_map(|(i, p)| [(p.begin, true, i), (p.end, false, i)])
+        .filter(|(_, p)| p.begin < until(p))
+        .flat_map(|(i, p)| [(p.begin, true, i), (until(p), false, i)])
         .collect();
     events.sort_unstable();
     let mut active = BTreeSet::new();
