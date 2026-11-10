@@ -1346,6 +1346,25 @@ fn image_only_document_is_refused() {
     );
 }
 
+/// An image is not a reason to hide a skipped paragraph: a document with one
+/// stray image and a text paragraph that is skipped is refused with the skip's
+/// reason, not as image-based. Image-only documents stay image-based.
+#[test]
+fn stray_image_does_not_hide_skipped_text() {
+    assert_eq!(
+        read_ttml(doc(r#"<image begin="0s" end="1s" src="a.png"/><p>x</p>"#).as_bytes()),
+        Err(ReadError::AllSkipped {
+            count: 1,
+            line: 1,
+            reason: "no end time"
+        })
+    );
+    assert_eq!(
+        read_ttml(doc(r#"<image begin="0s" end="1s" src="a.png"/>"#).as_bytes()),
+        Err(ReadError::ImageBased)
+    );
+}
+
 /// A document whose every paragraph is skipped says why: the count, and the
 /// first skipped paragraph's line (line 2 here).
 #[test]

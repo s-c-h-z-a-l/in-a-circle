@@ -189,9 +189,9 @@ whatever else it holds (a hidden or animated one included).
 | `smpte:backgroundImage` on a `div` or `body` | the `div` or `body` is one image unit; the text under it is converted |
 | `smpte:backgroundImage` on a `span` or `br` | its paragraph is one image unit (as above) |
 | a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
-| the document has image units and no text cue | `ReadError::ImageBased` (the whole file) |
+| the document has image units, no text cue and nothing skipped | `ReadError::ImageBased` (the whole file) |
 | the document has no cue, no image unit and nothing skipped | `ReadError::NoCues` (the whole file) |
-| the document has no cue, and skipped items | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
+| the document has no cue, and skipped items (a stray image does not change this) | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
 | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
 | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
 | each element outside a paragraph that holds a `set` or `animate` of `display`, `visibility` or `opacity` (the animated-visibility scope pass: a division, the body, a region, the root, or a head element, one item each); a `set` inside a paragraph or span is free | the item budget, charged in a pre-pass before the read (`animated_scopes`) |
