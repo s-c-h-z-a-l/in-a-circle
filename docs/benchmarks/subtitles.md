@@ -273,64 +273,75 @@ anyway, so this is the worst case of the search, not the common one.
 The TTML rules add a head search for `.xml`: the root start tag is read after
 the prolog (`<?…?>`, comments, a `<!DOCTYPE …>`), with `find` for the ends of
 those declarations. A `.ttml` or `.dfxp` costs nothing new (its head is checked
-for a leading `<`). Base is `c7125a9a`, the plan-18 head; the new tree is
-`a99732836` (the plan-19 head before this page). Both are `git archive`s built
-with their own target directories, and the same harness as above
-(`classify_bench`, 2,000 drops, two alternating rounds with the order swapped).
+for a leading `<`). Base is `c7125a9a`, the plan-18 head, a `git archive` with
+its own target directory. The harness is the same as above (`classify_bench`,
+2,000 drops, two alternating rounds with the order swapped in round 2).
 
 Inputs: `nottml`, a `.xml` of 3,992 B (a 3,900 B XML comment, then
 `<catalog xmlns="urn:example:catalog">`, so the root is inside the head but
 is not `tt`); `ttml-xml`, a 403 B TTML document as `.xml`; `ttml`, the same as
 `.ttml`; `srt`, 94 B; `txt`, 51 B. "1 file" is one file per drop; "50 files" is
-50 copies per drop. Times in µs, round 1 / round 2; the delta is the mean of
+50 copies per drop. Times in µs, round 1 / round 2. The delta is the mean of
 the two medians against the mean of base.
 
-| Case | Tree | median | p95 | median delta |
-|---|---|---|---|---|
-| `.xml` without TTML, 1 file | base | 1.88 / 1.88 | 2.35 / 2.42 | |
-| `.xml` without TTML, 1 file | new | 3.60 / 3.60 | 4.57 / 3.72 | +91.5 % |
-| `.xml` without TTML, 50 files | base | 93.89 / 94.10 | 96.07 / 96.94 | |
-| `.xml` without TTML, 50 files | new | 180.07 / 179.64 | 183.27 / 182.10 | +91.3 % |
-| `.xml` TTML, 1 file | base | 1.60 / 1.59 | 2.09 / 2.05 | |
-| `.xml` TTML, 1 file | new | 1.67 / 1.65 | 2.15 / 2.13 | +4.1 % |
-| `.xml` TTML, 50 files | base | 78.37 / 78.68 | 79.95 / 80.17 | |
-| `.xml` TTML, 50 files | new | 82.18 / 82.02 | 83.39 / 83.89 | +4.6 % |
-| `.ttml`, 1 file | base | 1.57 / 1.57 | 2.03 / 2.02 | |
-| `.ttml`, 1 file | new | 1.54 / 1.58 | 1.99 / 1.96 | -0.6 % |
-| `.ttml`, 50 files | base | 78.86 / 78.30 | 81.06 / 79.77 | |
-| `.ttml`, 50 files | new | 76.73 / 76.94 | 78.11 / 78.33 | -2.2 % |
-| `.srt`, 1 file | base | 1.54 / 1.54 | 2.00 / 1.98 | |
-| `.srt`, 1 file | new | 1.52 / 1.54 | 1.96 / 1.99 | -0.6 % |
-| `.srt`, 50 files | base | 76.51 / 77.23 | 77.74 / 78.36 | |
-| `.srt`, 50 files | new | 76.47 / 76.85 | 78.24 / 78.96 | -0.3 % |
-| `.txt`, 1 file | base | 1.51 / 1.51 | 1.95 / 1.95 | |
-| `.txt`, 1 file | new | 1.50 / 1.51 | 1.87 / 1.95 | -0.3 % |
-| `.txt`, 50 files | base | 74.09 / 74.33 | 75.72 / 75.62 | |
-| `.txt`, 50 files | new | 74.54 / 74.21 | 75.90 / 75.21 | +0.2 % |
+**History.** The first plan-19 head searched the head byte by byte, one slice
+compare per position, with `find()`: `.xml` without TTML, 50 files, +91 %
+(94 → 180 µs). The cost is the comment's `-->` search across about 3.9 KB, the
+same window scan that plan-18 replaced in `in_head`. The fix is the shared
+block search (`first_match`, used by `find` and `in_head`): 128-byte blocks,
+an OR-fold of first-byte compares, and a full compare only in a block that
+holds the first byte. Three variants were measured in the same harness:
 
-The TTML-less `.xml` costs +1.7 µs per file, +91 % on the 50-file drop (about
-+86 µs): the goal of +10 % is not met as the tree stands. The `.ttml` and
-`.srt`/`.txt` paths are within the noise of the two trees. The `.xml` TTML
-drop costs +3.6 µs, about 0.07 µs per file.
+| Variant | `.xml` without TTML, 50 files, delta (median) |
+|---|---|
+| window scan (first plan-19 head) | +91.3 % (one run, two rounds) |
+| block scan in `find()` only, scratch copy | +9.5 % (two rounds, same session as base) |
+| block scan, comparison by a closure on the bytes after the first | +13.1 % (four rounds, same session) |
+| block scan, comparison of the whole window (committed) | +8.2 % (four rounds, same session); +11.8 % in the final full run |
 
-The cost is the search itself: `find` is `hay.windows(needle.len()).position`,
-one slice compare per byte, and the comment's `-->` is searched across about
-3.9 KB. The block search that fixed the subtitle search in plan-18 (`in_head`)
-is the fix. It was measured in a scratch copy of the new tree only, with `find`
-replaced by the same 128-byte block scan (the same first match by
-construction; the scratch copy was not differentially tested):
+The closure over the rest of the window was consistently slower than the
+whole-window compare, so the whole-window form is the one committed. The
+behaviour is the window scan's: `find_matches_the_naive_scan` checks the
+positions, not only whether a needle occurs, on every length up to 4 KiB, with
+needles at the block edges and random bytes, against the old scan as the oracle.
+
+**Final numbers** (the committed tree; base `c7125a9a`):
 
 | Case | Tree | median | p95 | median delta |
 |---|---|---|---|---|
-| `.xml` without TTML, 1 file | base / block scan | 1.89 / 1.88 vs 2.06 / 2.06 | 2.45 / 2.44 vs 2.68 / 2.66 | +9.3 % |
-| `.xml` without TTML, 50 files | base / block scan | 94.00 / 94.49 vs 103.03 / 103.28 | 95.58 / 98.04 vs 105.96 / 106.26 | +9.5 % |
-| `.xml` TTML, 1 file | base / block scan | 1.58 / 1.59 vs 1.66 / 1.67 | 2.06 / 2.07 vs 2.16 / 2.16 | +5.0 % |
-| `.xml` TTML, 50 files | base / block scan | 78.98 / 79.44 vs 81.70 / 81.30 | 80.23 / 81.47 vs 82.87 / 82.48 | +2.9 % |
+| `.xml` without TTML, 1 file | base | 1.87 / 1.87 | 1.93 / 1.92 | |
+| `.xml` without TTML, 1 file | new | 2.07 / 2.09 | 2.12 / 2.16 | +11.2 % |
+| `.xml` without TTML, 50 files | base | 94.27 / 93.91 | 95.87 / 96.04 | |
+| `.xml` without TTML, 50 files | new | 104.33 / 106.13 | 106.59 / 107.69 | +11.8 % |
+| `.xml` TTML, 1 file | base | 1.58 / 1.61 | 1.64 / 1.68 | |
+| `.xml` TTML, 1 file | new | 1.65 / 1.64 | 2.12 / 1.76 | +3.1 % |
+| `.xml` TTML, 50 files | base | 79.75 / 78.93 | 82.01 / 81.20 | |
+| `.xml` TTML, 50 files | new | 82.76 / 81.59 | 84.55 / 83.20 | +3.6 % |
+| `.ttml`, 1 file | base | 1.58 / 1.58 | 1.67 / 1.65 | |
+| `.ttml`, 1 file | new | 1.56 / 1.57 | 1.61 / 1.65 | -0.9 % |
+| `.ttml`, 50 files | base | 78.56 / 78.91 | 80.45 / 80.71 | |
+| `.ttml`, 50 files | new | 76.84 / 76.95 | 78.28 / 79.01 | -2.3 % |
+| `.srt`, 1 file | base | 1.58 / 1.54 | 1.98 / 1.58 | |
+| `.srt`, 1 file | new | 1.54 / 1.54 | 1.99 / 1.92 | -1.3 % |
+| `.srt`, 50 files | base | 77.09 / 76.65 | 78.28 / 80.34 | |
+| `.srt`, 50 files | new | 76.75 / 77.28 | 78.78 / 78.48 | +0.2 % |
+| `.txt`, 1 file | base | 1.50 / 1.51 | 1.91 / 1.96 | |
+| `.txt`, 1 file | new | 1.50 / 1.50 | 1.56 / 1.87 | -0.3 % |
+| `.txt`, 50 files | base | 74.00 / 74.05 | 75.45 / 76.60 | |
+| `.txt`, 50 files | new | 74.11 / 73.72 | 119.33 / 75.83 | -0.1 % |
 
-With the block scan the TTML-less 50-file drop is at +9.5 %: inside the goal,
-but at its edge and on this machine only. The rest (about 9 µs per 50 files)
-is the prolog walk and the reads. The change is not in the tree: it needs the
-same kind of differential test as `in_head_matches_the_naive_scan`.
+The `.txt` 50-file p95 of 119.33 µs is one outlier of a single round; the
+medians of that row agree. The `.ttml`, `.srt` and `.txt` paths are within the
+noise of the two trees, and the `.xml` TTML drop costs about 0.06 µs per file.
+
+**Verdict.** The shared block search takes the TTML-less `.xml` 50-file drop
+from +91 % to between +8 % and +12 % on this machine, in runs of the committed
+code. The goal of +10 % is at its edge and not robustly met. What remains is
+the scan of the 3.9 KB comment: about 0.25 µs per file, which is the block
+fold's speed on this machine (roughly 15 bytes per ns). A cheaper scan would
+need a wider compare (AVX2 with a runtime check, which is unsafe code), and it
+was not done. The input is a worst case for this path: a long comment in a
+`.xml` that is not TTML, read to its end before the root is found.
 
 These are CPU micro-measurements on this machine (Ryzen 7 5700X, Linux
 7.3.1-1-cachyos, rustc 1.98.1, release examples). They are not the acceptance

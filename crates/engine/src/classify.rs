@@ -380,12 +380,6 @@ fn ns_declaration<'a>(token: &'a [u8], prefix: Option<&[u8]>) -> Option<&'a [u8]
     value.strip_suffix(&[quote])
 }
 
-/// The first place `needle` occurs in `hay`. The head is 4 KiB and the
-/// needles are two or three bytes, so a plain scan is cheap.
-fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
 /// Bytes per block of the head search. A block without the needle's first
 /// byte is one vectorised pass (the fold below compiles to SSE2 compares),
 /// where a window per position was a compare per byte. 128 bytes is eight
@@ -394,31 +388,47 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// classifier (docs/benchmarks/subtitles.md).
 const HEAD_BLOCK: usize = 128;
 
-/// Whether `needle` occurs in `head`, ASCII case-insensitively. Both
-/// needles open with a byte that is not a letter, so matching that first
-/// byte exactly is the same as matching it case-insensitively.
-fn in_head(head: &[u8], needle: &[u8]) -> bool {
-    debug_assert!(needle.first().is_some_and(|b| !b.is_ascii_alphabetic()));
-    let Some(last) = head.len().checked_sub(needle.len()) else {
-        return false;
-    };
-    let (first, rest) = (needle[0], &needle[1..]);
+/// The first place `needle` occurs in `hay`, where `same` decides whether a
+/// window is the needle (exact, or ASCII case-insensitive). The search is
+/// blockwise (see [`HEAD_BLOCK`]) and gives the same first match as a window
+/// scan: a block is entered only if it holds the needle's first byte, and
+/// that byte is compared exactly, so `same` must agree with exact equality
+/// on it (the callers' needles open with a byte that is not a letter).
+fn first_match(hay: &[u8], needle: &[u8], same: impl Fn(&[u8], &[u8]) -> bool) -> Option<usize> {
+    let last = hay.len().checked_sub(needle.len())?;
+    let first = needle[0];
     let mut start = 0;
     while start <= last {
-        // Starts in `start..end`; the match may run past `end` into the head.
+        // Starts in `start..end`; the match may run past `end` into the hay.
         let end = (start + HEAD_BLOCK).min(last + 1);
-        let block = &head[start..end];
+        let block = &hay[start..end];
         if block.iter().fold(false, |hit, &b| hit | (b == first)) {
             for (at, &b) in block.iter().enumerate() {
                 let p = start + at;
-                if b == first && head[p + 1..p + needle.len()].eq_ignore_ascii_case(rest) {
-                    return true;
+                if b == first && same(&hay[p..p + needle.len()], needle) {
+                    return Some(p);
                 }
             }
         }
         start = end;
     }
-    false
+    None
+}
+
+/// The first place `needle` occurs in `hay`, exactly. The head is 4 KiB.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    first_match(hay, needle, |window, pattern| window == pattern)
+}
+
+/// Whether `needle` occurs in `head`, ASCII case-insensitively. Both
+/// needles open with a byte that is not a letter, so matching that first
+/// byte exactly is the same as matching it case-insensitively.
+fn in_head(head: &[u8], needle: &[u8]) -> bool {
+    debug_assert!(needle.first().is_some_and(|b| !b.is_ascii_alphabetic()));
+    first_match(head, needle, |window, pattern| {
+        window.eq_ignore_ascii_case(pattern)
+    })
+    .is_some()
 }
 
 /// Whether the head is valid UTF-8, from its `scan` and `cut`. A
@@ -1371,6 +1381,20 @@ mod tests {
         assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"));
     }
 
+    /// xorshift64: a fixed seed and no dependency, so a failure reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n as u64) as usize
+        }
+    }
+
     /// Differential test: `in_head` against the plain window scan it
     /// replaced (kept here as the oracle) on heads of every length up to
     /// the head size, needles planted at the start, the end and each block
@@ -1381,18 +1405,6 @@ mod tests {
         fn naive(head: &[u8], needle: &[u8]) -> bool {
             head.windows(needle.len())
                 .any(|w| w.eq_ignore_ascii_case(needle))
-        }
-        // xorshift64: a fixed seed and no dependency.
-        struct Rng(u64);
-        impl Rng {
-            fn below(&mut self, n: usize) -> usize {
-                let mut x = self.0;
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                self.0 = x;
-                (x % n as u64) as usize
-            }
         }
         const NEEDLES: [&[u8]; 9] = [
             b"-->",
@@ -1488,6 +1500,128 @@ mod tests {
             let mut head = vec![b; 130];
             head[127..130].copy_from_slice(b"-->");
             check(&head);
+        }
+    }
+
+    /// Differential test: `find` against the window scan it replaced (kept
+    /// here as the oracle). Both must give the same first position, not only
+    /// whether the needle occurs. The heads are those of the test above, the
+    /// needles are the ones the root scan searches for, plus random short
+    /// needles cut from the head itself and from random bytes. Fixed seed.
+    #[test]
+    fn find_matches_the_naive_scan() {
+        fn naive(hay: &[u8], needle: &[u8]) -> Option<usize> {
+            hay.windows(needle.len()).position(|w| w == needle)
+        }
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        const NEEDLES: [&[u8]; 8] = [
+            b"-->",
+            b"?>",
+            b">",
+            b"<",
+            b"--",
+            b"->",
+            b"<!--",
+            b"<!DOCTYPE",
+        ];
+        const TOKENS: [&[u8]; 14] = [
+            b"-",
+            b"-->",
+            b"--",
+            b"?",
+            b"?>",
+            b">",
+            b"<",
+            b"<!--",
+            b"\n",
+            b"x",
+            "\u{2014}".as_bytes(),
+            b"\xff\xc3",
+            b"\x00",
+            b"<!DOCTYPE",
+        ];
+        const ALPHABET: &[u8] = b"-->?<!DOCTYPE x\n";
+        let check = |hay: &[u8], needle: &[u8]| {
+            assert_eq!(
+                find(hay, needle),
+                naive(hay, needle),
+                "needle {:?} in {:?}",
+                String::from_utf8_lossy(needle),
+                hay
+            );
+        };
+        let check_all = |hay: &[u8]| {
+            for needle in NEEDLES {
+                check(hay, needle);
+            }
+        };
+        let random_bytes = |rng: &mut Rng, len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    if rng.below(4) == 0 {
+                        rng.below(256) as u8
+                    } else {
+                        ALPHABET[rng.below(ALPHABET.len())]
+                    }
+                })
+                .collect()
+        };
+
+        // Every length up to the head size, with a random head each, and
+        // random needles of one to four bytes, some cut from the head itself.
+        for len in 0..=HEAD {
+            let hay = random_bytes(&mut rng, len);
+            check_all(&hay);
+            for _ in 0..4 {
+                let n = 1 + rng.below(4);
+                if n > len {
+                    continue;
+                }
+                let at = rng.below(len - n + 1);
+                check(&hay, &hay[at..at + n]);
+                let needle = random_bytes(&mut rng, n);
+                check(&hay, &needle);
+            }
+        }
+        // Each needle planted at the edges and inside the blocks, as above.
+        for needle in NEEDLES {
+            let n = needle.len();
+            for len in [n, n + 1, 127, 128, 129, 255, 256, 257, HEAD] {
+                if len < n {
+                    continue;
+                }
+                let last = len - n;
+                let mut at: Vec<usize> = vec![0, 1, last.saturating_sub(1), last];
+                for edge in (HEAD_BLOCK..=len).step_by(HEAD_BLOCK) {
+                    at.extend((0..=n).map(|off| (edge + off).saturating_sub(n)));
+                }
+                for p in at.into_iter().filter(|&p| p <= last) {
+                    let mut hay = random_bytes(&mut rng, len);
+                    hay[p..p + n].copy_from_slice(needle);
+                    check_all(&hay);
+                }
+            }
+        }
+        // Heads of overlapping partial matches and non-ASCII tokens.
+        for _ in 0..400 {
+            let mut hay = Vec::new();
+            while hay.len() < HEAD && rng.below(64) != 0 {
+                hay.extend_from_slice(TOKENS[rng.below(TOKENS.len())]);
+            }
+            hay.truncate(HEAD);
+            check_all(&hay);
+        }
+        // Every byte value as a whole head, and with each needle across the
+        // first block edge.
+        for b in 0..=u8::MAX {
+            let hay = vec![b; 2 * HEAD_BLOCK];
+            check_all(&hay);
+            for needle in NEEDLES {
+                let mut edge = vec![b; 2 * HEAD_BLOCK];
+                let n = needle.len();
+                edge[HEAD_BLOCK - 1..HEAD_BLOCK - 1 + n].copy_from_slice(needle);
+                check_all(&edge);
+            }
         }
     }
 
