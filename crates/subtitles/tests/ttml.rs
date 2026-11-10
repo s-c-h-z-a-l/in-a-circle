@@ -1483,6 +1483,26 @@ fn accounting_rows() -> Vec<Row> {
             Some((1, "hidden by the document")),
         ),
         row(
+            "initial: fontStyle, fontWeight and textDecoration are the base (document)",
+            styled(
+                r#"<styling><initial tts:fontStyle="italic"/></styling>"#,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[],
+            0,
+            None,
+        ),
+        row(
+            "initial: a position declaration is counted (document)",
+            styled(
+                r#"<styling><initial tts:origin="10% 10%"/></styling>"#,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
             "display auto: the initial value, nothing counted",
             doc(r#"<p begin="0s" end="1s" tts:display="auto">a</p>"#),
             &[],
@@ -1701,4 +1721,103 @@ fn a_set_on_another_property_still_only_counts_styling() {
     assert_eq!(texts(&parsed), vec!["colour"]);
     assert_eq!(loss(&parsed, Loss::Styling), 1);
     assert_eq!(parsed.skipped.count, 0);
+}
+
+/// The italic, bold and underline of a cue's first run (cues here have one run).
+fn run_flags(cue: &Cue) -> (bool, bool, bool) {
+    let run = &cue.lines[0].runs[0];
+    (run.italic, run.bold, run.underline)
+}
+
+/// 10.1.1, 10.4.2: an `initial` element is the initial value of the properties
+/// it names. A paragraph takes it where no ancestor, region or reference gives
+/// a value; a style reference and an inline value beat it.
+#[test]
+fn initial_values_are_the_base_of_every_paragraph() {
+    let parsed = read(&styled(
+        r#"<styling><initial tts:fontStyle="italic" tts:fontWeight="bold" tts:textDecoration="underline"/><style xml:id="plain" tts:fontStyle="normal"/></styling>"#,
+        r#"<p begin="0s" end="1s">a</p><p begin="2s" end="3s" style="plain">b</p><p begin="4s" end="5s" tts:fontWeight="normal">c</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["a", "b", "c"]);
+    assert_eq!(
+        run_flags(&parsed.cues[0]),
+        (true, true, true),
+        "the initial values"
+    );
+    assert_eq!(
+        run_flags(&parsed.cues[1]),
+        (false, true, true),
+        "a style's normal fontStyle beats the initial italic"
+    );
+    assert_eq!(
+        run_flags(&parsed.cues[2]),
+        (true, false, true),
+        "an inline normal fontWeight beats the initial bold"
+    );
+    assert_eq!(
+        loss(&parsed, Loss::Styling),
+        0,
+        "carried properties count nothing"
+    );
+}
+
+/// 10.1.1: when several `initial` elements give a value for one property, the
+/// last one in document order applies.
+#[test]
+fn last_initial_wins() {
+    let parsed = read(&styled(
+        r#"<styling><initial tts:fontStyle="italic"/><initial tts:fontStyle="normal"/></styling>"#,
+        r#"<p begin="0s" end="1s">a</p>"#,
+    ));
+    assert_eq!(run_flags(&parsed.cues[0]), (false, false, false));
+}
+
+/// 10.4.2.2: a region gives the values no ancestor gives, and those beat the
+/// initial value; a paragraph outside the region keeps the initial value.
+#[test]
+fn a_region_value_beats_the_initial_value() {
+    let parsed = read(&styled(
+        r#"<styling><initial tts:fontStyle="italic"/></styling><layout><region xml:id="r" tts:fontStyle="normal"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">a</p><p begin="2s" end="3s">b</p>"#,
+    ));
+    assert_eq!(
+        run_flags(&parsed.cues[0]),
+        (false, false, false),
+        "the region"
+    );
+    assert_eq!(
+        run_flags(&parsed.cues[1]),
+        (true, false, false),
+        "the initial value"
+    );
+}
+
+/// 10.2.14: an initial `display="none"` makes every element ineligible for
+/// layout, and so does a descendant's own `auto`: the element and its
+/// descendants are not shown. A document with no other text is refused.
+#[test]
+fn initial_display_none_hides_the_whole_document() {
+    let refused = read_ttml(
+        styled(
+            r#"<styling><initial tts:display="none"/></styling>"#,
+            r#"<p begin="0s" end="1s">hidden</p><p begin="2s" end="3s" tts:display="auto">also hidden</p>"#,
+        )
+        .as_bytes(),
+    );
+    assert!(
+        matches!(refused, Err(ReadError::AllSkipped { count: 2, .. })),
+        "{refused:?}"
+    );
+}
+
+/// 10.1.1: a conditional `initial` is not evaluated, so it is not applied, and
+/// it counts as styling.
+#[test]
+fn a_conditional_initial_is_not_applied_and_counts_styling() {
+    let parsed = read(&styled(
+        r#"<styling><initial condition="ttp:profile" tts:fontStyle="italic"/></styling>"#,
+        r#"<p begin="0s" end="1s">a</p>"#,
+    ));
+    assert_eq!(run_flags(&parsed.cues[0]), (false, false, false));
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
 }

@@ -38,7 +38,7 @@
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
 //! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
-//! | `styling`: `initial` | `Styling` on every cue (the initial values it sets are not applied) |
+//! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 //! | `styling`: any other child | `Elements` on every cue of the document |
 //! | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
 //! | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
@@ -87,7 +87,7 @@
 //! | text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
 //!
 //! Document-level counts. A kind counted on every cue of the document (a
-//! `Styling` from `initial` or from an ignored element outside a paragraph, an
+//! `Styling` or `Position` from `initial` (a property the reader does not carry) or from an ignored element outside a paragraph, an
 //! `Elements` likewise) is the cue count: it replaces the per-cue counts the
 //! paragraphs made, so a document never counts a cue twice. Image units add to
 //! `Elements` on top of that, and only when a text cue remains.
@@ -483,7 +483,8 @@ enum Role {
     Container(Kind),
     /// `style` (in `styling`, or nested in a `region`) or `region`: an entry.
     Define(Kind),
-    /// `initial`: its values are not applied, so every cue is `Styling`.
+    /// `initial` (10.1.1): the initial value of the properties it names, which
+    /// every paragraph takes where nothing else gives one (see `Doc::initial`).
     Initial,
 }
 
@@ -650,6 +651,11 @@ struct Doc<'b> {
     out: Output,
     /// The styles and regions of the head, resolved when the body begins.
     sheet: Sheet,
+    /// The initial values (10.1.1), merged from the `initial` elements in
+    /// document order: the last one given for a property applies. Each
+    /// paragraph takes them where no ancestor, no region and no reference
+    /// gives a value (10.4.2), so they are the lowest layer of its style.
+    initial: Css,
     /// The body has begun: the sheet is resolved, and no head element is read.
     frozen: bool,
     /// The root container's height, when `tt` gives it in px (10.2.16).
@@ -684,6 +690,7 @@ impl<'b> Doc<'b> {
             skipped: Skipped::default(),
             out: Output::default(),
             sheet: Sheet::default(),
+            initial: Css::default(),
             frozen: false,
             root_height: None,
             doc_flags: Flags::default(),
@@ -757,7 +764,17 @@ impl<'b> Doc<'b> {
             Role::Container(kind) => self.container(kind)?,
             Role::Define(kind) => self.define(kind, el)?,
             Role::Initial => {
-                self.doc_flags.styling = true;
+                // A conditional `initial` is not evaluated (8.2.1), so it is not
+                // applied: counted as styling, as the reader cannot tell what it sets.
+                if el.attr(None, "condition").is_some() {
+                    self.doc_flags.styling = true;
+                } else {
+                    let decl = attrs_css(el);
+                    self.initial.merge(&decl);
+                    let flags = own_flags(&decl);
+                    self.doc_flags.styling |= flags.styling;
+                    self.doc_flags.position |= flags.position;
+                }
                 self.ignoring = 1;
             }
         }
@@ -885,9 +902,12 @@ impl<'b> Doc<'b> {
         let mut flags = parent_flags.join(own_flags(&decl));
         let mut css = decl.over(&parent_css);
         // display and opacity reach the content (10.2.14, 10.2.30); visibility is in `css`.
+        // display and opacity are not inherited, so each element takes its own
+        // value, else the initial one (10.2.14, 10.2.30, 10.1.1).
+        let initial = self.initial;
         let mut concealed = parent_concealed
-            || decl.display_none == Some(true)
-            || decl.opacity == Some(Opacity::Zero);
+            || decl.display_none.or(initial.display_none) == Some(true)
+            || decl.opacity.or(initial.opacity) == Some(Opacity::Zero);
         let mut animated = parent_animated || self.animated_scopes.contains(&self.ord);
         // A `region` names the region of the element and its content; a span's
         // is not used (its text is not placed in it), which is a `Position` loss.
@@ -913,8 +933,8 @@ impl<'b> Doc<'b> {
                     // 10.4.2.2: the region gives the values no ancestor does.
                     css = css.over(&placed);
                     // A region's own display and opacity hide its paragraphs (10.2.14, 10.2.30).
-                    concealed |=
-                        placed.display_none == Some(true) || placed.opacity == Some(Opacity::Zero);
+                    concealed |= placed.display_none.or(initial.display_none) == Some(true)
+                        || placed.opacity.or(initial.opacity) == Some(Opacity::Zero);
                     animated |= self.sheet.animated(entry);
                     flags = flags.join(self.sheet.flags(entry));
                     top = top_third(&placed, self.root_height) == Some(true);
@@ -927,6 +947,11 @@ impl<'b> Doc<'b> {
                     }
                 }
             }
+        }
+        // 10.1.1: the initial values are the lowest layer of a paragraph's style:
+        // a region's value (10.4.2.2) and every ancestor's already beat them.
+        if kind == Kind::Paragraph {
+            css = css.over(&initial);
         }
         // An image background (SMPTE-TT) is an image unit: a `div` or `body`
         // counts here, a `p` as its paragraph, a `span` through its paragraph.
@@ -1245,6 +1270,7 @@ impl<'b> Doc<'b> {
         }
         for (set, loss) in [
             (self.doc_flags.styling, Loss::Styling),
+            (self.doc_flags.position, Loss::Position),
             (self.doc_flags.elements, Loss::Elements),
         ] {
             if set && cues > 0 {

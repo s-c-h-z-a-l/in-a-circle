@@ -476,7 +476,7 @@ impl Css {
 
     /// Merges `from` over `self` (10.4.4.2 merging): each value `from` gives
     /// replaces this one; the flags stay once set.
-    fn merge(&mut self, from: &Css) {
+    pub(super) fn merge(&mut self, from: &Css) {
         self.italic = from.italic.or(self.italic);
         self.bold = from.bold.or(self.bold);
         self.underline = from.underline.or(self.underline);

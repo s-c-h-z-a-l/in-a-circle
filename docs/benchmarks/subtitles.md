@@ -307,8 +307,8 @@ found no critical or important finding and 4 minor ones. All were fixed.
   - a regression guard (`expected.tsv`): the outcome, cue count and first cue of
     each file as the reader gives them. It catches a change; it is not evidence
     that the reader is right;
-  - hand-checks (`hand-checked.tsv`): 45 files read against their own
-    description and the rule that applies. 36 agree. 9 differ, each counted and
+  - hand-checks (`hand-checked.tsv`): 46 files read against their own
+    description and the rule that applies. 37 agree. 9 differ, each counted and
     not silent: 3 by a rule the spec decides (a paragraph with no end; an oblique
     carried as italic), and 6 that are refused because a `set` changes their
     visibility over time (the reader does not play that timeline);

@@ -143,7 +143,7 @@ element reaches. The image units of a text document are added to `Elements`.
 | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
 | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
 | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
-| `styling`: `initial` | `Styling` on every cue (the initial values it sets are not applied) |
+| `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue | |
 | `styling`: any other child | `Elements` on every cue of the document |
 | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
 | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
