@@ -162,11 +162,6 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
         "imsc1_1/ttml/shear/shear003.ttml",
         "ruby: ttconv drops ruby element text",
     ),
-    // A paragraph with no end is skipped and counted (the spec); ttconv keeps it open-ended.
-    (
-        "imsc1/ttml/timing/BeginEnd002.ttml",
-        "paragraphs with no end: we skip and count them; ttconv keeps them",
-    ),
     // Times of 100 hours or more are skipped and counted; ttconv writes a three-digit hour.
     (
         "imsc1/ttml/timing/TimeExpressions001.ttml",
@@ -180,11 +175,11 @@ const DIVERGENT_FILES: &[(&str, &str)] = &[
 ];
 
 /// The number of files the comparison covers on the vendored set: the
-/// classification gives 230 compared, 22 refused, 22 overlapping, 12 with timed
-/// spans, 10 with a style animation and 25 listed. A file that leaves the
-/// comparison changes this count and fails the run until the count and the
-/// reasons are reviewed together.
-const COMPARED_FLOOR: usize = 230;
+/// classification gives 229 compared, 22 refused, 22 overlapping, 12 with timed
+/// spans, 10 with a style animation, 2 with no end and 24 listed. A file that
+/// leaves the comparison changes this count and fails the run until the count
+/// and the reasons are reviewed together.
+const COMPARED_FLOOR: usize = 229;
 
 /// Every vendored `.ttml` file, as its path under the data folder, sorted.
 fn ttml_files() -> Vec<String> {
@@ -363,6 +358,11 @@ enum Excluded {
     TimedSpans,
     /// It animates a style property (see [`Scan::style_animation`]).
     StyleAnimation,
+    /// The reader skipped a paragraph with no end (its first skip is that one).
+    /// A paragraph with no end is skipped and counted (12.4, the spec); ttconv
+    /// keeps it open-ended, with a default ten-second end (`srt/writer.py`,
+    /// `finish`), so the cues cannot match.
+    NoEnd,
     /// It is listed in `DIVERGENT_FILES`.
     Listed,
 }
@@ -465,6 +465,13 @@ fn read_for_comparison(path: &str) -> Result<Parsed, Excluded> {
     }
     if overlapping(&parsed.cues) {
         return Err(Excluded::Overlapping);
+    }
+    if parsed
+        .skipped
+        .first
+        .is_some_and(|(_, reason)| reason == "no end time")
+    {
+        return Err(Excluded::NoEnd);
     }
     Ok(parsed)
 }
