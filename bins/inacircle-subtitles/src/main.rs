@@ -292,7 +292,7 @@ impl<W: Write> Write for Capped<W> {
 /// The `warn` lines of one converted input: the skipped cues first (the count
 /// and the first one's line and reason), then one line per kind of loss, in
 /// `Loss` order, counted in cues. The reader's and the writer's counts of a
-/// kind are summed. At most eight lines (seven kinds and the skipped line),
+/// kind are summed. At most nine lines (eight kinds and the skipped line),
 /// under the engine's cap of 16 `warn` per input.
 fn warnings(parsed: &Parsed, writer: BTreeMap<Loss, usize>) -> Vec<String> {
     let mut lines = Vec::new();
@@ -429,6 +429,39 @@ mod tests {
                 "karaoke effects removed (2 cues)",
                 "speaker names written as 'Name:' prefixes (5 cues)",
             ]
+        );
+    }
+
+    /// Every kind of loss and a skipped line give nine `warn` lines: the
+    /// largest the readers can produce. The engine stops at 16 per input
+    /// (`MAX_WARNINGS` in `crates/engine/src/exec.rs`, private to that crate),
+    /// so nine leaves room; a tenth kind must raise this test's count first.
+    #[test]
+    fn warn_count_stays_under_the_engine_cap() {
+        let kinds = [
+            Loss::Styling,
+            Loss::Position,
+            Loss::Karaoke,
+            Loss::Drawing,
+            Loss::Settings,
+            Loss::VoiceNames,
+            Loss::Brackets,
+            Loss::Elements,
+        ];
+        let parsed = Parsed {
+            cues: Vec::new(),
+            losses: kinds.iter().map(|&k| (k, 1)).collect(),
+            skipped: subtitles::Skipped {
+                count: 1,
+                first: Some((1, "unsupported element")),
+            },
+        };
+        let lines = warnings(&parsed, BTreeMap::new());
+        assert_eq!(lines.len(), 9);
+        assert!(lines.len() < 16, "the engine's cap of 16 warn per input");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("unsupported elements ignored (1 cues)")
         );
     }
 }

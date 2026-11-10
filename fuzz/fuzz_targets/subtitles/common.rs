@@ -7,7 +7,8 @@
 //!   not white space, the skipped count and its first line agree (the line is
 //!   within the input's lines), and every loss is counted at least once;
 //! - `NotUtf8` names the first bad byte of the input, `TooLarge` comes only
-//!   past `INPUT_BYTES`; `TooComplex` and `NoCues` are valid verdicts;
+//!   past `INPUT_BYTES`; `TooComplex`, `NoCues` and `ImageBased` are valid
+//!   verdicts;
 //! - `Malformed` (TTML) names a line of the input and says why, and
 //!   `NotTtml` and `Unsupported` are verdicts on the whole document.
 //!
@@ -295,7 +296,9 @@ pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
         // A valid verdict. The budget boundary is pinned by the unit tests in
         // crates/subtitles; a fuzz input rarely reaches ITEM_BUDGET, and when
         // it does the verdict is still checked here.
-        Err(ReadError::TooComplex | ReadError::NoCues | ReadError::NotTtml) => {}
+        Err(
+            ReadError::TooComplex | ReadError::NoCues | ReadError::ImageBased | ReadError::NotTtml,
+        ) => {}
         Err(ReadError::Unsupported(reason)) => {
             assert!(!reason.is_empty(), "Unsupported with no reason");
         }

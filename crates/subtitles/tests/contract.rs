@@ -10,6 +10,7 @@ fn loss_order_is_the_warning_order() {
         Loss::Karaoke,
         Loss::Position,
         Loss::Styling,
+        Loss::Elements,
     ];
     all.sort();
     assert_eq!(
@@ -22,6 +23,7 @@ fn loss_order_is_the_warning_order() {
             Loss::Settings,
             Loss::VoiceNames,
             Loss::Brackets,
+            Loss::Elements,
         ]
     );
 }
@@ -41,6 +43,7 @@ fn loss_messages_are_the_user_text() {
         Loss::Brackets.message(),
         "characters that look like markup written as look-alikes"
     );
+    assert_eq!(Loss::Elements.message(), "unsupported elements ignored");
 }
 
 #[test]
@@ -66,6 +69,10 @@ fn read_errors_say_what_the_user_sees() {
     assert_eq!(
         ReadError::Unsupported("clock time base").to_string(),
         "unsupported TTML: clock time base"
+    );
+    assert_eq!(
+        ReadError::ImageBased.to_string(),
+        "no text subtitles found (image-based)"
     );
 }
 

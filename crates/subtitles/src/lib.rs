@@ -61,8 +61,9 @@ pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
 /// structure and timing: the limits are as in [`read_srt`], and the text is
 /// decoded by the `xml` crate. A document that is not well-formed is refused
 /// whole, with the line, and so is a time base the reader does not convert (a
-/// clock or drop-frame time code). An element the reader does not convert is
-/// skipped and counted. See `ttml/mod.rs` for the rules and the accounting.
+/// clock or drop-frame time code). A document whose subtitles are images is
+/// refused as [`ReadError::ImageBased`]. An element the reader does not convert
+/// is skipped or counted in its losses. See `ttml/mod.rs` for the accounting.
 pub fn read_ttml(bytes: &[u8]) -> Result<Parsed, ReadError> {
     if bytes.len() > INPUT_BYTES {
         return Err(ReadError::TooLarge);
@@ -186,6 +187,10 @@ pub enum Loss {
     Settings,
     VoiceNames,
     Brackets,
+    /// Elements the reader ignores whole (foreign namespaces, unsupported
+    /// vocabulary), and images, which a text file cannot show. The text around
+    /// an image is converted and counted as usual.
+    Elements,
 }
 
 impl Loss {
@@ -199,6 +204,7 @@ impl Loss {
             Loss::Settings => "style and region blocks ignored",
             Loss::VoiceNames => "speaker names written as 'Name:' prefixes",
             Loss::Brackets => "characters that look like markup written as look-alikes",
+            Loss::Elements => "unsupported elements ignored",
         }
     }
 }
@@ -240,6 +246,9 @@ pub enum ReadError {
     NotTtml,
     /// The document uses a construct the reader does not convert.
     Unsupported(&'static str),
+    /// The document has image subtitles (`smpte:backgroundImage`, `image`
+    /// elements) and no text cue: the images cannot be converted.
+    ImageBased,
 }
 
 impl fmt::Display for ReadError {
@@ -259,6 +268,7 @@ impl fmt::Display for ReadError {
             }
             ReadError::NotTtml => f.write_str("not a TTML document"),
             ReadError::Unsupported(reason) => write!(f, "unsupported TTML: {reason}"),
+            ReadError::ImageBased => f.write_str("no text subtitles found (image-based)"),
         }
     }
 }

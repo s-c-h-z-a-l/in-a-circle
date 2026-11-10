@@ -11,7 +11,8 @@
 //! refused anyway.
 //!
 //! Losses: a cue counts each loss kind once, if any piece active in it carries
-//! that kind of declaration (see [`Flags`]).
+//! that kind of declaration (see [`Flags`]), or if the paragraph does (its
+//! `extra` flags, which hold for every cue the paragraph is cut into).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -96,13 +97,13 @@ pub(super) fn normalize(raw: &str, preserve: bool) -> String {
 
 /// Writes the cues of the paragraph that runs from `begin` to `end`, both
 /// checked by the caller with `begin < end`, into `out`, in time order. `top`
-/// is the paragraph's placement; `doc` holds the losses that hold for every
-/// cue of the document.
+/// is the paragraph's placement; `extra` holds the losses of the paragraph's
+/// own ignored elements, which hold for every cue it is cut into.
 pub(super) fn cues(
     pieces: &[Piece],
     (begin, end): (u64, u64),
     top: bool,
-    doc: Flags,
+    extra: Flags,
     budget: &mut Budget,
     out: &mut Output,
 ) -> Result<(), ReadError> {
@@ -134,12 +135,15 @@ pub(super) fn cues(
         if !active.is_empty()
             && let Some(flags) = slice(pieces, &active, (at, stop), top, budget, out)?
         {
-            let flags = flags.join(doc);
+            let flags = flags.join(extra);
             if flags.styling {
                 *out.losses.entry(Loss::Styling).or_insert(0) += 1;
             }
             if flags.position {
                 *out.losses.entry(Loss::Position).or_insert(0) += 1;
+            }
+            if flags.elements {
+                *out.losses.entry(Loss::Elements).or_insert(0) += 1;
             }
         }
         at = stop;

@@ -30,16 +30,19 @@
 //! | Construct | Goes to |
 //! |---|---|
 //! | XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
-//! | a DOCTYPE with entity declarations | `Unsupported` (the whole file) |
-//! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` |
+//! | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
+//! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
+//! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
-//! | `metadata` elements, elements of the metadata namespaces | ignored without a count: metadata is not content (14) |
-//! | `head`: `styling` and `layout` are read (below); any other child | `styling`, `layout`: read. Other: `skipped`, `unsupported element` |
+//! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
+//! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
-//! | `styling`: `initial` | every cue `Styling` (the initial values it sets are not applied) |
-//! | `layout`: each `region` | an entry of the region table, named by its `xml:id`; a duplicate `xml:id` among styles or among regions: the file is refused (`Unsupported`) |
-//! | a `style` or `region` `xml:id` used twice | `Unsupported` (the reference would be ambiguous) |
+//! | `styling`: `initial` | `Styling` on every cue (the initial values it sets are not applied) |
+//! | `styling`: any other child | `Elements` on every cue of the document |
+//! | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
+//! | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
+//! | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
 //! | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
 //! | a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past [`style::MAX_CHAIN`] sets `Styling` on the element |
 //! | `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
@@ -56,15 +59,34 @@
 //! | `p` | cues (`slice.rs`), or `skipped` with its line and reason |
 //! | `span` | a container. A `span` with its own timing slices its paragraph |
 //! | `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
+//! | `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
 //! | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
 //! | text in `p` or `span`, white space only | spacing only: a piece with no time of its own, not counted |
 //! | visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
 //! | `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
 //! | `xml:space` | white-space mode (8.2.10); another value is a fault |
-//! | `condition` on `body`, `div`, `p`, `span` or `br` | the element and its content: `skipped`, `conditional element` (conditions are not evaluated) |
-//! | any other element in `body`, `div`, `p`, `span` or `br` (`set`, `animate`, `image`, foreign elements) | the element and its content: `skipped` once per element, `unsupported element`. A later change counts `set` and `animate` as `Styling`, and foreign content as `Elements` |
-//! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries and their references | the item budget: past it `TooComplex` |
+//! | `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
+//! | `set`, `animate`, `animation` in a paragraph or span | `Styling` on each cue of that paragraph |
+//! | `set`, `animate`, `animation` in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+//! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
+//! | a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
+//! | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
+//! | an `image` element in `body` or `div` | an image unit: `Elements` once |
+//! | `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
+//! | `smpte:backgroundImage` on a `div` or `body` | the `div` or `body` is one image unit; the text under it is converted |
+//! | `smpte:backgroundImage` on a `span` or `br` | its paragraph is one image unit (as above) |
+//! | a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
+//! | the document has image units and no text cue | `ReadError::ImageBased` (the whole file) |
+//! | the document has no cue and no image unit | `ReadError::NoCues` (the whole file) |
+//! | a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
+//! | element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
 //! | text copied into cues | `TooComplex` past `OUTPUT_BYTES` |
+//!
+//! Document-level counts. A kind counted on every cue of the document (a
+//! `Styling` from `initial` or from an ignored element outside a paragraph, an
+//! `Elements` likewise) is the cue count: it replaces the per-cue counts the
+//! paragraphs made, so a document never counts a cue twice. Image units add to
+//! `Elements` on top of that, and only when a text cue remains.
 //!
 //! A cue's losses are its pieces' flags (`Flags`), counted once per cue. A piece
 //! takes the flags of every element it is in, and a `br` those of its own
@@ -79,9 +101,11 @@ mod time;
 use xml::{Element, ErrorKind, Event, Options, QName, Reader};
 
 use crate::srt::STRAY;
-use crate::{Budget, MAX_MS, Parsed, ReadError, Skipped};
+use crate::{Budget, Loss, MAX_MS, Parsed, ReadError, Skipped};
 use slice::{Content, Output, Piece, RunStyle};
-use style::{Css, Flags, Len, Sheet, attrs_css, root_extent, root_extent_is_usable, top_third};
+use style::{
+    Css, Flags, Len, Sheet, attrs_css, own_flags, root_extent, root_extent_is_usable, top_third,
+};
 use time::{Params, TimeError, parse_time};
 
 /// A construct the reader does not convert. The whole document is refused with
@@ -96,6 +120,9 @@ const DFXP_NS: &str = "http://www.w3.org/2006/10/ttaf1";
 /// The parameter namespaces: the `ttp:` attributes of the root (5.1).
 const TTP_NS: &str = "http://www.w3.org/ns/ttml#parameter";
 const DFXP_TTP_NS: &str = "http://www.w3.org/2006/10/ttaf1#parameter";
+/// The SMPTE-TT namespace: its `backgroundImage` attribute makes the element
+/// that carries it an image unit (see the accounting table).
+const SMPTE_NS: &str = "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt";
 /// The metadata namespaces (14): their elements and attributes are metadata.
 const TTM_NS: &str = "http://www.w3.org/ns/ttml#metadata";
 const DFXP_TTM_NS: &str = "http://www.w3.org/2006/10/ttaf1#metadata";
@@ -146,7 +173,7 @@ pub(crate) fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Parsed, ReadErr
             Event::Text(t) => doc.text(&t, line)?,
         }
     }
-    Ok(doc.finish())
+    doc.finish()
 }
 
 /// The `xml` crate's refusal as the reader's. A declared encoding other than
@@ -274,6 +301,7 @@ impl Frame {
         Flags {
             styling: self.flags.styling || decorated(&self.css),
             position: self.flags.position,
+            elements: false,
         }
     }
 
@@ -330,6 +358,13 @@ struct Para {
     fault: Option<&'static str>,
     /// The region's placement puts the paragraph at the top (see [`top_third`]).
     top: bool,
+    /// Losses of the paragraph's own ignored elements (`set`, foreign content):
+    /// every cue the paragraph is cut into carries them.
+    flags: Flags,
+    /// The paragraph holds an image (an image element, or a `backgroundImage`
+    /// on it or on a span or `br` in it): one `Elements` unit. Its text is
+    /// converted all the same.
+    unit: bool,
 }
 
 /// What an element is, given the element it is in.
@@ -337,10 +372,15 @@ struct Para {
 enum Role {
     /// Its content is metadata: ignored, not counted.
     Silent,
-    /// Not converted: the element and its content are `skipped` with this reason.
+    /// Not converted, and its text would be shown: the element and its content
+    /// are `skipped` with this reason.
     Refused(&'static str),
+    /// Not converted, and its content is not shown: counted as `ignore` says.
+    Ignored(Ignore),
     /// `body`, `div`, `p`, `span`: a timed element.
     Open(Kind),
+    /// `ruby` and its parts: a span whose text is kept, its ruby drawn as text.
+    Ruby,
     Break,
     /// `head`, `styling`, `layout`: a container with no timing.
     Container(Kind),
@@ -350,13 +390,28 @@ enum Role {
     Initial,
 }
 
+/// What an ignored element counts as (the accounting table in the module doc).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ignore {
+    /// `set`, `animate`, `animation`: a change of style the reader does not apply.
+    Styling,
+    /// Foreign and unsupported elements: pruned with their content.
+    Elements,
+    /// An image: its paragraph is an image unit, or outside a paragraph the
+    /// element is one. The text is converted all the same.
+    Image,
+}
+
 /// The element's role under a parent of kind `parent`.
 fn role(parent: Kind, name: QName) -> Role {
     if is_metadata(name) {
         return Role::Silent;
     }
-    let local = if is_tt(name) { name.local } else { "" };
-    match (parent, local) {
+    // A foreign element, or one with no namespace, is not TTML: pruned whole.
+    if !is_tt(name) {
+        return Role::Ignored(Ignore::Elements);
+    }
+    match (parent, name.local) {
         (Kind::Root, "head") => Role::Container(Kind::Head),
         (Kind::Root, "body") => Role::Open(Kind::Body),
         (Kind::Head, "styling") => Role::Container(Kind::Styling),
@@ -368,7 +423,14 @@ fn role(parent: Kind, name: QName) -> Role {
         (Kind::Body | Kind::Div, "p") => Role::Open(Kind::Paragraph),
         (Kind::Paragraph | Kind::Span, "span") => Role::Open(Kind::Span),
         (Kind::Paragraph | Kind::Span, "br") => Role::Break,
-        _ => Role::Refused(UNSUPPORTED_ELEMENT),
+        (Kind::Paragraph | Kind::Span, "ruby" | "rb" | "rbc" | "rt" | "rtc" | "rp") => Role::Ruby,
+        (_, "set" | "animate" | "animation") => Role::Ignored(Ignore::Styling),
+        (_, "image") => Role::Ignored(Ignore::Image),
+        // An element that carries text, in a place where it cannot be shown.
+        (_, "p" | "div" | "span" | "ruby" | "rb" | "rbc" | "rt" | "rtc" | "rp") => {
+            Role::Refused(UNSUPPORTED_ELEMENT)
+        }
+        _ => Role::Ignored(Ignore::Elements),
     }
 }
 
@@ -475,18 +537,6 @@ fn decorated(css: &Css) -> bool {
     css.line_through == Some(true) || css.overline == Some(true)
 }
 
-/// The flags an element's own declarations give its content: a declaration the
-/// reader does not carry (`Styling`), or a placement it does not use (`Position`).
-fn own_flags(decl: &Css) -> Flags {
-    Flags {
-        styling: decl.styling,
-        position: decl.position
-            || decl.origin.is_some()
-            || decl.extent.is_some()
-            || decl.align.is_some(),
-    }
-}
-
 /// The state of one document being read.
 struct Doc<'b> {
     budget: &'b mut Budget,
@@ -507,8 +557,14 @@ struct Doc<'b> {
     frozen: bool,
     /// The root container's height, when `tt` gives it in px (10.2.16).
     root_height: Option<Len>,
-    /// The losses that hold for every cue: an `initial` element.
+    /// The losses that hold for every cue: an `initial` element, and an ignored
+    /// element outside any paragraph (see `finish`).
     doc_flags: Flags,
+    /// Image units outside a paragraph: an image element, or a `div` or `body`
+    /// with a background image. Each is one `Elements` count; the paragraph
+    /// units are counted at their end. A document with image units and no
+    /// text cue is image subtitles, refused as such.
+    images: usize,
 }
 
 impl<'b> Doc<'b> {
@@ -525,6 +581,7 @@ impl<'b> Doc<'b> {
             frozen: false,
             root_height: None,
             doc_flags: Flags::default(),
+            images: 0,
         }
     }
 
@@ -536,15 +593,16 @@ impl<'b> Doc<'b> {
         let Some(parent) = self.stack.last().map(|f| f.kind) else {
             return self.root(el);
         };
+        // After the body the sheet is resolved: a head element there is ignored.
         let role = if self.frozen && is_structure(el.name) {
-            Role::Refused(UNSUPPORTED_ELEMENT)
+            Role::Ignored(Ignore::Elements)
         } else {
             role(parent, el.name)
         };
         let role = match role {
             // Conditions are not evaluated, so a conditional element is refused
-            // whole rather than guessed at.
-            Role::Open(_) | Role::Break if el.attr(None, "condition").is_some() => {
+            // whole rather than guessed at: its text may or may not be shown.
+            Role::Open(_) | Role::Break | Role::Ruby if el.attr(None, "condition").is_some() => {
                 Role::Refused(CONDITIONAL)
             }
             role => role,
@@ -555,7 +613,18 @@ impl<'b> Doc<'b> {
                 self.skip(line, reason);
                 self.ignoring = 1;
             }
+            Role::Ignored(what) => {
+                self.ignore(what);
+                self.ignoring = 1;
+            }
             Role::Break => self.line_break(el)?,
+            Role::Ruby => {
+                self.open(Kind::Span, el, line)?;
+                // The ruby text stays; the ruby declarations are not drawn.
+                if let Some(top) = self.stack.last_mut() {
+                    top.flags.styling = true;
+                }
+            }
             Role::Open(kind) => self.open(kind, el, line)?,
             Role::Container(kind) => self.container(kind)?,
             Role::Define(kind) => self.define(kind, el)?,
@@ -600,6 +669,7 @@ impl<'b> Doc<'b> {
                 || decl.origin.is_some()
                 || decl.align.is_some()
                 || extent.is_some_and(|v| !root_extent_is_usable(v)),
+            elements: false,
         };
         self.stack.push(frame);
         Ok(())
@@ -702,10 +772,7 @@ impl<'b> Doc<'b> {
                     let placed = *self.sheet.css(entry);
                     // 10.4.2.2: the region gives the values no ancestor does.
                     css = css.over(&placed);
-                    flags = flags.join(Flags {
-                        styling: placed.styling,
-                        position: placed.position,
-                    });
+                    flags = flags.join(self.sheet.flags(entry));
                     top = top_third(&placed, self.root_height) == Some(true);
                     if !top
                         && (placed.origin.is_some()
@@ -716,6 +783,16 @@ impl<'b> Doc<'b> {
                     }
                 }
             }
+        }
+        // An image background (SMPTE-TT) is an image unit: a `div` or `body`
+        // counts here, a `p` as its paragraph, a `span` through its paragraph.
+        // The text under it is converted; only the image is not.
+        let own_image = el.attr(Some(SMPTE_NS), "backgroundImage").is_some();
+        if own_image && matches!(kind, Kind::Body | Kind::Div) {
+            self.images += 1;
+        }
+        if own_image && kind == Kind::Span {
+            self.image_unit();
         }
         let mut frame = Frame::bare(kind, preserve);
         frame.begin = begin_at;
@@ -737,6 +814,8 @@ impl<'b> Doc<'b> {
                 hidden: false,
                 fault: None,
                 top,
+                flags: Flags::default(),
+                unit: own_image,
             });
         }
         self.stack.push(frame);
@@ -746,6 +825,9 @@ impl<'b> Doc<'b> {
     /// A `br` in a paragraph or span: a line break in the parent's interval.
     /// Its own content is metadata and is read by the frame that holds it.
     fn line_break(&mut self, el: &Element) -> Result<(), ReadError> {
+        if el.attr(Some(SMPTE_NS), "backgroundImage").is_some() {
+            self.image_unit();
+        }
         let Some(top) = self.stack.last() else {
             return Ok(());
         };
@@ -754,7 +836,7 @@ impl<'b> Doc<'b> {
         let decl = self.sheet.declared(el);
         let own = Flags {
             styling: decorated(&decl),
-            position: false,
+            ..Flags::default()
         };
         let flags = top.text_flags().join(own_flags(&decl)).join(own);
         self.child_ended(end);
@@ -862,6 +944,9 @@ impl<'b> Doc<'b> {
         let Some(para) = self.para.take() else {
             return Ok(());
         };
+        if para.unit {
+            self.images += 1;
+        }
         if !para.visible {
             return Ok(());
         }
@@ -885,7 +970,7 @@ impl<'b> Doc<'b> {
             &para.pieces,
             (begin, end),
             para.top,
-            self.doc_flags,
+            para.flags,
             self.budget,
             &mut self.out,
         )?;
@@ -893,6 +978,27 @@ impl<'b> Doc<'b> {
             self.skip(para.line, NO_DISPLAY);
         }
         Ok(())
+    }
+
+    /// The open paragraph holds an image: its unit is counted once, at its end.
+    fn image_unit(&mut self) {
+        if let Some(para) = self.para.as_mut() {
+            para.unit = true;
+        }
+    }
+
+    /// Counts an ignored element where it sits: in an open paragraph, on each
+    /// of its cues (an image: the paragraph's unit); elsewhere on every cue of
+    /// the document, or as an image unit.
+    fn ignore(&mut self, what: Ignore) {
+        match (self.para.as_mut(), what) {
+            (Some(para), Ignore::Styling) => para.flags.styling = true,
+            (Some(para), Ignore::Elements) => para.flags.elements = true,
+            (Some(para), Ignore::Image) => para.unit = true,
+            (None, Ignore::Styling) => self.doc_flags.styling = true,
+            (None, Ignore::Elements) => self.doc_flags.elements = true,
+            (None, Ignore::Image) => self.images += 1,
+        }
     }
 
     /// Stores a piece of the open paragraph. The caller has charged it.
@@ -917,11 +1023,31 @@ impl<'b> Doc<'b> {
         }
     }
 
-    fn finish(self) -> Parsed {
-        Parsed {
-            cues: self.out.cues,
-            losses: self.out.losses,
-            skipped: self.skipped,
+    /// The document's result. Document-level losses hold for every cue, so
+    /// each is counted as the cue count, which replaces the per-cue counts of
+    /// the paragraphs. Image units are added to `Elements`. Without a cue, a
+    /// document with image units is image subtitles, refused as such.
+    fn finish(self) -> Result<Parsed, ReadError> {
+        let mut out = self.out;
+        let cues = out.cues.len();
+        if cues == 0 && self.images > 0 {
+            return Err(ReadError::ImageBased);
         }
+        for (set, loss) in [
+            (self.doc_flags.styling, Loss::Styling),
+            (self.doc_flags.elements, Loss::Elements),
+        ] {
+            if set && cues > 0 {
+                out.losses.insert(loss, cues);
+            }
+        }
+        if cues > 0 && self.images > 0 {
+            *out.losses.entry(Loss::Elements).or_insert(0) += self.images;
+        }
+        Ok(Parsed {
+            cues: out.cues,
+            losses: out.losses,
+            skipped: self.skipped,
+        })
     }
 }

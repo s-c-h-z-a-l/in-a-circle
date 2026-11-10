@@ -120,6 +120,75 @@ are in `CLAUDE.md`.
   cue. The style and region tables are charged to the item budget before they
   are stored.
 
+### TTML accounting
+
+What a TTML conversion keeps, counts, skips and refuses. The reader
+(`crates/subtitles/src/ttml/mod.rs`) has this table in its doc comment, and the
+test `every_ignored_construct_is_counted` checks one row per construct. Losses
+are counted in cues, once per cue and kind. `skipped` counts items (elements,
+paragraphs, text blocks) with the first one's line and reason. A count on every
+cue of the document (`initial`, an ignored element outside a paragraph) is the
+cue count, an upper bound where the reader does not track which paragraphs the
+element reaches. The image units of a text document are added to `Elements`.
+
+| Construct | Goes to |
+|---|---|
+| XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
+| a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
+| a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
+| `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
+| `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
+| other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
+| `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
+| `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
+| `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
+| `styling`: `initial` | `Styling` on every cue (the initial values it sets are not applied) |
+| `styling`: any other child | `Elements` on every cue of the document |
+| `layout`: each `region` | an entry of the region table, named by its `xml:id` |
+| a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
+| a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
+| `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
+| a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past 32 entries sets `Styling` on the element |
+| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic, bold and the decorations of the text, inherited as 10.2 says |
+| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
+| other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
+| `tts:origin`, `tts:extent`, `tts:displayAlign` on a region of a paragraph | the placement of `top`: a `top` paragraph keeps them; otherwise `Position` |
+| `tts:origin`, `tts:extent`, `tts:displayAlign` on any other element | `Position` |
+| `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
+| `tts:extent` on `tt` (10.2.16) | the root container's height in px (`top` of a px placement); `auto`, `contain`, and two px lengths are read; anything else `Position` |
+| a region's placement that cannot be computed (`em`, `c`, `rw`, `rh`, a sign, a `px` without a root height) | the paragraph is not `top`; its placement counts as `Position` |
+| `region` on `body`, `div` or `p` naming no region | `Position` on the paragraphs it reaches |
+| `region` on a `span` | `Position` on the span's text (the span is not placed in its region) |
+| `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
+| `p` | cues (`slice.rs`), or `skipped` with its line and reason |
+| `span` | a container. A `span` with its own timing slices its paragraph |
+| `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
+| `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
+| text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
+| text in `p` or `span`, white space only | spacing only: a piece with no time of its own, not counted |
+| visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
+| `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
+| `xml:space` | white-space mode (8.2.10); another value is a fault |
+| `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
+| `set`, `animate`, `animation` in a paragraph or span | `Styling` on each cue of that paragraph |
+| `set`, `animate`, `animation` in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
+| a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
+| a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
+| an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
+| an `image` element in `body` or `div` | an image unit: `Elements` once |
+| `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
+| `smpte:backgroundImage` on a `div` or `body` | the `div` or `body` is one image unit; the text under it is converted |
+| `smpte:backgroundImage` on a `span` or `br` | its paragraph is one image unit (as above) |
+| a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
+| the document has image units and no text cue | `ReadError::ImageBased` (the whole file) |
+| the document has no cue and no image unit | `ReadError::NoCues` (the whole file) |
+| a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
+| element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex` |
+| text copied into cues | `TooComplex` past `OUTPUT_BYTES` |
+
+Past `ITEM_BUDGET` (2,000,000 items: every element, piece, copy, cue and table
+entry) the whole file is refused as `TooComplex`; nothing is converted in part.
+
 ## Manifest
 
 - Each family binary describes itself: `<family> --manifest`. The engine
@@ -772,14 +841,15 @@ are in `CLAUDE.md`.
   In both, a line
   break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
   white space and a cue with no text are dropped, and a blank line ends a cue.
-- The subtitle `warn` lines, at most eight per input: first the skipped cues
+- The subtitle `warn` lines, at most nine per input: first the skipped cues
   (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
   including text outside any cue), then one line per kind of loss in the order
   of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
   drawings; style and region blocks; speaker names written as prefixes;
-  characters that look like markup written as look-alikes), each counted in
-  cues as `(N cues)`. The reader's and the writer's counts of one kind are
-  added together. That is far under the engine's 16 `warn` per input.
+  characters that look like markup written as look-alikes; unsupported elements
+  ignored), each counted in cues as `(N cues)`. The reader's and the writer's
+  counts of one kind are added together. That is far under the engine's 16
+  `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.

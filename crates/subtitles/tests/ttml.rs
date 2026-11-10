@@ -3,6 +3,7 @@
 //! Fixtures are hand-written in `tests/data/ttml`; each test names the rule it
 //! checks and the section that states it.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -297,30 +298,6 @@ fn bad_encodings_and_limits_are_refused() {
     assert_eq!(read_ttml(&huge), Err(ReadError::TooLarge));
 }
 
-/// 12.3.1 and 7.2.11: a clock time base, a drop-frame time code and a
-/// wall-clock time refuse the document: converting them would give wrong times.
-#[test]
-fn unconverted_time_bases_refuse_the_document() {
-    let clock = "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
-        xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"clock\"><body/></tt>";
-    assert_eq!(
-        read_ttml(clock.as_bytes()),
-        Err(ReadError::Unsupported("clock time base"))
-    );
-    let drop = "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
-        xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"smpte\" \
-        ttp:dropMode=\"dropNTSC\"><body><div>\
-        <p begin=\"00:00:01:00\" end=\"00:00:02:00\">x</p></div></body></tt>";
-    assert_eq!(
-        read_ttml(drop.as_bytes()),
-        Err(ReadError::Unsupported("drop-frame time code"))
-    );
-    assert_eq!(
-        read_ttml(doc("<p begin=\"wallclock(12:00:00)\" end=\"1s\">x</p>").as_bytes()),
-        Err(ReadError::Unsupported("wall-clock time"))
-    );
-}
-
 /// 12.4.1: text in a `seq` paragraph that has no time of its own is zero long
 /// and is never shown. It is counted, not dropped; the timed span still converts.
 #[test]
@@ -343,19 +320,6 @@ fn text_outside_any_paragraph_is_counted() {
     assert_eq!(texts(&parsed), vec!["x"]);
     assert_eq!(parsed.skipped.count, 1);
     assert_eq!(parsed.skipped.first, Some((1, "text outside any cue")));
-}
-
-/// Elements the reader does not convert are skipped with their content and
-/// counted once each: `set`, `image` and a foreign element, in a paragraph.
-#[test]
-fn unsupported_elements_are_skipped_and_counted() {
-    let parsed = read(&format!(
-        "{TT}<body><div><p begin=\"0s\" end=\"1s\">a<set begin=\"0s\">hidden</set>\
-         b<image>x</image><x:foo xmlns:x=\"urn:x\">lost</x:foo>c</p></div></body></tt>"
-    ));
-    assert_eq!(texts(&parsed), vec!["abc"]);
-    assert_eq!(parsed.skipped.count, 3);
-    assert_eq!(parsed.skipped.first, Some((1, "unsupported element")));
 }
 
 /// A `condition` is not evaluated: the element is skipped with the reason.
@@ -917,24 +881,6 @@ fn region_named_but_not_defined_is_a_position_loss() {
     assert_eq!(loss(&parsed, Loss::Position), 1);
 }
 
-/// A duplicate `xml:id` among styles (or among regions) makes a reference
-/// ambiguous, so the document is refused.
-#[test]
-fn duplicate_style_id_is_refused() {
-    assert_eq!(
-        read_ttml(
-            styled(
-                r#"<styling><style xml:id="s"/><style xml:id="s"/></styling>"#,
-                r#"<p begin="0s" end="1s">x</p>"#,
-            )
-            .as_bytes()
-        ),
-        Err(ReadError::Unsupported(
-            "duplicate xml:id of a style or region"
-        ))
-    );
-}
-
 /// A style flood is linear: 100,000 `style` elements (4 MiB), and a paragraph
 /// that references one style a million times (2 MiB of `a a a ...`). The
 /// reference count is charged to no budget, so the time is what bounds it, and
@@ -1034,4 +980,501 @@ fn style_flood_past_the_budget_is_refused() {
         after
     );
     assert_eq!(read_ttml(text.as_bytes()), Err(ReadError::TooComplex));
+}
+
+const SMPTE_TT: &str = "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt";
+
+/// 12.3.1 and 7.2.11: a clock time base refuses the document; converting its
+/// times would give wrong ones.
+#[test]
+fn clock_time_base_is_unsupported() {
+    let clock = "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+        xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"clock\"><body/></tt>";
+    assert_eq!(
+        read_ttml(clock.as_bytes()),
+        Err(ReadError::Unsupported("clock time base"))
+    );
+}
+
+/// 7.2.4: a drop-frame time code (`dropNTSC`, `dropPAL`) refuses the document.
+#[test]
+fn drop_frame_is_unsupported() {
+    let drop = "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+        xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"smpte\" \
+        ttp:dropMode=\"dropNTSC\"><body><div>\
+        <p begin=\"00:00:01:00\" end=\"00:00:02:00\">x</p></div></body></tt>";
+    assert_eq!(
+        read_ttml(drop.as_bytes()),
+        Err(ReadError::Unsupported("drop-frame time code"))
+    );
+}
+
+/// 12.3.1: a `wallclock()` expression refuses the document (the time base is
+/// not clock, so the expression is an error for a presentation the reader makes).
+#[test]
+fn wallclock_expression_is_unsupported() {
+    assert_eq!(
+        read_ttml(doc("<p begin=\"wallclock(12:00:00)\" end=\"1s\">x</p>").as_bytes()),
+        Err(ReadError::Unsupported("wall-clock time"))
+    );
+}
+
+/// 13.1: `set` and `animate` change a style the reader does not apply. In a
+/// paragraph they count once per cue of that paragraph (the paragraph's text is
+/// shown as the same text, with the change left out).
+#[test]
+fn set_and_animate_are_counted() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">a<set begin="0s" dur="1s" attributeName="tts:color" to="red"/>b<animate begin="0s" dur="1s" attributeName="tts:color" to="blue"/>c</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["abc"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1, "two elements, one cue");
+    assert_eq!(parsed.skipped.count, 0);
+    // In a div, a set has no paragraph of its own: every cue of the document
+    // is counted, the upper bound the reader can give.
+    let parsed = read(&doc(
+        r#"<set begin="0s" dur="1s" attributeName="tts:color" to="red"/><p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["a", "b"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 2);
+}
+
+/// A foreign-namespace element is pruned with its whole subtree (the standard
+/// ignores it): its text is not shown, and it counts as `Elements` once per cue.
+/// Outside a paragraph it counts on every cue of the document.
+#[test]
+fn foreign_namespace_content_is_pruned_and_counted() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x">lost<span begin="0s" end="1s">inner</span></x:foo>c</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["ac"]);
+    assert_eq!(loss(&parsed, Loss::Elements), 1);
+    assert_eq!(parsed.skipped.count, 0);
+    let parsed = read(&doc(
+        r#"<x:foo xmlns:x="urn:x"><p begin="0s" end="1s">lost</p></x:foo><p begin="0s" end="1s">kept</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(loss(&parsed, Loss::Elements), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// An image is an `Elements` unit: the image is not shown, and the text beside
+/// it converts (an image paragraph with text keeps the text too). A `div` with a
+/// background image is one unit, and one `image` element is one unit.
+#[test]
+fn images_beside_text_count_as_elements() {
+    let parsed = read(&format!(
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body>\
+         <div><p begin=\"0s\" end=\"1s\">text</p></div>\
+         <div><image begin=\"0s\" end=\"1s\" src=\"a.png\"/></div>\
+         <div><p begin=\"2s\" end=\"3s\" smpte:backgroundImage=\"#i\">words</p></div>\
+         </body></tt>"
+    ));
+    assert_eq!(texts(&parsed), vec!["text", "words"]);
+    assert_eq!(
+        loss(&parsed, Loss::Elements),
+        2,
+        "one image, one image paragraph"
+    );
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// A document whose only subtitles are images has no text to convert: it is
+/// refused as image-based, not as having no cues. A document with neither
+/// images nor cues is `NoCues`.
+#[test]
+fn image_only_document_is_refused() {
+    assert_eq!(
+        read_ttml(doc("<image begin=\"0s\" end=\"1s\" src=\"a.png\"/>").as_bytes()),
+        Err(ReadError::ImageBased)
+    );
+    assert_eq!(
+        read_ttml(
+            format!(
+                "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body><div>\
+                 <p begin=\"0s\" end=\"1s\" smpte:backgroundImage=\"#i\"/></div></body></tt>"
+            )
+            .as_bytes()
+        ),
+        Err(ReadError::ImageBased)
+    );
+    assert_eq!(
+        read_ttml(doc("<p begin=\"0s\" end=\"1s\"></p>").as_bytes()),
+        Err(ReadError::NoCues)
+    );
+}
+
+/// 12.4 and 12.4.1: a paragraph in a body with no timing has no end (its
+/// implicit duration is indefinite, and the document has no end to give it).
+/// It is skipped with its reason, and a document with nothing else is refused.
+#[test]
+fn paragraph_without_any_timing_has_no_end() {
+    assert_eq!(
+        read_ttml(doc("<p>x</p>").as_bytes()),
+        Err(ReadError::NoCues)
+    );
+    let parsed = read(&doc("<p>x</p><p begin=\"0s\" end=\"1s\">y</p>"));
+    assert_eq!(texts(&parsed), vec!["y"]);
+    assert_eq!(parsed.skipped.first, Some((1, "no end time")));
+}
+
+/// Ruby text stays in the cue (its base and its annotation both), and the ruby
+/// declarations are counted as `Styling`.
+#[test]
+fn ruby_text_stays_and_counts_styling() {
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s"><ruby>漢<rt>kan</rt></ruby></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["漢kan"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// A duplicate `xml:id` among styles is an xml:id error, which is not fatal
+/// (XML ID section 6). The first definition stands; each reference to the name
+/// counts the declarations of the dropped one, so the references that would
+/// have used them are counted, and no other cue is.
+#[test]
+fn duplicate_style_id_keeps_the_first_and_counts_its_references() {
+    let parsed = read(&styled(
+        r#"<styling><style xml:id="s" tts:fontStyle="italic"/><style xml:id="s" tts:fontWeight="bold" tts:color="red"/></styling>"#,
+        r#"<p begin="0s" end="1s" style="s">x</p><p begin="2s" end="3s">y</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["x", "y"]);
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", true, false, false)]);
+    assert_eq!(runs(&parsed.cues[1]), vec![run("y", false, false, false)]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// A duplicate region `xml:id`: the first region places the paragraph, and the
+/// reference counts the placement of the dropped one as `Position`.
+#[test]
+fn duplicate_region_id_keeps_the_first_and_counts_its_references() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="10% 0%" tts:extent="80% 10%"/><region xml:id="r" tts:origin="10% 80%" tts:extent="80% 10%"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert!(parsed.cues[0].top, "the first region is the top one");
+    assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// One row per construct the accounting table of `ttml/mod.rs` lists as
+/// counted or skipped: the document, and exactly what it must count. A row
+/// names its construct, so a failure says which one stopped being counted.
+struct Row {
+    construct: &'static str,
+    input: String,
+    losses: &'static [(Loss, usize)],
+    skipped: usize,
+    first: Option<(usize, &'static str)>,
+}
+
+fn row(
+    construct: &'static str,
+    input: String,
+    losses: &'static [(Loss, usize)],
+    skipped: usize,
+    first: Option<(usize, &'static str)>,
+) -> Row {
+    Row {
+        construct,
+        input,
+        losses,
+        skipped,
+        first,
+    }
+}
+
+/// Every row is one document on one line, so every skip is on line 1.
+fn accounting_rows() -> Vec<Row> {
+    let body = |b: &str| format!("{TT}<body>{b}</body></tt>");
+    vec![
+        row(
+            "metadata: silent",
+            doc(
+                r#"<metadata><x:foo xmlns:x="urn:x">m</x:foo></metadata><p begin="0s" end="1s">a</p>"#,
+            ),
+            &[],
+            0,
+            None,
+        ),
+        row(
+            "head: foreign element (document)",
+            styled(
+                r#"<x:foo xmlns:x="urn:x">f</x:foo>"#,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "head: unknown tt element (document)",
+            styled("<foo/>", r#"<p begin="0s" end="1s">a</p>"#),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "styling: unknown tt element (document)",
+            styled(
+                "<styling><foo/></styling>",
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "initial: every cue is Styling (document)",
+            styled(
+                r#"<styling><initial tts:color="red"/></styling>"#,
+                r#"<p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[(Loss::Styling, 2)],
+            0,
+            None,
+        ),
+        row(
+            "set in a paragraph: Styling per cue",
+            doc(r#"<p begin="0s" end="1s">a<set begin="0s" dur="1s"/>b</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "animate in a div: Styling on every cue",
+            doc(
+                r#"<animate begin="0s" dur="1s"/><p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[(Loss::Styling, 2)],
+            0,
+            None,
+        ),
+        row(
+            "animation in a paragraph: Styling per cue",
+            doc(r#"<p begin="0s" end="1s">a<animation begin="0s" dur="1s"/>b</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "foreign element in a paragraph: Elements per cue",
+            doc(r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x">lost</x:foo>b</p>"#),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "foreign element in a div: Elements on every cue",
+            doc(
+                r#"<x:foo xmlns:x="urn:x"/><p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[(Loss::Elements, 2)],
+            0,
+            None,
+        ),
+        row(
+            "unknown tt element in a paragraph: Elements per cue",
+            doc(r#"<p begin="0s" end="1s">a<foo/>b</p>"#),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "image element in a div: one image unit",
+            doc(r#"<image begin="0s" end="1s" src="a.png"/><p begin="0s" end="1s">a</p>"#),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "image element in a paragraph: one unit, its text converts",
+            doc(r#"<p begin="0s" end="1s">a<image src="a.png"/>b</p><p begin="2s" end="3s">c</p>"#),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "smpte:backgroundImage on a paragraph: one unit, its text converts",
+            format!(
+                "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body><div>\
+                 <p begin=\"0s\" end=\"1s\" smpte:backgroundImage=\"#i\">a</p>\
+                 <p begin=\"2s\" end=\"3s\">c</p></div></body></tt>"
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "smpte:backgroundImage on a div: one unit, the text under it converts",
+            format!(
+                "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body>\
+                 <div smpte:backgroundImage=\"#i\"><p begin=\"0s\" end=\"1s\">a</p>\
+                 <p begin=\"2s\" end=\"3s\">b</p></div>\
+                 <div><p begin=\"4s\" end=\"5s\">c</p></div></body></tt>"
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "smpte:backgroundImage on a span: its paragraph is one unit",
+            format!(
+                "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body><div>\
+                 <p begin=\"0s\" end=\"1s\">a<span smpte:backgroundImage=\"#i\">b</span></p>\
+                 <p begin=\"2s\" end=\"3s\">c</p></div></body></tt>"
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "smpte:backgroundImage on a body: one unit, the text converts",
+            format!(
+                "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:smpte=\"{SMPTE_TT}\"><body smpte:backgroundImage=\"#i\">\
+                 <div><p begin=\"0s\" end=\"1s\">a</p></div></body></tt>"
+            ),
+            &[(Loss::Elements, 1)],
+            0,
+            None,
+        ),
+        row(
+            "ruby: the text stays, Styling per cue",
+            doc(r#"<p begin="0s" end="1s"><ruby>漢<rt>kan</rt></ruby></p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "condition on a paragraph: skipped, its text may or may not show",
+            doc(
+                r#"<p begin="0s" end="1s" condition="ttp:profile()">cond</p><p begin="2s" end="3s">plain</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "conditional element")),
+        ),
+        row(
+            "span outside a paragraph: its text cannot be shown, skipped",
+            doc(r#"<span begin="0s" end="1s">lost</span><p begin="0s" end="1s">x</p>"#),
+            &[],
+            1,
+            Some((1, "unsupported element")),
+        ),
+        row(
+            "duplicate style id: the references count the dropped declarations",
+            styled(
+                r#"<styling><style xml:id="s" tts:fontStyle="italic"/><style xml:id="s" tts:color="red"/></styling>"#,
+                r#"<p begin="0s" end="1s" style="s">a</p>"#,
+            ),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "duplicate region id: the references count the dropped placement",
+            styled(
+                r#"<layout><region xml:id="r" tts:origin="10% 0%"/><region xml:id="r" tts:origin="10% 80%"/></layout>"#,
+                r#"<p begin="0s" end="1s" region="r">a</p>"#,
+            ),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
+            "style reference not defined: Styling",
+            doc(r#"<p begin="0s" end="1s" style="nope">a</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "tts:fontFamily: not carried, Styling",
+            doc(r#"<p begin="0s" end="1s" tts:fontFamily="serif">a</p>"#),
+            &[(Loss::Styling, 1)],
+            0,
+            None,
+        ),
+        row(
+            "tts:textAlign: not carried, Position",
+            doc(r#"<p begin="0s" end="1s" tts:textAlign="center">a</p>"#),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
+            "region named and not defined: Position",
+            doc(r#"<p begin="0s" end="1s" region="nope">a</p>"#),
+            &[(Loss::Position, 1)],
+            0,
+            None,
+        ),
+        row(
+            "text outside any cue: skipped",
+            body(r#"stray<div><p begin="0s" end="1s">x</p></div>"#),
+            &[],
+            1,
+            Some((1, "text outside any cue")),
+        ),
+        row(
+            "bad timestamp: the paragraph skipped",
+            doc(r#"<p begin="x" end="1s">a</p><p begin="2s" end="3s">b</p>"#),
+            &[],
+            1,
+            Some((1, "bad timestamp")),
+        ),
+        row(
+            "text with no display time: skipped",
+            doc(r#"<p begin="0s" timeContainer="seq">Hello<span dur="2s">World</span></p>"#),
+            &[],
+            1,
+            Some((1, "text with no display time")),
+        ),
+        row(
+            "invalid xml:space: the paragraph skipped",
+            doc(r#"<p begin="0s" end="1s" xml:space="maybe">a</p><p begin="2s" end="3s">b</p>"#),
+            &[],
+            1,
+            Some((1, "invalid xml:space")),
+        ),
+        row(
+            "paragraph with no end: skipped",
+            doc(r#"<p>x</p><p begin="0s" end="1s">y</p>"#),
+            &[],
+            1,
+            Some((1, "no end time")),
+        ),
+        row(
+            "time at or past 100 hours: skipped",
+            body(
+                r#"<div begin="60:00:00.000"><p begin="50:00:00.000" end="51:00:00.000">late</p></div><div><p begin="0s" end="1s">ok</p></div>"#,
+            ),
+            &[],
+            1,
+            Some((1, "time is 100 hours or more")),
+        ),
+    ]
+}
+
+/// Review focus 4: every construct the accounting table lists is counted
+/// exactly: its losses by kind, and the skipped count and its first line.
+#[test]
+fn every_ignored_construct_is_counted() {
+    for row in accounting_rows() {
+        let parsed = read_ttml(row.input.as_bytes())
+            .unwrap_or_else(|e| panic!("{}: refused: {e}", row.construct));
+        let losses: BTreeMap<Loss, usize> = row.losses.iter().copied().collect();
+        assert_eq!(parsed.losses, losses, "{}: losses", row.construct);
+        assert_eq!(
+            parsed.skipped.count, row.skipped,
+            "{}: skipped",
+            row.construct
+        );
+        assert_eq!(
+            parsed.skipped.first, row.first,
+            "{}: first skip",
+            row.construct
+        );
+    }
 }

@@ -89,11 +89,13 @@ pub(super) struct Css {
 }
 
 /// What a text piece or a `br` is affected by: a `Styling` or a `Position`
-/// declaration on it or on an element it is in. Each counts once per cue.
+/// declaration on it or on an element it is in, or an ignored element
+/// (`Elements`) it contains. Each counts once per cue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Flags {
     pub(super) styling: bool,
     pub(super) position: bool,
+    pub(super) elements: bool,
 }
 
 impl Flags {
@@ -101,6 +103,7 @@ impl Flags {
         Flags {
             styling: self.styling || other.styling,
             position: self.position || other.position,
+            elements: self.elements || other.elements,
         }
     }
 }
@@ -149,6 +152,35 @@ pub(super) fn tts_value<'e>(el: &'e Element<'_>, local: &str) -> Option<&'e str>
     tts_attrs(el)
         .find(|(name, _)| *name == local)
         .map(|(_, value)| value)
+}
+
+/// The flags an element's own declarations give its content: a declaration the
+/// reader does not carry (`Styling`), or a placement it does not use (`Position`).
+pub(super) fn own_flags(decl: &Css) -> Flags {
+    Flags {
+        styling: decl.styling,
+        position: decl.position
+            || decl.origin.is_some()
+            || decl.extent.is_some()
+            || decl.align.is_some(),
+        elements: false,
+    }
+}
+
+/// The flags of a duplicate definition that is ignored whole: every declaration
+/// it makes is dropped, carried ones included, so any declaration counts. A
+/// carried inheritable value counts as `Styling`; the rest is [`own_flags`].
+pub(super) fn dropped_flags(decl: &Css) -> Flags {
+    let carried = decl.italic.is_some()
+        || decl.bold.is_some()
+        || decl.underline.is_some()
+        || decl.line_through.is_some()
+        || decl.overline.is_some();
+    let flags = own_flags(decl);
+    Flags {
+        styling: flags.styling || carried,
+        ..flags
+    }
 }
 
 /// The `tts:` declarations of one element, as the reader keeps them. A value
@@ -402,6 +434,9 @@ struct Entry {
     /// The longest chain of accepted references from this entry, counting
     /// itself (a leaf is 1). Set by the freeze.
     height: u8,
+    /// The flags of the ignored duplicate definitions of this entry's name
+    /// (see [`Sheet::define_style`]): every reference to the name carries them.
+    dup: Flags,
 }
 
 /// The styles and regions of the head. Names are the `xml:id`s: styles and
@@ -432,6 +467,7 @@ impl Sheet {
             refs: Vec::new(),
             defined,
             height: 0,
+            dup: Flags::default(),
         });
         Ok(self.entries.len() - 1)
     }
@@ -448,13 +484,21 @@ impl Sheet {
             return self.push(budget, own, true);
         };
         match self.styles.get(id).copied() {
-            Some(i) if self.entries[i].defined => Err(duplicate()),
+            // A duplicate `xml:id` is an xml:id error, which is not fatal (XML ID
+            // section 6). The first definition stands; this one is kept as an
+            // entry that nothing names, and every reference to the name is
+            // flagged with its declarations: the references are where it matters.
+            Some(i) if self.entries[i].defined => {
+                self.entries[i].dup = self.entries[i].dup.join(dropped_flags(&own));
+                self.push(budget, own, true)
+            }
             Some(i) => {
                 self.entries[i] = Entry {
                     css: own,
                     refs: Vec::new(),
                     defined: true,
                     height: 0,
+                    dup: Flags::default(),
                 };
                 Ok(i)
             }
@@ -476,8 +520,10 @@ impl Sheet {
         let Some(id) = id else {
             return self.push(budget, own, true);
         };
-        if self.regions.contains_key(id) {
-            return Err(duplicate());
+        // A duplicate region is handled as a duplicate style (see `define_style`).
+        if let Some(&i) = self.regions.get(id) {
+            self.entries[i].dup = self.entries[i].dup.join(dropped_flags(&own));
+            return self.push(budget, own, true);
         }
         let i = self.push(budget, own, true)?;
         self.regions.insert(id.to_owned(), i);
@@ -517,14 +563,24 @@ impl Sheet {
         &self.entries[entry].css
     }
 
-    /// The resolved set of a style a `style` attribute names, `None` when it
-    /// is not defined. Only after the freeze.
-    fn style_css(&self, id: &str) -> Option<&Css> {
+    /// The style a `style` attribute names, `None` when it is not defined.
+    /// Only after the freeze.
+    fn style_entry(&self, id: &str) -> Option<&Entry> {
         self.styles
             .get(id)
             .map(|&i| &self.entries[i])
             .filter(|e| e.defined)
-            .map(|e| &e.css)
+    }
+
+    /// The flags a region or style entry gives its content: its declarations
+    /// and those of the duplicate definitions of its name.
+    pub(super) fn flags(&self, entry: usize) -> Flags {
+        let e = &self.entries[entry];
+        Flags {
+            styling: e.css.styling || e.dup.styling,
+            position: e.css.position || e.dup.position,
+            elements: false,
+        }
     }
 
     /// The declarations of an element with a `style` attribute, its
@@ -536,8 +592,12 @@ impl Sheet {
         let mut out = Css::default();
         if let Some(refs) = el.attr(None, "style") {
             for id in refs.split_ascii_whitespace() {
-                match self.style_css(id) {
-                    Some(css) => out.merge(css),
+                match self.style_entry(id) {
+                    Some(e) => {
+                        out.merge(&e.css);
+                        out.styling |= e.dup.styling;
+                        out.position |= e.dup.position;
+                    }
                     None => out.styling = true,
                 }
             }
@@ -589,6 +649,8 @@ impl Sheet {
             let target = &self.entries[r];
             if target.defined && phase[r] == Phase::Done && target.height < MAX_CHAIN {
                 out.merge(&target.css);
+                out.styling |= target.dup.styling;
+                out.position |= target.dup.position;
                 height = height.max(target.height);
             } else {
                 out.styling = true;
@@ -598,12 +660,6 @@ impl Sheet {
         self.entries[v].css = out;
         self.entries[v].height = height + 1;
     }
-}
-
-/// A duplicate `xml:id` among styles or among regions: the reference it would
-/// make is ambiguous, so the document is refused.
-fn duplicate() -> ReadError {
-    ReadError::Unsupported("duplicate xml:id of a style or region")
 }
 
 #[cfg(test)]
