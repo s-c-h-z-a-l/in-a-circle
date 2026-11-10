@@ -1145,65 +1145,339 @@ fn ttml_batch_of_three_one_bad_goes_on() {
     assert_eq!(lines(&out, "fail")[0][2], "not a TTML document");
 }
 
-/// The densest TTML shapes that fit the 8 MiB input, each run five times under
-/// the memory net, with the peak RSS of each run (`ru_maxrss`, from `wait4`).
+/// One dense TTML input, on disk: its name, its file, how many units the
+/// reader charges for it (the figure bytes per unit are taken over), and
+/// whether the reader keeps it (`false`: `TooComplex`, nothing written).
+struct DenseTtml {
+    name: &'static str,
+    path: PathBuf,
+    units: usize,
+    kept: bool,
+}
+
+/// The `xml:id` names of the shortest length first: one character (53 names),
+/// then two (3,339), three (210,357), and so on. An XML name starts with a
+/// letter or `_`, and continues with letters, digits, `_`, `-` or `.`.
+fn short_names() -> impl Iterator<Item = String> {
+    const START: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+    const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.";
+    (1usize..).flat_map(|len| {
+        let count = START.len() * REST.len().pow(u32::try_from(len - 1).unwrap());
+        (0..count).map(move |mut i| {
+            let mut tail = Vec::with_capacity(len - 1);
+            for _ in 1..len {
+                tail.push(char::from(REST[i % REST.len()]));
+                i /= REST.len();
+            }
+            let mut name = String::with_capacity(len);
+            name.push(char::from(START[i]));
+            name.extend(tail.iter().rev());
+            name
+        })
+    })
+}
+
+/// Writes `head`, then as many of `units` as fit before `tail` (each kept
+/// whole or not at all), then `tail`, padded with newlines to the input limit.
+/// Returns the number of units written. It streams to the file, so no copy of
+/// the input is held: see `dense_ttml_inputs` for why the parent must not.
+fn write_input(path: &Path, head: &str, units: impl Iterator<Item = String>, tail: &str) -> usize {
+    use std::io::Write as _;
+    let mut out = std::io::BufWriter::new(fs::File::create(path).unwrap());
+    let mut len = head.len() + tail.len();
+    out.write_all(head.as_bytes()).unwrap();
+    let mut count = 0;
+    for unit in units {
+        if len + unit.len() > INPUT_BYTES {
+            break;
+        }
+        len += unit.len();
+        count += 1;
+        out.write_all(unit.as_bytes()).unwrap();
+    }
+    out.write_all(tail.as_bytes()).unwrap();
+    // Padding after the root element: trailing white space is no content.
+    let newlines = [b'\n'; 4096];
+    let mut pad = INPUT_BYTES - len;
+    while pad > 0 {
+        let n = pad.min(newlines.len());
+        out.write_all(&newlines[..n]).unwrap();
+        pad -= n;
+    }
+    out.flush().unwrap();
+    count
+}
+
+/// One dense input from `write_input`, with its verdict.
+fn dense_input(
+    root: &Path,
+    name: &'static str,
+    head: &str,
+    units: impl Iterator<Item = String>,
+    tail: &str,
+    kept: bool,
+) -> DenseTtml {
+    let path = root.join(format!("{name}.ttml"));
+    let units = write_input(&path, head, units, tail);
+    DenseTtml {
+        name,
+        path,
+        units,
+        kept,
+    }
+}
+
+/// The dense TTML inputs, each at the densest size the 8 MiB limit allows for
+/// its shape. The shapes are the reader's own costs: an element, a piece of
+/// text, a copy of a piece into a slice, a style or region entry, a reference,
+/// a line break, an attribute value, a style chain and an overlap.
 ///
-/// (1) Run-dense: one paragraph of 599,179 `<span>x</span>` (14 B each). The plan
-/// named 4 M spans, but 4 M of these are 56 MB, past the input limit; 599,179 is
-/// the most that fit. Each span is an element, a piece and a copy of the piece
-/// in its slice, each charged to the item budget.
-/// (2) Cue-dense: 299,591 `<p begin="0s" end="1s">x</p>` (28 B each), one cue
-/// per paragraph.
+/// The plan's counts that do not fit the limit are replaced by the densest
+/// count that does: 4 M `<span>` are 56 MB and 4 M `<br/>` are 20 MB, so the
+/// most that fit are 599,176 spans and 1,677,693 breaks. A named
+/// `<style xml:id="…"/>` costs 18 B plus its name, so the shortest distinct
+/// names give 391,791 in the limit, not 784,960 (the unnamed `<style/>` is the
+/// one that reaches that count).
 ///
-/// Peak RSS over five runs, KiB (min / median / max). Test build: span-dense
-/// 103524 / 103916 / 103996 (101.1 / 101.5 / 101.6 MiB), cue-dense 128228 /
-/// 128440 / 128584 (125.2 / 125.4 / 125.6 MiB). Release build (`cargo test
-/// --release`): span-dense 103260 / 103444 / 103552 (100.8 / 101.0 / 101.1 MiB),
-/// cue-dense 127828 / 127932 / 128088 (124.8 / 124.9 / 125.1 MiB). The wall time
-/// is 2.6 s per run in the test build and 0.2 to 0.3 s in the release build.
-///
-/// The ceiling is `PEAK_CEILING`: the item budget bounds the readers at about
-/// 216 MiB (`ITEM_BUDGET`), and a run past 400 MiB is a finding, not a limit to
-/// raise. Both shapes stay under 130 MiB, far under that bound.
+/// Each input is written to disk, streamed, before the next is made, and the
+/// test measures only after all of them are written. A child forked from a
+/// parent holds at least that parent's resident set in its `ru_maxrss` (the
+/// `pre_exec` hook forks rather than spawning). Measured: with the inputs held
+/// in memory, every child reported about 130 MiB; streamed, the baseline reads
+/// about 11 MiB. So the parent keeps nothing here.
+fn dense_ttml_inputs(root: &Path) -> Vec<DenseTtml> {
+    const TT: &str =
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\">";
+    const P: &str = "<p begin=\"0s\" end=\"1s\">";
+    // A paragraph that ends at 100,000 s, later than any span below.
+    const LONG_P: &str = "<p begin=\"0s\" end=\"100000s\">";
+    let mut inputs = Vec::new();
+
+    // The cost of the input itself: one cue, padded to the limit.
+    let mut baseline = dense_input(
+        root,
+        "baseline",
+        &format!("{TT}<body><div>{P}x</p></div></body></tt>"),
+        std::iter::empty(),
+        "",
+        true,
+    );
+    baseline.units = 1;
+    inputs.push(baseline);
+
+    // Run-dense: one paragraph of spans (14 B each).
+    inputs.push(dense_input(
+        root,
+        "span-dense",
+        &format!("{TT}<body><div>{P}"),
+        std::iter::repeat("<span>x</span>").map(str::to_owned),
+        "</p></div></body></tt>",
+        true,
+    ));
+
+    // Cue-dense: one cue per paragraph (28 B each).
+    inputs.push(dense_input(
+        root,
+        "cue-dense",
+        &format!("{TT}<body>"),
+        std::iter::repeat("<p begin=\"0s\" end=\"1s\">x</p>").map(str::to_owned),
+        "</body></tt>",
+        true,
+    ));
+
+    // Depth-dense: a block of 254 elements that reaches the depth limit of 256
+    // open elements (`xml::MAX_DEPTH`): tt, body, 127 div, p, 126 span. The
+    // blocks are siblings in the body, so each one is nested afresh.
+    let block = format!(
+        "{}{P}{}x{}</p>{}",
+        "<div>".repeat(127),
+        "<span>".repeat(126),
+        "</span>".repeat(126),
+        "</div>".repeat(127)
+    );
+    let mut depth = dense_input(
+        root,
+        "depth-dense",
+        &format!("{TT}<body>"),
+        std::iter::repeat(block),
+        "</body></tt>",
+        true,
+    );
+    depth.units *= 254;
+    inputs.push(depth);
+
+    // Table-dense: named styles, each one an entry and an id (two items).
+    inputs.push(dense_input(
+        root,
+        "style-table",
+        &format!("{TT}<head><styling>"),
+        short_names().map(|s| format!("<style xml:id=\"{s}\"/>")),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Table-dense, unnamed: 784,960 `<style/>`, the count the ttml.rs
+    // measurement uses. An unnamed style is kept only as the entry of its own
+    // content (two items each).
+    inputs.push(dense_input(
+        root,
+        "style-unnamed",
+        &format!("{TT}<head><styling>"),
+        std::iter::repeat_n("<style/>".to_owned(), 784_960),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Region-dense: named regions, one item each.
+    inputs.push(dense_input(
+        root,
+        "region-table",
+        &format!("{TT}<head><layout>"),
+        short_names().map(|s| format!("<region xml:id=\"{s}\"/>")),
+        &format!("</layout></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Reference-dense, in a paragraph: one `style` list of distinct names, none
+    // defined. A paragraph's references make no entry and charge no item, so
+    // the whole list is read: one lookup and one merge per name.
+    inputs.push(dense_input(
+        root,
+        "reference-paragraph",
+        &format!("{TT}<body><div><p begin=\"0s\" end=\"1s\" style=\""),
+        short_names().map(|s| format!("{s} ")),
+        "\">x</p></div></body></tt>",
+        true,
+    ));
+
+    // Reference-dense, in the head: the same list on a `style` element. Each
+    // distinct name is a placeholder entry and a reference, two items, so the
+    // budget stops the list.
+    inputs.push(dense_input(
+        root,
+        "reference-head",
+        &format!("{TT}<head><styling><style xml:id=\"x\" style=\""),
+        short_names().map(|s| format!("{s} ")),
+        &format!("\"/></styling></head><body><div>{P}x</p></div></body></tt>"),
+        false,
+    ));
+
+    // Break-dense: `<br/>` in one paragraph, a line each (5 B each).
+    inputs.push(dense_input(
+        root,
+        "break-flood",
+        &format!("{TT}<body><div>{P}"),
+        std::iter::repeat("<br/>").map(str::to_owned),
+        "x</p></div></body></tt>",
+        false,
+    ));
+
+    // One attribute value of 1 MiB: a style id, held as the table's key, and a
+    // reference to it. Two MiB of input, so the value is the cost.
+    let value = "a".repeat(MIB);
+    let mut attribute = dense_input(
+        root,
+        "attribute-1mib",
+        &format!(
+            "{TT}<head><styling><style xml:id=\"{value}\"/></styling></head><body><div>\
+<p begin=\"0s\" end=\"1s\" style=\"{value}\">x</p></div></body></tt>"
+        ),
+        std::iter::empty(),
+        "",
+        true,
+    );
+    attribute.units = 1;
+    inputs.push(attribute);
+
+    // Chain-dense: each style refers to the one before it (one chain of
+    // styles), with a declaration of its own. Past `MAX_CHAIN` a chain is not
+    // followed, so the reader resolves every entry once.
+    let mut prev: Option<String> = None;
+    inputs.push(dense_input(
+        root,
+        "style-chain",
+        &format!("{TT}<head><styling>"),
+        short_names().map(move |s| {
+            let unit = match &prev {
+                Some(p) => {
+                    format!("<style xml:id=\"{s}\" style=\"{p}\" tts:fontStyle=\"italic\"/>")
+                }
+                None => format!("<style xml:id=\"{s}\" tts:fontStyle=\"italic\"/>"),
+            };
+            prev = Some(s);
+            unit
+        }),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Overlap-dense, nested: spans one inside the next, so every slice of the
+    // paragraph holds nearly all of them. Each slice copies its pieces; the
+    // copies are charged, and the budget stops the document.
+    inputs.push(dense_input(
+        root,
+        "overlap-nested",
+        &format!("{TT}<body><div>{LONG_P}"),
+        (0u64..).map(|i| {
+            format!(
+                "<span begin=\"{i}ms\" end=\"{}ms\">x</span>",
+                100_000_000 - i
+            )
+        }),
+        "</p></div></body></tt>",
+        false,
+    ));
+
+    // Overlap, staggered: each span starts 10 ms after the one before and lasts
+    // 15 ms, so at most two are active at a time. The copies stay in the budget
+    // and the document is converted.
+    inputs.push(dense_input(
+        root,
+        "overlap-staggered",
+        &format!("{TT}<body><div>{LONG_P}"),
+        (0u64..).map(|i| {
+            format!(
+                "<span begin=\"{}ms\" end=\"{}ms\">x</span>",
+                i * 10,
+                i * 10 + 15
+            )
+        }),
+        "</p></div></body></tt>",
+        true,
+    ));
+
+    inputs
+}
+
+/// Every dense TTML input under the memory net, each run five times, with the
+/// peak RSS of every run (`ru_maxrss`, from `wait4`). Each input asserts its
+/// verdict (converted, or `TooComplex` with nothing written) and the ceiling:
+/// past `PEAK_CEILING` the budget no longer bounds memory, which is a finding.
+/// The figures per shape and the bytes per unit are in `docs/resource-limits.md`;
+/// the test prints them.
 #[test]
 fn dense_ttml_shapes_stay_within_the_data_limit() {
     const RUNS: usize = 5;
     let root = tmp("dense-ttml");
     let work = root.join("work");
     fs::create_dir_all(&work).unwrap();
-    let span_head =
-        "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"0s\" end=\"1s\">";
-    let span_tail = "</p></div></body></tt>";
-    let span = "<span>x</span>";
-    let spans = span.repeat((INPUT_BYTES - span_head.len() - span_tail.len()) / span.len());
-    let para_head = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body>";
-    let para_tail = "</body></tt>";
-    let para = "<p begin=\"0s\" end=\"1s\">x</p>";
-    let paras = para.repeat((INPUT_BYTES - para_head.len() - para_tail.len()) / para.len());
-    let shapes = [
-        ("span-dense.ttml", format!("{span_head}{spans}{span_tail}")),
-        ("cue-dense.ttml", format!("{para_head}{paras}{para_tail}")),
-    ];
-    for (name, mut text) in shapes {
-        assert!(text.len() <= INPUT_BYTES, "{name}");
-        // Padding after the root element: trailing white space is no content.
-        let pad = INPUT_BYTES - text.len();
-        text.push_str(&"\n".repeat(pad));
-        let input = put(&root, name, text.as_bytes());
-        let mut peaks = Vec::new();
+    for shape in dense_ttml_inputs(&root) {
+        let name = shape.name;
+        let mut peaks = Vec::with_capacity(RUNS);
         for _ in 0..RUNS {
-            let started = Instant::now();
-            let (o, peak_kib) = run_measured("subtitles.ttml-to-srt", &work, &input);
-            let elapsed = started.elapsed();
+            let (o, peak_kib) = run_measured("subtitles.ttml-to-srt", &work, &shape.path);
             let out = stdout(&o);
-            // Both shapes are converted, so the run measures the reader and the
-            // writer to the end; a refusal would measure less.
-            assert_eq!(o.status.code(), Some(0), "{name}: {out}");
-            assert_eq!(lines(&out, "done").len(), 1, "{name}: {out}");
-            eprintln!(
-                "dense TTML {name}: exit {:?}, peak RSS {peak_kib} KiB, wall {:.2} s",
-                o.status.code(),
-                elapsed.as_secs_f64()
+            if shape.kept {
+                assert_eq!(o.status.code(), Some(0), "{name}: {out}");
+                assert_eq!(lines(&out, "done").len(), 1, "{name}: {out}");
+            } else {
+                assert_eq!(o.status.code(), Some(1), "{name}: {out}");
+                assert_eq!(lines(&out, "fail")[0][2], TOO_COMPLEX, "{name}: {out}");
+                assert!(files(&work).is_empty(), "{name}: a refused input wrote");
+            }
+            assert!(
+                peak_kib * 1024 <= PEAK_CEILING,
+                "{name}: peak RSS {peak_kib} KiB is past the ceiling"
             );
             peaks.push(peak_kib);
             for f in files(&work) {
@@ -1212,14 +1486,11 @@ fn dense_ttml_shapes_stay_within_the_data_limit() {
         }
         peaks.sort_unstable();
         eprintln!(
-            "dense TTML {name}: peak RSS KiB min {} median {} max {} over {RUNS} runs",
+            "dense TTML {name}: {} units, kept {}, peak RSS KiB min {} median {} max {} over {RUNS} runs",
+            shape.units,
+            shape.kept,
             peaks[0],
             peaks[RUNS / 2],
-            peaks[RUNS - 1]
-        );
-        assert!(
-            peaks[RUNS - 1] * 1024 <= PEAK_CEILING,
-            "{name}: peak RSS {} KiB is past the ceiling",
             peaks[RUNS - 1]
         );
     }
