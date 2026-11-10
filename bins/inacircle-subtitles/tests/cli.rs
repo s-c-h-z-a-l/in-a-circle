@@ -1069,7 +1069,7 @@ xmlns:foo=\"urn:example:foo\">\n\
 <head><styling><style xml:id=\"c\" tts:color=\"red\"/></styling>\n\
 <layout><region xml:id=\"low\" tts:origin=\"10% 80%\" tts:extent=\"80% 15%\"/></layout></head>\n\
 <body><div>\n\
-<p begin=\"00:00:01.000\" end=\"00:00:02.000\"><foo:note>ignored</foo:note>Plain</p>\n\
+<p begin=\"00:00:01.000\" end=\"00:00:02.000\"><foo:note/>Plain</p>\n\
 <p begin=\"00:00:03.000\" end=\"00:00:04.000\" region=\"low\" style=\"c\">Placed &lt;b&gt; text</p>\n\
 </div></body></tt>\n",
     );

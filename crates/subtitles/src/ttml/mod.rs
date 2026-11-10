@@ -39,7 +39,7 @@
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | `Params`; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
-//! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
+//! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements` on every cue of the document (see the rule for document-level counts below) |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
 //! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). The last `initial` in document order applies. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 //! | `styling`: any other child | `Elements` on every cue of the document |
@@ -74,8 +74,10 @@
 //! | `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
 //! | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
 //! | `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden |
-//! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
-//! | a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
+//! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
+//! | a foreign-namespace element in a paragraph or span with no visible text | `Elements` on each cue of that paragraph |
+//! | a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
+//! | a foreign or unknown tt element in `body` or `div` with no visible text | `Elements` on every cue of the document (an upper bound, as above) |
 //! | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
 //! | an `image` element in `body` or `div` | an image unit: `Elements` once |
 //! | `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
@@ -465,6 +467,18 @@ struct Para {
     /// The start lines of the outermost hidden spans of a shown paragraph: one
     /// `skipped` item each, counted when the paragraph is kept (see `paragraph`).
     hidden_spans: Vec<u32>,
+    /// The start lines of the outermost pruned elements (foreign, unsupported)
+    /// that held visible text: one `skipped` item each, counted when the
+    /// paragraph is kept (see `paragraph`).
+    pruned: Vec<u32>,
+}
+
+/// An element pruned with its content, while it is open. `text` is set when
+/// visible text is in it: that text is not converted (see `pruned_done`).
+#[derive(Clone, Copy)]
+struct Pruned {
+    line: u32,
+    text: bool,
 }
 
 /// What an element is, given the element it is in.
@@ -649,6 +663,9 @@ struct Doc<'b> {
     /// Open elements inside an ignored one, the ignored one included. Their
     /// events are not read.
     ignoring: usize,
+    /// The pruned element being read, if the ignored region is one (not
+    /// metadata or a refused element): its text is counted (see `pruned_done`).
+    pruned: Option<Pruned>,
     skipped: Skipped,
     /// The cues, their losses and the text copied into them (see `slice.rs`).
     out: Output,
@@ -690,6 +707,7 @@ impl<'b> Doc<'b> {
             stack: Vec::new(),
             para: None,
             ignoring: 0,
+            pruned: None,
             skipped: Skipped::default(),
             out: Output::default(),
             sheet: Sheet::default(),
@@ -749,6 +767,10 @@ impl<'b> Doc<'b> {
                 if let Some(para) = self.para.as_mut() {
                     para.animated = true;
                 }
+                self.ignoring = 1;
+            }
+            Role::Ignored(Ignore::Elements) => {
+                self.pruned = Some(Pruned { line, text: false });
                 self.ignoring = 1;
             }
             Role::Ignored(what) => {
@@ -993,6 +1015,7 @@ impl<'b> Doc<'b> {
                 unit: own_image,
                 animated,
                 hidden_spans: Vec::new(),
+                pruned: Vec::new(),
             });
         }
         self.stack.push(frame);
@@ -1041,6 +1064,11 @@ impl<'b> Doc<'b> {
 
     fn text(&mut self, text: &str, line: u32) -> Result<(), ReadError> {
         if self.ignoring > 0 {
+            if let Some(pruned) = self.pruned.as_mut()
+                && text.chars().any(|c| !c.is_whitespace())
+            {
+                pruned.text = true;
+            }
             return Ok(());
         }
         let Some(top) = self.stack.last() else {
@@ -1116,6 +1144,11 @@ impl<'b> Doc<'b> {
     fn end(&mut self) -> Result<(), ReadError> {
         if self.ignoring > 0 {
             self.ignoring -= 1;
+            if self.ignoring == 0
+                && let Some(pruned) = self.pruned.take()
+            {
+                self.pruned_done(pruned)?;
+            }
             return Ok(());
         }
         let Some(frame) = self.stack.pop() else {
@@ -1151,6 +1184,26 @@ impl<'b> Doc<'b> {
             note(&mut para.fault, reason);
         }
         self.child_ended(end);
+        Ok(())
+    }
+
+    /// A pruned element has ended. Its visible text is not converted, so it is
+    /// one `skipped` item with the element's line: counted with the paragraph
+    /// when the element is in one (see `paragraph`), else on its own. An element
+    /// with no visible text is an ignored element (`Ignore::Elements`).
+    fn pruned_done(&mut self, pruned: Pruned) -> Result<(), ReadError> {
+        if !pruned.text {
+            self.ignore(Ignore::Elements);
+            return Ok(());
+        }
+        match self.para.as_mut() {
+            Some(para) => {
+                self.budget.charge()?;
+                para.visible = true;
+                para.pruned.push(pruned.line);
+            }
+            None => self.skip(pruned.line, UNSUPPORTED_ELEMENT),
+        }
         Ok(())
     }
 
@@ -1209,6 +1262,9 @@ impl<'b> Doc<'b> {
         }
         for line in para.hidden_spans {
             self.skip(line, HIDDEN);
+        }
+        for line in para.pruned {
+            self.skip(line, UNSUPPORTED_ELEMENT);
         }
         slice::cues(
             &para.pieces,

@@ -1248,22 +1248,56 @@ fn set_and_animate_are_counted() {
 }
 
 /// A foreign-namespace element is pruned with its whole subtree (the standard
-/// ignores it): its text is not shown, and it counts as `Elements` once per cue.
-/// Outside a paragraph it counts on every cue of the document.
+/// ignores it). Its text is not shown: an element that holds visible text is
+/// `skipped` with its line, and the paragraph around it converts; an element
+/// with none is one `Elements` item.
 #[test]
 fn foreign_namespace_content_is_pruned_and_counted() {
     let parsed = read(&doc(
         r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x">lost<span begin="0s" end="1s">inner</span></x:foo>c</p>"#,
     ));
     assert_eq!(texts(&parsed), vec!["ac"]);
-    assert_eq!(loss(&parsed, Loss::Elements), 1);
-    assert_eq!(parsed.skipped.count, 0);
+    assert_eq!(loss(&parsed, Loss::Elements), 0);
+    assert_eq!(parsed.skipped.first, Some((1, "unsupported element")));
+    assert_eq!(parsed.skipped.count, 1);
     let parsed = read(&doc(
         r#"<x:foo xmlns:x="urn:x"><p begin="0s" end="1s">lost</p></x:foo><p begin="0s" end="1s">kept</p>"#,
     ));
     assert_eq!(texts(&parsed), vec!["kept"]);
+    assert_eq!(loss(&parsed, Loss::Elements), 0);
+    assert_eq!(parsed.skipped.count, 1);
+    let parsed = read(&doc(
+        r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x"/>b</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["ab"]);
     assert_eq!(loss(&parsed, Loss::Elements), 1);
     assert_eq!(parsed.skipped.count, 0);
+}
+
+/// Review focus 6: a document whose text lies entirely in pruned elements has
+/// no cue, and says why: the pruned element that held the text is `skipped`
+/// with its reason, so the refusal is `AllSkipped`, not a bare `NoCues`. The
+/// unprefixed `div` and `p` here are in no namespace, so they are pruned.
+#[test]
+fn text_in_pruned_elements_is_skipped_with_its_reason() {
+    assert_eq!(
+        read_ttml(
+            br#"<tt:tt xmlns:tt="http://www.w3.org/ns/ttml"><tt:body><div><p begin="0s" end="1s">Lost text</p></div></tt:body></tt:tt>"#
+        ),
+        Err(ReadError::AllSkipped {
+            count: 1,
+            line: 1,
+            reason: "unsupported element"
+        })
+    );
+    // A pruned element with no text is not text: nothing is skipped, and the
+    // document has no cue, so it is refused as having none.
+    assert_eq!(
+        read_ttml(
+            br#"<tt:tt xmlns:tt="http://www.w3.org/ns/ttml"><tt:body><div><p/></div></tt:body></tt:tt>"#
+        ),
+        Err(ReadError::NoCues)
+    );
 }
 
 /// An image is an `Elements` unit: the image is not shown, and the text beside
@@ -1455,12 +1489,22 @@ fn accounting_rows() -> Vec<Row> {
         row(
             "head: foreign element (document)",
             styled(
-                r#"<x:foo xmlns:x="urn:x">f</x:foo>"#,
+                r#"<x:foo xmlns:x="urn:x"/>"#,
                 r#"<p begin="0s" end="1s">a</p>"#,
             ),
             &[(Loss::Elements, 1)],
             0,
             None,
+        ),
+        row(
+            "head: foreign element holding text (document): skipped",
+            styled(
+                r#"<x:foo xmlns:x="urn:x">f</x:foo>"#,
+                r#"<p begin="0s" end="1s">a</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "unsupported element")),
         ),
         row(
             "head: unknown tt element (document)",
@@ -1513,8 +1557,15 @@ fn accounting_rows() -> Vec<Row> {
             None,
         ),
         row(
-            "foreign element in a paragraph: Elements per cue",
+            "foreign element holding text in a paragraph: skipped, the paragraph converts",
             doc(r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x">lost</x:foo>b</p>"#),
+            &[],
+            1,
+            Some((1, "unsupported element")),
+        ),
+        row(
+            "foreign element with no text in a paragraph: Elements",
+            doc(r#"<p begin="0s" end="1s">a<x:foo xmlns:x="urn:x"/>b</p>"#),
             &[(Loss::Elements, 1)],
             0,
             None,
@@ -1527,6 +1578,15 @@ fn accounting_rows() -> Vec<Row> {
             &[(Loss::Elements, 2)],
             0,
             None,
+        ),
+        row(
+            "foreign element holding text in a div: skipped, the paragraphs convert",
+            doc(
+                r#"<x:foo xmlns:x="urn:x">lost</x:foo><p begin="0s" end="1s">a</p><p begin="2s" end="3s">b</p>"#,
+            ),
+            &[],
+            1,
+            Some((1, "unsupported element")),
         ),
         row(
             "unknown tt element in a paragraph: Elements per cue",

@@ -143,7 +143,7 @@ whatever else it holds (a hidden or animated one included).
 | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
-| `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) | `Elements` on every cue of the document (see the rule for document-level counts below) |
+| `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements` on every cue of the document (see the rule for document-level counts below) |
 | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
 | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue | |
 | `styling`: any other child | `Elements` on every cue of the document |
@@ -179,8 +179,10 @@ whatever else it holds (a hidden or animated one included).
 | `set`, `animate`, `animation` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
 | `set`, `animate`, `animation` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach) |
 | `set`, `animate`, `animation` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
-| a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span | `Elements` on each cue of that paragraph |
-| a foreign or unknown tt element in `body` or `div` | `Elements` on every cue of the document (an upper bound, as above) |
+| a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
+| a foreign-namespace element in a paragraph or span with no visible text | `Elements` on each cue of that paragraph |
+| a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
+| a foreign or unknown tt element in `body` or `div` with no visible text | `Elements` on every cue of the document (an upper bound, as above) |
 | an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
 | an `image` element in `body` or `div` | an image unit: `Elements` once |
 | `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
