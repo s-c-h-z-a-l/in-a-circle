@@ -373,8 +373,8 @@ long a runaway tree lives, not how much memory it takes meanwhile.
 
 ## Subtitles
 
-The subtitle family (SRT, WebVTT, ASS) reads one file into cues and writes
-one file. Its size limits are the text family's, so one number bounds both
+The subtitle family (SRT, WebVTT, ASS, TTML) reads one file into cues and
+writes one file. Its size limits are the text family's, so one number bounds both
 families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
 
 | Limit | Value | Why, and what happens past it |
@@ -382,11 +382,15 @@ families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
 | input | 8 MiB | the text family's input budget; checked before any parsing, so `subtitle file is larger than 8 MiB` and nothing is read |
 | output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file. The action counts the bytes as it writes them and refuses the write that would pass 32 MiB (`subtitle output would be larger than 32 MiB`); a write past the process's `RLIMIT_FSIZE` fails the same way, since SIGXFSZ is ignored. Either way the file is removed and nothing is left behind |
 | time | 99:59:59.999 | both formats write the hour as two digits, so a later cue has no time code to be written with; the reader skips that cue (with a warning) and converts the rest |
-| items | 2,000,000 (`ITEM_BUDGET`) | each cue, each line and each run is one item, charged before it is stored; the readers' memory is per item, not per byte (a 2-byte line is a line and a run; the densest refused shape peaks at about 113 B per item over the whole process). Past it the input fails with `too many lines and styled runs (more than 2,000,000)` and nothing is written: nothing is truncated. 2,000,000 items peak at about 216 MiB (216.5 MiB measured), a fifth of the 1 GiB `RLIMIT_DATA` floor. A real 8 MiB film subtitle is about 10,000 items (2,000 cues of two lines of two runs), 200 times under the budget; the densest real file, the smallest SRT cues (27 B each, about 310,000 cues of three items), is about 930,000 and still fits |
+| items | 2,000,000 (`ITEM_BUDGET`) | each cue, each line and each run is one item, charged before it is stored; the TTML reader also charges each element, each piece of text or `br`, and each copy of a piece in a slice; the readers' memory is per item, not per byte (a 2-byte line is a line and a run; the densest refused shape peaks at about 113 B per item over the whole process). Past it the input fails with `too many lines and styled runs (more than 2,000,000)` and nothing is written: nothing is truncated. 2,000,000 items peak at about 216 MiB (216.5 MiB measured), a fifth of the 1 GiB `RLIMIT_DATA` floor. A real 8 MiB film subtitle is about 10,000 items (2,000 cues of two lines of two runs), 200 times under the budget; the densest real file, the smallest SRT cues (27 B each, about 310,000 cues of three items), is about 930,000 and still fits |
 | speaker name | shared, one copy | a WebVTT cue's speaker name is one `Rc<str>` shared by the lines of its cue, not a copy per line: one 1 MiB name over 400 lines held 406 MiB as copies, 12 MiB now |
 | cues | none of their own | the item budget bounds the count (a cue is one item) |
 | ASS style table | none of its own, not charged to the item budget | one entry per distinct `Style:` name, keyed by the name borrowed from the input (no copy); a repeated name replaces its entry. Bounded by the input: a style line is `Style:` and its name and a line feed, so the bound comes from three-character names at 10 B each (`Style:abc` and its line feed). There are 1,830,125 ASCII names of three characters, more than the input holds, so the input size is the limit. The cheaper names go first (one empty name at 7 B, 121 ASCII names of one character at 8 B, 16,559 names of two bytes at 9 B, 2-character ASCII names included), so 8 MiB holds at most 840,539 distinct names (the greedy count, with a `[V4+ Styles]` header set aside; 8 MiB / 10 B alone is 838,860). Each entry costs about 37 B of memory beyond the input. Measured (release build, `subtitles.ass-to-srt`, 5 runs each): 784,960 distinct style lines in a 7.5 MiB file peak at 41.6 MiB RSS (42,596 KiB) in 0.18 s, against 6.0 MiB for one style. At the 8 MiB input limit the table is about 30 MiB, extrapolated, so an ASS file that fills the input peaks at about 44 MiB, under the 216 MiB item peak below |
-| warnings | at most 8 lines | one per kind of loss (the seven kinds of the `Loss` enum) and one for the skipped items, far below the engine's cap of 16 per input |
+| TTML element depth | 256 (`xml::MAX_DEPTH`) | the XML reader's own bound, the same as the EPUB reader's; deeper nesting is refused whole as `not well-formed TTML (line N): elements nested too deeply`, so the reader's stack is bounded |
+| TTML style chain | 32 entries (`MAX_CHAIN`) | a `style` reference chain is followed to 32 entries; a loop, or a longer chain, is not followed and the element gets `Styling`. Each entry's chain height is computed once, and a loop is found on the walk's own path, so a reference list cannot make the reader spin |
+| TTML style and region tables | charged to the item budget before each entry is stored | a `style` is its element and its entry (two items); each region, each duplicate and each `style` reference is one more. Past the budget the file is `TooComplex`, as for cues |
+| TTML text copied into cues | 32 MiB (`OUTPUT_BYTES`) | a paragraph's text is copied into each slice it is active in. Past 32 MiB of copies the file fails with `subtitle text would be larger than 32 MiB` (`TextTooLarge`), which is not the item budget's message |
+| warnings | at most 9 lines | one per kind of loss (the eight kinds of the `Loss` enum) and one for the skipped items, far below the engine's cap of 16 per input. Unsupported elements are counted in items (elements and images), the others in cues |
 
 Measured peak RSS (`ru_maxrss` of the child, the test build, the development
 machine; the `dense_8_mib_input_stays_within_the_data_limit` test prints the
@@ -398,6 +402,25 @@ same figures). The five densest 8 MiB shapes, before and after the item budget:
 | SRT, one cue of 2-byte lines (`x\n`) | 906.3 MiB, 2.58 s, kept | 216.5 MiB, 0.58 s, refused (`TooComplex`) |
 | WebVTT, about 310,000 cues of 27 B | 138.4 MiB, 1.49 s, kept | 129.0 MiB, 1.50 s, kept |
 | ASS, 186,410 cues of 45 B | 87.2 MiB, 1.04 s, kept | 81.6 MiB, 1.04 s, kept |
+
+The two densest TTML shapes that fit the input limit (the test
+`dense_ttml_shapes_stay_within_the_data_limit`, five runs each, the child's
+`ru_maxrss`, both builds). The plan named 4 M `<span>` elements, but 4 M of
+`<span>x</span>` are 56 MB, past the 8 MiB input; the densest count that fits
+is 599,179 (14 B each), so that is the shape measured. Both are converted, not
+refused:
+
+| shape (8 MiB input) | build | min | median | max | wall |
+|---|---|---|---|---|---|
+| one paragraph of 599,179 `<span>x</span>` (run-dense), kept | test | 101.1 MiB | 101.5 MiB | 101.6 MiB | 2.6 s |
+| one paragraph of 599,179 `<span>x</span>` (run-dense), kept | release | 100.8 MiB | 101.0 MiB | 101.1 MiB | 0.23 s |
+| 299,591 `<p begin="0s" end="1s">x</p>` (cue-dense), kept | test | 125.2 MiB | 125.4 MiB | 125.6 MiB | 2.6 s |
+| 299,591 `<p begin="0s" end="1s">x</p>` (cue-dense), kept | release | 124.8 MiB | 124.9 MiB | 125.1 MiB | 0.29 s |
+
+Both are far under the 400 MiB ceiling. The 8 MiB input cannot hold the 4 M
+spans the plan named. The shapes that reach the item budget (8 MiB of `<br/>`
+in one paragraph, refused as `TooComplex`) are a unit test in
+`crates/subtitles/tests/ttml.rs`, not measured on the CLI here.
 | ASS, one cue of `x\N` lines (3 B each) | 607.8 MiB, 1.56 s, kept | 216.7 MiB, 0.77 s, refused (`TooComplex`) |
 
 The speaker-name probe (`vtt-to-srt`, one 1 MiB name in a cue of 400 lines):

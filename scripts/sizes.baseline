@@ -132,7 +132,21 @@
 # and white-space rules, and the WebVTT and ASS fixes). Every growth is under
 # the 100 KB explanation threshold and every .text is under the 1 MiB family
 # limit. The aarch64 baseline is not refreshed.
-inacircle 1199368 924440
+# Refreshed after the TTML reader and the two TTML actions (the xml-based
+# reader in crates/subtitles, the actions, the classifier's TTML type), same
+# toolchain and profile, built from the tree this commit records. inacircle-subtitles
+# grew 343352 B (file) and 136354 B (.text), past the 100 KB explanation
+# threshold. By symbol name on an unstripped build of the same tree, 72.5 KB is
+# the TTML reader (the subtitles::ttml module); the xml crate, linked into this
+# binary for the first time, shows about 4.8 KB by name, so most of its code is
+# inlined into the TTML symbols and is not split further. The HTML5 entity table
+# of the xml crate is linked as well (about 77 KB of relocated data in
+# .data.rel.ro), though TTML reads with html_entities off: a candidate for a
+# later change to the xml crate, not made here. The .text (497717 B) stays far
+# under the 1 MiB family limit. inacircle grew 1760 B (file, 1552 B of .text)
+# since its previous line, under the threshold; inacircle-text and
+# inacircle-pages are unchanged.
+inacircle 1201128 925992
 inacircle-text 1268024 901043
 inacircle-pages 514648 412179
-inacircle-subtitles 451016 361363
+inacircle-subtitles 794368 497717

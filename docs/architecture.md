@@ -99,11 +99,12 @@ are in `CLAUDE.md`.
   inside its entropy data is not detected and shows as a grey or partial page in
   the reader.
 
-- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT and ASS/SSA to SRT or
-  WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
+- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT, ASS/SSA and TTML to SRT
+  or WebVTT. Six one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
   writers are the `crates/subtitles` library (standard library, and the `xml`
   crate for TTML). The rules
-  are under Manifest, after the text family's. A TTML SMPTE time code
+  are under Manifest, after the text family's; the TTML element-by-element
+  accounting is under [TTML accounting](#ttml-accounting). A TTML SMPTE time code
   (`ttp:timeBase="smpte"`) is read with the continuous-marker formula under
   either `ttp:markerMode`: an approximation for discontinuous markers, which
   carry no media time of their own.
@@ -747,19 +748,30 @@ entry) the whole file is refused as `TooComplex`; nothing is converted in part.
   text (link reference expansion included), 32 MiB of output. Past one,
   the input fails with the budget's own message and the batch goes on.
 - The subtitle family (`inacircle-subtitles`, `family=subtitles`,
-  `group=subtitles`) has four actions, each reading one format and writing one:
-  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and
-  `subtitles.ass-to-vtt`. Their MIME types are `application/x-subrip` (SRT),
-  `text/vtt` (WebVTT) and `text/x-ssa` (ASS and SSA). All are `cost=10`,
+  `group=subtitles`) has six actions, each reading one format and writing one:
+  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt`,
+  `subtitles.ass-to-vtt`, `subtitles.ttml-to-srt` and `subtitles.ttml-to-vtt`.
+  Their MIME types are `application/x-subrip` (SRT), `text/vtt` (WebVTT),
+  `text/x-ssa` (ASS and SSA) and `application/ttml+xml` (TTML). All are `cost=10`,
   `lossy=yes` (a drawing is dropped and a speaker's name becomes text) and
   `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
   is larger than 8 MiB`) before any parsing. The readers store at most
-  2,000,000 items (each cue, line and run is one), each charged before it is
-  stored; past it the input fails with `too many lines and styled runs (more
+  2,000,000 items (each cue, line and run is one; the TTML reader also charges
+  each element, piece and copy of a piece), each charged before it is stored; past it the input fails with `too many lines and styled runs (more
   than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
   the lines of its cue. A file that is not UTF-8 fails
   with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
-  with no usable cue fails with `no subtitles found`. The output is counted as
+  with no usable cue fails with `no subtitles found`, and a TTML file whose
+  every item was skipped says how many and the first one's line and reason
+  (`no subtitles found (N items skipped, first at line L: <reason>)`). A TTML
+  file fails with `not well-formed TTML (line L): <reason>`, `not a TTML
+  document`, `unsupported TTML: <reason>` (a clock time base, a drop-frame time
+  code, a declared encoding other than UTF-8 or UTF-16, entity declarations) or
+  `no text subtitles found (image-based)`. Text copied into cues past 32 MiB
+  fails with `subtitle text would be larger than 32 MiB`, not with the item
+  budget's message. TTML's own limits are the element depth of the XML reader
+  (256) and the style chain of 32 entries; see [TTML accounting](#ttml-accounting)
+  and `docs/resource-limits.md`. The output is counted as
   it is written: past 32 MiB the input fails with `subtitle output would be
   larger than 32 MiB`. SIGXFSZ is ignored, so a write past the process's
   `RLIMIT_FSIZE` fails the same way and not the batch. A failed input leaves
@@ -848,8 +860,10 @@ entry) the whole file is refused as `TooComplex`; nothing is converted in part.
   of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
   drawings; style and region blocks; speaker names written as prefixes;
   characters that look like markup written as look-alikes; unsupported elements
-  ignored), each counted in cues as `(N cues)`. The reader's and the writer's
-  counts of one kind are added together. That is far under the engine's 16
+  ignored), each counted in cues as `(N cues)`, except unsupported elements,
+  which count the elements and images they ignore, so `(N items)`. The
+  reader's and the writer's counts of one kind are added together. At most
+  nine lines (eight kinds and the skipped line), far under the engine's 16
   `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
@@ -875,6 +889,8 @@ action	subtitles.srt-to-vtt	family=subtitles	in=application/x-subrip	out=text/vt
 action	subtitles.vtt-to-srt	family=subtitles	in=text/vtt	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
 action	subtitles.ass-to-srt	family=subtitles	in=text/x-ssa	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
 action	subtitles.ass-to-vtt	family=subtitles	in=text/x-ssa	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ttml-to-srt	family=subtitles	in=application/ttml+xml	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ttml-to-vtt	family=subtitles	in=application/ttml+xml	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
