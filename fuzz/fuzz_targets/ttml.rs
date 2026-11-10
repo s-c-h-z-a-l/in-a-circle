@@ -11,13 +11,19 @@
 //! one paragraph is checked against its own model (see [`check_paragraph_timing`]),
 //! and the italic of one paragraph against another (see [`check_italic`]): the
 //! checks of the reader's arithmetic and of its style that the shared checks
-//! cannot make.
+//! cannot make. The text is checked too: the input's bytes choose a whole
+//! document (its paragraphs, spans, breaks, white space and timing), and the
+//! brute-force model in `subtitles/ttml_model.rs` says which cues it must give
+//! (see [`check_text`]). The same model runs in the normal test suite.
 
 use libfuzzer_sys::fuzz_target;
 use subtitles::ReadError;
 
 #[path = "subtitles/common.rs"]
 mod common;
+
+#[path = "subtitles/ttml_model.rs"]
+mod ttml_model;
 
 /// A document whose one paragraph is timed 0 to 1 hour (3,600,000 ms, inside
 /// `MAX_MS`), so the input is that paragraph's content.
@@ -95,6 +101,20 @@ fn check_italic(data: &[u8]) {
     );
 }
 
+/// The text of a generated document against the model (`ttml_model`): each
+/// byte of the input is one choice (`byte % n`), and past the end every choice
+/// is 0, so every input gives a document. A shape the model names wrong fails
+/// here with the document in the message.
+fn check_text(data: &[u8]) {
+    let mut at = 0;
+    let mut pick = |n: u32| {
+        let byte = data.get(at).copied().unwrap_or(0);
+        at += 1;
+        u32::from(byte) % n
+    };
+    ttml_model::check(&ttml_model::document(&mut pick));
+}
+
 fuzz_target!(|data: &[u8]| {
     common::check(data, subtitles::read_ttml);
     common::check(&[HEAD, data, TAIL].concat(), subtitles::read_ttml);
@@ -104,4 +124,8 @@ fuzz_target!(|data: &[u8]| {
     );
     check_paragraph_timing(data);
     check_italic(data);
+    for (_, doc) in ttml_model::named() {
+        ttml_model::check(&doc);
+    }
+    check_text(data);
 });
