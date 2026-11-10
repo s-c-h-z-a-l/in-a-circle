@@ -168,7 +168,7 @@ whatever else it holds (a hidden or animated one included).
 | `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
 | `p` | cues (`slice.rs`), or `skipped` with its line and reason |
 | `span` | a container. A `span` with its own timing slices its paragraph |
-| `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
+| `br` | a line-break piece over the container's interval, open-ended when the container has no end (12.4): it does not decide the container's end. Metadata in it is ignored without a count; other content is counted as below |
 | `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
 | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
 | text in `p` or `span`, white space only | spacing only: a piece over its container's interval; with no end of its own it lasts as long as the paragraph (8.2.10, 12.4), and the space is trimmed where a line starts or ends. Not counted |

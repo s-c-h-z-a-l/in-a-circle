@@ -307,6 +307,47 @@ fn timed_break_is_active_only_in_its_span() {
     assert_eq!(spans(&parsed), vec![(0, 1_000), (1_000, 2_000)]);
 }
 
+/// 12.4: a `br` is an anonymous span whose implicit duration is its
+/// container's, so it does not decide the container's end. A paragraph whose
+/// lines are timed by their spans ends with them, with or without a `br`
+/// between them. In `seq` a `br` is zero long and moves nothing.
+#[test]
+fn a_line_break_does_not_decide_the_paragraph_end() {
+    // The reviewer's case: no end on the paragraph or its ancestors.
+    let parsed = read(&doc(
+        r#"<p><span begin="1s" end="2s">Hello</span><br/><span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello\nworld"]);
+    assert_eq!(spans(&parsed), vec![(1_000, 2_000)]);
+    assert_eq!(parsed.skipped.count, 0);
+    // The same with white space around the `br`.
+    let parsed = read(&doc(
+        r#"<p><span begin="1s" end="2s">Hello</span> <br/> <span begin="1s" end="2s">world</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Hello\nworld"]);
+    // A `br` after the last timed line does not end the paragraph either.
+    let parsed = read(&doc(
+        r#"<p begin="0s"><span begin="0s" end="2s">a</span><br/></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert_eq!(spans(&parsed), vec![(0, 2_000)]);
+    // A `br` between two lines whose times differ: each line keeps its own
+    // interval, and the break is active over the whole paragraph, so a line
+    // break at either edge of a cue is not text.
+    let parsed = read(&doc(
+        r#"<p><span begin="0s" end="1s">one</span><br/><span begin="1s" end="2s">two</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["one", "two"]);
+    assert_eq!(spans(&parsed), vec![(0, 1_000), (1_000, 2_000)]);
+    // In `seq` the `br` is zero long: the spans follow each other.
+    let parsed = read(&doc(
+        r#"<p begin="0s" timeContainer="seq"><span dur="1s">one</span><br/><span dur="1s">two</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["one", "two"]);
+    assert_eq!(spans(&parsed), vec![(0, 1_000), (1_000, 2_000)]);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
 #[test]
 fn utf16_input_is_decoded() {
     let text = fs::read_to_string(

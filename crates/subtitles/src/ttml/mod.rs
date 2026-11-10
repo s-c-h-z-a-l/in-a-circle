@@ -12,9 +12,12 @@
 //! the two. Without an explicit end, a container ends with its children: at the
 //! latest child end (`seq`: at the end of the last child). Text and `br` are
 //! anonymous spans (12.4): zero long in `seq`, and in `par` as long as their
-//! container, which is indefinite unless it has an end. Every end is clamped to
-//! the earliest explicit end of the element and its ancestors. A paragraph that
-//! is still indefinite has no end time and is skipped.
+//! container, which is indefinite unless it has an end. Such a piece does not
+//! decide its container's end: the container ends with its timed children, so
+//! white space or a `br` after the last timed line does not make a paragraph
+//! without an end time (the endsync `all` of 12.2.4 would, read literally).
+//! Every end is clamped to the earliest explicit end of the element and its
+//! ancestors. A paragraph that is still indefinite has no end time and is skipped.
 //!
 //! Styles (10.4). A style is referenced by a `style` attribute (a list of ids,
 //! merged in order, the later one winning), and its own declarations come last.
@@ -60,7 +63,7 @@
 //! | `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
 //! | `p` | cues (`slice.rs`), or `skipped` with its line and reason |
 //! | `span` | a container. A `span` with its own timing slices its paragraph |
-//! | `br` | a line-break piece. Metadata in it is ignored without a count; other content is counted as below |
+//! | `br` | a line-break piece over the container's interval, open-ended when the container has no end (12.4): it does not decide the container's end. Metadata in it is ignored without a count; other content is counted as below |
 //! | `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
 //! | text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
 //! | text in `p` or `span`, white space only | spacing only: a piece over its container's interval; with no end of its own it lasts as long as the paragraph (8.2.10, 12.4), and the space is trimmed where a line starts or ends. Not counted |
@@ -998,6 +1001,9 @@ impl<'b> Doc<'b> {
 
     /// A `br` in a paragraph or span: a line break in the parent's interval.
     /// Its own content is metadata and is read by the frame that holds it.
+    /// A `br` is an anonymous span (12.4), so its end is the container's, not
+    /// its own: it does not decide the container's end (`child_ended` is not
+    /// called). In `seq` it is zero long and the cursor does not move.
     fn line_break(&mut self, el: &Element) -> Result<(), ReadError> {
         if el.attr(Some(SMPTE_NS), "backgroundImage").is_some() {
             self.image_unit();
@@ -1014,14 +1020,15 @@ impl<'b> Doc<'b> {
             ..Flags::default()
         };
         let flags = top.text_flags().join(own_flags(&decl)).join(own);
-        self.child_ended(end);
-        if let (Some(begin), Some(end)) = (base, end)
-            && end > begin
+        // Zero long in `seq` (no piece); in `par` the end is open, and the
+        // paragraph's end resolves it (see `slice::cues`).
+        if let Some(begin) = base
+            && end.is_none_or(|end| end > begin)
         {
             self.budget.charge()?;
             self.push_piece(Piece {
                 begin,
-                end: Some(end),
+                end,
                 content: Content::Break,
                 style: RunStyle::default(),
                 flags,
