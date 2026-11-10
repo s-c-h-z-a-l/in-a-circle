@@ -435,4 +435,36 @@ mod tests {
             Err(ReadError::TooComplex)
         );
     }
+
+    /// Losses are counted in cues, so a read with no cue counts none: the
+    /// `set` outside any paragraph is styling for every cue there is, and the
+    /// paragraph that would be one is skipped (its end is before its begin).
+    #[test]
+    fn a_document_without_a_cue_counts_no_loss() {
+        let ttml = concat!(
+            r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body>"#,
+            r#"<div><set begin="0s" tts:color="red"/><p begin="2s" end="1s">x</p></div></body></tt>"#
+        );
+        let parsed = ttml::parse(ttml.as_bytes(), &mut Budget::new(ITEM_BUDGET))
+            .expect("the document is read, with nothing usable in it");
+        assert!(parsed.cues.is_empty());
+        assert!(parsed.losses.is_empty());
+    }
+
+    /// An ignored element is not an item (the accounting table charges element
+    /// frames, pieces, copies, lines, cues and style entries). A visibility `set`
+    /// in a paragraph is ignored, so the least budget that reads a paragraph
+    /// with one is the least for the empty paragraph.
+    #[test]
+    fn a_visibility_set_in_a_paragraph_costs_no_item() {
+        let least = |body: &str| {
+            let text = format!(
+                r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s">{body}</p></div></body></tt>"#
+            );
+            (1..)
+                .find(|&b| ttml::parse(text.as_bytes(), &mut Budget::new(b)).is_ok())
+                .expect("some budget reads the document")
+        };
+        assert_eq!(least(r#"<set begin="0s" tts:display="none"/>"#), least(""),);
+    }
 }
