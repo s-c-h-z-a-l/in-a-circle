@@ -1,6 +1,7 @@
 //! Subtitle cues: the model the subtitle readers fill and the SRT and WebVTT
-//! writers print. Standard library only, because the shipped subtitle binary
-//! links it and the dependency guard allows nothing else.
+//! writers print. The standard library, and the `xml` crate for the TTML reader:
+//! the shipped subtitle binary links these and the dependency guard allows
+//! nothing else.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,6 +11,7 @@ mod ass;
 mod srt;
 mod tag;
 mod time;
+mod ttml;
 mod vtt;
 mod write;
 

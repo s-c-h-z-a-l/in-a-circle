@@ -33,7 +33,8 @@ Four actions, one format in and one out: `subtitles.srt-to-vtt`,
 The classifier types a file by its head: a `.srt` with a `-->` timing
 (`application/x-subrip`), a `.vtt` with the `WEBVTT` signature (`text/vtt`),
 and a `.ass` or `.ssa` with a `[Script Info]` section (`text/x-ssa`). The
-readers are in `crates/subtitles` (standard library only); the action binary is
+readers are in `crates/subtitles` (standard library, and the `xml` crate for
+TTML); the action binary is
 `inacircle-subtitles`.
 
 Every conversion is lossy where the target cannot carry a feature. The notice

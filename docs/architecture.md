@@ -101,7 +101,8 @@ are in `CLAUDE.md`.
 
 - **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT and ASS/SSA to SRT or
   WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
-  writers are the `crates/subtitles` library (standard library only). The rules
+  writers are the `crates/subtitles` library (standard library, and the `xml`
+  crate for TTML). The rules
   are under Manifest, after the text family's.
 
 ## Manifest
