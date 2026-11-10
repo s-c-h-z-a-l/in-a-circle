@@ -83,14 +83,25 @@ column of the earlier series was not re-run on the final tree and is not shown.
 | SRT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.9 / 129.0 / 129.0 | kept, exit 0 |
 | SRT, one cue of 2-byte lines (`x\n`) | 906.3 | 216.5 | 216.2 / 216.3 / 216.5 | refused (`TooComplex`), exit 1 |
 | WebVTT, about 310,000 cues of 27 B | 138.4 | 129.0 | 128.8 / 128.9 / 128.9 | kept, exit 0 |
-| ASS, about 180,000 cues of 46 B | 87.2 | 81.6 | 89.5 / 89.5 / 89.5 | kept, exit 0 |
+| ASS, 186,410 cues of 45 B (the dense test's shape) | 87.2 | 81.6 | 81.4 / 81.6 / 81.6 (srt), 81.5 / 81.6 / 81.6 (vtt) | kept, exit 0 |
+| ASS, 204,597 cues of 41 B (not in the dense test) | not recorded | not recorded | 88.3 / 88.4 / 88.5 (srt), 88.3 / 88.5 / 88.5 (vtt) | kept, exit 0 |
 | ASS, one cue of `x\N` lines (3 B each) | 607.8 | 216.7 | 216.3 / 216.4 / 216.5 | refused (`TooComplex`), exit 1 |
 
-Against the earlier release series of this page, the four shapes whose
-figures stayed within about 0.3 MiB are unchanged within noise. The ASS cue
-shape moved from 81.2 / 81.5 / 81.6 to 89.5 MiB. The ASS reader changed after
-that series (the bare-override reset and the look-alike rules), and the cause of
-the 8 MiB is not separated here. It is still far under the 1 GiB net.
+The two ASS cue rows were re-measured at `038bb5c46`, the tree before this
+correction, five runs each. The ASS reader is the same as at `666f61b18`, and
+the dense shape measures the same with the `666f61b18` binary (81.3 / 81.3 / 81.5
+srt, 81.3 / 81.4 / 81.4 vtt). The SRT writer changes since then move it by less than
+0.3 MiB.
+
+The earlier release series gave the dense ASS shape 81.2 / 81.5 / 81.6 MiB, and
+it measures the same now. The 89.5 MiB this row showed does not reproduce: no
+input shape tried gave it, and its input is not available. Peak RSS grows with
+the cue count, about 400 B per cue (80.0 MiB at 182,358 cues of 46 B with CRLF
+line ends, 81.5 at 186,410, 88.5 at 204,597). So the higher figure belongs to an
+input of about 205,000 cues, like the 41-byte-line row, not to the dense shape.
+Nothing changed the dense shape's figure, so the earlier attribution to reader
+changes is withdrawn: the look-alike rules are writer-only. Both rows are still
+far under the 1 GiB net.
 
 The two refused shapes are refused whole: their output is not written. The
 speaker-name probe (a 1 MiB name over 400 lines, `vtt-to-srt`) held 406.4 MiB
@@ -345,7 +356,11 @@ done
 #   target/release/inacircle-subtitles run <action> --work <dir> -- <input>
 # and reads ru_maxrss from wait4. The parent is a throw-away script that
 # generates the inputs as the dense test does (bins/inacircle-subtitles/tests/cli.rs);
-# it is not committed. Run it under the prefix:
+# it is not committed. The ASS cue inputs are the dense test's head (`[Script Info]`,
+# `ScriptType: v4.00+`, `[Events]`, the `Format:` line of the test) followed by
+# `Dialogue: 0,0:00:00.00,0:00:00.01,,,0,0,0,,x` lines (45 B with the newline; the
+# dense row), or by `Dialogue:0,0:00:00.00,0:00:00.01,,,,,,,x` lines (41 B; the
+# 41-byte row), padded with newlines to 8 MiB. Run it under the prefix:
 #   $MEM python3 -I <parent>.py <binary> 5 <input dir> <work dir>
 
 # Refused-shape check (no peak figure): one run per format
