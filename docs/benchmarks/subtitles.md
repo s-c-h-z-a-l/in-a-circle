@@ -278,7 +278,7 @@ for a leading `<`). Base is `c7125a9a`, the plan-18 head; the new tree is
 with their own target directories, and the same harness as above
 (`classify_bench`, 2,000 drops, two alternating rounds with the order swapped).
 
-Inputs: `nottml`, a `.xml` of 3,992 B (a 3,890 B XML comment, then
+Inputs: `nottml`, a `.xml` of 3,992 B (a 3,900 B XML comment, then
 `<catalog xmlns="urn:example:catalog">`, so the root is inside the head but
 is not `tt`); `ttml-xml`, a 403 B TTML document as `.xml`; `ttml`, the same as
 `.ttml`; `srt`, 94 B; `txt`, 51 B. "1 file" is one file per drop; "50 files" is
