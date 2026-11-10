@@ -111,15 +111,13 @@ impl Params {
             "dropNTSC" | "dropPAL" => {}
             _ => return Err(Unsupported("invalid ttp:dropMode")),
         }
-        // 7.2.7: the default is discontinuous, and a discontinuous SMPTE time
-        // has no media time: its expressions name markers the document does not
-        // carry (I.3). Only `continuous` gives the SMPTE formula below.
+        // 7.2.7: the default is discontinuous. I.3 says a discontinuous SMPTE
+        // time has no media time of its own, so the continuous formula below is
+        // an approximation for it: the time code is read as if the markers were
+        // continuous, under either marker mode. Refusing the default would refuse
+        // most broadcast files, and a converter can only map time codes to times.
         match attribute(attrs, "markerMode").unwrap_or("discontinuous") {
-            "continuous" => {}
-            "discontinuous" if smpte => {
-                return Err(Unsupported("discontinuous SMPTE markers"));
-            }
-            "discontinuous" => {}
+            "continuous" | "discontinuous" => {}
             _ => return Err(Unsupported("invalid ttp:markerMode")),
         }
 
@@ -675,18 +673,58 @@ mod tests {
         );
     }
 
+    /// SMPTE time with either marker mode is read by the same formula (7.2.7,
+    /// I.3): the default discontinuous mode and the explicit one give the same
+    /// milliseconds as the continuous mode, which is the documented
+    /// approximation for discontinuous markers.
+    #[test]
+    fn smpte_with_discontinuous_markers_is_read_as_continuous() {
+        let implicit = [
+            ("timeBase", "smpte"),
+            ("frameRate", "30"),
+            ("frameRateMultiplier", "1000 1001"),
+        ];
+        let explicit = [
+            ("timeBase", "smpte"),
+            ("markerMode", "discontinuous"),
+            ("frameRate", "30"),
+            ("frameRateMultiplier", "1000 1001"),
+        ];
+        assert!(
+            Params::from_tt(&implicit).is_ok(),
+            "the default marker mode is accepted"
+        );
+        assert_eq!(read("00:01:00:00", &implicit), Ok(60_060));
+        assert_eq!(read("00:01:00:00", &explicit), Ok(60_060));
+        assert_eq!(read("1s", &explicit), Ok(1_001));
+    }
+
+    /// The continuous marker mode gives the same milliseconds as the default
+    /// (7.2.7): the marker mode changes the approximation's label, not its value.
+    #[test]
+    fn smpte_with_continuous_markers_is_read_the_same() {
+        let discontinuous = [("timeBase", "smpte"), ("markerMode", "discontinuous")];
+        let continuous = [("timeBase", "smpte"), ("markerMode", "continuous")];
+        for expr in ["00:00:01:00", "00:01:00:00", "1.5s"] {
+            assert_eq!(
+                read(expr, &continuous),
+                read(expr, &discontinuous),
+                "{expr}"
+            );
+        }
+        assert_eq!(
+            Params::from_tt(&[("timeBase", "smpte"), ("markerMode", "sometimes")]),
+            Err(Unsupported("invalid ttp:markerMode"))
+        );
+    }
+
     /// The bases and drop modes this reader does not convert refuse the whole
-    /// document, as do the SMPTE tick and a discontinuous SMPTE time (7.2.7).
+    /// document, as does the SMPTE tick (7.2.10, 7.2.11).
     #[test]
     fn unconverted_time_bases_refuse_the_document() {
         assert_eq!(
             Params::from_tt(&[("timeBase", "clock")]),
             Err(Unsupported("clock time base"))
-        );
-        assert_eq!(
-            Params::from_tt(&[("timeBase", "smpte")]),
-            Err(Unsupported("discontinuous SMPTE markers")),
-            "the marker mode defaults to discontinuous"
         );
         let smpte_drop = |drop: &'static str| {
             Params::from_tt(&[

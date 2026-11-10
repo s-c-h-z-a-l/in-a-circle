@@ -103,7 +103,10 @@ are in `CLAUDE.md`.
   WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
   writers are the `crates/subtitles` library (standard library, and the `xml`
   crate for TTML). The rules
-  are under Manifest, after the text family's.
+  are under Manifest, after the text family's. A TTML SMPTE time code
+  (`ttp:timeBase="smpte"`) is read with the continuous-marker formula under
+  either `ttp:markerMode`: an approximation for discontinuous markers, which
+  carry no media time of their own.
 
 ## Manifest
 
