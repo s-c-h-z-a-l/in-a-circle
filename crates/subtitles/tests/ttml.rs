@@ -343,6 +343,17 @@ fn end_before_begin_is_skipped() {
     assert_eq!(parsed.skipped.first, Some((1, "ends before it starts")));
 }
 
+/// A `p` whose end equals its begin is zero long: it is skipped as text with
+/// no display time, not as one that ends before it starts (12.2.3).
+#[test]
+fn empty_interval_is_not_end_before_begin() {
+    let parsed = read(&doc(
+        r#"<p begin="1s" end="1s">empty</p><p begin="0s" end="1s">ok</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["ok"]);
+    assert_eq!(parsed.skipped.first, Some((1, "text with no display time")));
+}
+
 /// 100 hours or more is past what a subtitle can carry. An
 /// expression that says so is out of range; a paragraph whose time adds up to
 /// it through its containers is past [`subtitles::MAX_MS`].
@@ -358,6 +369,32 @@ fn time_at_or_past_100_hours_is_skipped() {
         "{TT}<body><div begin=\"60:00:00.000\">\
          <p begin=\"50:00:00.000\" end=\"51:00:00.000\">late</p>\
          <p begin=\"0s\" end=\"1s\">ok</p></div></body></tt>"
+    ));
+    assert_eq!(texts(&parsed), vec!["ok"]);
+    assert_eq!(parsed.skipped.first, Some((1, "time is 100 hours or more")));
+}
+
+/// The limit is a time the reader keeps: a paragraph that ends at `MAX_MS`
+/// (359 999 999 ms, just under 100 hours) is shown, and one that begins there
+/// with no time left is an empty interval, not a late one.
+#[test]
+fn the_limit_itself_is_a_kept_time() {
+    let parsed = read(&doc(r#"<p begin="359999.998s" end="359999.999s">x</p>"#));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(spans(&parsed), vec![(359_999_998, 359_999_999)]);
+    let parsed = read(&doc(
+        r#"<p begin="359999.999s" end="359999.999s">x</p><p begin="0s" end="1s">ok</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["ok"]);
+    assert_eq!(parsed.skipped.first, Some((1, "text with no display time")));
+}
+
+/// An end past the limit is late even when it comes from a container: 99:59:59
+/// plus 2 s is past `MAX_MS`, so the paragraph is skipped, not shown.
+#[test]
+fn an_end_past_the_limit_through_a_container_is_late() {
+    let parsed = read(&doc(
+        r#"<div begin="99:59:59.000"><p begin="0s" end="2s">late</p></div><p begin="0s" end="1s">ok</p>"#,
     ));
     assert_eq!(texts(&parsed), vec!["ok"]);
     assert_eq!(parsed.skipped.first, Some((1, "time is 100 hours or more")));
@@ -685,6 +722,18 @@ fn region_style_applies_below_the_paragraph() {
     assert_eq!(runs(&parsed.cues[0]), vec![run("x", true, true, false)]);
 }
 
+/// A `body` names styles like any element, and its references resolve before
+/// its content takes them: `a` refers to `b`, so the italic of `b` reaches the
+/// paragraph under the body (10.4.1.2).
+#[test]
+fn a_body_style_reference_chain_reaches_its_content() {
+    let parsed = read(&format!(
+        "{STYLED}<head><styling><style xml:id=\"a\" style=\"b\"/><style xml:id=\"b\" tts:fontStyle=\"italic\"/></styling></head>\
+         <body style=\"a\"><div><p begin=\"0s\" end=\"1s\">x</p></div></body></tt>"
+    ));
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", true, false, false)]);
+}
+
 /// Content style inheritance (10.4.2.1): an inheritable value on `body` reaches
 /// the spans of its paragraphs. A value the ancestor gives beats the region's, so
 /// the body's `none` keeps the region's underline off. A non-inheritable value
@@ -803,12 +852,16 @@ fn losses_count_once_per_cue() {
 /// the reader keeps, or the loss a paragraph carrying it gets.
 #[test]
 fn every_style_declaration_is_carried_or_counted() {
-    let rows: [(&str, Option<Loss>); 15] = [
+    let rows: [(&str, Option<Loss>); 19] = [
         (r#"tts:fontStyle="italic""#, None),
         (r#"tts:fontWeight="bold""#, None),
         (r#"tts:textDecoration="underline""#, None),
         (r#"tts:textDecoration="none""#, None),
         (r#"tts:textDecoration="lineThrough""#, Some(Loss::Styling)),
+        (r#"tts:textDecoration="overline""#, Some(Loss::Styling)),
+        (r#"tts:textDecoration="noOverline""#, None),
+        (r#"tts:opacity="1""#, None),
+        (r#"tts:opacity="2""#, Some(Loss::Styling)),
         (r#"tts:fontStyle="sideways""#, Some(Loss::Styling)),
         (r#"tts:color="red""#, Some(Loss::Styling)),
         (r#"tts:backgroundColor="blue""#, Some(Loss::Styling)),
@@ -856,6 +909,34 @@ fn px_placement_without_root_extent_is_not_top() {
     assert_eq!(loss(&parsed, Loss::Position), 1);
 }
 
+/// `tts:origin` on the root is a placement the reader does not use, so every
+/// cue of the document counts it as `Position`, the root's origin alone.
+#[test]
+fn a_placement_on_the_root_is_a_position_loss() {
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" tts:origin="0px 0px"><body><div><p begin="0s" end="1s">x</p><p begin="2s" end="3s">y</p></div></body></tt>"#,
+    );
+    assert_eq!(texts(&parsed), vec!["x", "y"]);
+    assert_eq!(loss(&parsed, Loss::Position), 2);
+}
+
+/// `tts:extent` on the root is read only as two px lengths (or `auto` and
+/// `contain`). Any other value is a placement the reader does not use, so each
+/// cue counts it as `Position`: a percentage in either place, or a zero height.
+#[test]
+fn a_root_extent_the_reader_cannot_use_is_a_position_loss() {
+    for extent in ["10% 10px", "10px 10%", "1920px 0px"] {
+        let parsed = read(&format!(
+            r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" tts:extent="{extent}"><body><div><p begin="0s" end="1s">x</p></div></body></tt>"#
+        ));
+        assert_eq!(loss(&parsed, Loss::Position), 1, "{extent}");
+    }
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" tts:extent="1920px 1080px"><body><div><p begin="0s" end="1s">x</p></div></body></tt>"#,
+    );
+    assert_eq!(loss(&parsed, Loss::Position), 0);
+}
+
 /// A paragraph with no region is never top: the layout's default placement is
 /// not the top (a player puts it at the bottom), and a document without a layout
 /// has no region at all.
@@ -879,6 +960,49 @@ fn region_named_but_not_defined_is_a_position_loss() {
     assert_eq!(texts(&parsed), vec!["x"]);
     assert!(!parsed.cues[0].top);
     assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// A region placed off the top by its origin alone loses that placement: the
+/// origin is a placement whatever the alignment and the extent say.
+#[test]
+fn an_origin_alone_off_the_top_is_a_position_loss() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="10% 80%"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert!(!parsed.cues[0].top);
+    assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// A region's own declaration the reader does not carry is `Styling` on each cue
+/// placed in it, as the same declaration on the paragraph would be.
+#[test]
+fn a_region_declaration_not_carried_is_styling_on_its_cues() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="0% 0%" tts:color="red"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// A length keeps at most nine digits. The value 33 % in nine digits is read,
+/// and the anchor is top (a third of the root or less); in ten digits it is not
+/// read at all, so the placement it gives is lost.
+#[test]
+fn a_length_of_nine_digits_is_read_and_ten_are_not() {
+    let nine = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="0% 000000033%"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert!(nine.cues[0].top);
+    assert_eq!(loss(&nine, Loss::Position), 0);
+    let ten = read(&styled(
+        r#"<layout><region xml:id="r" tts:origin="0% 0000000033%"/></layout>"#,
+        r#"<p begin="0s" end="1s" region="r">x</p>"#,
+    ));
+    assert!(!ten.cues[0].top);
+    assert_eq!(loss(&ten, Loss::Position), 1);
 }
 
 /// A style flood is linear: 100,000 `style` elements (4 MiB), and a paragraph
@@ -1177,6 +1301,31 @@ fn duplicate_region_id_keeps_the_first_and_counts_its_references() {
     ));
     assert!(parsed.cues[0].top, "the first region is the top one");
     assert_eq!(loss(&parsed, Loss::Position), 1);
+}
+
+/// A dropped duplicate counts its carried values too, not only its unknown ones:
+/// a lone `fontStyle` in the dropped style is `Styling` on the reference.
+#[test]
+fn a_dropped_duplicate_with_only_carried_values_counts_its_references() {
+    let parsed = read(&styled(
+        r#"<styling><style xml:id="s"/><style xml:id="s" tts:fontStyle="italic"/></styling>"#,
+        r#"<p begin="0s" end="1s" style="s">x</p>"#,
+    ));
+    assert_eq!(runs(&parsed.cues[0]), vec![run("x", false, false, false)]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
+/// A `head` after the body is not read: the sheet is resolved when the body
+/// begins, so the style there is an ignored element, counted on every cue.
+#[test]
+fn a_head_after_the_body_is_ignored_and_counted() {
+    let parsed = read(&format!(
+        "{STYLED}<head/><body><div><p begin=\"0s\" end=\"1s\">x</p></div></body>\
+         <head><styling><style xml:id=\"s\" tts:color=\"red\"/></styling></head></tt>"
+    ));
+    assert_eq!(texts(&parsed), vec!["x"]);
+    assert_eq!(loss(&parsed, Loss::Elements), 1);
+    assert_eq!(loss(&parsed, Loss::Styling), 0);
 }
 
 /// One row per construct the accounting table of `ttml/mod.rs` lists as
