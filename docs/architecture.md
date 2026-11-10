@@ -128,8 +128,9 @@ What a TTML conversion keeps, counts, skips and refuses. The reader
 test `every_ignored_construct_is_counted` checks one row per construct. Losses
 are counted in cues, once per cue and kind, except `Elements`, which counts
 items: each ignored element (with no visible text) and each image unit once,
-however many cues it lies over. `skipped` counts items (elements, paragraphs,
-text blocks) with the first one's line and reason. A count on every cue of the
+however many cues it lies over, and also in a skipped paragraph (the skip counts
+the paragraph, the item what it held). `skipped` counts items (elements,
+paragraphs, text blocks) with the first one's line and reason. A count on every cue of the
 document (`initial`, a `set` outside a paragraph) is the cue count, an upper
 bound where the reader does not track which paragraphs the element reaches.
 A paragraph with no visible text has nothing to lose, so it is not counted,

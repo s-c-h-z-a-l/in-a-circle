@@ -98,8 +98,10 @@
 //! a `set` or `animate` outside a paragraph) is the cue count: it replaces the
 //! per-cue counts the paragraphs made, so a document never counts a cue twice.
 //! `Elements` counts items, not cues: each ignored element with no visible text
-//! and each image unit is one, however many cues it lies over. Image units and
-//! ignored elements count only when a text cue remains.
+//! and each image unit is one, however many cues it lies over. An item counts
+//! even when the paragraph that holds it is skipped, as an image unit always
+//! did: the skip counts the paragraph, the item counts what it held. Image units
+//! and ignored elements count only when a text cue remains.
 //!
 //! A cue's losses are its pieces' flags (`Flags`), counted once per cue. A piece
 //! takes the flags of every element it is in, and a `br` those of its own

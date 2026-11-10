@@ -1603,6 +1603,13 @@ fn accounting_rows() -> Vec<Row> {
             None,
         ),
         row(
+            "foreign element with no text in a skipped paragraph: its item and the skip",
+            doc(r#"<p>a<x:foo xmlns:x="urn:x"/>b</p><p begin="0s" end="1s">ok</p>"#),
+            &[(Loss::Elements, 1)],
+            1,
+            Some((1, "no end time")),
+        ),
+        row(
             "two foreign elements in a paragraph cut into three cues: Elements 2, not 6",
             doc(
                 r#"<p begin="0s" end="3s">a<x:foo xmlns:x="urn:x"/><span begin="1s" end="2s">b</span><x:foo xmlns:x="urn:x"/>c</p>"#,
