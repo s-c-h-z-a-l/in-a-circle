@@ -57,6 +57,23 @@ pub fn read_ass(bytes: &[u8]) -> Result<Parsed, ReadError> {
     Ok(parsed)
 }
 
+/// Reads a TTML file (TTML2, and the DFXP namespace of TTML 1) for its
+/// structure and timing: the limits are as in [`read_srt`], and the text is
+/// decoded by the `xml` crate. A document that is not well-formed is refused
+/// whole, with the line, and so is a time base the reader does not convert (a
+/// clock or drop-frame time code). An element the reader does not convert is
+/// skipped and counted. See `ttml/mod.rs` for the rules and the accounting.
+pub fn read_ttml(bytes: &[u8]) -> Result<Parsed, ReadError> {
+    if bytes.len() > INPUT_BYTES {
+        return Err(ReadError::TooLarge);
+    }
+    let parsed = ttml::parse(bytes, &mut Budget::new(ITEM_BUDGET))?;
+    if parsed.cues.is_empty() {
+        return Err(ReadError::NoCues);
+    }
+    Ok(parsed)
+}
+
 /// The input as text: refused past [`INPUT_BYTES`], refused when it is not
 /// UTF-8, and without its byte order mark.
 fn text_of(bytes: &[u8]) -> Result<&str, ReadError> {
@@ -85,7 +102,10 @@ pub const OUTPUT_BYTES: u64 = 32 << 20;
 pub const MAX_MS: u64 = 359_999_999;
 
 /// Largest number of items a reader stores: each cue, each line and each run
-/// is one. The readers' memory grows with the items, not with the bytes (a
+/// is one. The TTML reader also charges each element it opens, each text or
+/// `br` piece of a paragraph, and each copy of a piece into a cue (one per
+/// cue the piece is active in; see `ttml/slice.rs`). The readers' memory grows
+/// with the items, not with the bytes (a
 /// 2-byte line is a line and a run), so this count is the memory bound. The
 /// densest refused 8 MiB shape (one cue of 2-byte lines) peaked at 216.5 MiB
 /// at this budget, about 113 B per item over the whole process, so the budget
@@ -214,6 +234,12 @@ pub enum ReadError {
     TooComplex,
     /// The input parsed, but no cue in it is usable.
     NoCues,
+    /// The XML is not well-formed, at `line` (1-based); `reason` says what.
+    Malformed { line: u32, reason: &'static str },
+    /// The root is not a `tt` element of a TTML namespace.
+    NotTtml,
+    /// The document uses a construct the reader does not convert.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for ReadError {
@@ -228,6 +254,11 @@ impl fmt::Display for ReadError {
                 f.write_str("too many lines and styled runs (more than 2,000,000)")
             }
             ReadError::NoCues => f.write_str("no subtitles found"),
+            ReadError::Malformed { line, reason } => {
+                write!(f, "not well-formed TTML (line {line}): {reason}")
+            }
+            ReadError::NotTtml => f.write_str("not a TTML document"),
+            ReadError::Unsupported(reason) => write!(f, "unsupported TTML: {reason}"),
         }
     }
 }
@@ -274,6 +305,25 @@ mod tests {
         );
         assert_eq!(
             ass::parse(ass, &mut Budget::new(2)).map(|p| p.cues.len()),
+            Err(ReadError::TooComplex)
+        );
+    }
+
+    /// The TTML count is exact too: the root, the body and the paragraph are
+    /// elements (3); the text is a piece (1); the one slice copies it (1); its
+    /// line (1) and its cue (1). Seven items; six refuses.
+    #[test]
+    fn ttml_budget_boundary_is_exact() {
+        let ttml = concat!(
+            r#"<tt xmlns="http://www.w3.org/ns/ttml"><body>"#,
+            r#"<p begin="0s" end="1s">x</p></body></tt>"#
+        );
+        assert_eq!(
+            ttml::parse(ttml.as_bytes(), &mut Budget::new(7)).map(|p| p.cues.len()),
+            Ok(1)
+        );
+        assert_eq!(
+            ttml::parse(ttml.as_bytes(), &mut Budget::new(6)).map(|p| p.cues.len()),
             Err(ReadError::TooComplex)
         );
     }

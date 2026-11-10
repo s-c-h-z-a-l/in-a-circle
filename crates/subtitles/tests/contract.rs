@@ -54,6 +54,19 @@ fn read_errors_say_what_the_user_sees() {
         "subtitle file is larger than 8 MiB"
     );
     assert_eq!(ReadError::NoCues.to_string(), "no subtitles found");
+    assert_eq!(
+        ReadError::Malformed {
+            line: 7,
+            reason: "mismatched end tag"
+        }
+        .to_string(),
+        "not well-formed TTML (line 7): mismatched end tag"
+    );
+    assert_eq!(ReadError::NotTtml.to_string(), "not a TTML document");
+    assert_eq!(
+        ReadError::Unsupported("clock time base").to_string(),
+        "unsupported TTML: clock time base"
+    );
 }
 
 #[test]

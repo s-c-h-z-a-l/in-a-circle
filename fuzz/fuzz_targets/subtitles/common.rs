@@ -272,10 +272,13 @@ pub fn check(data: &[u8], read: fn(&[u8]) -> Result<Parsed, ReadError>) {
             "NotUtf8 names a byte that is not the first bad one"
         ),
         Err(ReadError::TooLarge) => assert!(data.len() > INPUT_BYTES, "TooLarge under the limit"),
+        // A malformed document names a line that exists.
+        Err(ReadError::Malformed { line, .. }) => assert!(line >= 1, "Malformed names line 0"),
         // A valid verdict. TooComplex needs more than ITEM_BUDGET items, which
         // a fuzz input (at most 1 MiB, about one item per byte) cannot reach;
         // the budget boundary is pinned by the unit test in crates/subtitles.
-        Err(ReadError::TooComplex | ReadError::NoCues) => {}
+        Err(ReadError::TooComplex | ReadError::NoCues | ReadError::NotTtml) => {}
+        Err(ReadError::Unsupported(_)) => {}
     }
 }
 
