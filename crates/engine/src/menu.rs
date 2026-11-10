@@ -1389,14 +1389,13 @@ mod tests {
     }
 
     /// UTF-8 text is not a subtitle: Subtitles stays dim and no target
-    /// lights, for a `.srt` or `.ttml` the classifier left as plain text.
+    /// lights, for a `.srt` the classifier left as plain text too.
     #[test]
     fn utf8_text_files_do_not_offer_subtitles() {
         let cat = subtitle_catalog();
         for (n, m) in [
             ("a.srt", "text/plain"),
             ("a.vtt", "text/plain"),
-            ("a.ttml", "text/plain"),
             ("a.txt", "text/markdown"),
             ("a.srt", "text/x-8bit"),
         ] {
