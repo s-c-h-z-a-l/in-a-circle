@@ -206,6 +206,25 @@ fn old_dfxp_namespace_is_read() {
     assert_eq!(spans(&parsed), vec![(1_000, 2_000)]);
 }
 
+/// TTML 1 (DFXP, 2006) binds `tts` to `http://www.w3.org/2006/10/ttaf1#styling`:
+/// the namespace document of `ttaf1` lists that URI with `#parameter` and
+/// `#metadata`. A document in that family styles its text as a TTML one does.
+#[test]
+fn old_dfxp_styling_namespace_styles_the_text() {
+    let parsed = read(
+        "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"http://www.w3.org/2006/10/ttaf1#styling\">\
+         <body><div>\
+         <p begin=\"0s\" end=\"1s\" tts:fontStyle=\"italic\" tts:color=\"red\">italic</p>\
+         <p begin=\"2s\" end=\"3s\" tts:display=\"none\">hidden</p>\
+         </div></body></tt>",
+    );
+    assert_eq!(texts(&parsed), vec!["italic"]);
+    assert_eq!(run_flags(&parsed.cues[0]), (true, false, false));
+    assert_eq!(loss(&parsed, Loss::Styling), 1, "the colour is not carried");
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(parsed.skipped.first, Some((1, "hidden by the document")));
+}
+
 /// Namespace prefixes are the XML crate's job: `tt:p` is the TTML `p`.
 #[test]
 fn prefixed_tt_elements_are_read() {
@@ -1824,6 +1843,13 @@ fn accounting_rows() -> Vec<Row> {
         row(
             "display none on a paragraph: hidden, counted",
             doc(r#"<p begin="0s" end="1s" tts:display="none">a</p><p begin="2s" end="3s">b</p>"#),
+            &[],
+            1,
+            Some((1, "hidden by the document")),
+        ),
+        row(
+            "DFXP 2006 styling namespace: display none hides, as in TTML",
+            "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"http://www.w3.org/2006/10/ttaf1#styling\"><body><div><p begin=\"0s\" end=\"1s\" tts:display=\"none\">a</p><p begin=\"2s\" end=\"3s\">b</p></div></body></tt>".to_owned(),
             &[],
             1,
             Some((1, "hidden by the document")),
