@@ -295,6 +295,20 @@ fn foreign_attributes_are_counted_by_their_meaning() {
     assert_eq!(parsed.skipped.count, 0);
 }
 
+/// TTML2 2.3 permits an unqualified attribute (no namespace) only where the
+/// specification defines it; section 4 prunes the attributes an element does not
+/// define. A bare `fontStyle="italic"` on a `p` has no instruction, so the reader
+/// drops it without a count: the text is kept and not italic, with no loss and
+/// no skip. The rule is in the accounting table (`mod.rs`).
+#[test]
+fn unqualified_attributes_are_dropped_without_a_count() {
+    let parsed = read(&doc(r#"<p begin="0s" end="1s" fontStyle="italic">a</p>"#));
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert_eq!(run_flags(&parsed.cues[0]), (false, false, false));
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
 /// Namespace prefixes are the XML crate's job: `tt:p` is the TTML `p`.
 #[test]
 fn prefixed_tt_elements_are_read() {
