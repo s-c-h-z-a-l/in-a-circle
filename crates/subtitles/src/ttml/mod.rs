@@ -38,20 +38,20 @@
 //! | XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
 //! | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
 //! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
-//! | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#style` (the CR's, Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
+//! | the DFXP 2006 namespaces of TTML 1 (`ttaf1` of the 2006/10 CR or the 2006/04 working draft, and its `#style` (Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 //! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | `ttp:timeBase="smpte"` with `ttp:markerMode` absent or `discontinuous` (7.2.7, I.3) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"`, and the media time base, count nothing |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 //! | an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
-//! | the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in either TTML family), anywhere | silent: profile declarations, not content (6, 7) |
+//! | the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in each TTML family), anywhere | silent: profile declarations, not content (6, 7) |
 //! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
-//! | an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones and EBU-TT's `ebuttm` (parameters and metadata: read without a count, IMSC 1.2 8.8, EBU Tech 3380), or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
-//! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
+//! | an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones (IMSC 1.2 8.8), EBU-TT's `ebuttm` (metadata, EBU Tech 3380) and `ebuttp` (parameters, EBU Tech 3370 Part 3): parameters and metadata, read without a count; or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
+//! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it (an unqualified `id` in the 2006/04 draft); without one it can never be referenced and has no effect |
 //! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 //! | `styling`: any other child | `Elements`, once (an item) |
-//! | `layout`: each `region` | an entry of the region table, named by its `xml:id` |
+//! | `layout`: each `region` | an entry of the region table, named by its `xml:id` (`id` in the 2006/04 draft) |
 //! | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
 //! | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
 //! | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
@@ -149,15 +149,20 @@ pub(crate) struct Unsupported(pub(crate) &'static str);
 /// edition, which many files still carry.
 const TT_NS: &str = "http://www.w3.org/ns/ttml";
 const DFXP_NS: &str = "http://www.w3.org/2006/10/ttaf1";
+/// The 2006/04 DFXP working draft's namespace family (WD-ttaf1-dfxp-20060427,
+/// Table 1): the same vocabulary, read as the 2006/10 family is.
+const DFXP_WD_NS: &str = "http://www.w3.org/2006/04/ttaf1";
 /// The parameter namespaces: the `ttp:` attributes of the root (5.1).
 const TTP_NS: &str = "http://www.w3.org/ns/ttml#parameter";
 const DFXP_TTP_NS: &str = "http://www.w3.org/2006/10/ttaf1#parameter";
+const DFXP_WD_TTP_NS: &str = "http://www.w3.org/2006/04/ttaf1#parameter";
 /// The SMPTE-TT namespace: its `backgroundImage` attribute makes the element
 /// that carries it an image unit (see the accounting table).
 const SMPTE_NS: &str = "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt";
 /// The metadata namespaces (14): their elements and attributes are metadata.
 const TTM_NS: &str = "http://www.w3.org/ns/ttml#metadata";
 const DFXP_TTM_NS: &str = "http://www.w3.org/2006/10/ttaf1#metadata";
+const DFXP_WD_TTM_NS: &str = "http://www.w3.org/2006/04/ttaf1#metadata";
 /// The IMSC 1.2 parameter and metadata namespaces (8.8: `ittp:aspectRatio`,
 /// `ittp:progressivelyDecodable`, `ittm:altText`) and EBU-TT's metadata namespace
 /// (`ebuttm:`, EBU Tech 3380): parameters and metadata, read without a count.
@@ -685,16 +690,17 @@ fn is_structure(name: QName) -> bool {
 }
 
 fn is_tt(name: QName) -> bool {
-    matches!(name.ns, Some(TT_NS | DFXP_NS))
+    matches!(name.ns, Some(TT_NS | DFXP_NS | DFXP_WD_NS))
 }
 
 fn is_metadata(name: QName) -> bool {
-    matches!(name.ns, Some(TTM_NS | DFXP_TTM_NS)) || (is_tt(name) && name.local == "metadata")
+    matches!(name.ns, Some(TTM_NS | DFXP_TTM_NS | DFXP_WD_TTM_NS))
+        || (is_tt(name) && name.local == "metadata")
 }
 
 /// The parameter namespaces' elements: the profile declarations of the head.
 fn is_parameter(name: QName) -> bool {
-    matches!(name.ns, Some(TTP_NS | DFXP_TTP_NS))
+    matches!(name.ns, Some(TTP_NS | DFXP_TTP_NS | DFXP_WD_TTP_NS))
 }
 
 /// A time attribute: absent, a time, or a value that cannot be used (its
@@ -953,7 +959,7 @@ impl<'b> Doc<'b> {
         }
         let attrs: Vec<(&str, &str)> = el
             .attrs()
-            .filter(|(q, _)| matches!(q.ns, Some(TTP_NS | DFXP_TTP_NS)))
+            .filter(|(q, _)| matches!(q.ns, Some(TTP_NS | DFXP_TTP_NS | DFXP_WD_TTP_NS)))
             .map(|(q, v)| (q.local, v.as_ref()))
             .collect();
         let params = Params::from_tt(&attrs).map_err(|Unsupported(r)| ReadError::Unsupported(r))?;
@@ -1011,8 +1017,13 @@ impl<'b> Doc<'b> {
         // own declarations are ignored, while the styles it references still
         // apply (10.4.4.2): it counts `Styling` on the cues that reference it.
         let conditional = el.attr(None, "condition").is_some();
+        // The 2006/04 draft names styles and regions by an unqualified `id`.
         let id = el
             .attr(Some(xml::XML_NS), "id")
+            .or_else(|| {
+                el.attr(None, "id")
+                    .filter(|_| el.name.ns == Some(DFXP_WD_NS))
+            })
             .filter(|_| !(conditional && kind == Kind::Region));
         if conditional && kind == Kind::Style && own != Css::default() {
             own = Css {

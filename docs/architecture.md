@@ -141,20 +141,20 @@ whatever else it holds (a hidden or animated one included).
 | XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
 | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
 | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
-| the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#style` (the CR's, Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
+| the DFXP 2006 namespaces of TTML 1 (`ttaf1` of the 2006/10 CR or the 2006/04 working draft, and its `#style` (Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 | `ttp:timeBase="smpte"` with `ttp:markerMode` absent or `discontinuous` (7.2.7, I.3) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"`, and the media time base, count nothing |
 | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 | an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
 | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
-| the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in either TTML family), anywhere | silent: profile declarations, not content (6, 7) |
+| the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in each TTML family), anywhere | silent: profile declarations, not content (6, 7) |
 | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
-| an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones and EBU-TT's `ebuttm` (parameters and metadata: read without a count, IMSC 1.2 8.8, EBU Tech 3380), or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
-| `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
+| an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones (IMSC 1.2 8.8), EBU-TT's `ebuttm` (metadata, EBU Tech 3380) and `ebuttp` (parameters, EBU Tech 3370 Part 3): parameters and metadata, read without a count; or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
+| `styling`: each `style` | an entry of the style table. Its `xml:id` names it (an unqualified `id` in the 2006/04 draft); without one it can never be referenced and has no effect |
 | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 | `styling`: any other child | `Elements`, once (an item) |
-| `layout`: each `region` | an entry of the region table, named by its `xml:id` |
+| `layout`: each `region` | an entry of the region table, named by its `xml:id` (`id` in the 2006/04 draft) |
 | a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
 | a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
 | `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
@@ -1139,10 +1139,10 @@ Every action runs sandboxed, set up in the child between `fork` and
   head opens with `<` after an optional byte order mark and white space is
   `application/ttml+xml`, label `TTML subtitles`; a `.xml` is one only when
   its head's root element is `tt` or `prefix:tt` with a TTML namespace
-  (`http://www.w3.org/ns/ttml`, or the 2006 DFXP draft's
-  `http://www.w3.org/2006/10/ttaf1`) declared on that start tag, found by
-  text search past any `<?…?>`, comments and `<!DOCTYPE …>` (its internal
-  subset included). The root must end within the 4 KiB head; a root past
+  (`http://www.w3.org/ns/ttml`, or a 2006 DFXP one: `http://www.w3.org/2006/10/ttaf1`,
+  the CR's, or `http://www.w3.org/2006/04/ttaf1`, the working draft's) declared on
+  that start tag, found by text search past any `<?…?>`, comments and
+  `<!DOCTYPE …>` (its internal subset included). The root must end within the 4 KiB head; a root past
   it is not recognised. Whether the XML is well formed is the reader's
   to say. A UTF-16 TTML has NUL bytes, and a non-UTF-8 one is not valid
   UTF-8: neither is text, so neither is offered TTML or a code page.

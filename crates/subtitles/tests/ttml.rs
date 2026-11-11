@@ -244,6 +244,63 @@ fn old_dfxp_styling_namespaces_style_the_text() {
     }
 }
 
+/// The 2006/04 DFXP working draft (WD-ttaf1-dfxp-20060427) has the 2006/10
+/// vocabulary under its own namespace family: `tt`, `ttp`, `ttm` and `tts` are
+/// `http://www.w3.org/2006/04/ttaf1`, `#parameter`, `#metadata` and `#style`
+/// (its Table 1), and the draft's examples bind `tts` to `#styling`. Its
+/// styles and regions are named by an unqualified `id`, not `xml:id`. Flash-era
+/// captions carry this root, so it is read as the 2006/10 family is.
+#[test]
+fn draft_2006_04_dfxp_namespace_is_read() {
+    let parsed = read(
+        "<tt xmlns=\"http://www.w3.org/2006/04/ttaf1\"><body><div>\
+         <p begin=\"0s\" end=\"1s\">a</p></div></body></tt>",
+    );
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+}
+
+/// A 2006/04 style named by `id` is referenced by `style` and carries its
+/// italic; `tts:display="none"` hides a paragraph (10.2.14). Both `tts`
+/// spellings of the draft are read.
+#[test]
+fn draft_2006_04_styles_name_by_id_and_style_the_text() {
+    for tts in [
+        "http://www.w3.org/2006/04/ttaf1#style",
+        "http://www.w3.org/2006/04/ttaf1#styling",
+    ] {
+        let parsed = read(&format!(
+            "<tt xmlns=\"http://www.w3.org/2006/04/ttaf1\" xmlns:tts=\"{tts}\">\
+             <head><styling><style id=\"s1\" tts:fontStyle=\"italic\"/></styling></head>\
+             <body><div>\
+             <p begin=\"0s\" end=\"1s\" style=\"s1\">italic</p>\
+             <p begin=\"2s\" end=\"3s\" tts:display=\"none\">hidden</p>\
+             </div></body></tt>"
+        ));
+        assert_eq!(texts(&parsed), vec!["italic"], "{tts}");
+        assert_eq!(run_flags(&parsed.cues[0]), (true, false, false), "{tts}");
+        assert!(parsed.losses.is_empty(), "{tts}: {:?}", parsed.losses);
+        assert_eq!(parsed.skipped.count, 1, "{tts}");
+    }
+}
+
+/// The 2006/04 parameter namespace: `ttp:frameRate="25"` sets the frame of an
+/// SMPTE time (`00:00:01:12` is 1.48 s at 25 fps, 1.40 s at the default 30).
+/// Its metadata namespace is metadata, not content.
+#[test]
+fn draft_2006_04_parameters_and_metadata_are_read() {
+    let parsed = read(
+        "<tt xmlns=\"http://www.w3.org/2006/04/ttaf1\" \
+         xmlns:ttp=\"http://www.w3.org/2006/04/ttaf1#parameter\" \
+         ttp:timeBase=\"smpte\" ttp:markerMode=\"continuous\" ttp:frameRate=\"25\">\
+         <head><metadata xmlns:ttm=\"http://www.w3.org/2006/04/ttaf1#metadata\">\
+         <ttm:title>Title</ttm:title></metadata></head>\
+         <body><div><p begin=\"00:00:01:12\" end=\"00:00:02:00\">a</p></div></body></tt>",
+    );
+    assert_eq!(spans(&parsed), vec![(1_480, 2_000)]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+}
+
 /// The IMSC parameter and metadata attributes (IMSC 1.2, 8.8: `ittp:aspectRatio`,
 /// `ittp:progressivelyDecodable` on the root; `ittm:altText` on a paragraph) and
 /// the EBU-TT metadata namespace (`ebuttm:`, EBU Tech 3380: `urn:ebu:tt:metadata`)

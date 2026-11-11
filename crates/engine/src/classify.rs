@@ -295,11 +295,13 @@ fn webvtt_signature(head: &[u8]) -> bool {
     })
 }
 
-/// The TTML namespaces a `.xml` root may declare: the W3C one, and the 2006
-/// DFXP draft's, which older DFXP files carry and which is read the same.
-const TTML_NAMESPACES: [&[u8]; 2] = [
+/// The TTML namespaces a `.xml` root may declare: the W3C one, and the two 2006
+/// DFXP ones (the 2006/10 CR's and the 2006/04 working draft's), which older
+/// DFXP files carry and which are read the same.
+const TTML_NAMESPACES: [&[u8]; 3] = [
     b"http://www.w3.org/ns/ttml",
     b"http://www.w3.org/2006/10/ttaf1",
+    b"http://www.w3.org/2006/04/ttaf1",
 ];
 
 /// Whether an XML head's root element is `tt` (or `prefix:tt`) with a TTML
@@ -1229,11 +1231,13 @@ mod tests {
     #[test]
     fn xml_with_the_ttml_namespace_and_tt_root_is_ttml() {
         let d = Dir::new("ttml-xml");
-        let ok: [&[u8]; 7] = [
+        let ok: [&[u8]; 9] = [
             b"<tt xmlns=\"http://www.w3.org/ns/ttml\">",
             b"<tt:tt xmlns:tt=\"http://www.w3.org/ns/ttml\">",
             b"<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xml:lang=\"en\">",
             b"<tt:tt xmlns:tt='http://www.w3.org/2006/10/ttaf1'/>",
+            b"<tt xmlns=\"http://www.w3.org/2006/04/ttaf1\" xml:lang=\"en\">",
+            b"<tt:tt xmlns:tt='http://www.w3.org/2006/04/ttaf1'/>",
             b"<tt\n  xml:lang=\"en\"\n  xmlns=\"http://www.w3.org/ns/ttml\"\n>",
             b"<tt xmlns:ttp=\"x\" xmlns=\"http://www.w3.org/ns/ttml\"/>",
             b"<t:tt xmlns:t=\"http://www.w3.org/ns/ttml\"/>",
@@ -1251,6 +1255,9 @@ mod tests {
             b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body/></html>",
             b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
             b"<tt xmlns=\"http://example.com/tt\"/>",
+            // A DFXP styling namespace is not a document namespace.
+            b"<tt xmlns=\"http://www.w3.org/2006/04/ttaf1#style\"/>",
+            b"<tt xmlns=\"http://www.w3.org/2006/04/ttaf1x\"/>",
             b"<tt/>",
             // The namespace is declared on a child, not on the root.
             b"<tt><p xmlns=\"http://www.w3.org/ns/ttml\"/></tt>",

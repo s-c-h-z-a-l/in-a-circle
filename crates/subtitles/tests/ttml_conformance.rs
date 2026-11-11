@@ -460,12 +460,14 @@ struct Scan {
     div_in_div: bool,
 }
 
-/// The TTML styling namespaces (the TTML 2 one and the two DFXP ones, `#style`
-/// as the DFXP CR of 2006 binds it, and `#styling`).
-const STYLING_NS: [&str; 3] = [
+/// The TTML styling namespaces (the TTML 2 one, and the DFXP ones of the 2006/10
+/// CR and the 2006/04 working draft: `#style`, and `#styling`).
+const STYLING_NS: [&str; 5] = [
     "http://www.w3.org/ns/ttml#styling",
     "http://www.w3.org/2006/10/ttaf1#style",
     "http://www.w3.org/2006/10/ttaf1#styling",
+    "http://www.w3.org/2006/04/ttaf1#style",
+    "http://www.w3.org/2006/04/ttaf1#styling",
 ];
 
 /// Scans the markup for what the comparison leaves out (see [`Scan`]).
