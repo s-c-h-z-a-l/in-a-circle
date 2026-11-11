@@ -12,10 +12,13 @@
 //! the two. Without an explicit end, a container ends with its children: at the
 //! latest child end (`seq`: at the end of the last child). Text and `br` are
 //! anonymous spans (12.4): zero long in `seq`, and in `par` as long as their
-//! container, which is indefinite unless it has an end. Such a piece does not
-//! decide its container's end: the container ends with its timed children, so
-//! white space or a `br` after the last timed line does not make a paragraph
-//! without an end time (the endsync `all` of 12.2.4 would, read literally).
+//! container, which is indefinite unless it has an end. In `par`, white space and
+//! a `br` do not decide their container's end: the container ends with its timed
+//! children, so white space or a `br` after the last timed line does not make a
+//! paragraph without an end time (the endsync `all` of 12.2.4 would, read
+//! literally). In `seq` such a piece sits at the cursor, the active end of the
+//! child before it, and that end is known, so it decides the container's end
+//! there: a `seq` span of white space alone ends at its begin (12.2.4).
 //! Every end is clamped to the earliest explicit end of the element and its
 //! ancestors. A paragraph that is still indefinite has no end time and is skipped.
 //!

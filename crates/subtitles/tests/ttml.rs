@@ -2656,6 +2656,33 @@ fn named_white_space_shapes_keep_their_text() {
     }
 }
 
+/// 12.2.4, 12.4.1: a `seq` span of white space alone, with no end, is a child
+/// whose end is its begin (zero long, at the cursor), so the span ends there and
+/// the paragraph is usable. The same span in `par` has an indefinite end (its
+/// white space lasts as long as the span, which has no timed child), so the
+/// paragraph has no end time and is skipped.
+#[test]
+fn a_seq_span_of_white_space_ends_at_its_begin() {
+    let seq = read(&doc(
+        r#"<p begin="0s"><span begin="2s" end="3s">a</span><span begin="6s" timeContainer="seq"> </span></p>"#,
+    ));
+    assert_eq!(texts(&seq), vec!["a"]);
+    assert_eq!(spans(&seq), vec![(2_000, 3_000)]);
+    assert_eq!(seq.skipped.count, 0);
+    let par = read_ttml(
+        doc(r#"<p begin="0s"><span begin="2s" end="3s">a</span><span begin="6s" timeContainer="par"> </span></p>"#)
+            .as_bytes(),
+    );
+    assert_eq!(
+        par,
+        Err(ReadError::AllSkipped {
+            count: 1,
+            line: 1,
+            reason: "no end time"
+        })
+    );
+}
+
 /// The model itself on the named shapes, against the text the standard gives
 /// (the white space between two timed spans is shown; a `br` between them breaks
 /// the line; the preserved line is trimmed). A model wrong here would pass the

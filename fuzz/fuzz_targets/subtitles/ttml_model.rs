@@ -9,11 +9,13 @@
 //! (each with optional timing, and `xml:space="preserve"` on some), and up to
 //! [`ITEMS`] items per paragraph: words, `br`, white space between the items
 //! (none, one space, several spaces, a line feed and a tab), and `span`s with
-//! their own timing and italic, nested up to [`MAX_DEPTH`] deep. A third of the
+//! their own timing and italic, nested up to [`MAX_DEPTH`] deep. Some spans are
+//! `seq` time containers (their children in sequence), and some hold white space
+//! only, timed, with `xml:space="preserve"` on half of them. A third of the
 //! paragraphs are timed runs instead: two to four timed spans joined by white
 //! space or a `br`, often with no end of their own (white space between timed
-//! spans, and a break between them). Times are multiples of [`STEP_MS`], written as
-//! milliseconds, seconds or frames. Every `end` is at or after its `begin`, so
+//! spans, and a break between them). Times are multiples of [`STEP_MS`], written
+//! as milliseconds, seconds or frames. Every `end` is at or after its `begin`, so
 //! the document has no timing fault: the faults are the unit tests' business.
 //!
 //! The model reads the generated tree and never the XML, and it calls no
@@ -26,6 +28,8 @@
 //!    end (the paragraph's, when it has one); with none, it is open and lasts to
 //!    the paragraph's end;
 //!  - a timed span decides its container's end, even an empty one;
+//!  - in a `seq` container a piece is zero long at the cursor (the active end of
+//!    the child before), so it decides the container's end there (12.4.1, 12.2.4);
 //!  - visible text with an empty interval is not shown, and its paragraph is
 //!    `skipped` once (`text with no display time`), after the cues of the rest;
 //!  - a paragraph with no end time is `skipped` once, with no cue.
@@ -51,6 +55,8 @@ const WORDS: [&str; 12] = [
 /// The white space between items: none, one space, several spaces, a line
 /// feed and a tab.
 const GAPS: [&str; 4] = ["", " ", "   ", "\n\t"];
+/// The white space of a span that holds white space only (never empty).
+const BLANKS: [&str; 3] = [" ", "   ", "\n\t"];
 /// Items in one paragraph, spans' items included: keeps a document small.
 const ITEMS: u32 = 24;
 /// Span nesting below the paragraph: spans at depths 1 to `MAX_DEPTH`.
@@ -93,6 +99,11 @@ pub enum Node {
 pub struct Span {
     pub timing: Timing,
     pub italic: bool,
+    /// The span is a `seq` time container: its children run in sequence (12.2.4).
+    pub seq: bool,
+    /// `xml:space="preserve"` on the span (8.2.10). It is written only as
+    /// `preserve`, so a span without it takes its parent's mode.
+    pub preserve: bool,
     pub children: Vec<Node>,
 }
 
@@ -151,8 +162,9 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
 
 /// Timed spans with white space or a `br` between them, one word each, and
 /// often no end on the paragraph: the shapes "white space between timed spans"
-/// and "a break between timed spans". Each span begins in the first 3 s and lasts up to 3 s, so two of them
-/// often overlap, which is where white space between words can be lost.
+/// and "a break between timed spans". Each span begins in the first 3 s and
+/// lasts up to 3 s, so two of them often overlap, which is where white space
+/// between words can be lost.
 fn timed_runs(pick: &mut dyn FnMut(u32) -> u32) -> (Timing, Vec<Node>) {
     let mut children = Vec::new();
     for i in 0..2 + pick(3) {
@@ -172,6 +184,8 @@ fn timed_runs(pick: &mut dyn FnMut(u32) -> u32) -> (Timing, Vec<Node>) {
                 dur: None,
             },
             italic: pick(3) == 0,
+            seq: false,
+            preserve: false,
             children: vec![Node::Word(WORDS[pick(WORDS.len() as u32) as usize])],
         }));
     }
@@ -242,10 +256,43 @@ fn gap(pick: &mut dyn FnMut(u32) -> u32, out: &mut Vec<Node>) {
 fn span(pick: &mut dyn FnMut(u32) -> u32, depth: u32, budget: &mut u32) -> Span {
     let timing = timing(pick);
     let italic = pick(3) == 0;
-    let children = nodes(pick, depth, budget);
+    // One span in six holds white space only, and is timed: the reader must keep
+    // the white space (or trim it where a line ends), not drop the span.
+    if pick(6) == 0 {
+        let begin = u64::from(pick(31)) * STEP_MS;
+        let end = begin + u64::from(pick(31)) * STEP_MS;
+        return Span {
+            timing: Timing {
+                begin: Some(stamp(begin, pick)),
+                end: Some(stamp(end, pick)),
+                dur: None,
+            },
+            italic,
+            seq: false,
+            preserve: pick(2) == 0,
+            children: vec![Node::Space(BLANKS[pick(BLANKS.len() as u32) as usize])],
+        };
+    }
+    let seq = pick(4) == 0;
+    let mut children = nodes(pick, depth, budget);
+    if seq {
+        // Each timed child of a `seq` span needs an end: its begin is the active
+        // end of the one before, so an open child would leave the rest with no
+        // begin (12.2.4), which the model does not decide.
+        for node in &mut children {
+            if let Node::Span(child) = node
+                && child.timing.end.is_none()
+            {
+                let from = child.timing.begin.map_or(0, |s| s.ms);
+                child.timing.end = Some(stamp(from + u64::from(pick(41)) * STEP_MS, pick));
+            }
+        }
+    }
     Span {
         timing,
         italic,
+        seq,
+        preserve: false,
         children,
     }
 }
@@ -306,6 +353,12 @@ fn nodes_xml(nodes: &[Node], x: &mut String) {
             Node::Span(span) => {
                 x.push_str("<span");
                 timing_attrs(x, span.timing);
+                if span.seq {
+                    x.push_str(r#" timeContainer="seq""#);
+                }
+                if span.preserve {
+                    x.push_str(r#" xml:space="preserve""#);
+                }
                 if span.italic {
                     x.push_str(r#" tts:fontStyle="italic""#);
                 }
@@ -410,6 +463,7 @@ fn element(
     parent_limit: Option<u64>,
     children: &[Node],
     preserve: bool,
+    seq: bool,
     g: &mut Gathered,
 ) -> Element {
     let (begin, explicit) = resolve(base, t);
@@ -421,6 +475,7 @@ fn element(
             limit,
             preserve,
         },
+        seq,
         g,
     );
     let own = match explicit {
@@ -435,10 +490,27 @@ fn element(
 /// child end: `None` when no child decides it (no timed span and no visible
 /// word), else `Some(end)`, where `end` is `None` when one child is open.
 /// White space and `br` do not decide it.
-fn walk(nodes: &[Node], scope: Scope, g: &mut Gathered) -> Option<Option<u64>> {
+fn walk(nodes: &[Node], scope: Scope, seq: bool, g: &mut Gathered) -> Option<Option<u64>> {
     let mut latest: Option<Option<u64>> = None;
+    // The reference begin of the next child: the container's begin, or in a
+    // `seq` container the active end of the last span (12.2.4).
+    let mut at = scope.begin;
     for node in nodes {
         let decides = match *node {
+            // An anonymous piece in a `seq` container has zero implicit duration
+            // (12.4.1): it is shown nowhere, and it moves nothing. It is still a
+            // child whose end is known, the reference begin, so it decides the
+            // container's end there: a `seq` span of white space alone ends at its
+            // begin (12.2.4: the end of the last child).
+            Node::Word(word) if seq => text(word, true, zero(at, scope), g),
+            Node::Space(space) if seq => {
+                text(space, false, zero(at, scope), g);
+                Some(at)
+            }
+            Node::Br if seq => {
+                line_break(zero(at, scope), g);
+                Some(at)
+            }
             Node::Word(word) => text(word, true, scope, g),
             Node::Space(space) => text(space, false, scope, g),
             Node::Br => {
@@ -446,14 +518,19 @@ fn walk(nodes: &[Node], scope: Scope, g: &mut Gathered) -> Option<Option<u64>> {
                 None
             }
             Node::Span(ref span) => {
+                let child = if seq { at } else { scope.begin };
                 let el = element(
                     span.timing,
-                    scope.begin,
+                    child,
                     scope.limit,
                     &span.children,
-                    scope.preserve,
+                    scope.preserve || span.preserve,
+                    span.seq,
                     g,
                 );
+                if seq {
+                    at = el.end;
+                }
                 Some(el.end)
             }
         };
@@ -468,6 +545,16 @@ fn walk(nodes: &[Node], scope: Scope, g: &mut Gathered) -> Option<Option<u64>> {
         }
     }
     latest
+}
+
+/// The scope of an anonymous piece in a `seq` container: an empty interval at
+/// the reference begin `at`.
+fn zero(at: Option<u64>, scope: Scope) -> Scope {
+    Scope {
+        begin: at,
+        limit: at,
+        preserve: scope.preserve,
+    }
 }
 
 /// A text piece: a word is visible and white space is not. Its interval is the
@@ -529,6 +616,7 @@ pub fn expected(doc: &Doc) -> Expected {
             div_limit,
             &para.children,
             para.preserve,
+            false,
             &mut g,
         );
         if doc.seq {
@@ -666,6 +754,8 @@ pub fn named() -> Vec<(&'static str, Doc)> {
                     Node::Span(Span {
                         timing: Timing::default(),
                         italic: true,
+                        seq: false,
+                        preserve: false,
                         children: vec![Node::Space("  "), Node::Word("w1")],
                     }),
                 ],
@@ -686,6 +776,8 @@ fn timed(word: &'static str, begin: u64, end: u64) -> Node {
             dur: None,
         },
         italic: false,
+        seq: false,
+        preserve: false,
         children: vec![Node::Word(word)],
     })
 }
