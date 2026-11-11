@@ -11,8 +11,8 @@
 //! (none, one space, several spaces, a line feed and a tab), and `span`s with
 //! their own timing and italic, nested up to [`MAX_DEPTH`] deep. A third of the
 //! paragraphs are timed runs instead: two to four timed spans joined by white
-//! space or a `br`, often with no end of their own, which is the shape of the
-//! review's findings. Times are multiples of [`STEP_MS`], written as
+//! space or a `br`, often with no end of their own (white space between timed
+//! spans, and a break between them). Times are multiples of [`STEP_MS`], written as
 //! milliseconds, seconds or frames. Every `end` is at or after its `begin`, so
 //! the document has no timing fault: the faults are the unit tests' business.
 //!
@@ -125,7 +125,7 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
             timed_runs(pick)
         } else {
             // Most paragraphs get an end, so the cues are not all skipped; the
-            // rest (about one in five) have none, which is the review's shape.
+            // rest (about one in five) have none: a paragraph with no end time.
             let mut timing = timing(pick);
             if timing.end.is_none() && pick(3) != 0 {
                 let from = timing.begin.map_or(0, |s| s.ms);
@@ -150,8 +150,8 @@ pub fn document(pick: &mut dyn FnMut(u32) -> u32) -> Doc {
 }
 
 /// Timed spans with white space or a `br` between them, one word each, and
-/// often no end on the paragraph: the shape of the review's findings (R1 and
-/// R2). Each span begins in the first 3 s and lasts up to 3 s, so two of them
+/// often no end on the paragraph: the shapes "white space between timed spans"
+/// and "a break between timed spans". Each span begins in the first 3 s and lasts up to 3 s, so two of them
 /// often overlap, which is where white space between words can be lost.
 fn timed_runs(pick: &mut dyn FnMut(u32) -> u32) -> (Timing, Vec<Node>) {
     let mut children = Vec::new();
@@ -627,16 +627,14 @@ fn visible_words(pieces: &[Piece], begin: u64, end: u64) -> Vec<(&'static str, u
         .collect()
 }
 
-/// A word, a line break and an italic span, each of a paragraph with a given
-/// shape: the review's findings and one white-space case, as named documents.
-/// R1: white space between two timed spans, in a paragraph with no end. R2:
-/// two timed spans with a `br` between them, in a paragraph with no end. P1:
-/// a preserved paragraph whose first run is white space, then an italic run
-/// that starts with spaces (the line must still be trimmed).
+/// Paragraphs of a given shape, as named documents: white space between two
+/// timed spans, and a `br` between two timed spans, each in a paragraph with no
+/// end; and a preserved paragraph whose first run is white space, then an italic
+/// run that starts with spaces (the line must still be trimmed).
 pub fn named() -> Vec<(&'static str, Doc)> {
     vec![
         (
-            "R1 white space between timed spans, no paragraph end",
+            "white space between timed spans, no paragraph end",
             one_para(
                 false,
                 Timing::default(),
@@ -648,7 +646,7 @@ pub fn named() -> Vec<(&'static str, Doc)> {
             ),
         ),
         (
-            "R2 timed spans with a br between them, no paragraph end",
+            "a break between timed spans, no paragraph end",
             one_para(
                 false,
                 Timing::default(),
@@ -656,7 +654,7 @@ pub fn named() -> Vec<(&'static str, Doc)> {
             ),
         ),
         (
-            "P1 preserved line, first run white space, italic run with spaces",
+            "a preserved line with a white-space-only run, then an italic run with spaces",
             one_para(
                 true,
                 Timing {

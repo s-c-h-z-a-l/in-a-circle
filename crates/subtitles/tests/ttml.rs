@@ -431,7 +431,7 @@ fn timed_break_is_active_only_in_its_span() {
 /// between them. In `seq` a `br` is zero long and moves nothing.
 #[test]
 fn a_line_break_does_not_decide_the_paragraph_end() {
-    // The reviewer's case: no end on the paragraph or its ancestors.
+    // No end on the paragraph or its ancestors.
     let parsed = read(&doc(
         r#"<p><span begin="1s" end="2s">Hello</span><br/><span begin="1s" end="2s">world</span></p>"#,
     ));
@@ -2339,7 +2339,7 @@ fn a_set_on_another_property_still_only_counts_styling() {
 /// 13.2.1: an `animate` attribute names out-of-line animations of the head. A
 /// visibility one refuses the paragraph that names it, as an inline `set` does:
 /// the timeline is not played, so the text is neither shown nor hidden. This is
-/// the repro of review item R4: `Secret` was shown for its whole time.
+/// before this rule `Secret` was shown for its whole time.
 #[test]
 fn an_animate_attribute_naming_a_visibility_set_refuses_the_paragraph() {
     let parsed = read(&styled(
@@ -2647,19 +2647,19 @@ fn generated_documents_keep_their_text() {
     );
 }
 
-/// The shapes of the review findings (R1, R2) and the preserved white-space
-/// line, each checked against the model.
+/// The named shapes (white space and a break between timed spans, a preserved
+/// line with a white-space-only run), each checked against the model.
 #[test]
-fn review_shapes_keep_their_text() {
+fn named_white_space_shapes_keep_their_text() {
     for (_, doc) in ttml_model::named() {
         ttml_model::check(&doc);
     }
 }
 
 /// The model itself on the named shapes, against the text the standard gives
-/// (R1: the white space between two timed spans is shown; R2: the `br` breaks
-/// the line; P1: the trimmed line). A model wrong here would pass the property
-/// vacuously.
+/// (the white space between two timed spans is shown; a `br` between them breaks
+/// the line; the preserved line is trimmed). A model wrong here would pass the
+/// property vacuously.
 #[test]
 fn model_gives_the_standard_text_for_the_named_shapes() {
     let want = [
