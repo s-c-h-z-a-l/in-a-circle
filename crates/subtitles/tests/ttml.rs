@@ -1410,6 +1410,41 @@ fn drop_frame_is_unsupported() {
     );
 }
 
+/// 6.2.8 of the 2006/04 working draft and of the 2006/10 CR: DFXP's
+/// `ttp:smpteMode="dropNTSC"` is the drop-frame time code of 7.2.4, refused
+/// like TTML's `dropMode`. `nonDrop` converts. Each draft's root is read, and
+/// TTML's spelling on a DFXP root is refused too.
+#[test]
+fn dfxp_drop_frame_is_unsupported() {
+    let root = |ns: &str, attr: &str, drop: &str| {
+        format!(
+            "<tt xmlns=\"{ns}\" xmlns:ttp=\"{ns}#parameter\" ttp:timeBase=\"smpte\" \
+             ttp:frameRate=\"30\" ttp:{attr}=\"{drop}\" ttp:markerMode=\"continuous\">\
+             <body><div><p begin=\"01:00:00:00\" end=\"01:00:02:00\">Hour</p></div></body></tt>"
+        )
+    };
+    let drafts = [
+        "http://www.w3.org/2006/04/ttaf1",
+        "http://www.w3.org/2006/10/ttaf1",
+    ];
+    for ns in drafts {
+        assert_eq!(
+            read_ttml(root(ns, "smpteMode", "dropNTSC").as_bytes()).err(),
+            Some(ReadError::Unsupported("drop-frame time code")),
+            "{ns}"
+        );
+        assert!(
+            read_ttml(root(ns, "smpteMode", "nonDrop").as_bytes()).is_ok(),
+            "{ns}"
+        );
+    }
+    assert_eq!(
+        read_ttml(root(drafts[1], "dropMode", "dropNTSC").as_bytes()).err(),
+        Some(ReadError::Unsupported("drop-frame time code")),
+        "TTML's spelling on a DFXP root"
+    );
+}
+
 /// 7.2.7, I.3: an SMPTE time code whose markers are discontinuous (the default,
 /// or said) is read as continuous time, which is an approximation: each cue
 /// counts `Timing`, once. `markerMode="continuous"` and the media time base are

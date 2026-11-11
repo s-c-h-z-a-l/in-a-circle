@@ -39,7 +39,7 @@
 //! | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
 //! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
 //! | the DFXP 2006 namespaces of TTML 1 (`ttaf1` of the 2006/10 CR or the 2006/04 working draft, and its `#style` (Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
-//! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
+//! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` (DFXP: `ttp:smpteMode`) | `Unsupported` (the whole file) |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | `ttp:timeBase="smpte"` with `ttp:markerMode` absent or `discontinuous` (7.2.7, I.3) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"`, and the media time base, count nothing |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
@@ -138,7 +138,7 @@ use style::{
     Css, Flags, Len, Opacity, Sheet, animates_visibility, attrs_css, hiding_declared, own_flags,
     root_extent, root_extent_is_usable, top_third,
 };
-use time::{Params, TimeError, parse_time};
+use time::{Family, Params, TimeError, parse_time};
 
 /// A construct the reader does not convert. The whole document is refused with
 /// it: converting around it would give a wrong result, and a refusal says so.
@@ -965,7 +965,14 @@ impl<'b> Doc<'b> {
             .filter(|(q, _)| matches!(q.ns, Some(TTP_NS | DFXP_TTP_NS | DFXP_WD_TTP_NS)))
             .map(|(q, v)| (q.local, v.as_ref()))
             .collect();
-        let params = Params::from_tt(&attrs).map_err(|Unsupported(r)| ReadError::Unsupported(r))?;
+        // The family of the root's own namespace decides the spellings (time.rs).
+        let family = if el.name.ns == Some(TT_NS) {
+            Family::Ttml
+        } else {
+            Family::Dfxp
+        };
+        let params =
+            Params::from_tt(&attrs, family).map_err(|Unsupported(r)| ReadError::Unsupported(r))?;
         self.approximated = params.approximated;
         self.params = Some(params);
         let (preserve, bad_space) = space(el, false);

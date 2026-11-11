@@ -29,6 +29,15 @@ const MS_PER_SECOND: u128 = 1_000;
 /// of seconds cannot, so upgrade if such a file turns up.
 const FRACTION_DIGITS: usize = 9;
 
+/// The parameter family of the root `tt`: TTML's, or DFXP's (the 2006/10 CR and
+/// the 2006/04 working draft). The families spell and default some parameters
+/// differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Family {
+    Ttml,
+    Dfxp,
+}
+
 /// The `tt` parameters that decide how time expressions are read. Built by
 /// [`Params::from_tt`], which refuses what the reader cannot convert.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,10 +78,11 @@ pub(crate) enum TimeError {
 
 impl Params {
     /// Reads the parameters from the `tt` element's attributes, as (local name,
-    /// value) pairs in the TTML parameter namespace. An absent parameter takes
-    /// its default. A value that breaks its syntax is refused, and so is a time
-    /// base or marker mode whose time this reader cannot convert.
-    pub(crate) fn from_tt(attrs: &[(&str, &str)]) -> Result<Params, Unsupported> {
+    /// value) pairs in the TTML or DFXP parameter namespaces, the names as
+    /// spelled there. An absent parameter takes its default. A value that
+    /// breaks its syntax is refused, and so is a time base or marker mode whose
+    /// time this reader cannot convert.
+    pub(crate) fn from_tt(attrs: &[(&str, &str)], family: Family) -> Result<Params, Unsupported> {
         let frame_rate_given = attribute(attrs, "frameRate");
         let frame_rate = match frame_rate_given {
             Some(v) => positive(v, "invalid ttp:frameRate")?,
@@ -110,12 +120,23 @@ impl Params {
         };
         // 7.2.4: nonDrop is the default. dropNTSC and dropPAL apply to the SMPTE
         // time base only; under the media time base the parameter has no effect.
-        match attribute(attrs, "dropMode").unwrap_or("nonDrop") {
+        // DFXP spells it `ttp:smpteMode` (6.2.8 of both drafts). Each spelling is
+        // read; when both appear, the root's own family's spelling wins.
+        let (own, other) = match family {
+            Family::Ttml => ("dropMode", "smpteMode"),
+            Family::Dfxp => ("smpteMode", "dropMode"),
+        };
+        let (name, drop) = attribute(attrs, own)
+            .map(|v| (own, v))
+            .or_else(|| attribute(attrs, other).map(|v| (other, v)))
+            .unwrap_or((own, "nonDrop"));
+        match drop {
             "nonDrop" => {}
             "dropNTSC" | "dropPAL" if smpte => {
                 return Err(Unsupported("drop-frame time code"));
             }
             "dropNTSC" | "dropPAL" => {}
+            _ if name == "smpteMode" => return Err(Unsupported("invalid ttp:smpteMode")),
             _ => return Err(Unsupported("invalid ttp:dropMode")),
         }
         // 7.2.7: the default is discontinuous. I.3 says a discontinuous SMPTE
@@ -438,9 +459,19 @@ impl Ratio {
 mod tests {
     use super::*;
 
+    /// Parameters of the TTML family from `attrs`.
+    fn ttml(attrs: &[(&str, &str)]) -> Result<Params, Unsupported> {
+        Params::from_tt(attrs, Family::Ttml)
+    }
+
+    /// Parameters of the DFXP family from `attrs`.
+    fn dfxp(attrs: &[(&str, &str)]) -> Result<Params, Unsupported> {
+        Params::from_tt(attrs, Family::Dfxp)
+    }
+
     /// Parameters from `attrs`, which must be valid.
     fn params(attrs: &[(&str, &str)]) -> Params {
-        Params::from_tt(attrs).expect("valid parameters")
+        ttml(attrs).expect("valid parameters")
     }
 
     /// The milliseconds of `expr` under `attrs`.
@@ -721,7 +752,7 @@ mod tests {
             ("frameRateMultiplier", "1000 1001"),
         ];
         assert!(
-            Params::from_tt(&implicit).is_ok(),
+            ttml(&implicit).is_ok(),
             "the default marker mode is accepted"
         );
         assert_eq!(read("00:01:00:00", &implicit), Ok(60_060));
@@ -743,7 +774,7 @@ mod tests {
             );
         }
         assert_eq!(
-            Params::from_tt(&[("timeBase", "smpte"), ("markerMode", "sometimes")]),
+            ttml(&[("timeBase", "smpte"), ("markerMode", "sometimes")]),
             Err(Unsupported("invalid ttp:markerMode"))
         );
     }
@@ -753,11 +784,11 @@ mod tests {
     #[test]
     fn unconverted_time_bases_refuse_the_document() {
         assert_eq!(
-            Params::from_tt(&[("timeBase", "clock")]),
+            ttml(&[("timeBase", "clock")]),
             Err(Unsupported("clock time base"))
         );
         let smpte_drop = |drop: &'static str| {
-            Params::from_tt(&[
+            ttml(&[
                 ("timeBase", "smpte"),
                 ("markerMode", "continuous"),
                 ("dropMode", drop),
@@ -779,7 +810,62 @@ mod tests {
             )))
         );
         // Under the media time base the drop mode has no effect (7.2.4).
-        assert!(Params::from_tt(&[("dropMode", "dropNTSC")]).is_ok());
+        assert!(ttml(&[("dropMode", "dropNTSC")]).is_ok());
+    }
+
+    /// DFXP spells the drop mode `ttp:smpteMode`, nonDrop, dropNTSC and dropPAL
+    /// (6.2.8 of the 2006/04 working draft and of the 2006/10 CR). A drop-frame
+    /// value under the SMPTE time base is refused in either spelling, as TTML's
+    /// `dropMode` is. Where both spellings appear, the root's own family's wins
+    /// and the other is ignored.
+    #[test]
+    fn dfxp_smpte_mode_is_the_drop_mode() {
+        let smpte = |name: &'static str, drop: &'static str| {
+            dfxp(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                (name, drop),
+            ])
+        };
+        for drop in ["dropNTSC", "dropPAL"] {
+            assert_eq!(
+                smpte("smpteMode", drop),
+                Err(Unsupported("drop-frame time code")),
+                "{drop}"
+            );
+            assert_eq!(
+                smpte("dropMode", drop),
+                Err(Unsupported("drop-frame time code")),
+                "TTML's spelling on a DFXP root, {drop}"
+            );
+        }
+        assert!(smpte("smpteMode", "nonDrop").is_ok());
+        assert_eq!(
+            smpte("smpteMode", "dropX"),
+            Err(Unsupported("invalid ttp:smpteMode"))
+        );
+        // Under the media time base the drop mode has no effect (7.2.4), in either spelling.
+        assert!(dfxp(&[("smpteMode", "dropNTSC")]).is_ok());
+        assert_eq!(
+            dfxp(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("smpteMode", "dropNTSC"),
+                ("dropMode", "nonDrop"),
+            ]),
+            Err(Unsupported("drop-frame time code")),
+            "the DFXP root's own spelling wins"
+        );
+        assert!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("dropMode", "nonDrop"),
+                ("smpteMode", "dropNTSC"),
+            ])
+            .is_ok(),
+            "the TTML root's own spelling wins"
+        );
     }
 
     /// A parameter value that breaks its syntax refuses the document: zero,
@@ -790,7 +876,7 @@ mod tests {
     fn invalid_parameter_values_refuse_the_document() {
         for value in ["0", "-5", "1.5", "+5", "", "99999999999999999999"] {
             assert_eq!(
-                Params::from_tt(&[("frameRate", value)]),
+                ttml(&[("frameRate", value)]),
                 Err(Unsupported("invalid ttp:frameRate")),
                 "{value:?}"
             );
@@ -805,25 +891,25 @@ mod tests {
             "+1000 1001",
         ] {
             assert_eq!(
-                Params::from_tt(&[("frameRateMultiplier", value)]),
+                ttml(&[("frameRateMultiplier", value)]),
                 Err(Unsupported("invalid ttp:frameRateMultiplier")),
                 "{value:?}"
             );
         }
         assert_eq!(
-            Params::from_tt(&[("subFrameRate", "0")]),
+            ttml(&[("subFrameRate", "0")]),
             Err(Unsupported("invalid ttp:subFrameRate"))
         );
         assert_eq!(
-            Params::from_tt(&[("tickRate", "0")]),
+            ttml(&[("tickRate", "0")]),
             Err(Unsupported("invalid ttp:tickRate"))
         );
         assert_eq!(
-            Params::from_tt(&[("timeBase", "local")]),
+            ttml(&[("timeBase", "local")]),
             Err(Unsupported("invalid ttp:timeBase"))
         );
         assert_eq!(
-            Params::from_tt(&[("dropMode", "dropX")]),
+            ttml(&[("dropMode", "dropX")]),
             Err(Unsupported("invalid ttp:dropMode"))
         );
     }
