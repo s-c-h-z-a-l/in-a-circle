@@ -44,6 +44,9 @@ pub(crate) struct Params {
     tick_rate: Ratio,
     /// The SMPTE time base (I.3); otherwise the media time base (I.2).
     smpte: bool,
+    /// An SMPTE time base with discontinuous markers (the default, 7.2.7): read
+    /// as continuous, an approximation counted as `Loss::Timing`.
+    pub(crate) approximated: bool,
 }
 
 /// Why a time expression is not used.
@@ -120,9 +123,9 @@ impl Params {
         // an approximation for it: the time code is read as if the markers were
         // continuous, under either marker mode. Refusing the default would refuse
         // most broadcast files, and a converter can only map time codes to times.
-        match attribute(attrs, "markerMode").unwrap_or("discontinuous") {
-            "continuous" | "discontinuous" => {}
-            _ => return Err(Unsupported("invalid ttp:markerMode")),
+        let markers = attribute(attrs, "markerMode").unwrap_or("discontinuous");
+        if !matches!(markers, "continuous" | "discontinuous") {
+            return Err(Unsupported("invalid ttp:markerMode"));
         }
 
         Ok(Params {
@@ -131,6 +134,7 @@ impl Params {
             sub_frame_rate,
             tick_rate,
             smpte,
+            approximated: smpte && markers == "discontinuous",
         })
     }
 }
@@ -520,6 +524,7 @@ mod tests {
                 sub_frame_rate: 1,
                 tick_rate: Ratio::int(1),
                 smpte: false,
+                approximated: false,
             }
         );
         assert_eq!(params(&[("frameRate", "25")]).tick_rate, Ratio::int(25));

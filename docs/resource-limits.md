@@ -390,7 +390,7 @@ families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
 | TTML style chain | 32 entries (`MAX_CHAIN`) | a `style` reference chain is followed to 32 entries; a loop, or a longer chain, is not followed and the element gets `Styling`. Each entry's chain height is computed once, and a loop is found on the walk's own path, so a reference list cannot make the reader spin |
 | TTML style and region tables | charged to the item budget before each entry is stored | a `style` is its element and its entry (two items); each region, each duplicate and each `style` reference on a style or region is one more (an id not defined yet is also a placeholder entry: two items). A paragraph's `style` references are not charged (see the dense shapes below). Past the budget the file is `TooComplex`, as for cues |
 | TTML text copied into cues | 32 MiB (`OUTPUT_BYTES`) | a paragraph's text is copied into each slice it is active in. Past 32 MiB of copies the file fails with `subtitle text would be larger than 32 MiB` (`TextTooLarge`), which is not the item budget's message |
-| warnings | at most 9 lines | one per kind of loss (the eight kinds of the `Loss` enum) and one for the skipped items, far below the engine's cap of 16 per input. Unsupported elements are counted in items (elements and images), the others in cues |
+| warnings | at most 10 lines | one per kind of loss (the nine kinds of the `Loss` enum) and one for the skipped items, far below the engine's cap of 16 per input. Unsupported elements are counted in items (elements and images), the others in cues |
 
 Measured peak RSS (`ru_maxrss` of the child, the test build, the development
 machine; the `dense_8_mib_input_stays_within_the_data_limit` test prints the

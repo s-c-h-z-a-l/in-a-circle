@@ -38,6 +38,7 @@
 //! | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#style` (the CR's, Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 //! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
+//! | `ttp:timeBase="smpte"` with `ttp:markerMode` absent or `discontinuous` (7.2.7, I.3) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"`, and the media time base, count nothing |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 //! | an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
@@ -819,6 +820,9 @@ struct Doc<'b> {
     /// units are counted at their end. A document with image units and no
     /// text cue is image subtitles, refused as such.
     images: usize,
+    /// The root's SMPTE time codes are read as continuous time (see
+    /// [`Params::approximated`]): a document-level `Timing` loss.
+    approximated: bool,
     /// The containers a visibility-changing animation applies to (see
     /// [`animated_scopes`]), by ordinal.
     animated_scopes: BTreeMap<u32, Anim>,
@@ -848,6 +852,7 @@ impl<'b> Doc<'b> {
             doc_flags: Flags::default(),
             elements: 0,
             images: 0,
+            approximated: false,
         }
     }
 
@@ -950,6 +955,7 @@ impl<'b> Doc<'b> {
             .map(|(q, v)| (q.local, v.as_ref()))
             .collect();
         let params = Params::from_tt(&attrs).map_err(|Unsupported(r)| ReadError::Unsupported(r))?;
+        self.approximated = params.approximated;
         self.params = Some(params);
         let (preserve, bad_space) = space(el, false);
         self.budget.charge()?;
@@ -1500,6 +1506,7 @@ impl<'b> Doc<'b> {
         for (set, loss) in [
             (self.doc_flags.styling, Loss::Styling),
             (self.doc_flags.position, Loss::Position),
+            (self.approximated, Loss::Timing),
         ] {
             if set && cues > 0 {
                 out.losses.insert(loss, cues);

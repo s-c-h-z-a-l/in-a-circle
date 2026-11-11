@@ -55,7 +55,7 @@ and images).
 | items | 2,000,000 (`ITEM_BUDGET`) | refused whole (`too many lines and styled runs (more than 2,000,000)`); nothing is truncated. TTML also charges its elements, pieces, slice copies, style and region entries, and the animated-visibility scopes (see [TTML accounting](../architecture.md#ttml-accounting)) |
 | TTML element depth | 256 (`xml::MAX_DEPTH`) | refused whole as `not well-formed TTML (line N): elements nested too deeply` |
 | TTML style chain | 32 entries (`MAX_CHAIN`) | a longer chain or a loop is not followed; the element gets `Styling` |
-| warnings | eight loss kinds and one for skipped items | at most nine lines per input |
+| warnings | nine loss kinds and one for skipped items | at most ten lines per input |
 
 ## Memory: why an item budget
 

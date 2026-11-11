@@ -1,0 +1,1 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:timeBase="smpte"><body><div><p begin="00:00:01:00" end="00:00:02:00">a</p><p begin="00:00:03:00" end="00:00:04:00">b</p></div></body></tt>

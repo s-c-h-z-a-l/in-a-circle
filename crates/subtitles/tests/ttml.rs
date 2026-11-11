@@ -1325,6 +1325,46 @@ fn drop_frame_is_unsupported() {
     );
 }
 
+/// 7.2.7, I.3: an SMPTE time code whose markers are discontinuous (the default,
+/// or said) is read as continuous time, which is an approximation: each cue
+/// counts `Timing`, once. `markerMode="continuous"` and the media time base are
+/// read the same way and count nothing.
+#[test]
+fn smpte_time_codes_read_as_continuous_are_counted() {
+    let cases = [
+        (r#" ttp:timeBase="smpte""#, true),
+        (
+            r#" ttp:timeBase="smpte" ttp:markerMode="discontinuous""#,
+            true,
+        ),
+        (
+            r#" ttp:timeBase="smpte" ttp:markerMode="continuous""#,
+            false,
+        ),
+        ("", false),
+    ];
+    for (root, counted) in cases {
+        let (a, b, c, d) = if root.contains("smpte") {
+            ("00:00:01:00", "00:00:02:00", "00:00:03:00", "00:00:04:00")
+        } else {
+            ("1s", "2s", "3s", "4s")
+        };
+        let parsed = read(&format!(
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\"{root}>\
+             <body><div><p begin=\"{a}\" end=\"{b}\">a</p><p begin=\"{c}\" end=\"{d}\">b</p></div></body></tt>"
+        ));
+        assert_eq!(texts(&parsed), vec!["a", "b"], "{root}");
+        assert_eq!(
+            spans(&parsed),
+            vec![(1_000, 2_000), (3_000, 4_000)],
+            "{root}"
+        );
+        let expected = if counted { 2 } else { 0 };
+        assert_eq!(loss(&parsed, Loss::Timing), expected, "{root}");
+        assert_eq!(parsed.losses.len(), usize::from(counted), "{root}");
+    }
+}
+
 /// 12.3.1: a `wallclock()` expression refuses the document (the time base is
 /// not clock, so the expression is an error for a presentation the reader makes).
 #[test]
@@ -2005,6 +2045,13 @@ fn accounting_rows() -> Vec<Row> {
             &[],
             1,
             Some((1, "hidden by the document")),
+        ),
+        row(
+            "SMPTE time codes with discontinuous markers: read as continuous, Timing per cue",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"smpte\"><body><div><p begin=\"00:00:01:00\" end=\"00:00:02:00\">a</p></div></body></tt>".to_owned(),
+            &[(Loss::Timing, 1)],
+            0,
+            None,
         ),
         row(
             "DFXP 2006 CR styling namespace (#style): display none hides, as in TTML",

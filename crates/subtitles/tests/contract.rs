@@ -11,6 +11,7 @@ fn loss_order_is_the_warning_order() {
         Loss::Position,
         Loss::Styling,
         Loss::Elements,
+        Loss::Timing,
     ];
     all.sort();
     assert_eq!(
@@ -24,6 +25,7 @@ fn loss_order_is_the_warning_order() {
             Loss::VoiceNames,
             Loss::Brackets,
             Loss::Elements,
+            Loss::Timing,
         ]
     );
 }
@@ -44,6 +46,7 @@ fn loss_messages_are_the_user_text() {
         "characters that look like markup written as look-alikes"
     );
     assert_eq!(Loss::Elements.message(), "unsupported elements ignored");
+    assert_eq!(Loss::Timing.message(), "time codes read as continuous");
 }
 
 #[test]

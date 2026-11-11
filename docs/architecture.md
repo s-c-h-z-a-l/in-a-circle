@@ -144,6 +144,7 @@ whatever else it holds (a hidden or animated one included).
 | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#style` (the CR's, Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
+| `ttp:timeBase="smpte"` with `ttp:markerMode` absent or `discontinuous` (7.2.7, I.3) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"`, and the media time base, count nothing |
 | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
 | an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
 | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
@@ -878,16 +879,16 @@ entry) the whole file is refused as `TooComplex`; nothing is converted in part.
   In both, a line
   break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
   white space and a cue with no text are dropped, and a blank line ends a cue.
-- The subtitle `warn` lines, at most nine per input: first the skipped cues
+- The subtitle `warn` lines, at most ten per input: first the skipped cues
   (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
   including text outside any cue), then one line per kind of loss in the order
   of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
   drawings; style and region blocks; speaker names written as prefixes;
   characters that look like markup written as look-alikes; unsupported elements
-  ignored), each counted in cues as `(N cues)`, except unsupported elements,
+  ignored; time codes read as continuous), each counted in cues as `(N cues)`, except unsupported elements,
   which count the elements and images they ignore, so `(N items)`. The
   reader's and the writer's counts of one kind are added together. At most
-  nine lines (eight kinds and the skipped line), far under the engine's 16
+  ten lines (nine kinds and the skipped line), far under the engine's 16
   `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of

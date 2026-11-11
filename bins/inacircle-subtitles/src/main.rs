@@ -311,7 +311,7 @@ impl<W: Write> Write for Capped<W> {
 /// The `warn` lines of one converted input: the skipped cues first (the count
 /// and the first one's line and reason), then one line per kind of loss, in
 /// `Loss` order, counted in cues (`Elements` in items). The reader's and the
-/// writer's counts of a kind are summed. At most nine lines (eight kinds and
+/// writer's counts of a kind are summed. At most ten lines (nine kinds and
 /// the skipped line), under the engine's cap of 16 `warn` per input.
 fn warnings(parsed: &Parsed, writer: BTreeMap<Loss, usize>) -> Vec<String> {
     let mut lines = Vec::new();
@@ -458,10 +458,10 @@ mod tests {
         );
     }
 
-    /// Every kind of loss and a skipped line give nine `warn` lines: the
+    /// Every kind of loss and a skipped line give ten `warn` lines: the
     /// largest the readers can produce. The engine stops at 16 per input
     /// (`MAX_WARNINGS` in `crates/engine/src/exec.rs`, private to that crate),
-    /// so nine leaves room; a tenth kind must raise this test's count first.
+    /// so ten leaves room; an eleventh kind must raise this test's count first.
     #[test]
     fn warn_count_stays_under_the_engine_cap() {
         let kinds = [
@@ -473,6 +473,7 @@ mod tests {
             Loss::VoiceNames,
             Loss::Brackets,
             Loss::Elements,
+            Loss::Timing,
         ];
         let parsed = Parsed {
             cues: Vec::new(),
@@ -483,11 +484,15 @@ mod tests {
             },
         };
         let lines = warnings(&parsed, BTreeMap::new());
-        assert_eq!(lines.len(), 9);
+        assert_eq!(lines.len(), 10);
         assert!(lines.len() < 16, "the engine's cap of 16 warn per input");
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("unsupported elements ignored (1 items)")
+            Some("time codes read as continuous (1 cues)")
+        );
+        assert_eq!(
+            lines[lines.len() - 2],
+            "unsupported elements ignored (1 items)"
         );
     }
 

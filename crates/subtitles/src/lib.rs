@@ -210,6 +210,10 @@ pub enum Loss {
     /// not cues: each ignored element and each image is one. The text around
     /// an image is converted and counted as usual.
     Elements,
+    /// Time codes read as continuous time: an SMPTE time base whose marker mode
+    /// is discontinuous or absent. Such a time has no media time of its own, so
+    /// the reader's conversion is an approximation. Counted in cues.
+    Timing,
 }
 
 impl Loss {
@@ -224,6 +228,7 @@ impl Loss {
             Loss::VoiceNames => "speaker names written as 'Name:' prefixes",
             Loss::Brackets => "characters that look like markup written as look-alikes",
             Loss::Elements => "unsupported elements ignored",
+            Loss::Timing => "time codes read as continuous",
         }
     }
 }
