@@ -84,7 +84,7 @@
 //! | `set` or `animate` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach). One inside an `animation` is out-of-line: see the rows below |
 //! | `set` or `animate` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
 //! | `animation` (13.1.2): a container of out-of-line `set` and `animate` | nothing counted itself. Each `set` or `animate` with an `xml:id` is counted where an element names it with an `animate` attribute (next row); one that nothing names has no effect, so nothing is counted |
-//! | the `animate` attribute (13.2.1) on `body`, `div`, `p`, `span` or `region`, each IDREF it names | an IDREF costs one item. A visibility target refuses each paragraph under the element (or placed in the region): `skipped`, `visibility changes over time`. Another target, or an IDREF that names no such animation, is `Styling` on the element's cues. Each element named costs one item (its entry, charged before it is stored) |
+//! | the `animate` attribute (13.2.1) on `body`, `div`, `p`, `span` or `region`, each IDREF it names | an IDREF costs one item. A visibility target refuses each paragraph under the element (or placed in the region, or holding the span that names it): `skipped`, `visibility changes over time`. Another target, or an IDREF that names no such animation, is `Styling` on the element's cues. Each element named costs one item (its entry, charged before it is stored) |
 //! | a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
 //! | a foreign-namespace element in a paragraph or span with no visible text | `Elements`, once (an item), wherever it sits in the paragraph |
 //! | a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
@@ -1165,6 +1165,14 @@ impl<'b> Doc<'b> {
                 hidden_spans: Vec::new(),
                 pruned: Vec::new(),
             });
+        }
+        // A span that an `animate` attribute gives a visibility change refuses its
+        // paragraph, as an inline `set` in a span does (the `set` arm of `Doc::start`).
+        if kind == Kind::Span
+            && anim.visible
+            && let Some(para) = self.para.as_mut()
+        {
+            para.animated = true;
         }
         self.stack.push(frame);
         Ok(())

@@ -2311,6 +2311,53 @@ fn an_animate_attribute_may_name_a_later_animation() {
     );
 }
 
+/// 13.2.1: an `animate` attribute on a span that names a visibility animation
+/// refuses the paragraph that holds the span, as an inline `set` in a span does
+/// (the span's text is hidden for part of its time, and the timeline is not
+/// played). The first paragraph is refused; the plain one after it is shown.
+#[test]
+fn an_animate_attribute_on_a_span_refuses_its_paragraph() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="v" tts:visibility="hidden"/></animation>"#,
+        r#"<p begin="0s" end="1s">A <span animate="v">B</span></p><p begin="2s" end="3s">plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// The same refusal for a span nested in a span: the inner one is the element
+/// that names the animation, and its paragraph is the one refused.
+#[test]
+fn a_nested_span_with_an_animate_attribute_refuses_its_paragraph() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="v" tts:visibility="hidden"/></animation>"#,
+        r#"<p begin="0s" end="1s">A <span><span animate="v">B</span></span></p><p begin="2s" end="3s">plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// 13.2.1, 10.4: a span whose `animate` names an animation of another property
+/// keeps its text and counts `Styling` on the paragraph's cue. No refusal.
+#[test]
+fn a_span_whose_animate_names_another_property_counts_styling() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="c" tts:color="red"/></animation>"#,
+        r#"<p begin="0s" end="1s">A <span animate="c">B</span></p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["A B"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
 /// The italic, bold and underline of a cue's first run (cues here have one run).
 fn run_flags(cue: &Cue) -> (bool, bool, bool) {
     let run = &cue.lines[0].runs[0];
