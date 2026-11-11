@@ -1445,6 +1445,47 @@ fn dfxp_drop_frame_is_unsupported() {
     );
 }
 
+/// 6.2.5 of the DFXP drafts: `ttp:markerMode` defaults to `continuous`, TTML's
+/// to `discontinuous` (7.2.7). An SMPTE file without the attribute is counted
+/// `Timing` only in TTML, once per cue; DFXP's explicit `discontinuous` counts.
+#[test]
+fn dfxp_smpte_default_marker_mode_is_continuous() {
+    let cases = [
+        ("http://www.w3.org/ns/ttml", "", 2),
+        ("http://www.w3.org/2006/04/ttaf1", "", 0),
+        ("http://www.w3.org/2006/10/ttaf1", "", 0),
+        (
+            "http://www.w3.org/2006/10/ttaf1",
+            r#" ttp:markerMode="discontinuous""#,
+            2,
+        ),
+    ];
+    for (ns, marker, counted) in cases {
+        let parsed = read(&format!(
+            "<tt xmlns=\"{ns}\" xmlns:ttp=\"{ns}#parameter\" ttp:timeBase=\"smpte\"{marker}>\
+             <body><div><p begin=\"00:00:01:00\" end=\"00:00:02:00\">a</p>\
+             <p begin=\"00:00:03:00\" end=\"00:00:04:00\">b</p></div></body></tt>"
+        ));
+        assert_eq!(texts(&parsed), vec!["a", "b"], "{ns}{marker}");
+        assert_eq!(loss(&parsed, Loss::Timing), counted, "{ns}{marker}");
+    }
+}
+
+/// 6.2.4 of the DFXP drafts: `ttp:frameRateMultiplier="1000:1001"` is NTSC. At
+/// 30 frames a second, 00:01:00:00 is 60.060 s and 00:01:01:00 is 61.061 s, the
+/// same as TTML's `1000 1001`.
+#[test]
+fn dfxp_ntsc_frame_rate_multiplier_is_read() {
+    let parsed = read(
+        "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" \
+         xmlns:ttp=\"http://www.w3.org/2006/10/ttaf1#parameter\" ttp:timeBase=\"smpte\" \
+         ttp:frameRate=\"30\" ttp:frameRateMultiplier=\"1000:1001\" ttp:markerMode=\"continuous\">\
+         <body><div><p begin=\"00:01:00:00\" end=\"00:01:01:00\">a</p></div></body></tt>",
+    );
+    assert_eq!(spans(&parsed), vec![(60_060, 61_061)]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+}
+
 /// 7.2.7, I.3: an SMPTE time code whose markers are discontinuous (the default,
 /// or said) is read as continuous time, which is an approximation: each cue
 /// counts `Timing`, once. `markerMode="continuous"` and the media time base are

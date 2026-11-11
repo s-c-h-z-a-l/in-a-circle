@@ -53,8 +53,9 @@ pub(crate) struct Params {
     tick_rate: Ratio,
     /// The SMPTE time base (I.3); otherwise the media time base (I.2).
     smpte: bool,
-    /// An SMPTE time base with discontinuous markers (the default, 7.2.7): read
-    /// as continuous, an approximation counted as `Loss::Timing`.
+    /// An SMPTE time base with discontinuous markers (TTML's default, 7.2.7; DFXP's
+    /// is continuous, 6.2.5): read as continuous, an approximation counted as
+    /// `Loss::Timing`.
     pub(crate) approximated: bool,
 }
 
@@ -89,7 +90,7 @@ impl Params {
             None => DEFAULT_FRAME_RATE,
         };
         let frame_rate_mul = match attribute(attrs, "frameRateMultiplier") {
-            Some(v) => multiplier(v)?,
+            Some(v) => multiplier(v, family)?,
             None => (1, 1),
         };
         let sub_frame_rate = match attribute(attrs, "subFrameRate") {
@@ -139,12 +140,17 @@ impl Params {
             _ if name == "smpteMode" => return Err(Unsupported("invalid ttp:smpteMode")),
             _ => return Err(Unsupported("invalid ttp:dropMode")),
         }
-        // 7.2.7: the default is discontinuous. I.3 says a discontinuous SMPTE
-        // time has no media time of its own, so the continuous formula below is
-        // an approximation for it: the time code is read as if the markers were
-        // continuous, under either marker mode. Refusing the default would refuse
-        // most broadcast files, and a converter can only map time codes to times.
-        let markers = attribute(attrs, "markerMode").unwrap_or("discontinuous");
+        // 7.2.7: the TTML default is discontinuous; DFXP's is continuous (6.2.5 of
+        // both drafts). I.3 says a discontinuous SMPTE time has no media time of
+        // its own, so the continuous formula below is an approximation for it: the
+        // time code is read as if the markers were continuous, under either marker
+        // mode. Refusing the default would refuse most broadcast files, and a
+        // converter can only map time codes to times.
+        let default_markers = match family {
+            Family::Ttml => "discontinuous",
+            Family::Dfxp => "continuous",
+        };
+        let markers = attribute(attrs, "markerMode").unwrap_or(default_markers);
         if !matches!(markers, "continuous" | "discontinuous") {
             return Err(Unsupported("invalid ttp:markerMode"));
         }
@@ -361,15 +367,20 @@ fn positive(v: &str, reason: &'static str) -> Result<u32, Unsupported> {
 
 /// `numerator lwsp denominator`, both above zero (7.2.6). `lwsp` is one or
 /// more of space, tab, CR and LF (10.3.23, 10.3.41); nothing may come before
-/// the numerator or after the denominator.
-fn multiplier(v: &str) -> Result<(u32, u32), Unsupported> {
+/// the numerator or after the denominator. DFXP writes `numerator ":"
+/// denominator` (6.2.4 of both drafts, 1000:1001 for NTSC); its family reads
+/// that form, and the whitespace form too, leniently.
+fn multiplier(v: &str, family: Family) -> Result<(u32, u32), Unsupported> {
     const REASON: &str = "invalid ttp:frameRateMultiplier";
     let is_space = |c: char| matches!(c, ' ' | '\t' | '\r' | '\n');
-    let (numerator, rest) = v.split_once(is_space).ok_or(Unsupported(REASON))?;
-    Ok((
-        positive(numerator, REASON)?,
-        positive(rest.trim_start_matches(is_space), REASON)?,
-    ))
+    let (numerator, denominator) = match (family, v.split_once(':')) {
+        (Family::Dfxp, Some(pair)) => pair,
+        _ => {
+            let (numerator, rest) = v.split_once(is_space).ok_or(Unsupported(REASON))?;
+            (numerator, rest.trim_start_matches(is_space))
+        }
+    };
+    Ok((positive(numerator, REASON)?, positive(denominator, REASON)?))
 }
 
 /// The largest common divisor. `gcd(0, d)` is `d`, so zero reduces to `0/1`.
@@ -865,6 +876,79 @@ mod tests {
             ])
             .is_ok(),
             "the TTML root's own spelling wins"
+        );
+    }
+
+    /// DFXP writes the frame rate multiplier as `numerator:denominator` (6.2.4 of
+    /// the 2006/04 draft and the 2006/10 CR; 1000:1001 is NTSC). It reads the same
+    /// milliseconds as TTML's `1000 1001`. TTML refuses the colon, and DFXP refuses
+    /// a zero or a missing part.
+    #[test]
+    fn dfxp_frame_rate_multiplier_accepts_the_colon_form() {
+        let ntsc = |mul: &'static str| {
+            [
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("frameRate", "30"),
+                ("frameRateMultiplier", mul),
+            ]
+        };
+        for expr in ["00:01:00:00", "1s", "00:01:01:00"] {
+            assert_eq!(
+                parse_time(expr, &dfxp(&ntsc("1000:1001")).expect("valid")),
+                read(expr, &ntsc("1000 1001")),
+                "{expr}"
+            );
+        }
+        let dfxp_ntsc = dfxp(&ntsc("1000:1001")).expect("valid");
+        assert_eq!(parse_time("00:01:00:00", &dfxp_ntsc), Ok(60_060));
+        assert_eq!(
+            dfxp(&[("frameRateMultiplier", "1000 1001")]).map(|p| p.frame_rate_mul),
+            Ok((1000, 1001)),
+            "the whitespace form is read leniently"
+        );
+        assert_eq!(
+            ttml(&[("frameRateMultiplier", "1000:1001")]),
+            Err(Unsupported("invalid ttp:frameRateMultiplier"))
+        );
+        for value in [
+            "1000:0",
+            "0:1001",
+            "1000:",
+            ":1001",
+            "1000:1001:1",
+            "1000: 1001",
+            "1000:1001 ",
+        ] {
+            assert_eq!(
+                dfxp(&[("frameRateMultiplier", value)]),
+                Err(Unsupported("invalid ttp:frameRateMultiplier")),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// DFXP's `ttp:markerMode` defaults to `continuous` (6.2.5 of both drafts);
+    /// TTML's defaults to `discontinuous` (7.2.7). So an SMPTE file without the
+    /// attribute is an approximation only in TTML, and the explicit values are the
+    /// same in both families.
+    #[test]
+    fn dfxp_marker_mode_defaults_to_continuous() {
+        assert!(!dfxp(&[("timeBase", "smpte")]).expect("valid").approximated);
+        assert!(ttml(&[("timeBase", "smpte")]).expect("valid").approximated);
+        assert!(
+            dfxp(&[("timeBase", "smpte"), ("markerMode", "discontinuous")])
+                .expect("valid")
+                .approximated
+        );
+        assert!(
+            !ttml(&[("timeBase", "smpte"), ("markerMode", "continuous")])
+                .expect("valid")
+                .approximated
+        );
+        assert_eq!(
+            dfxp(&[("markerMode", "sometimes")]),
+            Err(Unsupported("invalid ttp:markerMode"))
         );
     }
 
