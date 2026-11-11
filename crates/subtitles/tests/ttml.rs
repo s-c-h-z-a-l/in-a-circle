@@ -2456,6 +2456,52 @@ fn an_animate_attribute_naming_another_property_counts_styling() {
     assert_eq!(parsed.skipped.count, 0);
 }
 
+/// 13.2.1: two out-of-line animations with one `xml:id` are one name (the
+/// duplicate is an XML ID error, which is not fatal, XML ID section 6), and an
+/// IDREF to it takes both changes. The visibility change refuses the paragraph
+/// that names it, though a colour change comes with it.
+#[test]
+fn an_animate_attribute_naming_a_visibility_and_a_colour_set_refuses_the_paragraph() {
+    let parsed = read(&styled(
+        r#"<animation><set xml:id="d" begin="0s" end="1s" tts:visibility="hidden"/><set xml:id="d" begin="0s" end="1s" tts:color="red"/></animation>"#,
+        r#"<p begin="0s" end="3s" animate="d">Secret</p><p begin="4s" end="5s">Plain</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["Plain"]);
+    assert_eq!(parsed.skipped.count, 1);
+    assert_eq!(
+        parsed.skipped.first,
+        Some((1, "visibility changes over time"))
+    );
+}
+
+/// XML ID section 6, 13.2.1: a duplicate region is dropped (the first definition
+/// stands), but its declarations still count on the paragraphs that name it. An
+/// `animate` that changes visibility and colour gives the duplicate its styling:
+/// the paragraph is kept and counts `Styling` once.
+#[test]
+fn a_duplicate_region_keeps_the_styling_of_its_animation() {
+    let parsed = read(&styled(
+        r#"<layout><region xml:id="r"/><region xml:id="r" animate="d"/></layout><animation><set xml:id="d" begin="0s" end="1s" tts:visibility="hidden"/><set xml:id="d" begin="0s" end="1s" tts:color="red"/></animation>"#,
+        r#"<p begin="0s" end="3s" region="r">in region</p>"#,
+    ));
+    assert_eq!(texts(&parsed), vec!["in region"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// 13.2.1: the `animate` attribute names animations on the elements the table
+/// lists (`body`, `div`, `p`, `span`, `region`). On the root it names nothing,
+/// so the paragraphs keep their text. (Refused, they would leave no cue, and
+/// the read would fail.)
+#[test]
+fn an_animate_attribute_on_the_root_names_nothing() {
+    let text = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" animate="a1"><head><animation><set xml:id="a1" begin="0s" end="1s" tts:visibility="hidden"/></animation></head><body><div><p begin="0s" end="3s">Shown</p><p begin="4s" end="5s">Plain</p></div></body></tt>"#;
+    assert_eq!(
+        read_ttml(text.as_bytes()).map(|p| texts(&p)),
+        Ok(vec!["Shown".to_owned(), "Plain".to_owned()])
+    );
+}
+
 /// 13.2.1: the `animate` attribute may name an animation the head gives after
 /// the element that names it. The region is read first; its paragraphs are
 /// refused all the same, and a paragraph outside it is shown.

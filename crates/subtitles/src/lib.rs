@@ -406,7 +406,9 @@ mod tests {
             )
         };
         let least = |text: &str| {
-            (1..)
+            // Refused at the item budget, so there is no least budget: fail here.
+            assert!(ttml::parse(text.as_bytes(), &mut Budget::new(ITEM_BUDGET)).is_ok());
+            (1..=ITEM_BUDGET)
                 .find(|&b| ttml::parse(text.as_bytes(), &mut Budget::new(b)).is_ok())
                 .expect("some budget reads the document")
         };
@@ -468,11 +470,30 @@ mod tests {
             let text = format!(
                 r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"><body><div><p begin="0s" end="1s">{body}</p></div></body></tt>"#
             );
-            (1..)
+            // Refused at the item budget, so there is no least budget: fail here.
+            assert!(ttml::parse(text.as_bytes(), &mut Budget::new(ITEM_BUDGET)).is_ok());
+            (1..=ITEM_BUDGET)
                 .find(|&b| ttml::parse(text.as_bytes(), &mut Budget::new(b)).is_ok())
                 .expect("some budget reads the document")
         };
         assert_eq!(least(r#"<set begin="0s" tts:display="none"/>"#), least(""),);
+    }
+
+    /// A `br` over a span that lasts no time is no piece (`Doc::line_break`), so
+    /// it costs its element frame and nothing more: one item over the empty span.
+    #[test]
+    fn a_zero_long_break_costs_its_frame_only() {
+        let least = |body: &str| {
+            let text = format!(
+                r#"<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="1s">x<span begin="0.5s" end="0.5s">{body}</span></p></div></body></tt>"#
+            );
+            // Refused at the item budget, so there is no least budget: fail here.
+            assert!(ttml::parse(text.as_bytes(), &mut Budget::new(ITEM_BUDGET)).is_ok());
+            (1..=ITEM_BUDGET)
+                .find(|&b| ttml::parse(text.as_bytes(), &mut Budget::new(b)).is_ok())
+                .expect("some budget reads the document")
+        };
+        assert_eq!(least("<br/>") - least(""), 1);
     }
 
     /// The animated scope pass charges one item per element it scopes, and one
@@ -484,7 +505,7 @@ mod tests {
     #[test]
     fn the_animated_scope_pass_charges_one_item_per_scope() {
         let least = |text: &str| {
-            (1..)
+            (1..=ITEM_BUDGET)
                 .find(|&b| {
                     !matches!(
                         ttml::parse(text.as_bytes(), &mut Budget::new(b)),
