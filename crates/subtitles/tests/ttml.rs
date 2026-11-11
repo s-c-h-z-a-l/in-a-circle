@@ -1490,6 +1490,49 @@ fn conflicting_drop_modes_are_refused() {
     }
 }
 
+/// A parameter given in two parameter namespaces on one root (TTML's `ttp:` and
+/// DFXP's `d:`): equal values are one parameter; different values refuse the
+/// document, since neither can be chosen. Every read parameter is checked.
+#[test]
+fn a_parameter_given_in_two_namespaces_must_agree() {
+    let root = |attrs: &str| {
+        format!(
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+             xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" \
+             xmlns:d=\"http://www.w3.org/2006/10/ttaf1#parameter\" {attrs}>\
+             <body><div><p begin=\"00:00:01:00\" end=\"00:00:02:00\">a</p></div></body></tt>"
+        )
+    };
+    let cases = [
+        (
+            r#"ttp:timeBase="smpte" d:timeBase="media" ttp:markerMode="continuous""#,
+            "conflicting ttp:timeBase",
+        ),
+        (
+            r#"ttp:timeBase="smpte" ttp:markerMode="continuous" ttp:frameRate="30" d:frameRate="25""#,
+            "conflicting ttp:frameRate",
+        ),
+        (
+            r#"ttp:timeBase="smpte" ttp:markerMode="continuous" ttp:dropMode="nonDrop" d:dropMode="dropNTSC""#,
+            "conflicting ttp:dropMode",
+        ),
+    ];
+    for (attrs, reason) in cases {
+        assert_eq!(
+            read_ttml(root(attrs).as_bytes()).err(),
+            Some(ReadError::Unsupported(reason)),
+            "{attrs}"
+        );
+    }
+    let equal = root(
+        r#"ttp:timeBase="smpte" ttp:markerMode="continuous" ttp:dropMode="nonDrop" d:dropMode="nonDrop""#,
+    );
+    assert!(
+        read_ttml(equal.as_bytes()).is_ok(),
+        "equal values are one parameter"
+    );
+}
+
 /// 6.2.5 of the DFXP drafts: `ttp:markerMode` defaults to `continuous`, TTML's
 /// to `discontinuous` (7.2.7). An SMPTE file without the attribute is counted
 /// `Timing` only in TTML, once per cue; DFXP's explicit `discontinuous` counts.

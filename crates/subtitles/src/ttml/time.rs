@@ -81,9 +81,11 @@ impl Params {
     /// Reads the parameters from the `tt` element's attributes, as (local name,
     /// value) pairs in the TTML or DFXP parameter namespaces, the names as
     /// spelled there. An absent parameter takes its default. A value that
-    /// breaks its syntax is refused, and so is a time base or marker mode whose
+    /// breaks its syntax is refused, and so is a parameter given twice with
+    /// different values (`READ`), and a time base or marker mode whose
     /// time this reader cannot convert.
     pub(crate) fn from_tt(attrs: &[(&str, &str)], family: Family) -> Result<Params, Unsupported> {
+        no_conflict(attrs)?;
         let frame_rate_given = attribute(attrs, "frameRate");
         let frame_rate = match frame_rate_given {
             Some(v) => positive(v, "invalid ttp:frameRate")?,
@@ -358,9 +360,39 @@ fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The value of the attribute `name`, if the element has it.
+/// The value of the attribute `name`, if the element has it. Equal repeats are
+/// one parameter: `no_conflict` has refused the unequal ones before any read.
 fn attribute<'a>(attrs: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
     attrs.iter().find(|(n, _)| *n == name).map(|&(_, v)| v)
+}
+
+/// The parameters `from_tt` reads, each with its refusal for a conflict. The
+/// root's parameters arrive by local name from every parameter namespace, so one
+/// name can come twice: equal values are one parameter, unequal ones cannot be
+/// chosen between and refuse the document. `dropMode` and `smpteMode` are two
+/// names for one parameter; their own rule is in `from_tt`. A name not read here
+/// has no effect, so its repeats are not checked.
+const READ: [(&str, &str); 8] = [
+    ("frameRate", "conflicting ttp:frameRate"),
+    ("frameRateMultiplier", "conflicting ttp:frameRateMultiplier"),
+    ("subFrameRate", "conflicting ttp:subFrameRate"),
+    ("tickRate", "conflicting ttp:tickRate"),
+    ("timeBase", "conflicting ttp:timeBase"),
+    ("markerMode", "conflicting ttp:markerMode"),
+    ("dropMode", "conflicting ttp:dropMode"),
+    ("smpteMode", "conflicting ttp:smpteMode"),
+];
+
+/// Refuses a read parameter given twice with different values (see `READ`).
+fn no_conflict(attrs: &[(&str, &str)]) -> Result<(), Unsupported> {
+    for (name, reason) in READ {
+        let mut values = attrs.iter().filter(|(n, _)| *n == name).map(|&(_, v)| v);
+        let Some(first) = values.next() else { continue };
+        if values.any(|v| v != first) {
+            return Err(Unsupported(reason));
+        }
+    }
+    Ok(())
 }
 
 /// A `<digit>+` value above zero (7.2.5, 7.2.9, 7.2.10). Parsing a `u32` alone
@@ -940,6 +972,61 @@ mod tests {
                 ("smpteMode", "dropNTSC")
             ]),
             Err(Unsupported("drop-frame time code"))
+        );
+    }
+
+    /// A parameter given twice on the root, from two parameter namespaces (the
+    /// callers pass local names), is one parameter when the values are equal and
+    /// refused when they differ: a timing or drop choice cannot be made between
+    /// them. The drop mode's own conflict across its two names keeps its message.
+    #[test]
+    fn a_parameter_given_twice_must_agree() {
+        let conflict =
+            |reason: &'static str| -> Result<Params, Unsupported> { Err(Unsupported(reason)) };
+        assert_eq!(
+            ttml(&[("timeBase", "smpte"), ("timeBase", "media")]),
+            conflict("conflicting ttp:timeBase")
+        );
+        assert_eq!(
+            ttml(&[("frameRate", "30"), ("frameRate", "25")]),
+            conflict("conflicting ttp:frameRate")
+        );
+        assert_eq!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("dropMode", "nonDrop"),
+                ("dropMode", "dropNTSC"),
+            ]),
+            conflict("conflicting ttp:dropMode")
+        );
+        assert_eq!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("dropMode", "nonDrop"),
+                ("smpteMode", "dropNTSC")
+            ]),
+            conflict("conflicting drop mode")
+        );
+        assert!(ttml(&[("frameRate", "30"), ("frameRate", "30")]).is_ok());
+        assert!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("dropMode", "nonDrop"),
+                ("dropMode", "nonDrop"),
+            ])
+            .is_ok()
+        );
+        assert_eq!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("dropMode", "dropNTSC"),
+                ("dropMode", "dropNTSC"),
+            ]),
+            Err(Unsupported("drop-frame time code")),
+            "an equal repeat is one drop mode, and it is refused"
         );
     }
 
