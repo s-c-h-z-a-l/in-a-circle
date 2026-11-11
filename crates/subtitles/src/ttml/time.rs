@@ -121,24 +121,31 @@ impl Params {
         };
         // 7.2.4: nonDrop is the default. dropNTSC and dropPAL apply to the SMPTE
         // time base only; under the media time base the parameter has no effect.
-        // DFXP spells it `ttp:smpteMode` (6.2.8 of both drafts). Each spelling is
-        // read; when both appear, the root's own family's spelling wins.
-        let (own, other) = match family {
-            Family::Ttml => ("dropMode", "smpteMode"),
-            Family::Dfxp => ("smpteMode", "dropMode"),
-        };
-        let (name, drop) = attribute(attrs, own)
-            .map(|v| (own, v))
-            .or_else(|| attribute(attrs, other).map(|v| (other, v)))
-            .unwrap_or((own, "nonDrop"));
-        match drop {
-            "nonDrop" => {}
-            "dropNTSC" | "dropPAL" if smpte => {
-                return Err(Unsupported("drop-frame time code"));
+        // DFXP spells it `ttp:smpteMode` (6.2.8 of both drafts). Either spelling
+        // is read. When both appear, equal values are one drop mode, and different
+        // values are refused: the author's intent cannot be told, and a wrong
+        // choice would shift the time codes by 3.6 s per hour.
+        let mut drop = None;
+        for (name, value) in [
+            ("dropMode", attribute(attrs, "dropMode")),
+            ("smpteMode", attribute(attrs, "smpteMode")),
+        ] {
+            let Some(value) = value else { continue };
+            if !matches!(value, "nonDrop" | "dropNTSC" | "dropPAL") {
+                return Err(Unsupported(match name {
+                    "smpteMode" => "invalid ttp:smpteMode",
+                    _ => "invalid ttp:dropMode",
+                }));
             }
-            "dropNTSC" | "dropPAL" => {}
-            _ if name == "smpteMode" => return Err(Unsupported("invalid ttp:smpteMode")),
-            _ => return Err(Unsupported("invalid ttp:dropMode")),
+            match drop {
+                Some(earlier) if earlier != value => {
+                    return Err(Unsupported("conflicting drop mode"));
+                }
+                _ => drop = Some(value),
+            }
+        }
+        if smpte && matches!(drop, Some("dropNTSC" | "dropPAL")) {
+            return Err(Unsupported("drop-frame time code"));
         }
         // 7.2.7: the TTML default is discontinuous; DFXP's is continuous (6.2.5 of
         // both drafts). I.3 says a discontinuous SMPTE time has no media time of
@@ -827,8 +834,8 @@ mod tests {
     /// DFXP spells the drop mode `ttp:smpteMode`, nonDrop, dropNTSC and dropPAL
     /// (6.2.8 of the 2006/04 working draft and of the 2006/10 CR). A drop-frame
     /// value under the SMPTE time base is refused in either spelling, as TTML's
-    /// `dropMode` is. Where both spellings appear, the root's own family's wins
-    /// and the other is ignored.
+    /// `dropMode` is. The spellings with different values on one root are
+    /// refused (see `conflicting_drop_modes_are_refused`).
     #[test]
     fn dfxp_smpte_mode_is_the_drop_mode() {
         let smpte = |name: &'static str, drop: &'static str| {
@@ -857,25 +864,82 @@ mod tests {
         );
         // Under the media time base the drop mode has no effect (7.2.4), in either spelling.
         assert!(dfxp(&[("smpteMode", "dropNTSC")]).is_ok());
+    }
+
+    /// Two spellings of the drop mode on one root, in either order, with different
+    /// values, are refused: neither can be chosen without knowing the author's
+    /// intent, and a wrong choice shifts an SMPTE time by 3.6 s per hour. The
+    /// refusal holds in both families, since the spelling decides nothing here. An
+    /// invalid value in either spelling is the invalid-value refusal instead.
+    #[test]
+    fn conflicting_drop_modes_are_refused() {
+        let smpte = [("timeBase", "smpte"), ("markerMode", "continuous")];
+        let conflict = Err(Unsupported("conflicting drop mode"));
+        for attrs in [
+            [("dropMode", "dropNTSC"), ("smpteMode", "nonDrop")],
+            [("smpteMode", "nonDrop"), ("dropMode", "dropNTSC")],
+        ] {
+            let all: Vec<(&str, &str)> = smpte.iter().chain(attrs.iter()).copied().collect();
+            assert_eq!(ttml(&all), conflict, "{attrs:?}");
+            assert_eq!(dfxp(&all), conflict, "{attrs:?}");
+        }
+        let invalid_beside_valid = [("dropMode", "nonDrop"), ("smpteMode", "dropX")];
+        let all: Vec<(&str, &str)> = smpte
+            .iter()
+            .chain(invalid_beside_valid.iter())
+            .copied()
+            .collect();
         assert_eq!(
-            dfxp(&[
-                ("timeBase", "smpte"),
-                ("markerMode", "continuous"),
-                ("smpteMode", "dropNTSC"),
-                ("dropMode", "nonDrop"),
-            ]),
-            Err(Unsupported("drop-frame time code")),
-            "the DFXP root's own spelling wins"
+            dfxp(&all),
+            Err(Unsupported("invalid ttp:smpteMode")),
+            "an invalid value is refused before the conflict"
         );
+        // The same value in both spellings is that one drop mode.
+        let both = |drop: &'static str| {
+            let mut all = smpte.to_vec();
+            all.extend([("dropMode", drop), ("smpteMode", drop)]);
+            all
+        };
+        assert!(ttml(&both("nonDrop")).is_ok());
+        assert!(dfxp(&both("nonDrop")).is_ok());
+        for family in [ttml, dfxp] {
+            assert_eq!(
+                family(&both("dropNTSC")),
+                Err(Unsupported("drop-frame time code"))
+            );
+        }
+        // One spelling only, in each family: read by its value.
         assert!(
             ttml(&[
                 ("timeBase", "smpte"),
                 ("markerMode", "continuous"),
-                ("dropMode", "nonDrop"),
-                ("smpteMode", "dropNTSC"),
+                ("dropMode", "nonDrop")
             ])
-            .is_ok(),
-            "the TTML root's own spelling wins"
+            .is_ok()
+        );
+        assert!(
+            dfxp(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("smpteMode", "nonDrop")
+            ])
+            .is_ok()
+        );
+        assert_eq!(
+            ttml(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("dropMode", "dropPAL")
+            ]),
+            Err(Unsupported("drop-frame time code"))
+        );
+        assert_eq!(
+            dfxp(&[
+                ("timeBase", "smpte"),
+                ("markerMode", "continuous"),
+                ("smpteMode", "dropNTSC")
+            ]),
+            Err(Unsupported("drop-frame time code"))
         );
     }
 

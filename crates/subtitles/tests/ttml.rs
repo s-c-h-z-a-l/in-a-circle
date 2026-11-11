@@ -1445,6 +1445,51 @@ fn dfxp_drop_frame_is_unsupported() {
     );
 }
 
+/// Both drop-mode spellings on the root (`ttp:dropMode` and DFXP's
+/// `ttp:smpteMode`): different values refuse the document in either order and in
+/// each draft; equal values read as that value.
+#[test]
+fn conflicting_drop_modes_are_refused() {
+    let root = |ns: &str, first: &str, second: &str| {
+        format!(
+            "<tt xmlns=\"{ns}\" xmlns:ttp=\"{ns}#parameter\" ttp:timeBase=\"smpte\" \
+             ttp:frameRate=\"30\" {first} {second} ttp:markerMode=\"continuous\">\
+             <body><div><p begin=\"01:00:00:00\" end=\"01:00:02:00\">Hour</p></div></body></tt>"
+        )
+    };
+    let drafts = [
+        "http://www.w3.org/ns/ttml",
+        "http://www.w3.org/2006/04/ttaf1",
+        "http://www.w3.org/2006/10/ttaf1",
+    ];
+    let dropped = r#"ttp:dropMode="dropNTSC""#;
+    let dropped_smpte = r#"ttp:smpteMode="dropNTSC""#;
+    let non = r#"ttp:dropMode="nonDrop""#;
+    let non_smpte = r#"ttp:smpteMode="nonDrop""#;
+    for ns in drafts {
+        let err = |a: &str, b: &str| read_ttml(root(ns, a, b).as_bytes()).err();
+        assert_eq!(
+            err(dropped, non_smpte),
+            Some(ReadError::Unsupported("conflicting drop mode")),
+            "{ns}"
+        );
+        assert_eq!(
+            err(non_smpte, dropped),
+            Some(ReadError::Unsupported("conflicting drop mode")),
+            "{ns}, reversed"
+        );
+        assert_eq!(
+            err(dropped, dropped_smpte),
+            Some(ReadError::Unsupported("drop-frame time code")),
+            "{ns}: the same value is one drop mode"
+        );
+        assert!(
+            read_ttml(root(ns, non, non_smpte).as_bytes()).is_ok(),
+            "{ns}: nonDrop in both spellings reads"
+        );
+    }
+}
+
 /// 6.2.5 of the DFXP drafts: `ttp:markerMode` defaults to `continuous`, TTML's
 /// to `discontinuous` (7.2.7). An SMPTE file without the attribute is counted
 /// `Timing` only in TTML, once per cue; DFXP's explicit `discontinuous` counts.
