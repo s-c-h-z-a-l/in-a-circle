@@ -211,23 +211,37 @@ fn old_dfxp_namespace_is_read() {
     assert_eq!(spans(&parsed), vec![(1_000, 2_000)]);
 }
 
-/// TTML 1 (DFXP, 2006) binds `tts` to `http://www.w3.org/2006/10/ttaf1#styling`:
-/// the namespace document of `ttaf1` lists that URI with `#parameter` and
-/// `#metadata`. A document in that family styles its text as a TTML one does.
+/// TTML 1 (DFXP, 2006) binds `tts` to `http://www.w3.org/2006/10/ttaf1#style`
+/// (the CR of 2006-11-16, Table 1, and its examples). The namespace document of
+/// `ttaf1` lists `#styling` for the same vocabulary, so both URIs are read. A
+/// document in either styles its text as a TTML one does.
 #[test]
-fn old_dfxp_styling_namespace_styles_the_text() {
-    let parsed = read(
-        "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"http://www.w3.org/2006/10/ttaf1#styling\">\
-         <body><div>\
-         <p begin=\"0s\" end=\"1s\" tts:fontStyle=\"italic\" tts:color=\"red\">italic</p>\
-         <p begin=\"2s\" end=\"3s\" tts:display=\"none\">hidden</p>\
-         </div></body></tt>",
-    );
-    assert_eq!(texts(&parsed), vec!["italic"]);
-    assert_eq!(run_flags(&parsed.cues[0]), (true, false, false));
-    assert_eq!(loss(&parsed, Loss::Styling), 1, "the colour is not carried");
-    assert_eq!(parsed.skipped.count, 1);
-    assert_eq!(parsed.skipped.first, Some((1, "hidden by the document")));
+fn old_dfxp_styling_namespaces_style_the_text() {
+    for tts in [
+        "http://www.w3.org/2006/10/ttaf1#style",
+        "http://www.w3.org/2006/10/ttaf1#styling",
+    ] {
+        let parsed = read(&format!(
+            "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"{tts}\">\
+             <body><div>\
+             <p begin=\"0s\" end=\"1s\" tts:fontStyle=\"italic\" tts:color=\"red\">italic</p>\
+             <p begin=\"2s\" end=\"3s\" tts:display=\"none\">hidden</p>\
+             </div></body></tt>"
+        ));
+        assert_eq!(texts(&parsed), vec!["italic"], "{tts}");
+        assert_eq!(run_flags(&parsed.cues[0]), (true, false, false), "{tts}");
+        assert_eq!(
+            loss(&parsed, Loss::Styling),
+            1,
+            "{tts}: the colour is not carried"
+        );
+        assert_eq!(parsed.skipped.count, 1, "{tts}");
+        assert_eq!(
+            parsed.skipped.first,
+            Some((1, "hidden by the document")),
+            "{tts}"
+        );
+    }
 }
 
 /// An attribute in a namespace that is not TTML's is not carried: it is counted
@@ -1958,6 +1972,13 @@ fn accounting_rows() -> Vec<Row> {
         row(
             "DFXP 2006 styling namespace: display none hides, as in TTML",
             "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"http://www.w3.org/2006/10/ttaf1#styling\"><body><div><p begin=\"0s\" end=\"1s\" tts:display=\"none\">a</p><p begin=\"2s\" end=\"3s\">b</p></div></body></tt>".to_owned(),
+            &[],
+            1,
+            Some((1, "hidden by the document")),
+        ),
+        row(
+            "DFXP 2006 CR styling namespace (#style): display none hides, as in TTML",
+            "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" xmlns:tts=\"http://www.w3.org/2006/10/ttaf1#style\"><body><div><p begin=\"0s\" end=\"1s\" tts:display=\"none\">a</p><p begin=\"2s\" end=\"3s\">b</p></div></body></tt>".to_owned(),
             &[],
             1,
             Some((1, "hidden by the document")),

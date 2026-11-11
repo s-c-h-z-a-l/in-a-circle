@@ -17,9 +17,12 @@ use xml::Element;
 use super::{DFXP_TTM_NS, DFXP_TTP_NS, SMPTE_NS, TTM_NS, TTP_NS, XSI_NS};
 use crate::{Budget, ReadError};
 
-/// The styling namespace (TTML2 Table 5-1) and the DFXP one of TTML 1.
+/// The styling namespace (TTML2 Table 5-1) and the two DFXP ones of TTML 1:
+/// `#style` as the DFXP CR of 2006-11-16 binds `tts` (Table 1), and `#styling`
+/// as the namespace document of `ttaf1` lists it.
 const TTS_NS: &str = "http://www.w3.org/ns/ttml#styling";
-const DFXP_TTS_NS: &str = "http://www.w3.org/2006/10/ttaf1#styling";
+const DFXP_TTS_NS: &str = "http://www.w3.org/2006/10/ttaf1#style";
+const DFXP_TTS_STYLING_NS: &str = "http://www.w3.org/2006/10/ttaf1#styling";
 /// The EBU-TT-D style namespace (`ebutts:linePadding`, `ebutts:multiRowAlign`),
 /// as IMSC 1.2 (9.5.14, 9.5.15) gives it.
 const EBU_STYLE_NS: &str = "urn:ebu:tt:style";
@@ -187,7 +190,8 @@ const fn percent(n: u32) -> Len {
 /// Every `tts:` attribute as (local name, value).
 fn tts_attrs<'e>(el: &'e Element<'_>) -> impl Iterator<Item = (&'e str, &'e str)> {
     el.attrs().filter_map(|(name, value)| {
-        matches!(name.ns, Some(TTS_NS | DFXP_TTS_NS)).then_some((name.local, value.as_ref()))
+        matches!(name.ns, Some(TTS_NS | DFXP_TTS_NS | DFXP_TTS_STYLING_NS))
+            .then_some((name.local, value.as_ref()))
     })
 }
 
@@ -310,6 +314,7 @@ fn is_read_ns(ns: &str) -> bool {
         ns,
         TTS_NS
             | DFXP_TTS_NS
+            | DFXP_TTS_STYLING_NS
             | TTP_NS
             | DFXP_TTP_NS
             | TTM_NS

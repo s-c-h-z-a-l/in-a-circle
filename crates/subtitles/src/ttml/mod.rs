@@ -35,7 +35,7 @@
 //! | XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
 //! | a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
 //! | a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
-//! | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
+//! | the DFXP 2006 namespaces of TTML 1 (`ttaf1`, and its `#style` (the CR's, Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
 //! | `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` | `Unsupported` (the whole file) |
 //! | `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, or a bad value: `Unsupported` |
 //! | other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |

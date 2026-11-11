@@ -460,9 +460,11 @@ struct Scan {
     div_in_div: bool,
 }
 
-/// The TTML styling namespaces (the TTML 2 and the DFXP one).
-const STYLING_NS: [&str; 2] = [
+/// The TTML styling namespaces (the TTML 2 one and the two DFXP ones, `#style`
+/// as the DFXP CR of 2006 binds it, and `#styling`).
+const STYLING_NS: [&str; 3] = [
     "http://www.w3.org/ns/ttml#styling",
+    "http://www.w3.org/2006/10/ttaf1#style",
     "http://www.w3.org/2006/10/ttaf1#styling",
 ];
 
