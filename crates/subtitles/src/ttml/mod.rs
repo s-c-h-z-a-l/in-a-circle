@@ -164,11 +164,14 @@ const TTM_NS: &str = "http://www.w3.org/ns/ttml#metadata";
 const DFXP_TTM_NS: &str = "http://www.w3.org/2006/10/ttaf1#metadata";
 const DFXP_WD_TTM_NS: &str = "http://www.w3.org/2006/04/ttaf1#metadata";
 /// The IMSC 1.2 parameter and metadata namespaces (8.8: `ittp:aspectRatio`,
-/// `ittp:progressivelyDecodable`, `ittm:altText`) and EBU-TT's metadata namespace
-/// (`ebuttm:`, EBU Tech 3380): parameters and metadata, read without a count.
+/// `ittp:progressivelyDecodable`, `ittm:altText`) and EBU-TT's metadata and
+/// parameter namespaces (`ebuttm:`, EBU Tech 3380; `ebuttp:`, the sequence
+/// parameters of EBU Tech 3370, Part 3, on `tt`): parameters and metadata, read
+/// without a count.
 const IMSC_PARAM_NS: &str = "http://www.w3.org/ns/ttml/profile/imsc1#parameter";
 const IMSC_META_NS: &str = "http://www.w3.org/ns/ttml/profile/imsc1#metadata";
 const EBU_META_NS: &str = "urn:ebu:tt:metadata";
+const EBU_PARAM_NS: &str = "urn:ebu:tt:parameters";
 /// The XML Schema instance namespace (`xsi:schemaLocation` and the like): not content.
 const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 

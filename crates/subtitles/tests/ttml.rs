@@ -301,6 +301,20 @@ fn draft_2006_04_parameters_and_metadata_are_read() {
     assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
 }
 
+/// EBU-TT Part 3 (Live, EBU Tech 3370, the namespace table of 3.1.1) puts its
+/// sequence and handover parameters on `tt`, in `urn:ebu:tt:parameters`
+/// (`ebuttp:sequenceIdentifier` and `ebuttp:sequenceNumber`, both required).
+/// They are parameters, not content, as `ebuttm:` is: no loss.
+#[test]
+fn ebu_tt_parameters_are_not_content() {
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:ebuttp="urn:ebu:tt:parameters" ttp:timeBase="media" ttp:clockMode="local" ebuttp:sequenceIdentifier="TestSequence1" ebuttp:sequenceNumber="1" ebuttp:authorsGroupIdentifier="group" ebuttp:authorsGroupControlToken="2"><head/><body><div><p begin="1s" end="3s">Live text</p></div></body></tt>"#,
+    );
+    assert_eq!(texts(&parsed), vec!["Live text"]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
 /// The IMSC parameter and metadata attributes (IMSC 1.2, 8.8: `ittp:aspectRatio`,
 /// `ittp:progressivelyDecodable` on the root; `ittm:altText` on a paragraph) and
 /// the EBU-TT metadata namespace (`ebuttm:`, EBU Tech 3380: `urn:ebu:tt:metadata`)

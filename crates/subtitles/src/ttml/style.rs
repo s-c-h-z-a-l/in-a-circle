@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use xml::Element;
 
 use super::{
-    DFXP_TTM_NS, DFXP_TTP_NS, DFXP_WD_TTM_NS, DFXP_WD_TTP_NS, EBU_META_NS, IMSC_META_NS,
-    IMSC_PARAM_NS, SMPTE_NS, TTM_NS, TTP_NS, XSI_NS,
+    DFXP_TTM_NS, DFXP_TTP_NS, DFXP_WD_TTM_NS, DFXP_WD_TTP_NS, EBU_META_NS, EBU_PARAM_NS,
+    IMSC_META_NS, IMSC_PARAM_NS, SMPTE_NS, TTM_NS, TTP_NS, XSI_NS,
 };
 use crate::{Budget, ReadError};
 
@@ -321,8 +321,9 @@ pub(super) fn attrs_css(el: &Element) -> Css {
 }
 
 /// Whether an attribute's namespace is one the reader handles by its own rules:
-/// the TTML and DFXP styling, parameter and metadata namespaces, XML's own
-/// attributes, schema instances, and SMPTE's `backgroundImage` (an image unit,
+/// the TTML and DFXP styling, parameter and metadata namespaces, EBU-TT's
+/// parameter and metadata ones, XML's own attributes, schema instances, and
+/// SMPTE's `backgroundImage` (an image unit,
 /// see `mod.rs`). Any other namespace is foreign to TTML.
 fn is_read_ns(ns: &str) -> bool {
     matches!(
@@ -341,6 +342,7 @@ fn is_read_ns(ns: &str) -> bool {
             | IMSC_PARAM_NS
             | IMSC_META_NS
             | EBU_META_NS
+            | EBU_PARAM_NS
             | SMPTE_NS
             | xml::XML_NS
             | XSI_NS
