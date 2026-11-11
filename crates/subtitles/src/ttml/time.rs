@@ -404,16 +404,17 @@ fn positive(v: &str, reason: &'static str) -> Result<u32, Unsupported> {
     }
 }
 
-/// `numerator lwsp denominator`, both above zero (7.2.6). `lwsp` is one or
+/// TTML: `numerator lwsp denominator`, both above zero (7.2.6). `lwsp` is one or
 /// more of space, tab, CR and LF (10.3.23, 10.3.41); nothing may come before
-/// the numerator or after the denominator. DFXP writes `numerator ":"
-/// denominator` (6.2.4 of both drafts, 1000:1001 for NTSC); its family reads
-/// that form, and the whitespace form too, leniently.
+/// the numerator or after the denominator. DFXP: `numerator (":" denominator)?`
+/// (6.2.4 of both drafts, 1000:1001 for NTSC), so a lone number is `n:1`; its
+/// family reads the whitespace form too, leniently.
 fn multiplier(v: &str, family: Family) -> Result<(u32, u32), Unsupported> {
     const REASON: &str = "invalid ttp:frameRateMultiplier";
     let is_space = |c: char| matches!(c, ' ' | '\t' | '\r' | '\n');
     let (numerator, denominator) = match (family, v.split_once(':')) {
         (Family::Dfxp, Some(pair)) => pair,
+        (Family::Dfxp, None) if !v.contains(is_space) => (v, "1"),
         _ => {
             let (numerator, rest) = v.split_once(is_space).ok_or(Unsupported(REASON))?;
             (numerator, rest.trim_start_matches(is_space))
@@ -1077,6 +1078,33 @@ mod tests {
                 "{value:?}"
             );
         }
+    }
+
+    /// DFXP's frame rate multiplier is `numerator (":" denominator)?` (6.2.4 of
+    /// both drafts), so a lone number is `n:1`: `frameRate="15"` with a
+    /// multiplier of `2` is an effective 30 fps. TTML needs the denominator
+    /// (7.2.6). A zero is refused in both families.
+    #[test]
+    fn dfxp_frame_rate_multiplier_may_be_a_lone_number() {
+        let lone = dfxp(&[("frameRate", "15"), ("frameRateMultiplier", "2")]).expect("valid");
+        let thirty = ttml(&[("frameRate", "30")]).expect("valid");
+        // 30 frames at an effective 30 fps is one second, as at 30 fps directly.
+        assert_eq!(parse_time("30f", &lone), Ok(1_000));
+        assert_eq!(parse_time("30f", &lone), parse_time("30f", &thirty));
+        assert_eq!(parse_time("1.5s", &lone), parse_time("1.5s", &thirty));
+        assert_eq!(
+            dfxp(&[("frameRateMultiplier", "1000")]).map(|p| p.frame_rate_mul),
+            Ok((1000, 1))
+        );
+        assert_eq!(
+            dfxp(&[("frameRateMultiplier", "0")]),
+            Err(Unsupported("invalid ttp:frameRateMultiplier"))
+        );
+        assert_eq!(
+            ttml(&[("frameRateMultiplier", "2")]),
+            Err(Unsupported("invalid ttp:frameRateMultiplier"))
+        );
+        assert!(dfxp(&[("frameRateMultiplier", "1000:1001")]).is_ok());
     }
 
     /// DFXP's `ttp:markerMode` defaults to `continuous` (6.2.5 of both drafts);

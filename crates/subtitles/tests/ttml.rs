@@ -1533,6 +1533,21 @@ fn a_parameter_given_in_two_namespaces_must_agree() {
     );
 }
 
+/// 6.2.4 of the DFXP drafts: `ttp:frameRateMultiplier="2"` is the lone form of
+/// `numerator (":" denominator)?`, 2:1. At `frameRate="15"` the effective rate is
+/// 30 fps, so 30 frames are one second.
+#[test]
+fn dfxp_lone_frame_rate_multiplier_is_read() {
+    let parsed = read(
+        "<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\" \
+         xmlns:ttp=\"http://www.w3.org/2006/10/ttaf1#parameter\" \
+         ttp:frameRate=\"15\" ttp:frameRateMultiplier=\"2\">\
+         <body><div><p begin=\"0s\" end=\"30f\">a</p></div></body></tt>",
+    );
+    assert_eq!(spans(&parsed), vec![(0, 1_000)]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+}
+
 /// 6.2.5 of the DFXP drafts: `ttp:markerMode` defaults to `continuous`, TTML's
 /// to `discontinuous` (7.2.7). An SMPTE file without the attribute is counted
 /// `Timing` only in TTML, once per cue; DFXP's explicit `discontinuous` counts.
