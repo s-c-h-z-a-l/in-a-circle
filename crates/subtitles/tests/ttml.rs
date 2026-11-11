@@ -244,6 +244,36 @@ fn old_dfxp_styling_namespaces_style_the_text() {
     }
 }
 
+/// The IMSC parameter and metadata attributes (IMSC 1.2, 8.8: `ittp:aspectRatio`,
+/// `ittp:progressivelyDecodable` on the root; `ittm:altText` on a paragraph) and
+/// the EBU-TT metadata namespace (`ebuttm:`, EBU Tech 3380: `urn:ebu:tt:metadata`)
+/// are parameters and metadata, not content: they are read without a count, as
+/// `ttp:` and `ttm:` are. The styling ones of IMSC (`itts:`) are still counted.
+#[test]
+fn imsc_parameters_and_metadata_are_not_content() {
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ittp="http://www.w3.org/ns/ttml/profile/imsc1#parameter" xmlns:ittm="http://www.w3.org/ns/ttml/profile/imsc1#metadata" xmlns:ebuttm="urn:ebu:tt:metadata" ittp:aspectRatio="16 9" ittp:progressivelyDecodable="true"><body><div>
+        <p begin="0s" end="1s" ittm:altText="a description" ebuttm:sourceCredits="x">a</p>
+        </div></body></tt>"#,
+    );
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert!(parsed.losses.is_empty(), "{:?}", parsed.losses);
+    assert_eq!(parsed.skipped.count, 0);
+}
+
+/// An IMSC styling attribute (`itts:`, IMSC 1.2 8.8.3 and 9.5) is still
+/// `Styling`: only the parameter and metadata namespaces are silent.
+#[test]
+fn imsc_styling_attributes_are_still_counted() {
+    let parsed = read(
+        r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itts="http://www.w3.org/ns/ttml/profile/imsc1#styling"><body><div>
+        <p begin="0s" end="1s" itts:forcedDisplay="true">a</p>
+        </div></body></tt>"#,
+    );
+    assert_eq!(texts(&parsed), vec!["a"]);
+    assert_eq!(loss(&parsed, Loss::Styling), 1);
+}
+
 /// An attribute in a namespace that is not TTML's is not carried: it is counted
 /// once per cue, not dropped. The EBU-TT-D placements (IMSC 1.2, 9.5.14 and
 /// 9.5.15) are Position. A `tts:display` in a namespace that is not TTML's is not

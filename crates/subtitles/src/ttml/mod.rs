@@ -43,7 +43,7 @@
 //! | `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
 //! | the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in either TTML family), anywhere | silent: profile declarations, not content (6, 7) |
 //! | `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
-//! | an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
+//! | an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones and EBU-TT's `ebuttm` (parameters and metadata: read without a count, IMSC 1.2 8.8, EBU Tech 3380), or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
 //! | `styling`: each `style` | an entry of the style table. Its `xml:id` names it; without one it can never be referenced and has no effect |
 //! | `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
 //! | `styling`: any other child | `Elements`, once (an item) |
@@ -155,6 +155,12 @@ const SMPTE_NS: &str = "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt";
 /// The metadata namespaces (14): their elements and attributes are metadata.
 const TTM_NS: &str = "http://www.w3.org/ns/ttml#metadata";
 const DFXP_TTM_NS: &str = "http://www.w3.org/2006/10/ttaf1#metadata";
+/// The IMSC 1.2 parameter and metadata namespaces (8.8: `ittp:aspectRatio`,
+/// `ittp:progressivelyDecodable`, `ittm:altText`) and EBU-TT's metadata namespace
+/// (`ebuttm:`, EBU Tech 3380): parameters and metadata, read without a count.
+const IMSC_PARAM_NS: &str = "http://www.w3.org/ns/ttml/profile/imsc1#parameter";
+const IMSC_META_NS: &str = "http://www.w3.org/ns/ttml/profile/imsc1#metadata";
+const EBU_META_NS: &str = "urn:ebu:tt:metadata";
 /// The XML Schema instance namespace (`xsi:schemaLocation` and the like): not content.
 const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 

@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 
 use xml::Element;
 
-use super::{DFXP_TTM_NS, DFXP_TTP_NS, SMPTE_NS, TTM_NS, TTP_NS, XSI_NS};
+use super::{
+    DFXP_TTM_NS, DFXP_TTP_NS, EBU_META_NS, IMSC_META_NS, IMSC_PARAM_NS, SMPTE_NS, TTM_NS, TTP_NS,
+    XSI_NS,
+};
 use crate::{Budget, ReadError};
 
 /// The styling namespace (TTML2 Table 5-1) and the two DFXP ones of TTML 1:
@@ -319,6 +322,9 @@ fn is_read_ns(ns: &str) -> bool {
             | DFXP_TTP_NS
             | TTM_NS
             | DFXP_TTM_NS
+            | IMSC_PARAM_NS
+            | IMSC_META_NS
+            | EBU_META_NS
             | SMPTE_NS
             | xml::XML_NS
             | XSI_NS

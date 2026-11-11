@@ -1,0 +1,1 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ittp="http://www.w3.org/ns/ttml/profile/imsc1#parameter" xmlns:ittm="http://www.w3.org/ns/ttml/profile/imsc1#metadata" xmlns:ebuttm="urn:ebu:tt:metadata" ittp:aspectRatio="16 9" ittp:progressivelyDecodable="true"><body><div><p begin="0s" end="1s" ittm:altText="a description" ebuttm:sourceCredits="x">a</p></div></body></tt>
