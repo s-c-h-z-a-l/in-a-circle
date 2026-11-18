@@ -99,10 +99,119 @@ are in `CLAUDE.md`.
   inside its entropy data is not detected and shows as a grey or partial page in
   the reader.
 
-- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT and ASS/SSA to SRT or
-  WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
-  writers are the `crates/subtitles` library (standard library only). The rules
-  are under Manifest, after the text family's.
+- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT, ASS/SSA and TTML to SRT
+  or WebVTT. Six one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
+  writers are the `crates/subtitles` library (standard library, and the `xml`
+  crate for TTML). The rules
+  are under Manifest, after the text family's; the TTML element-by-element
+  accounting is under [TTML accounting](#ttml-accounting). A TTML SMPTE time code
+  (`ttp:timeBase="smpte"`) is read with the continuous-marker formula under
+  either `ttp:markerMode`: an approximation for discontinuous markers, which
+  carry no media time of their own.
+  TTML styles and regions: a `style` attribute names styles that merge left to
+  right (the later one wins), with the element's own inline values last; a
+  style may reference styles, and a chain is read up to 32 entries (a loop or a
+  longer reference is refused and counted as `Styling`). Italic, bold, underline,
+  line-through and overline are inheritable and pass to the paragraph's text, and
+  a region gives a paragraph only the values no ancestor gives. A paragraph is
+  `top` only when its own region is placed in the upper third: its anchor (origin,
+  plus the extent by `displayAlign`) at or within 33 % of the root container's
+  height from the top, where a px placement needs the root's `tts:extent`. Every other declaration is
+  `Styling` (colours, sizes, fonts) or `Position` (placement), counted once per
+  cue. The style and region tables are charged to the item budget before they
+  are stored.
+
+### TTML accounting
+
+What a TTML conversion keeps, counts, skips and refuses. The reader
+(`crates/subtitles/src/ttml/mod.rs`) has this table in its doc comment, and the
+test `every_ignored_construct_is_counted` checks one row per construct. Losses
+are counted in cues, once per cue and kind, except `Elements`, which counts
+items: each ignored element (with no visible text) and each image unit once,
+however many cues it lies over, and also in a skipped paragraph (the skip counts
+the paragraph, the item what it held). `skipped` counts items (elements,
+paragraphs, text blocks) with the first one's line and reason. A count on every cue of the
+document (`initial`, a `set` outside a paragraph) is the cue count, an upper
+bound where the reader does not track which paragraphs the element reaches.
+A paragraph with no visible text has nothing to lose, so it is not counted,
+whatever else it holds (a hidden or animated one included).
+
+| Construct | Goes to |
+|---|---|
+| XML that is not well-formed, or nested past `MAX_DEPTH` | `Malformed` (the whole file) |
+| a DOCTYPE with entity declarations; a declared encoding other than UTF-8 or UTF-16 | `Unsupported` (the whole file) |
+| a root that is not `tt` in the TTML or DFXP namespace | `NotTtml` (the whole file) |
+| the DFXP 2006 namespaces of TTML 1 (`ttaf1` of the 2006/10 CR or the 2006/04 working draft, and its `#style` (Table 1) or `#styling`, `#parameter`, `#metadata`), on any element or attribute | read as their TTML counterparts: no loss of their own |
+| `ttp:timeBase="clock"`, a `wallclock(...)` time, a drop-frame `ttp:dropMode` (DFXP: `ttp:smpteMode`) | `Unsupported` (the whole file) |
+| `ttp:*` on the root (TTML or DFXP parameter namespace) | read as the time parameters, no loss; an unconverted time base or drop mode, a bad value, a parameter given twice on the root with different values (`conflicting ttp:<name>`), or `dropMode` and `smpteMode` both present with different values (`conflicting drop mode`): `Unsupported`. A parameter is matched by its local name in either parameter namespace; the root's own namespace (`tt` in TTML or DFXP) decides the default of `markerMode` and the syntax of `frameRateMultiplier` |
+| `ttp:timeBase="smpte"` with `ttp:markerMode="discontinuous"`, or absent in TTML (7.2.7, I.3; DFXP's default is `continuous`, 6.2.5) | the time codes are read as continuous time, an approximation (a discontinuous SMPTE time has no media time of its own): `Timing`, counted once per cue of the document. `markerMode="continuous"` (or absent in DFXP), and the media time base, count nothing |
+| other `ttp:*`, `ttm:*` attributes, `xml:lang`, `xml:id` on elements other than styles and regions | no content: nothing |
+| an unqualified attribute (no namespace) that the reader does not know, on any element, e.g. a bare `fontStyle="italic"` on a `p` | no content: nothing. TTML2 2.3 permits an unqualified attribute only where the specification defines it, and section 4 prunes the attributes an element does not define, so a processor has no instruction for it; dropping it without a count is a documented rule |
+| `metadata` and the elements of the metadata namespaces, anywhere | silent: metadata is not content (14) |
+| the elements of the parameter namespaces (`ttp:profile`, `ttp:features`, `ttp:extensions`, in each TTML family), anywhere | silent: profile declarations, not content (6, 7) |
+| `head`: `styling` and `layout` are read (below); any other child (foreign, or a tt element not in the vocabulary) with visible text in it | `skipped`: `unsupported element`, with its line; with none, `Elements`, once (an item) |
+| an attribute in another namespace (not TTML's, DFXP's, XML's, `xsi`, the `ttm` or `ttp` ones, the IMSC `ittp` and `ittm` ones (IMSC 1.2 8.8), EBU-TT's `ebuttm` (metadata, EBU Tech 3380) and `ebuttp` (parameters, EBU Tech 3370 Part 3): parameters and metadata, read without a count; or SMPTE's `backgroundImage`) on `tt`, `body`, `div`, `p`, `span`, `br`, `region`, `style` or `initial` | `Styling` on the element (every piece under it, once per cue), e.g. `xmlns:v="urn:v"` `v:x="1"`, `itts:forcedDisplay`, or a `tts:display` in a namespace that is not TTML's (not applied, so the text is kept). `ebutts:linePadding` and `ebutts:multiRowAlign` (namespace `urn:ebu:tt:style`, IMSC 1.2 9.5.14 and 9.5.15): `Position`, as `tts:padding` and `tts:textAlign` are |
+| `styling`: each `style` | an entry of the style table. Its `xml:id` names it (an unqualified `id` in the 2006/04 draft); without one it can never be referenced and has no effect |
+| `styling`: `initial` (10.1.1) | the initial value of each property it names, for every paragraph: a paragraph takes it where no ancestor, region or style reference gives one (10.4.2), so it is the lowest layer. Carried: `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration`, and `tts:display`, `tts:visibility`, `tts:opacity` (the same rules as on the element). Each property takes the value of the last `initial` that names it. Any other property: `Styling` or `Position` on every cue. A conditional `initial` is not evaluated, so it is not applied: `Styling` on every cue |
+| `styling`: any other child | `Elements`, once (an item) |
+| `layout`: each `region` | an entry of the region table, named by its `xml:id` (`id` in the 2006/04 draft) |
+| a duplicate `xml:id` among styles, or among regions | the first definition stands; the later one is dropped. Each reference to the name counts the dropped one's declarations (below). The `xml:id` error is not fatal (XML ID, section 6) |
+| a dropped duplicate's declarations, referenced | `Styling` for each carried or unknown declaration, `Position` for a placement: on each cue of a paragraph or element that references the name |
+| `style` inside `region` | a nested declaration of the region (10.4.1.4): an entry merged after the referenced styles, before the region's own attributes |
+| a `style` attribute (`body`, `div`, `p`, `span`, `br`, `region`, `style`): each id | merged in order. An id not defined, a loop, or a chain past 32 entries sets `Styling` on the element |
+| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` (underline, line-through, overline) on those elements | carried: italic (`oblique` too), bold (`normal` or `bold` only, 10.2.24) and the decorations of the text, inherited as 10.2 says |
+| `tts:fontStyle`, `tts:fontWeight`, `tts:textDecoration` with a value outside the grammar | `Styling` |
+| other `tts:*` declarations, and `tts:*` names the reader does not know | `Styling` on the element (every piece under it, once per cue) |
+| `tts:display` `none`, `tts:visibility` `hidden`, `tts:opacity` `0`, on `body`, `div`, `p`, `region` or `span` (10.2.14, 10.2.49, 10.2.30) | the content is not shown: `none` and `0` hide the element and everything in it, `hidden` is inherited and a descendant with `visible` is shown. A hidden paragraph is `skipped`: `hidden by the document`; a paragraph with its own hidden text, or a hidden span in a shown paragraph, counts once (the outermost element holding the hidden text). Opacity counts the whole element; the other values are initial values and count nothing |
+| `tts:opacity` with a value between 0 and 1, `tts:display="inlineBlock"`, a `tts:display`, `tts:visibility` or `tts:opacity` on `br` or `tt` (not applicable there) | `Styling`; the text is kept |
+| `tts:origin`, `tts:extent`, `tts:displayAlign` on a region of a paragraph | the placement of `top`: a `top` paragraph keeps them; otherwise `Position` |
+| `tts:origin`, `tts:extent`, `tts:displayAlign` on any other element | `Position` |
+| `tts:padding`, `tts:position`, `tts:textAlign`, `tts:bpd`, `tts:ipd`, `tts:overflow`, `tts:zIndex`, `tts:disparity` | `Position` |
+| `tts:extent` on `tt` (10.2.16) | the root container's height in px (`top` of a px placement); `auto`, `contain`, and two px lengths are read; anything else `Position` |
+| a region's placement that cannot be computed (`em`, `c`, `rw`, `rh`, a sign, a `px` without a root height) | the paragraph is not `top`; its placement counts as `Position` |
+| a paragraph with no region (no `layout`, or none named on it or its ancestors) | never `top`; no count (a region named and not defined counts `Position`, as below) |
+| `region` on `body`, `div` or `p` naming no region | `Position` on the paragraphs it reaches |
+| `region` on a `span` | `Position` on the span's text (the span is not placed in its region) |
+| `body`, `div` | containers: timing. A bad time or `timeContainer` makes the paragraphs under it `skipped` |
+| `p` | cues (`slice.rs`), or `skipped` with its line and reason |
+| `span` | a container. A `span` with its own timing slices its paragraph |
+| `br` | a line-break piece over the container's interval, open-ended when the container has no end (12.4): it does not decide the container's end. Metadata in it is ignored without a count; other content is counted as below |
+| `ruby`, `rb`, `rbc`, `rt`, `rtc`, `rp` in a paragraph or span | a span whose text stays; `Styling` on each cue of it |
+| text in `p` or `span`, visible | a piece. Visible text with no display time (zero long, or outside its container) makes its paragraph `skipped` once: `text with no display time` |
+| text in `p` or `span`, white space only | spacing only: a piece over its container's interval; with no end of its own it lasts as long as the paragraph (8.2.10, 12.4), and the space is trimmed where a line starts or ends. Not counted |
+| visible text directly in `tt`, `body`, `div`, `br`, `head`, `styling`, `layout`, `style` or `region` | `skipped`: `text outside any cue` |
+| `begin`, `end`, `dur` with a time at or past 100 hours, in one expression or summed through the containers | a fault on the element: its paragraphs are `skipped`, `time is 100 hours or more` (the same reason wherever the time comes from)
+| `begin`, `end`, `dur` with a field past its range (minutes or seconds of 60 or more, a frame past the frame rate) | a fault on the element: its paragraphs are `skipped`, `time out of range`
+| `begin`, `end`, `dur` with a bad value, or `end` before `begin` | a fault on the element: its paragraphs are `skipped` with the reason |
+| `xml:space` | white-space mode (8.2.10); another value is a fault |
+| `condition` on `body`, `div`, `p`, `span`, `br` or `ruby` | the element and its content: `skipped`, `conditional element`. The condition is not evaluated, and the text may or may not be shown (8.2.1), so it is not an ignored element |
+| `condition` on a `style` (8.2.1): its own declarations are not applied, the styles it references with `style` still are (10.4.4.2) | `Styling` on each cue of an element that references it, if it declares anything |
+| `condition` on a `region` (8.2.1): the region is excluded, so it is not defined | a paragraph that names it is placed as a region named and not defined: `Position` |
+| `set` or `animate` on another target, in a paragraph or span | `Styling` on each cue of that paragraph |
+| `set` or `animate` on another target, in `body`, `div` or the head | `Styling` on every cue of the document (an upper bound: the reader does not track which paragraphs they reach). One inside an `animation` is out-of-line: see the rows below |
+| `set` or `animate` with a `tts:display`, `tts:visibility` or `tts:opacity` target (13.1.3, 13.1.1), in a paragraph or span, or in `body`, `div`, `region` (the paragraphs under it, or placed in it) | each paragraph it reaches is `skipped`: `visibility changes over time`. The timeline is not played, so the paragraph is neither shown nor hidden. In the head or on a `style`, the same element reaches no paragraph: `Styling` on every cue, as for another target |
+| `animation` (13.1.2): a container of out-of-line `set` and `animate` | nothing counted itself. Each `set` or `animate` with an `xml:id` is counted where an element names it with an `animate` attribute (next row); one that nothing names has no effect, so nothing is counted |
+| the `animate` attribute (13.2.1) on `body`, `div`, `p`, `span` or `region`, each IDREF it names | an IDREF costs one item. A visibility target refuses each paragraph under the element (or placed in the region, or holding the span that names it): `skipped`, `visibility changes over time`. Another target, or an IDREF that names no such animation, is `Styling` on the element's cues. Each element named costs one item (its entry, charged before it is stored) |
+| a foreign-namespace element (its whole subtree is pruned, 8.1) in a paragraph or span, with visible text in it | `skipped`: `unsupported element`, with its line; the paragraph's other text converts
+| a foreign-namespace element in a paragraph or span with no visible text | `Elements`, once (an item), wherever it sits in the paragraph |
+| a foreign or unknown tt element in `body` or `div` with visible text in it (its whole subtree is pruned) | `skipped`: `unsupported element`, with its line
+| a foreign or unknown tt element in `body` or `div` with no visible text | `Elements`, once (an item) |
+| an `image` element (tt namespace) in a paragraph or span | the paragraph is one image unit, counted once in `Elements`; its text is converted |
+| an `image` element in `body` or `div` | an image unit: `Elements` once |
+| `smpte:backgroundImage` on a `p` | the paragraph is one image unit (as above); its text is converted |
+| `smpte:backgroundImage` on a `div` or `body` | the `div` or `body` is one image unit; the text under it is converted |
+| `smpte:backgroundImage` on a `span` or `br` | its paragraph is one image unit (as above) |
+| a `span`, `p`, `div` or ruby element in a place that holds no text (`body`, `div`, the head, or inside a `p` or `span` where a paragraph cannot nest) | `skipped`: `unsupported element`, the element and its content |
+| the document has image units, no text cue and nothing skipped | `ReadError::ImageBased` (the whole file) |
+| the document has no cue, no image unit and nothing skipped | `ReadError::NoCues` (the whole file) |
+| the document has no cue, and skipped items (a stray image does not change this) | `ReadError::AllSkipped`: the count and the first skipped item (the whole file) |
+| a `p` with no end time: its implicit duration is indefinite (12.4) and the document has no end | `skipped`: `no end time` |
+| element frames, pieces, copies of pieces in slices, lines and cues, and the style and region entries, their references, and the duplicates | the item budget: past it `TooComplex`. A white-space-only piece is copied into each slice its paragraph's interval spans (an open-ended one lasts as long as the paragraph, 8.2.10, 12.4), so the copies grow with the timed words: one paragraph of spaced one-word timed spans reads up to 1,411 (measured: 1,411 pass, 1,412 are `TooComplex`, with or without an explicit paragraph end; 20,000 spans with no space between them pass) |
+| the animation pass, before the reading: each `tt`, `body`, `div` or `region` with a visibility `set` or `animate` as a child outside a paragraph (the animated-visibility scope pass, one item each); each element an `animate` attribute names, on `body`, `div`, `p`, `span` or `region` (one item each); each IDREF of an `animate` attribute (one item each); each out-of-line `set` or `animate` in an `animation`, once per distinct `xml:id` | the item budget: past it `TooComplex`. A visibility `set` or `animate` inside a paragraph or span costs nothing |
+| text copied into cues | `TextTooLarge` past `OUTPUT_BYTES` |
+
+Past `ITEM_BUDGET` (2,000,000 items: every element, piece, copy, cue and table
+entry) the whole file is refused as `TooComplex`; nothing is converted in part.
 
 ## Manifest
 
@@ -661,19 +770,32 @@ are in `CLAUDE.md`.
   text (link reference expansion included), 32 MiB of output. Past one,
   the input fails with the budget's own message and the batch goes on.
 - The subtitle family (`inacircle-subtitles`, `family=subtitles`,
-  `group=subtitles`) has four actions, each reading one format and writing one:
-  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and
-  `subtitles.ass-to-vtt`. Their MIME types are `application/x-subrip` (SRT),
-  `text/vtt` (WebVTT) and `text/x-ssa` (ASS and SSA). All are `cost=10`,
+  `group=subtitles`) has six actions, each reading one format and writing one:
+  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt`,
+  `subtitles.ass-to-vtt`, `subtitles.ttml-to-srt` and `subtitles.ttml-to-vtt`.
+  Their MIME types are `application/x-subrip` (SRT), `text/vtt` (WebVTT),
+  `text/x-ssa` (ASS and SSA) and `application/ttml+xml` (TTML). All are `cost=10`,
   `lossy=yes` (a drawing is dropped and a speaker's name becomes text) and
   `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
   is larger than 8 MiB`) before any parsing. The readers store at most
-  2,000,000 items (each cue, line and run is one), each charged before it is
-  stored; past it the input fails with `too many lines and styled runs (more
+  2,000,000 items (each cue, line and run is one; the TTML reader also charges
+  each element, piece and copy of a piece, and each element that holds a
+  visibility `set` or `animate` outside a paragraph), each charged before it is stored; past it the input fails with `too many lines and styled runs (more
   than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
   the lines of its cue. A file that is not UTF-8 fails
-  with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
-  with no usable cue fails with `no subtitles found`. The output is counted as
+  with `not UTF-8 text (byte at N): convert it with Encoding first`. A file
+  with no usable cue fails with `no subtitles found` when nothing in it was
+  skipped (empty, or no cue at all), and otherwise says how many items were
+  skipped and the first one's line and reason, in every format
+  (`no subtitles found (N items skipped, first at line L: <reason>)`). A TTML
+  file fails with `not well-formed TTML (line L): <reason>`, `not a TTML
+  document`, `unsupported TTML: <reason>` (a clock time base, a drop-frame time
+  code, a declared encoding other than UTF-8 or UTF-16, entity declarations) or
+  `no text subtitles found (image-based)`. Text copied into cues past 32 MiB
+  fails with `subtitle text would be larger than 32 MiB`, not with the item
+  budget's message. TTML's own limits are the element depth of the XML reader
+  (256) and the style chain of 32 entries; see [TTML accounting](#ttml-accounting)
+  and `docs/resource-limits.md`. The output is counted as
   it is written: past 32 MiB the input fails with `subtitle output would be
   larger than 32 MiB`. SIGXFSZ is ignored, so a write past the process's
   `RLIMIT_FSIZE` fails the same way and not the batch. A failed input leaves
@@ -756,14 +878,17 @@ are in `CLAUDE.md`.
   In both, a line
   break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
   white space and a cue with no text are dropped, and a blank line ends a cue.
-- The subtitle `warn` lines, at most eight per input: first the skipped cues
+- The subtitle `warn` lines, at most ten per input: first the skipped cues
   (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
   including text outside any cue), then one line per kind of loss in the order
   of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
   drawings; style and region blocks; speaker names written as prefixes;
-  characters that look like markup written as look-alikes), each counted in
-  cues as `(N cues)`. The reader's and the writer's counts of one kind are
-  added together. That is far under the engine's 16 `warn` per input.
+  characters that look like markup written as look-alikes; unsupported elements
+  ignored; time codes read as continuous), each counted in cues as `(N cues)`, except unsupported elements,
+  which count the elements and images they ignore, so `(N items)`. The
+  reader's and the writer's counts of one kind are added together. At most
+  ten lines (nine kinds and the skipped line), far under the engine's 16
+  `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
@@ -788,6 +913,8 @@ action	subtitles.srt-to-vtt	family=subtitles	in=application/x-subrip	out=text/vt
 action	subtitles.vtt-to-srt	family=subtitles	in=text/vtt	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
 action	subtitles.ass-to-srt	family=subtitles	in=text/x-ssa	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
 action	subtitles.ass-to-vtt	family=subtitles	in=text/x-ssa	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ttml-to-srt	family=subtitles	in=application/ttml+xml	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ttml-to-vtt	family=subtitles	in=application/ttml+xml	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
@@ -1008,15 +1135,27 @@ Every action runs sandboxed, set up in the child between `fork` and
   an optional byte order mark) opens with `WEBVTT` followed by a space, a
   tab, a line end or the head's end (`WEBVTTX` is not a signature) is
   `text/vtt`, label `WebVTT subtitles`; a `.ass` or `.ssa` whose head has `[Script Info]` (any
-  case) is `text/x-ssa`, label `ASS subtitles`. The name alone never makes a
-  subtitle: without the head check the file keeps its text label (`.srt
-  text`). A subtitle that is not valid UTF-8 is `text/x-8bit`, decided first
-  as before, and goes to the code page actions.
+  case) is `text/x-ssa`, label `ASS subtitles`. A `.ttml` or `.dfxp` whose
+  head opens with `<` after an optional byte order mark and white space is
+  `application/ttml+xml`, label `TTML subtitles`; a `.xml` is one only when
+  its head's root element is `tt` or `prefix:tt` with a TTML namespace
+  (`http://www.w3.org/ns/ttml`, or a 2006 DFXP one: `http://www.w3.org/2006/10/ttaf1`,
+  the CR's, or `http://www.w3.org/2006/04/ttaf1`, the working draft's) declared on
+  that start tag, found by text search past any `<?…?>`, comments and
+  `<!DOCTYPE …>` (its internal subset included). The root must end within the 4 KiB head; a root past
+  it is not recognised. Whether the XML is well formed is the reader's
+  to say. A UTF-16 TTML has NUL bytes, and a non-UTF-8 one is not valid
+  UTF-8: neither is text, so neither is offered TTML or a code page.
+  The name alone never makes a subtitle: without the head check the file
+  keeps its text label (`.srt text`). An SRT, WebVTT or ASS file that is not valid UTF-8 is
+  `text/x-8bit`, decided first as before, and goes to the code page actions.
 - **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
   the code page actions and taken by no other preset. A file is one when
   its extension is on the classifier's text list (`txt`, `text`, `md`,
   `markdown`, `mdown`, `mkd`, `srt`, `vtt`, `ass`, `ssa`, `sub`, `csv`,
-  `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; not
+  `tsv`, `log`, `ini`, `cfg`, `conf`, `me`, `1st`, `readme`, `diz`; XML
+  names such as `ttml` and `dfxp` are not, since a code page action keeps
+  the file's XML declaration; not
   `nfo`, usually CP437 art) or it has none, what is read has no NUL and no
   C0 control byte other than TAB, LF, CR and FF (one Ctrl-Z, `0x1A`, as the
   file's very last byte is allowed), and it is not valid UTF-8. A file with
@@ -1433,9 +1572,10 @@ compositor.
   lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
   `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
   leaves Encoding dim; a subtitle lights only Subtitles (south): `vtt-srt`
-  (VTT from SRT) and `vtt-ass` (VTT from ASS) share its north slot, `srt-vtt`
-  (SRT from VTT) and `srt-ass` (SRT from ASS) its south slot, so an SRT
-  offers VTT north only, a VTT SRT south only, and an ASS both; `pdf` north
+  (VTT from SRT), `vtt-ass` (VTT from ASS) and `vtt-ttml` (VTT from TTML)
+  share its north slot, `srt-vtt` (SRT from VTT), `srt-ass` (SRT from ASS)
+  and `srt-ttml` (SRT from TTML) its south slot, so an SRT offers VTT north
+  only, a VTT SRT south only, and an ASS or a TTML both; `pdf` north
   and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:

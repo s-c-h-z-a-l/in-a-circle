@@ -112,7 +112,7 @@ fn wpt_files_parse_to_the_expected_cues() {
         let bytes = fs::read(&path).expect("a readable data file");
         let cues = match read_vtt(&bytes) {
             Ok(parsed) => parsed.cues,
-            Err(ReadError::NoCues) => Vec::new(),
+            Err(ReadError::NoCues | ReadError::AllSkipped { .. }) => Vec::new(),
             Err(e) => panic!("{name}: {e}"),
         };
         for cue in &cues {
@@ -863,5 +863,27 @@ fn white_space_only_cue_is_dropped_silently() {
     assert_eq!(
         read_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\u{a0}\n".as_bytes()),
         Err(ReadError::NoCues)
+    );
+}
+
+/// An empty file, or one with only the signature, has no cue and nothing was
+/// skipped: the bare `NoCues`.
+#[test]
+fn empty_file_is_no_cues() {
+    assert_eq!(read_vtt(b""), Err(ReadError::NoCues));
+    assert_eq!(read_vtt(b"WEBVTT\n"), Err(ReadError::NoCues));
+}
+
+/// A cue whose timing does not parse is skipped, and a file whose cues are all
+/// skipped says why, with the first one's line (the timing line, line 3).
+#[test]
+fn every_cue_unusable_names_the_first_reason() {
+    assert_eq!(
+        read_vtt(b"WEBVTT\n\nnot a time --> 00:00:02.000\nhi\n"),
+        Err(ReadError::AllSkipped {
+            count: 1,
+            line: 3,
+            reason: "bad timestamp"
+        })
     );
 }

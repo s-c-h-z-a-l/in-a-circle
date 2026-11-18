@@ -1,0 +1,1 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:ebuttp="urn:ebu:tt:parameters" xmlns:ebuttm="urn:ebu:tt:metadata" ttp:timeBase="media" ebuttp:sequenceIdentifier="TestSequence1" ebuttp:sequenceNumber="1" ttp:clockMode="local"><head/><body begin="00:00:01.000" end="00:00:03.000"><div><p>Live text</p></div></body></tt>

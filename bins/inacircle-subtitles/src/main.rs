@@ -1,5 +1,6 @@
-//! `inacircle-subtitles`: the subtitle family. An SRT, WebVTT or ASS/SSA file
-//! becomes an SRT or a WebVTT file (`crates/subtitles` reads and writes them).
+//! `inacircle-subtitles`: the subtitle family. An SRT, WebVTT, ASS/SSA or TTML
+//! file becomes an SRT or a WebVTT file (`crates/subtitles` reads and writes
+//! them).
 //! A cue that cannot be used is skipped and counted, and what the target
 //! cannot carry is reported as `warn`. Contract v0 (docs/architecture.md).
 
@@ -22,6 +23,7 @@ enum Format {
     Srt,
     Vtt,
     Ass,
+    Ttml,
 }
 
 impl Format {
@@ -30,6 +32,7 @@ impl Format {
             Format::Srt => subtitles::read_srt(bytes),
             Format::Vtt => subtitles::read_vtt(bytes),
             Format::Ass => subtitles::read_ass(bytes),
+            Format::Ttml => subtitles::read_ttml(bytes),
         }
     }
 }
@@ -72,6 +75,8 @@ impl Conversion {
             "subtitles.vtt-to-srt" => (Format::Vtt, Target::Srt),
             "subtitles.ass-to-srt" => (Format::Ass, Target::Srt),
             "subtitles.ass-to-vtt" => (Format::Ass, Target::Vtt),
+            "subtitles.ttml-to-srt" => (Format::Ttml, Target::Srt),
+            "subtitles.ttml-to-vtt" => (Format::Ttml, Target::Vtt),
             _ => return None,
         };
         Some(Conversion { from, to })
@@ -106,6 +111,20 @@ fn manifest_text() -> String {
         (
             "subtitles.ass-to-vtt",
             "text/x-ssa",
+            "text/vtt",
+            "vtt",
+            "VTT",
+        ),
+        (
+            "subtitles.ttml-to-srt",
+            "application/ttml+xml",
+            "application/x-subrip",
+            "srt",
+            "SRT",
+        ),
+        (
+            "subtitles.ttml-to-vtt",
+            "application/ttml+xml",
             "text/vtt",
             "vtt",
             "VTT",
@@ -291,9 +310,9 @@ impl<W: Write> Write for Capped<W> {
 
 /// The `warn` lines of one converted input: the skipped cues first (the count
 /// and the first one's line and reason), then one line per kind of loss, in
-/// `Loss` order, counted in cues. The reader's and the writer's counts of a
-/// kind are summed. At most eight lines (seven kinds and the skipped line),
-/// under the engine's cap of 16 `warn` per input.
+/// `Loss` order, counted in cues (`Elements` in items). The reader's and the
+/// writer's counts of a kind are summed. At most ten lines (nine kinds and
+/// the skipped line), under the engine's cap of 16 `warn` per input.
 fn warnings(parsed: &Parsed, writer: BTreeMap<Loss, usize>) -> Vec<String> {
     let mut lines = Vec::new();
     let skipped = &parsed.skipped;
@@ -311,7 +330,14 @@ fn warnings(parsed: &Parsed, writer: BTreeMap<Loss, usize>) -> Vec<String> {
         *losses.entry(loss).or_insert(0) += n;
     }
     for (loss, n) in losses {
-        lines.push(format!("{} ({n} cues)", loss.message()));
+        // Elements counts the elements it ignores and the images, which are not
+        // cues: its unit is items. Every other kind is counted in cues.
+        let unit = if loss == Loss::Elements {
+            "items"
+        } else {
+            "cues"
+        };
+        lines.push(format!("{} ({n} {unit})", loss.message()));
     }
     lines
 }
@@ -428,6 +454,62 @@ mod tests {
                 "colours, fonts and sizes removed (5 cues)",
                 "karaoke effects removed (2 cues)",
                 "speaker names written as 'Name:' prefixes (5 cues)",
+            ]
+        );
+    }
+
+    /// Every kind of loss and a skipped line give ten `warn` lines: the
+    /// largest the readers can produce. The engine stops at 16 per input
+    /// (`MAX_WARNINGS` in `crates/engine/src/exec.rs`, private to that crate),
+    /// so ten leaves room; an eleventh kind must raise this test's count first.
+    #[test]
+    fn warn_count_stays_under_the_engine_cap() {
+        let kinds = [
+            Loss::Styling,
+            Loss::Position,
+            Loss::Karaoke,
+            Loss::Drawing,
+            Loss::Settings,
+            Loss::VoiceNames,
+            Loss::Brackets,
+            Loss::Elements,
+            Loss::Timing,
+        ];
+        let parsed = Parsed {
+            cues: Vec::new(),
+            losses: kinds.iter().map(|&k| (k, 1)).collect(),
+            skipped: subtitles::Skipped {
+                count: 1,
+                first: Some((1, "unsupported element")),
+            },
+        };
+        let lines = warnings(&parsed, BTreeMap::new());
+        assert_eq!(lines.len(), 10);
+        assert!(lines.len() < 16, "the engine's cap of 16 warn per input");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("time codes read as continuous (1 cues)")
+        );
+        assert_eq!(
+            lines[lines.len() - 2],
+            "unsupported elements ignored (1 items)"
+        );
+    }
+
+    /// `Elements` counts the elements it ignores and the images, which are not
+    /// cues, so its line says items; the other kinds still say cues.
+    #[test]
+    fn elements_are_counted_in_items_not_cues() {
+        let parsed = Parsed {
+            cues: Vec::new(),
+            losses: BTreeMap::from([(Loss::Elements, 2), (Loss::Styling, 2)]),
+            skipped: subtitles::Skipped::default(),
+        };
+        assert_eq!(
+            warnings(&parsed, BTreeMap::new()),
+            [
+                "colours, fonts and sizes removed (2 cues)",
+                "unsupported elements ignored (2 items)",
             ]
         );
     }

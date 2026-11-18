@@ -9,7 +9,9 @@ const MANIFEST: &str = "inacircle-manifest 0\n\
 action\tsubtitles.srt-to-vtt\tfamily=subtitles\tin=application/x-subrip\tout=text/vtt\text=vtt\tlabel=VTT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n\
 action\tsubtitles.vtt-to-srt\tfamily=subtitles\tin=text/vtt\tout=application/x-subrip\text=srt\tlabel=SRT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n\
 action\tsubtitles.ass-to-srt\tfamily=subtitles\tin=text/x-ssa\tout=application/x-subrip\text=srt\tlabel=SRT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n\
-action\tsubtitles.ass-to-vtt\tfamily=subtitles\tin=text/x-ssa\tout=text/vtt\text=vtt\tlabel=VTT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n";
+action\tsubtitles.ass-to-vtt\tfamily=subtitles\tin=text/x-ssa\tout=text/vtt\text=vtt\tlabel=VTT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n\
+action\tsubtitles.ttml-to-srt\tfamily=subtitles\tin=application/ttml+xml\tout=application/x-subrip\text=srt\tlabel=SRT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n\
+action\tsubtitles.ttml-to-vtt\tfamily=subtitles\tin=application/ttml+xml\tout=text/vtt\text=vtt\tlabel=VTT\tgroup=subtitles\tcost=10\tlossy=yes\tbatch=yes\n";
 
 /// The input limit and the output ceiling, as the action states them.
 const MIB: usize = 1 << 20;
@@ -123,7 +125,7 @@ fn put(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 }
 
 #[test]
-fn manifest_lists_the_four_actions() {
+fn manifest_lists_the_six_actions() {
     let o = bin().arg("--manifest").output().unwrap();
     assert_eq!(o.status.code(), Some(0));
     assert_eq!(stdout(&o), MANIFEST);
@@ -285,8 +287,8 @@ fn vtt_output_has_no_bom_and_lf() {
     assert!(bytes.starts_with(b"WEBVTT\n\n"));
 }
 
-/// RF 2: a file with no usable cue fails with the reason, and nothing is
-/// left in the work folder.
+/// RF 2: a file with no usable cue fails with the count, the first skipped
+/// item's line and its reason, and nothing is left in the work folder.
 #[test]
 fn nothing_usable_fails_and_leaves_nothing() {
     let root = tmp("nothing");
@@ -300,7 +302,11 @@ fn nothing_usable_fails_and_leaves_nothing() {
     let o = run("subtitles.srt-to-vtt", &work, &[&a]);
     assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
     let out = stdout(&o);
-    assert_eq!(lines(&out, "fail")[0][2], "no subtitles found", "{out}");
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no subtitles found (1 items skipped, first at line 2: ends before it starts)",
+        "{out}"
+    );
     assert!(lines(&out, "done").is_empty());
     assert!(files(&work).is_empty());
 }
@@ -458,7 +464,10 @@ fn batch_of_three_one_bad_goes_on() {
     assert_eq!(lines(&out, "done").len(), 2, "{out}");
     assert_eq!(lines(&out, "fail").len(), 1, "{out}");
     assert_eq!(lines(&out, "fail")[0][1], b.to_str().unwrap());
-    assert_eq!(lines(&out, "fail")[0][2], "no subtitles found");
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no subtitles found (1 items skipped, first at line 1: text outside any cue)"
+    );
 }
 
 /// `progress 0` opens the run, then one line per input: the fraction of the
@@ -802,4 +811,687 @@ fn run_measured(id: &str, work: &Path, input: &Path) -> (Output, u64) {
     };
     // `ru_maxrss` is in KiB on Linux.
     (output, u64::try_from(ru.ru_maxrss).unwrap_or(0))
+}
+
+/// A TTML document with a bold, italic and underlined paragraph (a `br`, and
+/// a red span that is lost), a paragraph in a top region (`top`, no warning)
+/// and one in a bottom region (a placement the output cannot carry).
+const TTML_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">
+<head>
+<styling><style xml:id="s1" tts:fontStyle="italic" tts:fontWeight="bold" tts:textDecoration="underline"/></styling>
+<layout><region xml:id="top" tts:origin="10% 5%" tts:extent="80% 20%" tts:displayAlign="before"/><region xml:id="bottom" tts:origin="10% 80%" tts:extent="80% 15%"/></layout>
+</head>
+<body><div>
+<p begin="00:00:01.000" end="00:00:02.500" style="s1">Hello <span tts:color="red">red</span><br/>second line</p>
+<p begin="00:00:03.000" end="00:00:04.000" region="top">Top cue</p>
+<p begin="00:00:05.000" end="00:00:06.000" region="bottom">Bottom cue</p>
+</div></body>
+</tt>
+"#;
+
+#[test]
+fn ttml_to_srt_converts_and_keeps_formatting() {
+    let root = tmp("ttml-srt");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(&root, "a.ttml", TTML_BASIC.as_bytes());
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    let mut want = BOM.to_vec();
+    want.extend_from_slice(
+        "1\r\n00:00:01,000 --> 00:00:02,500\r\n<i><b><u>Hello red</u></b></i>\r\n\
+<i><b><u>second line</u></b></i>\r\n\r\n\
+2\r\n00:00:03,000 --> 00:00:04,000\r\n{\\an8}Top cue\r\n\r\n\
+3\r\n00:00:05,000 --> 00:00:06,000\r\nBottom cue\r\n\r\n"
+            .as_bytes(),
+    );
+    assert_eq!(produced(&work, &out), want);
+    assert_eq!(
+        warns(&out),
+        [
+            "colours, fonts and sizes removed (1 cues)",
+            "exact positions removed (1 cues)"
+        ],
+        "{out}"
+    );
+}
+
+#[test]
+fn ttml_to_vtt_top_region_gives_line_zero() {
+    let root = tmp("ttml-vtt");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(&root, "a.ttml", TTML_BASIC.as_bytes());
+    let o = run("subtitles.ttml-to-vtt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        String::from_utf8(produced(&work, &out)).unwrap(),
+        "WEBVTT\n\n\
+00:00:01.000 --> 00:00:02.500\n<i><b><u>Hello red</u></b></i>\n\
+<i><b><u>second line</u></b></i>\n\n\
+00:00:03.000 --> 00:00:04.000 line:0\nTop cue\n\n\
+00:00:05.000 --> 00:00:06.000\nBottom cue\n\n"
+    );
+    assert_eq!(
+        warns(&out),
+        [
+            "colours, fonts and sizes removed (1 cues)",
+            "exact positions removed (1 cues)"
+        ],
+        "{out}"
+    );
+}
+
+/// Frames (TTML2 12.3.1: a frame is below the frame rate). On the media time
+/// base a frame is a division of a second: at 25 a second, 1:15 is 1.600 s and
+/// 2:20 is 2.800 s; at 29.97 (30 x 1000/1001), 1:15 is 1.5005 s, rounded half
+/// up to 1.501 s, and 2:20 is 2.66733 s, rounded to 2.667 s. On the SMPTE time
+/// base (I.3) the frames are counted at the nominal rate: 1:15 is 45 frames,
+/// 45 x 1001/30000 = 1.5015 s, rounded to 1.502 s, and 2:20 is 80 frames,
+/// 2.66933 s, rounded to 2.669 s.
+#[test]
+fn frame_times_become_milliseconds() {
+    let root = tmp("ttml-frames");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let tt = "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+        xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\"";
+    let body =
+        "><body><div><p begin=\"00:00:01:15\" end=\"00:00:02:20\">Frames</p></div></body></tt>";
+    let cases = [
+        (
+            format!("{tt} ttp:frameRate=\"25\"{body}"),
+            "WEBVTT\n\n00:00:01.600 --> 00:00:02.800\nFrames\n\n",
+        ),
+        (
+            format!("{tt} ttp:frameRate=\"30\" ttp:frameRateMultiplier=\"1000 1001\"{body}"),
+            "WEBVTT\n\n00:00:01.501 --> 00:00:02.667\nFrames\n\n",
+        ),
+        (
+            format!(
+                "{tt} ttp:timeBase=\"smpte\" ttp:frameRate=\"30\" ttp:frameRateMultiplier=\"1000 1001\"{body}"
+            ),
+            "WEBVTT\n\n00:00:01.502 --> 00:00:02.669\nFrames\n\n",
+        ),
+    ];
+    for (i, (text, want)) in cases.iter().enumerate() {
+        let a = put(&root, &format!("{i}.ttml"), text.as_bytes());
+        let o = run("subtitles.ttml-to-vtt", &work, &[&a]);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        assert_eq!(produced(&work, &stdout(&o)), want.as_bytes(), "case {i}");
+        for f in files(&work) {
+            fs::remove_file(f.0).unwrap();
+        }
+    }
+}
+
+/// The reader's line is the line where the error is found: here the `</body>`
+/// on line 5, which closes the `div` that was not closed.
+#[test]
+fn malformed_ttml_fails_with_line_and_leaves_nothing() {
+    let root = tmp("ttml-bad");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(
+        &root,
+        "a.ttml",
+        b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n<body>\n<div>\n\
+<p begin=\"0s\" end=\"1s\">x</p>\n</body></tt>\n",
+    );
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "not well-formed TTML (line 5): an end tag that does not match its start tag",
+        "{out}"
+    );
+    assert!(lines(&out, "done").is_empty());
+    assert!(files(&work).is_empty());
+}
+
+#[test]
+fn not_ttml_fails() {
+    let root = tmp("ttml-not");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(
+        &root,
+        "a.ttml",
+        b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>x</body></html>",
+    );
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "fail")[0][2], "not a TTML document", "{out}");
+    assert!(files(&work).is_empty());
+}
+
+/// A time base the reader does not convert refuses the whole file, with the
+/// reason: a clock time base, and a drop-frame time code.
+#[test]
+fn unsupported_time_base_fails_with_the_reason() {
+    let root = tmp("ttml-unsupported");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let cases = [
+        (
+            "clock.ttml",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"clock\">\
+<body><div><p begin=\"0s\" end=\"1s\">x</p></div></body></tt>",
+            "unsupported TTML: clock time base",
+        ),
+        (
+            "drop.ttml",
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" \
+xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:timeBase=\"smpte\" \
+ttp:dropMode=\"dropNTSC\"><body><div>\
+<p begin=\"00:00:01:00\" end=\"00:00:02:00\">x</p></div></body></tt>",
+            "unsupported TTML: drop-frame time code",
+        ),
+    ];
+    for (name, text, reason) in cases {
+        let a = put(&root, name, text.as_bytes());
+        let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+        let out = stdout(&o);
+        assert_eq!(o.status.code(), Some(1), "{name}: {out}");
+        assert_eq!(lines(&out, "fail")[0][2], reason, "{name}: {out}");
+        assert!(files(&work).is_empty(), "{name}: a refused input wrote");
+    }
+}
+
+/// A document whose only subtitles are images has no text to convert: the
+/// reason is said, not `no subtitles found`.
+#[test]
+fn image_only_ttml_fails_with_the_reason() {
+    let root = tmp("ttml-image");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(
+        &root,
+        "a.ttml",
+        b"<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\
+<p begin=\"0s\" end=\"1s\"><image src=\"a.png\"/></p></div></body></tt>",
+    );
+    let o = run("subtitles.ttml-to-vtt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no text subtitles found (image-based)",
+        "{out}"
+    );
+    assert!(files(&work).is_empty());
+}
+
+/// A document whose every paragraph is skipped says how many were skipped and
+/// the first one's line and reason; the paragraph here has no end time, on
+/// line 4.
+#[test]
+fn ttml_with_every_paragraph_skipped_says_why() {
+    let root = tmp("ttml-skipped");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(
+        &root,
+        "a.ttml",
+        b"<tt xmlns=\"http://www.w3.org/ns/ttml\">\n<body>\n<div>\n\
+<p>x</p>\n</div></body></tt>\n",
+    );
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        lines(&out, "fail")[0][2],
+        "no subtitles found (1 items skipped, first at line 4: no end time)",
+        "{out}"
+    );
+    assert!(files(&work).is_empty());
+}
+
+/// Each loss kind is one warn line, in `Loss` order whatever the document's
+/// order: here the foreign element comes first in the file and is last in the
+/// output. The bracket is written as its look-alike and counted there.
+#[test]
+fn ttml_warnings_list_losses_in_order() {
+    let root = tmp("ttml-warn");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let a = put(
+        &root,
+        "a.ttml",
+        b"<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\" \
+xmlns:foo=\"urn:example:foo\">\n\
+<head><styling><style xml:id=\"c\" tts:color=\"red\"/></styling>\n\
+<layout><region xml:id=\"low\" tts:origin=\"10% 80%\" tts:extent=\"80% 15%\"/></layout></head>\n\
+<body><div>\n\
+<p begin=\"00:00:01.000\" end=\"00:00:02.000\"><foo:note/>Plain</p>\n\
+<p begin=\"00:00:03.000\" end=\"00:00:04.000\" region=\"low\" style=\"c\">Placed &lt;b&gt; text</p>\n\
+</div></body></tt>\n",
+    );
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        warns(&out),
+        [
+            "colours, fonts and sizes removed (1 cues)",
+            "exact positions removed (1 cues)",
+            "characters that look like markup written as look-alikes (1 cues)",
+            "unsupported elements ignored (1 items)",
+        ],
+        "{out}"
+    );
+}
+
+/// A UTF-16 document with its byte order mark converts like a UTF-8 one.
+#[test]
+fn utf16_ttml_converts() {
+    let root = tmp("ttml-utf16");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let text = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\
+<p begin=\"0s\" end=\"1s\">Wide</p></div></body></tt>";
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let a = put(&root, "a.ttml", &bytes);
+    let o = run("subtitles.ttml-to-srt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let mut want = BOM.to_vec();
+    want.extend_from_slice(b"1\r\n00:00:00,000 --> 00:00:01,000\r\nWide\r\n\r\n");
+    assert_eq!(produced(&work, &stdout(&o)), want);
+}
+
+/// One byte past the input limit fails before any parsing, with the size copy.
+#[test]
+fn oversize_ttml_fails() {
+    let root = tmp("ttml-oversize");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let mut bytes = b"<tt xmlns=\"http://www.w3.org/ns/ttml\"><body/></tt>".to_vec();
+    bytes.resize(INPUT_BYTES + 1, b' ');
+    let a = put(&root, "big.ttml", &bytes);
+    let o = run("subtitles.ttml-to-vtt", &work, &[&a]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert_eq!(
+        lines(&stdout(&o), "fail")[0][2],
+        "subtitle file is larger than 8 MiB"
+    );
+    assert!(files(&work).is_empty());
+}
+
+/// Three TTML inputs, one of them not TTML: the bad one fails alone and the
+/// batch goes on.
+#[test]
+fn ttml_batch_of_three_one_bad_goes_on() {
+    let root = tmp("ttml-batch");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let good = b"<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\
+<p begin=\"0s\" end=\"1s\">Yes</p></div></body></tt>";
+    let a = put(&root, "a.ttml", good);
+    let b = put(&root, "b.ttml", b"<html/>");
+    let c = put(&root, "c.dfxp", good);
+    let o = run("subtitles.ttml-to-vtt", &work, &[&a, &b, &c]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert_eq!(lines(&out, "done").len(), 2, "{out}");
+    assert_eq!(lines(&out, "fail").len(), 1, "{out}");
+    assert_eq!(lines(&out, "fail")[0][1], b.to_str().unwrap());
+    assert_eq!(lines(&out, "fail")[0][2], "not a TTML document");
+}
+
+/// One dense TTML input, on disk: its name, its file, how many units the
+/// reader charges for it (the figure bytes per unit are taken over), and
+/// whether the reader keeps it (`false`: `TooComplex`, nothing written).
+struct DenseTtml {
+    name: &'static str,
+    path: PathBuf,
+    units: usize,
+    kept: bool,
+}
+
+/// The `xml:id` names of the shortest length first: one character (53 names),
+/// then two (3,339), three (210,357), and so on. An XML name starts with a
+/// letter or `_`, and continues with letters, digits, `_`, `-` or `.`.
+fn short_names() -> impl Iterator<Item = String> {
+    const START: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+    const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.";
+    (1usize..).flat_map(|len| {
+        let count = START.len() * REST.len().pow(u32::try_from(len - 1).unwrap());
+        (0..count).map(move |mut i| {
+            let mut tail = Vec::with_capacity(len - 1);
+            for _ in 1..len {
+                tail.push(char::from(REST[i % REST.len()]));
+                i /= REST.len();
+            }
+            let mut name = String::with_capacity(len);
+            name.push(char::from(START[i]));
+            name.extend(tail.iter().rev());
+            name
+        })
+    })
+}
+
+/// Writes `head`, then as many of `units` as fit before `tail` (each kept
+/// whole or not at all), then `tail`, padded with newlines to the input limit.
+/// Returns the number of units written. It streams to the file, so no copy of
+/// the input is held: see `dense_ttml_inputs` for why the parent must not.
+fn write_input(path: &Path, head: &str, units: impl Iterator<Item = String>, tail: &str) -> usize {
+    use std::io::Write as _;
+    let mut out = std::io::BufWriter::new(fs::File::create(path).unwrap());
+    let mut len = head.len() + tail.len();
+    out.write_all(head.as_bytes()).unwrap();
+    let mut count = 0;
+    for unit in units {
+        if len + unit.len() > INPUT_BYTES {
+            break;
+        }
+        len += unit.len();
+        count += 1;
+        out.write_all(unit.as_bytes()).unwrap();
+    }
+    out.write_all(tail.as_bytes()).unwrap();
+    // Padding after the root element: trailing white space is no content.
+    let newlines = [b'\n'; 4096];
+    let mut pad = INPUT_BYTES - len;
+    while pad > 0 {
+        let n = pad.min(newlines.len());
+        out.write_all(&newlines[..n]).unwrap();
+        pad -= n;
+    }
+    out.flush().unwrap();
+    count
+}
+
+/// One dense input from `write_input`, with its verdict.
+fn dense_input(
+    root: &Path,
+    name: &'static str,
+    head: &str,
+    units: impl Iterator<Item = String>,
+    tail: &str,
+    kept: bool,
+) -> DenseTtml {
+    let path = root.join(format!("{name}.ttml"));
+    let units = write_input(&path, head, units, tail);
+    DenseTtml {
+        name,
+        path,
+        units,
+        kept,
+    }
+}
+
+/// The dense TTML inputs, each at the densest size the 8 MiB limit allows for
+/// its shape. The shapes are the reader's own costs: an element, a piece of
+/// text, a copy of a piece into a slice, a style or region entry, a reference,
+/// a line break, an attribute value, a style chain and an overlap.
+///
+/// The plan's counts that do not fit the limit are replaced by the densest
+/// count that does: 4 M `<span>` are 56 MB and 4 M `<br/>` are 20 MB, so the
+/// most that fit are 599,176 spans and 1,677,693 breaks. A named
+/// `<style xml:id="…"/>` costs 18 B plus its name, so the shortest distinct
+/// names give 391,791 in the limit, not 784,960 (the unnamed `<style/>` is the
+/// one that reaches that count).
+///
+/// Each input is written to disk, streamed, before the next is made, and the
+/// test measures only after all of them are written. A child forked from a
+/// parent holds at least that parent's resident set in its `ru_maxrss` (the
+/// `pre_exec` hook forks rather than spawning). Measured: with the inputs held
+/// in memory, every child reported about 130 MiB; streamed, the baseline reads
+/// about 11 MiB. So the parent keeps nothing here.
+fn dense_ttml_inputs(root: &Path) -> Vec<DenseTtml> {
+    const TT: &str =
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\">";
+    const P: &str = "<p begin=\"0s\" end=\"1s\">";
+    // A paragraph that ends at 100,000 s, later than any span below.
+    const LONG_P: &str = "<p begin=\"0s\" end=\"100000s\">";
+    let mut inputs = Vec::new();
+
+    // The cost of the input itself: one cue, padded to the limit.
+    let mut baseline = dense_input(
+        root,
+        "baseline",
+        &format!("{TT}<body><div>{P}x</p></div></body></tt>"),
+        std::iter::empty(),
+        "",
+        true,
+    );
+    baseline.units = 1;
+    inputs.push(baseline);
+
+    // Run-dense: one paragraph of spans (14 B each).
+    inputs.push(dense_input(
+        root,
+        "span-dense",
+        &format!("{TT}<body><div>{P}"),
+        std::iter::repeat("<span>x</span>").map(str::to_owned),
+        "</p></div></body></tt>",
+        true,
+    ));
+
+    // Cue-dense: one cue per paragraph (28 B each).
+    inputs.push(dense_input(
+        root,
+        "cue-dense",
+        &format!("{TT}<body>"),
+        std::iter::repeat("<p begin=\"0s\" end=\"1s\">x</p>").map(str::to_owned),
+        "</body></tt>",
+        true,
+    ));
+
+    // Depth-dense: a block of 254 elements that reaches the depth limit of 256
+    // open elements (`xml::MAX_DEPTH`): tt, body, 127 div, p, 126 span. The
+    // blocks are siblings in the body, so each one is nested afresh.
+    let block = format!(
+        "{}{P}{}x{}</p>{}",
+        "<div>".repeat(127),
+        "<span>".repeat(126),
+        "</span>".repeat(126),
+        "</div>".repeat(127)
+    );
+    let mut depth = dense_input(
+        root,
+        "depth-dense",
+        &format!("{TT}<body>"),
+        std::iter::repeat(block),
+        "</body></tt>",
+        true,
+    );
+    depth.units *= 254;
+    inputs.push(depth);
+
+    // Table-dense: named styles, each one an entry and an id (two items).
+    inputs.push(dense_input(
+        root,
+        "style-table",
+        &format!("{TT}<head><styling>"),
+        short_names().map(|s| format!("<style xml:id=\"{s}\"/>")),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Table-dense, unnamed: 784,960 `<style/>`, the count the ttml.rs
+    // measurement uses. An unnamed style is kept only as the entry of its own
+    // content (two items each).
+    inputs.push(dense_input(
+        root,
+        "style-unnamed",
+        &format!("{TT}<head><styling>"),
+        std::iter::repeat_n("<style/>".to_owned(), 784_960),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Region-dense: named regions, one item each.
+    inputs.push(dense_input(
+        root,
+        "region-table",
+        &format!("{TT}<head><layout>"),
+        short_names().map(|s| format!("<region xml:id=\"{s}\"/>")),
+        &format!("</layout></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Reference-dense, in a paragraph: one `style` list of distinct names, none
+    // defined. A paragraph's references make no entry and charge no item, so
+    // the whole list is read: one lookup and one merge per name.
+    inputs.push(dense_input(
+        root,
+        "reference-paragraph",
+        &format!("{TT}<body><div><p begin=\"0s\" end=\"1s\" style=\""),
+        short_names().map(|s| format!("{s} ")),
+        "\">x</p></div></body></tt>",
+        true,
+    ));
+
+    // Reference-dense, in the head: the same list on a `style` element. Each
+    // distinct name is a placeholder entry and a reference, two items, so the
+    // budget stops the list.
+    inputs.push(dense_input(
+        root,
+        "reference-head",
+        &format!("{TT}<head><styling><style xml:id=\"x\" style=\""),
+        short_names().map(|s| format!("{s} ")),
+        &format!("\"/></styling></head><body><div>{P}x</p></div></body></tt>"),
+        false,
+    ));
+
+    // Break-dense: `<br/>` in one paragraph, a line each (5 B each).
+    inputs.push(dense_input(
+        root,
+        "break-flood",
+        &format!("{TT}<body><div>{P}"),
+        std::iter::repeat("<br/>").map(str::to_owned),
+        "x</p></div></body></tt>",
+        false,
+    ));
+
+    // One attribute value of 1 MiB: a style id, held as the table's key, and a
+    // reference to it. Two MiB of input, so the value is the cost.
+    let value = "a".repeat(MIB);
+    let mut attribute = dense_input(
+        root,
+        "attribute-1mib",
+        &format!(
+            "{TT}<head><styling><style xml:id=\"{value}\"/></styling></head><body><div>\
+<p begin=\"0s\" end=\"1s\" style=\"{value}\">x</p></div></body></tt>"
+        ),
+        std::iter::empty(),
+        "",
+        true,
+    );
+    attribute.units = 1;
+    inputs.push(attribute);
+
+    // Chain-dense: each style refers to the one before it (one chain of
+    // styles), with a declaration of its own. Past `MAX_CHAIN` a chain is not
+    // followed, so the reader resolves every entry once.
+    let mut prev: Option<String> = None;
+    inputs.push(dense_input(
+        root,
+        "style-chain",
+        &format!("{TT}<head><styling>"),
+        short_names().map(move |s| {
+            let unit = match &prev {
+                Some(p) => {
+                    format!("<style xml:id=\"{s}\" style=\"{p}\" tts:fontStyle=\"italic\"/>")
+                }
+                None => format!("<style xml:id=\"{s}\" tts:fontStyle=\"italic\"/>"),
+            };
+            prev = Some(s);
+            unit
+        }),
+        &format!("</styling></head><body><div>{P}x</p></div></body></tt>"),
+        true,
+    ));
+
+    // Overlap-dense, nested: spans one inside the next, so every slice of the
+    // paragraph holds nearly all of them. Each slice copies its pieces; the
+    // copies are charged, and the budget stops the document.
+    inputs.push(dense_input(
+        root,
+        "overlap-nested",
+        &format!("{TT}<body><div>{LONG_P}"),
+        (0u64..).map(|i| {
+            format!(
+                "<span begin=\"{i}ms\" end=\"{}ms\">x</span>",
+                100_000_000 - i
+            )
+        }),
+        "</p></div></body></tt>",
+        false,
+    ));
+
+    // Overlap, staggered: each span starts 10 ms after the one before and lasts
+    // 15 ms, so at most two are active at a time. The copies stay in the budget
+    // and the document is converted.
+    inputs.push(dense_input(
+        root,
+        "overlap-staggered",
+        &format!("{TT}<body><div>{LONG_P}"),
+        (0u64..).map(|i| {
+            format!(
+                "<span begin=\"{}ms\" end=\"{}ms\">x</span>",
+                i * 10,
+                i * 10 + 15
+            )
+        }),
+        "</p></div></body></tt>",
+        true,
+    ));
+
+    inputs
+}
+
+/// Every dense TTML input under the memory net, each run five times, with the
+/// peak RSS of every run (`ru_maxrss`, from `wait4`). Each input asserts its
+/// verdict (converted, or `TooComplex` with nothing written) and the ceiling:
+/// past `PEAK_CEILING` the budget no longer bounds memory, which is a finding.
+/// The figures per shape and the bytes per unit are in `docs/resource-limits.md`;
+/// the test prints them.
+#[test]
+fn dense_ttml_shapes_stay_within_the_data_limit() {
+    const RUNS: usize = 5;
+    let root = tmp("dense-ttml");
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for shape in dense_ttml_inputs(&root) {
+        let name = shape.name;
+        let mut peaks = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let (o, peak_kib) = run_measured("subtitles.ttml-to-srt", &work, &shape.path);
+            let out = stdout(&o);
+            if shape.kept {
+                assert_eq!(o.status.code(), Some(0), "{name}: {out}");
+                assert_eq!(lines(&out, "done").len(), 1, "{name}: {out}");
+            } else {
+                assert_eq!(o.status.code(), Some(1), "{name}: {out}");
+                assert_eq!(lines(&out, "fail")[0][2], TOO_COMPLEX, "{name}: {out}");
+                assert!(files(&work).is_empty(), "{name}: a refused input wrote");
+            }
+            assert!(
+                peak_kib * 1024 <= PEAK_CEILING,
+                "{name}: peak RSS {peak_kib} KiB is past the ceiling"
+            );
+            peaks.push(peak_kib);
+            for f in files(&work) {
+                fs::remove_file(f.0).unwrap();
+            }
+        }
+        peaks.sort_unstable();
+        eprintln!(
+            "dense TTML {name}: {} units, kept {}, peak RSS KiB min {} median {} max {} over {RUNS} runs",
+            shape.units,
+            shape.kept,
+            peaks[0],
+            peaks[RUNS / 2],
+            peaks[RUNS - 1]
+        );
+    }
 }

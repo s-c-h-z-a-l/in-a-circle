@@ -360,7 +360,7 @@ fn html_entities_only_in_html_mode() {
 
 #[test]
 fn entity_table_is_sorted_and_semicolon_only() {
-    let t = entities::ENTITIES;
+    let t: Vec<_> = (0..entities::ENTITIES.len()).map(entry).collect();
     assert!(t.len() > 2000);
     assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
     // 32: the longest name the doc crate's Markdown reader scans for
@@ -369,9 +369,32 @@ fn entity_table_is_sorted_and_semicolon_only() {
         n.bytes().all(|c| c.is_ascii_alphanumeric()) && n.len() <= 32 && !v.is_empty()
     }));
     assert_eq!(ENTITY_LOOKUP_STEPS, 12);
-    for (n, v) in t {
+    for (n, v) in &t {
         assert_eq!(entity(n), Some(*v));
     }
+}
+
+#[test]
+fn entity_table_is_intact() {
+    // The WHATWG names that end with `;`: 2,125 at generation.
+    assert_eq!(entities::ENTITIES.len(), 2125);
+    let text = entities::TEXT;
+    for &(at, n, v) in entities::ENTITIES {
+        let (at, n, v) = (at as usize, n as usize, v as usize);
+        // Name and characters lie inside TEXT, on char boundaries, so
+        // `entry` slices never panic.
+        assert!(at + n + v <= text.len());
+        assert!(text.is_char_boundary(at));
+        assert!(text.is_char_boundary(at + n));
+        assert!(text.is_char_boundary(at + n + v));
+    }
+    let all: Vec<_> = (0..entities::ENTITIES.len()).map(entry).collect();
+    assert!(all.windows(2).all(|w| w[0].0 < w[1].0));
+    // Spot checks: a two-character value, an astral character, and a
+    // two-character value of ASCII.
+    assert_eq!(entity("NotEqualTilde"), Some("\u{2242}\u{338}"));
+    assert_eq!(entity("Afr"), Some("\u{1D504}"));
+    assert_eq!(entity("fjlig"), Some("fj"));
 }
 
 #[test]

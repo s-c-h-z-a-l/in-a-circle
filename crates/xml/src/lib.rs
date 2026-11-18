@@ -425,10 +425,20 @@ fn is_xml_char(c: char) -> bool {
 /// e.g. `entity("eacute") == Some("é")`; some names stand for two
 /// characters. Binary search of the WHATWG table.
 pub fn entity(name: &str) -> Option<&'static str> {
-    entities::ENTITIES
-        .binary_search_by(|(e, _)| (*e).cmp(name))
-        .ok()
-        .map(|k| entities::ENTITIES[k].1)
+    let k = entities::ENTITIES
+        .binary_search_by(|&(at, n, _)| entities::TEXT[at as usize..][..n as usize].cmp(name))
+        .ok()?;
+    Some(entry(k).1)
+}
+
+/// The name and the characters of table entry `k` (see `entities`).
+fn entry(k: usize) -> (&'static str, &'static str) {
+    let (at, n, v) = entities::ENTITIES[k];
+    let (at, n) = (at as usize, n as usize);
+    (
+        &entities::TEXT[at..at + n],
+        &entities::TEXT[at + n..at + n + v as usize],
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

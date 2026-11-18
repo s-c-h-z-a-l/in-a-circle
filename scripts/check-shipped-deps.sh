@@ -22,7 +22,7 @@ for pkg in $SHIPPED; do
             *:epub) ;;
             # The XML reader (no dependencies), which doc uses.
             *:xml) ;;
-            # The subtitle cue model and writers (std only), used by the subtitle family.
+            # The subtitle cue model, readers and writers (std, and the xml reader for TTML), used by the subtitle family.
             *:subtitles) ;;
             # Notifications: our own libc-only D-Bus client.
             inacircle:dbus) ;;

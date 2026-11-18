@@ -10,6 +10,8 @@ fn loss_order_is_the_warning_order() {
         Loss::Karaoke,
         Loss::Position,
         Loss::Styling,
+        Loss::Elements,
+        Loss::Timing,
     ];
     all.sort();
     assert_eq!(
@@ -22,6 +24,8 @@ fn loss_order_is_the_warning_order() {
             Loss::Settings,
             Loss::VoiceNames,
             Loss::Brackets,
+            Loss::Elements,
+            Loss::Timing,
         ]
     );
 }
@@ -41,6 +45,8 @@ fn loss_messages_are_the_user_text() {
         Loss::Brackets.message(),
         "characters that look like markup written as look-alikes"
     );
+    assert_eq!(Loss::Elements.message(), "unsupported elements ignored");
+    assert_eq!(Loss::Timing.message(), "time codes read as continuous");
 }
 
 #[test]
@@ -54,6 +60,43 @@ fn read_errors_say_what_the_user_sees() {
         "subtitle file is larger than 8 MiB"
     );
     assert_eq!(ReadError::NoCues.to_string(), "no subtitles found");
+    assert_eq!(
+        ReadError::Malformed {
+            line: 7,
+            reason: "mismatched end tag"
+        }
+        .to_string(),
+        "not well-formed TTML (line 7): mismatched end tag"
+    );
+    assert_eq!(ReadError::NotTtml.to_string(), "not a TTML document");
+    assert_eq!(
+        ReadError::Unsupported("clock time base").to_string(),
+        "unsupported TTML: clock time base"
+    );
+    assert_eq!(
+        ReadError::ImageBased.to_string(),
+        "no text subtitles found (image-based)"
+    );
+    // The reason of a file whose every item is skipped is shown, not hidden
+    // behind `no subtitles found`.
+    assert_eq!(
+        ReadError::AllSkipped {
+            count: 3,
+            line: 7,
+            reason: "no end time"
+        }
+        .to_string(),
+        "no subtitles found (3 items skipped, first at line 7: no end time)"
+    );
+    // The text copied into cues past the output size is not the item budget.
+    assert_eq!(
+        ReadError::TextTooLarge.to_string(),
+        "subtitle text would be larger than 32 MiB"
+    );
+    assert_ne!(
+        ReadError::TextTooLarge.to_string(),
+        ReadError::TooComplex.to_string()
+    );
 }
 
 #[test]

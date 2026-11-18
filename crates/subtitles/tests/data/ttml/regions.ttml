@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Regions and the top placement (TTML2 10.2.15, 10.2.16, 10.2.31, 11.3.1). A paragraph
+     is top when its region's anchor (origin, plus the extent by the alignment) lies
+     in the upper third of the root container. The root here is 1920px by 1080px, so
+     px placements can be read. -->
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"
+    tts:extent="1920px 1080px">
+  <head>
+    <layout>
+      <region xml:id="before" tts:origin="0% 5%" tts:extent="50% 20%" tts:displayAlign="before"/>
+      <region xml:id="center" tts:origin="0% 10%" tts:extent="50% 40%" tts:displayAlign="center"/>
+      <region xml:id="after" tts:origin="0% 10%" tts:extent="50% 20%" tts:displayAlign="after"/>
+      <region xml:id="bottom" tts:origin="10% 80%" tts:extent="80% 10%" tts:displayAlign="after"/>
+      <region xml:id="pixels" tts:origin="0px 108px" tts:extent="960px 216px"/>
+    </layout>
+  </head>
+  <body>
+    <div>
+      <p begin="0s" end="1s" region="before">before</p>
+      <p begin="1s" end="2s" region="center">center</p>
+      <p begin="2s" end="3s" region="after">after</p>
+      <p begin="3s" end="4s" region="bottom">bottom</p>
+      <p begin="4s" end="5s" region="pixels">pixels</p>
+      <p begin="5s" end="6s">no region</p>
+    </div>
+  </body>
+</tt>

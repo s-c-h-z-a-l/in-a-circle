@@ -1,0 +1,1 @@
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:d="http://www.w3.org/2006/10/ttaf1#parameter" ttp:timeBase="smpte" ttp:markerMode="continuous" ttp:dropMode="nonDrop" d:timeBase="media"><body><div><p begin="01:00:00:00" end="01:00:02:00">Hour</p></div></body></tt>

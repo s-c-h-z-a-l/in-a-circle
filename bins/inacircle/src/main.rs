@@ -1806,7 +1806,8 @@ mod tests {
 
     /// What the drawn wheels are built from for subtitles: an SRT lights
     /// Subtitles (south), VTT north is lit and SRT south is drawn dim; an
-    /// ASS lights both. Valid UTF-8 text lights nothing.
+    /// ASS lights both; a TTML `.xml` lights both too. Valid UTF-8 text
+    /// lights nothing.
     #[test]
     fn subtitle_menus_light_the_drawn_slices() {
         let base = md_catalog().actions.remove(0);
@@ -1850,6 +1851,20 @@ mod tests {
                     "vtt",
                     "VTT",
                 ),
+                act(
+                    "subtitles.ttml-to-srt",
+                    "application/ttml+xml",
+                    "application/x-subrip",
+                    "srt",
+                    "SRT",
+                ),
+                act(
+                    "subtitles.ttml-to-vtt",
+                    "application/ttml+xml",
+                    "text/vtt",
+                    "vtt",
+                    "VTT",
+                ),
             ],
         };
         // (label, preset, applicable) of the slice in `k`.
@@ -1882,6 +1897,20 @@ mod tests {
         let m = target_menu(&g, "subtitles");
         assert_eq!(slot(&m, 4), Some(("SRT", "srt-ass", true)));
         assert_eq!(slot(&m, 0), Some(("VTT", "vtt-ass", true)));
+        // A TTML document in a `.xml`: the classifier reads its root and
+        // namespace, so it lights Subtitles and both its slices.
+        let ttml = dir.join("Film.xml");
+        std::fs::write(
+            &ttml,
+            b"<?xml version=\"1.0\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>\
+              <p begin=\"00:00:01\" end=\"00:00:02\">x</p></div></body></tt>\n",
+        )
+        .unwrap();
+        let g = group_menu_for(vec![ttml], Some(cat.clone()));
+        assert!(g.slices[4].as_ref().unwrap().lit, "a TTML lights Subtitles");
+        let m = target_menu(&g, "subtitles");
+        assert_eq!(slot(&m, 0), Some(("VTT", "vtt-ttml", true)));
+        assert_eq!(slot(&m, 4), Some(("SRT", "srt-ttml", true)));
         let txt = dir.join("Plain.txt");
         std::fs::write(&txt, "plain words\n").unwrap();
         let g = group_menu_for(vec![txt], Some(cat));
