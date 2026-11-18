@@ -1,0 +1,17 @@
+1
+00:00:01,000 --> 00:00:02,000
+{\an8}Top l<>
+iiientalic</i>
+
+2
+00:00:03,000 --> 00:00:04,000
+{\i1}ass italic{\iS} plain {\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#ff0000">red</font> text
+{\c&H00FF00&}green {\u1}unde&&&&&&&&&&&&,000
+<font color="#ff0000">red</font> text
+{\c&H00FF00&}green {\u1}under{="#ff0000">red</font> text
+{\c&H00FF00&}green {\u1}unde:00:11,000 --> 00:00:12,000
+{\an9}top right

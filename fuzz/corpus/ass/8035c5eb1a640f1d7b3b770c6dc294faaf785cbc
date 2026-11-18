@@ -1,0 +1,6 @@
+[sc,10,10,10,1
+Style: Ital,Arial,20.ion
+
+[Events]
+F0,0,,non-ASCII:0:16.00
+Dialogue: 0,0:0 :17.00,0:00:18.00,Default,,0,0,0,,{\rMissing}back to Default after an unknoin Events

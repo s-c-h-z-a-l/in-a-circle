@@ -1,0 +1,19 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:bar
+
+REGION
+id:foo
+
+REGION
+:01.000 region: 
+nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnninvladi6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00:00:00.000 -->->

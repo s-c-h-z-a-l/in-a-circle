@@ -1,0 +1,18 @@
+[Script Info]
+A; Plain V4+ file: every way.
+Title: ordinar{
+ScriptTy-pe: v2.ayResY: 288
+
+[V4+ Sty0,1
+
+[Events]
+Forrm {\fnArial Black}fon
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}explicit top
+Dialogue: 00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue:\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,5,0,0,,{\a*n8}explicit top
+Dialogue: 0,0:00:07.00,0:00:0,0:00:07.00,0:00:[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapSt08.0y0

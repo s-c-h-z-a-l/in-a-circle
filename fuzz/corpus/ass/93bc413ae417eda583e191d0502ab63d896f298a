@@ -1,0 +1,38 @@
+[Script Info]
+Wrap1,0,0,0,100,100,0,0,11,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+ForminR, MarginV, Enault,,0,0,0,,plain bd ol{\rItal}italic, enurdline, top
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,ck to bold
+Dialogue: 1,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Fo,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&Hnurdline, top
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,10,10,1
+
+[Events]
+ForminR,,8,10,10,10,1
+
+[Events]
+ForminR, MarginV, Enault,,0,0,0,,plain bd ol{\rItal}italic, enurdline, to,Default,,0,0,10,10,1
+
+[ MarginV, Encoding
+Style: Dagain

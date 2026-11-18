@@ -1,0 +1,50 @@
+[Script Info]
+ScriptType: ve: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontyle: 0
+
+[V4 Stoles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, Marginnm[V4 Stoles]
+Form0
+
+[V4 Stoles]
+Format:pStyle: 0
+
+[V4+ Styles]
+Format: AlignmenrimaryColour, SenrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, SceaX[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Stoles]
+Form0
+
+[V4 Stoles]
+Format:pStyle: 0
+
+[V4+ Styles]
+Format: AlignmenrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, SceaX[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+ntname, Fontyle: 0
+
+[V4 Stoles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackCOutlineColour, BackColour, Underline, StrikeOut, SceaX[Script Info]
+ScriptType: v5.00
+WrapStyle: 0
+
+[V4 Stoles]
+Form0
+
+[V4 Stoles]
+Format:pStyle: 0
+
+[V4+ Styles]
+Format: AlignmenrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, SceaX[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Stoles]
+Format: Name, FontnameA, Fontsize, PrimaryColour:01.00me,0:, 

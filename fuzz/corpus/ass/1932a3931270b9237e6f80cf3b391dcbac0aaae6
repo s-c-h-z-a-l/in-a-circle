@@ -1,0 +1,15 @@
+[Script Info]
+; Plainia4+ file:ResX: 384
+PlayRe
+Y: 288
+
+[V4ly Set+s]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineCol[Script Info]
+WrapSty[script info]
+Title: w100,100,0,0,1,2,0,2,10,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,& subtitle line, in another section
+
+[Events]
+Format,: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Black}font :00:06.00,Default,,0,0,0,,{unk0,0,,{\an2}botto00:0200,Default,,0,0,0%,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 ea0,0,,{\a+\an+form {\fnArial Black}font :00:06.00,Default,,0,0,0,,{unk0,0,,{\an2}botto00:0200,Default,,0,0,0%,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 eak, soft\nbreak and hard\hspa00:07.00,Default,,0,0,0,,{\a+\an+form {\fnArial Black}font :00:06.00,Default,,0,0,0,,{unknown} block and {hello\i1}i and } stray \an2}bot0,0,0,,{\tZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZRZZ.00,&efault[v4+ sty,

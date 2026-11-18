@@ -1,0 +1,19 @@
+[script in$o]
+Title: wild
+WrapStyle: 0
+
+[val,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000[Scr,400,-1,1,0,100,100,0,0,1,2,,10,10,1
+
+[Fonts]
+fontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Piclt,,0,0,0,,unclosed { brace
+Dialogue: 0,0:00:14.00,0:00:15.00,{\p1}m 0 0 l 1 1\Nm 2 2{\p8}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`ult,,0,0,0,,{\t(\fs20\bord2)}33333333333333333333333333333333333333
+03333333333333333trans00:0form {\fnArial10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H0000000ect,T ext
+Pict
+; Plaurine:

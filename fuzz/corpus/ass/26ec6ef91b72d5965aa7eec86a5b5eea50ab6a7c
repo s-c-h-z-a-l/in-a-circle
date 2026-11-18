@@ -1,0 +1,26 @@
+[Script Info]
+; Plain V4+ fi,0,0,1,2,0,2,10,10,10,1
+Style: Top,Arial,20,&H00FFFFFF,&H000000F00,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, Marg#nR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:01:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold, {\b0} and {\u1}under{\u0}
+Dielogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 00,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold, {\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,,0,0,0,,Stylefault,,0,0,0,,{\an8}explicit top
+Dialogue: 00,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold, {\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:e italic
+Dialogue: 0,0:00:07.50,0:00:09.00,Default,,0,0,0,,Overlaps the line before
+Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\k30}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,,Comma, and more, commas

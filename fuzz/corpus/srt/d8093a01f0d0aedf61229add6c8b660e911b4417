@@ -1,0 +1,31 @@
+﻿1
+00:00:01,000 --> 00:00:02,000
+árvíztűrő &amp; <i>open
+{\an8}{\pos(1,2)}{\b1 unclosed
+<unknown tag> <font color="red">red</font> a < b > c <
+\\ backslashes \ and {brace bell
+2
+00:00:05,000 --> 00:00:04,000
+ends before start
+3
+100:00:00,000 --> 100:00:01,000
+too late
+
+00:00:07 --> 00:00:08
+bad format line between
+
+99:59:59,999 --> 99:59:59,999
+last ms possible
+
+1:2:3,4 --> 1:2:3,5 X1:1
+mixed
+<b
+
+00:00:09,000 --> 00:00:10,000
+</i></b>{\i0}{\u1}{\k1}{\p1}end
+
+1000000000000000000000000000:00:00,000 --> 00:00:01,000
+huge hours
+
+00:00:11,000 --> 00:00:12,000
+{hello} {\} {\\}

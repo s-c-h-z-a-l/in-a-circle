@@ -1,0 +1,16 @@
+[Script Info]
+ScriptType: 5:00:08.000,Default,,0,0,0,,three digit centiseconds
+Dia1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR% MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0os(10,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Missing,,0,0,0,,unknown style name
+Dialogue: 0,0:00:05.00,0:00:00:00:05.00,Missing,,0,0,0fault,,0,0,0anted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,0:00:09.00,Default,,0,0,0,O,verlaps the line before
+Dialogue: 0,0:00:09.00,0:00:pe: 0:00:08.000,Default,,0,0,0,,three digit centiseconds
+Dialogue: 0,0:00:09.00,0:00:000,&H00[script info]
+Title: wil000000d
+W,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+Style: Top,Arial,20,&H00}FFFFF,{\t(\fs20\&bo

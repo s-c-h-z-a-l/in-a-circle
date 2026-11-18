@@ -1,0 +1,6 @@
+[Script Inf in anothEr section
+
+[Events]
+FdrmarginV, hs0 0,00:00:name
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,00,Default,,0,0,0,,{\p1,0,0,,{unknown} block and {hello\i2}i and } stray brace { open
+Dial},

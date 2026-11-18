@@ -1,0 +1,15 @@
+[Script Info]
+; PScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+For2,10,10,10,1
+Style: Top,Arail,20,&H00FFFFFF,&H000000FF0,100,100,0,0,1,2,0,8,10,10,10,1
+Style: Slanted,Arial,20,&H00FFFFVF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,+,10,10,10,1
+
+[Evetsn]
+Format: Layer, Start, End, Sty, elName, M000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,10,1																																																																												,0:00:03.00,0:00:04.0-->}italic{\i0} and {\b1}bold{\0
+
+[V4 Styles

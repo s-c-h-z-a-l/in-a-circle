@@ -1,0 +1,34 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00 region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region<<<<<<<<<0 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+t
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lineses :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_spall_settings
+{"width":32,"line
+    width: 18ps":5,"rex;
+}gion

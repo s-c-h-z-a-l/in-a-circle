@@ -1,0 +1,18 @@
+7
+1}bold{\b0}
+
+3
+00:00:0
+5
+00:00:22,000 --> 00:00:23,000
+tex4 that holds an arrow: a -->&b
+a spaces-only line ends the cue{\   
+15:00:24,000-->00::25,000
+no sPacesaround the ae000
+no sPaces around the ae cue{\   
+40:00:24,000-->00::25,000  
+00:00:24,000-->0 cue{\   
+00:00:24,000-->00::25,000  
+00:00:24,000-->00::25,000
+n﻿1
+00:00:01,000 --> o sPace00:s 

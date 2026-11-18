@@ -1,0 +1,19 @@
+1
+00old{\b0}
+
+6
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+nested <b>both</b><BBBd{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+0:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+00:00:11,000,000
+{\an9}top right

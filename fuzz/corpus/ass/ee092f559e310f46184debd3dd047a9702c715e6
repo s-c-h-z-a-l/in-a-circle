@@ -1,0 +1,11 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Normat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, O00,100,0,0,1,2,0,2,10,10,10,1
+Style:F,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,plain bold {\rItal}italic, u00:03.00,0:00:04.00,Default,,0,0,0,,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDefault}named again

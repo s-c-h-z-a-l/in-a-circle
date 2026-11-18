@@ -1,0 +1,16 @@
+[Script Info]
+; Plain V4+ file: ever,2,0,2,10,10,10,1
+
+[Events]
+Format, Text
+Comment: 0,0:00:00.00,0:00101.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.0:00:02.50,Default,,0,0t,,0,0,0,,First line\NSecond line
+Dialogue: 08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,0:40:09.00,Default,,0,0,0,,
+Oerlaps the line=before
+Dialogue: 0,0:00:09.000,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\k30}ra{\kf40}o{\ko5}ke
+Dialogue: 0First line\NSecond line
+Dialogue: 08.00,Slanted,,0,0,0,,Style italic
+Dialogue: A,0:00:07.50,0:00:09.00,Default,,0,0,0,,
+Oerlaps the line=before
+Dia2.00,0:00:13.00,Dfaul,t,0,0,0,,Comma, and more, commas

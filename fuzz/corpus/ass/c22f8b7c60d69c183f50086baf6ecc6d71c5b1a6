@@ -1,0 +1,41 @@
+[Script Info]
+A; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0l
+yPaResX: 384
+PlayResY: 288
+
+[V4+ Sty0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0200:00.00,0:00:01.00,Defaul,0,0,100,100,0,0,1,2,0,2,10:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00z00,0:00:06.00,Default,,0,0,0,$First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}explicRit top
+Dialogue: 00,0:00:02.50,Default,,000:06.00,Default,,0,0,0,$First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}ex0}ra{00,0:00:First line\NS reads the samu way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0l
+yPaResX: 384
+PlayResY: 288
+
+[V4+ Sty0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0200:00.00,0:00:01.00,Defaul,0,0,100,100,0,0,1,2,0,2,10:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00z00,0:00:06.00,Default,,0,0,0,$First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}explicit top
+Dialogue: 00,0:00:02.50,Default,,000:06.00,Default,,0,0,0,$First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}ex0}ra{\3.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue:00,0:00:First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,D07.00,Default,,0,0,0,,{\a*n8}ex0}ra{\3.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue:00,0:00:First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}ex0}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,,Comecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,D07.00,Default,,0,0,0,,{\a*n8}ex0}ra{\3.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue:00,0:00:First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\a*n8}ex0}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,,Comma, and more, commas

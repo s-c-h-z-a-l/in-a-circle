@@ -1,0 +1,11 @@
+[Script Info]
+WrapackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spa in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:logue: 0,0:00:09.00,0:00:08.00,Default,,0,0,0,,ends before it starts
+Dialogue: 0,100:00:00.00,100:00:01.00,Default,,0,0,0,,a hundred 4333333hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b400}b400 {\i-1}italic
+DialoguStyle: [V0
+
+ +40.00in

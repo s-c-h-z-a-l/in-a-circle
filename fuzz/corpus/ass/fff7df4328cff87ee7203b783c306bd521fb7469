@@ -1,0 +1,10 @@
+[Script Info]
+; Plain V4+ file: every feature here ﻿one that ffmpeg reads the srapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H000000Outline, Shadow, MarginL, MarginR, MarginV, Encoding
+Style: 8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+Style: 2,Bottom,-1,0,Aria0,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,[SctType: v1

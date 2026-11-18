@@ -1,0 +1,8 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, Baclour, OutlineColour, BackColour, Bold, Italic, Un{\rline, StrikeOut, ScaleX, ScaleY, SaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1inL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,1,0,100,&H00FFF[

@@ -1,0 +1,303 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 line:-1
+valid0
+
+00:00:00.000 --> 00:00:01.000 line:0
+valid1
+
+00:00:00.000 --> 00:00:01.000 line:-0
+valid2
+
+00:00:00.000 --> 00:00:01.000 line:1
+valid3
+
+00:00:00.000 --> 00:00:01.000 line:100
+valid4
+
+00:00:00.000 -->	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region<<<<<<<<<0 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:00.000 --> 00:00:01.000 position:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-right
+text6
+
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE in-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAnchorY":20,"viewportAnchoreft, center and line-rigX":30,"viewportAnchoreft, center and line-rigX":30,"viewportAht; "auto" voids the setting
+00:00:00.000nchorY" --> 00:00:01.000 position:1%,:80,"scroll":"autLUE %
+00:00:00.000 --> 00:00:01.000 line:0.000000000000000000000000000000000000000000000000000000000000000000000000oating_point_anchor
+regionanchor:41.125%,20.25% viewportanchor:32.75%,32.5%
+
+REGION
+id:not_unique_id width:42%
+
+REGION
+ifd:not_unique_id
+width:67%
+
+REGION
+invalid_settings values but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespace			width:10%
+lines:5regionanchor:40%,20%    viegportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 -0- >0:00:04.000 region:region_without_settings
+{WEBVTT
+
+NOTE vzalid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.00<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<0 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:00.000 --> 00:00:01.000 position:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-right
+text6
+
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE in-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAnchorY":20,"viewportAributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 -0- >0:00:04.000 region:region_without_settings
+{WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.00<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<0 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE in-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAnchorY":20,"viewportAnchoreft, center and line-rigX":30,"viewportAnchoreft, center and line-rigX":30,"viewportAht; "auto" voids t:1.5%
+text3
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-left
+text4
+
+00:00:00.000 --> 00:00:01.000 position:1%,center
+text5
+
+00:00:00.000 --> 00:00:01.000 position:1%,line-right
+text6
+
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE in-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAnchorY":20,"viewportAributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 -0- >0:00:04.000 region:region_without_settings
+{WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.00<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<0 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+00:00:00.000 --> 00:00:01.000 position:1% ,center
+text7
+LE
+::cue(#foo) {
+    width: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+NOTE in-left" followed by "auto"
+00:00:00.000 --> 00:00:01.000 position:1%,line-leftauto
+invalid23
+
+The colalign keywords are only line-l:40,"regionAnchorY":20,"viewportAnchoreft, center and line-rigX":30,"viewportAnchoreft, center and line-rigX":30,"viewportAht; "auto" voids the setting
+00:00:00.000nchorY" --> 00:00:01.000 position:1%,:80,"scroll":"autLUE %
+00:00:00.000 --> 00:00:01.000 line:0.000000000000000000000000000000000000000000000000000000000000000000000000oating_point_anchor
+regionanchor:41.125%,20.25% viewportanchor:32.75%,32.5%
+
+REGION
+id:not_unique_id width:42%
+
+REGION
+ifd:not_unique_id
+width:67%
+
+REGION
+invalid_settings values but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespace			width:10%
+lines:5regionanchor:40%,20%    viegportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.00> 0-- 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 -0- >0:00:04.000 region:region_without_settings
+{WEBVTT
+
+NOTE vzalid
+
+00:00:00.000 --> 00:00:01.tch as "start" followed by "end"
+00:00:00.000 --> 00:00:01.000 line:100%,startend
+text46

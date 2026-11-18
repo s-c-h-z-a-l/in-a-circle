@@ -1,0 +1,16 @@
+WEBVTT
+
+NOTEs :1x
+invalid12
+
+00:00:00.000 --> 00:00:01.000 position:1%x
+invalid13
+
+00:00:00.000 --> 00:01:01.000 position:
+invalid14
+
+00:nred
+
+00:00:01.000 --> 00:00:020.00
+NOTE text
+NOTE text2

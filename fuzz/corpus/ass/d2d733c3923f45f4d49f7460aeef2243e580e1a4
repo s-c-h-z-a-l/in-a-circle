@@ -1,0 +1,7 @@
+[Script Info]
+,0,2,10,10,10,1
+
+[Events]
+Fostyle, bold
+Dialogue
+ 0,0:00 Angle, Borde0,,rS

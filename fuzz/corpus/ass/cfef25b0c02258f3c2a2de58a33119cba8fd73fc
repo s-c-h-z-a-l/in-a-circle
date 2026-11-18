@@ -1,0 +1,7 @@
+[Script Info]
+WrapStylez 0
+
+[V4+ Styles]
+ForOut Encoding
+Style: Default, Secon$aryCoLour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, SDefault,,0,0,0,,{\i1}{\rItal}{\rDefault}named againline, StrikeOut,ginL, MarginR, MarginV, Encoding
+Style: Default, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, SDefault,,0,0,0,,{~i1}{\rItal}{\rDefaulan}tedm again

@@ -1,0 +1,8 @@
+[Scri,10,1
+
+[Events]
+Form`t: Layer, Start, End, Style, NrginV, Effect, Text
+Comment: 0,0,0,100,100,0,0,1,2,0,8,10,10,10,1
+Style: Slyle, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:0700.00,0:ant Start, End, Style, Name, MarginL, MarginR, MGGGGGop
+Dialogue: 0,0:00:07.00,0:00:08.

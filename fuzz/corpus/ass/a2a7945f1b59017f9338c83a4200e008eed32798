@@ -1,0 +1,6 @@
+[Script ame 00,10,1
+
+[Events]
+Format: Layer, zStart, EStyletorect, Text
+Dialogue: 0,0:ma00:01.00,0:00:02.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0,0m

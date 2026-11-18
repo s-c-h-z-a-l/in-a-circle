@@ -1,0 +1,17 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+<	
+00:000 --> 00:00:01.000 region :f00:00:01.000 region :foo

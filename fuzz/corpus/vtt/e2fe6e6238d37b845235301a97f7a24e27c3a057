@@ -1,0 +1,239 @@
+WEBVTT FILE
+
+REGION
+id:region_withoul_settings
+
+REGION
+id:region_with_all_settings width:32%
+:6
+lines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_spli]_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.50 in0l:e5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_without_settings
+{}
+
+00:00:04.000 --> 00:00:05.000 region:region_with_all_settings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_anchor
+{"&regionAnchorX":41.125,"regionAnchorY":20.25,"viewportAnchorX"
+regionanchor:65536%,65536%
+
+REGION
+id:16
+regionanchor:4294967296%,4294967296%
+
+REGION
+WEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGION
+id:5
+lines:65536
+
+REGION
+id:6
+lines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_spli]_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_without_settings
+{}
+
+00WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:0                
+                                                                            0:01.000 size:1xx size:2%
+text1
+
+00:00:00.000 --> 00:00:01.000 size:0%
+text2
+
+00:00:00.000 --> 00:00:01.000 size:00%
+text3
+
+00:00:00.000 --> 00:00:01.000 size:50% size:100%
+text4
+
+00:00:00.000 --> 00:00:01.000 size:50% size:101%
+textWEBVTT
+
+00:00:00.000 --> 00:00:00.000
+text0
+
+00:00:01.000 --> 00:00:00.999
+text1
+
+00:01:00.000 --> 00:00959.999
+text2
+
+01:00:00.000 --> 00:59:59.999
+text3
+5
+
+00:00:000.00 --> 00:00:01.000 size:1.5%
+text6
+
+NOTE invalid
+
+00:00:00.000 --> 00:00:01.000 size:
+invalid7
+
+00:00VTT
+	
+00:00:00.000 --> 00:00.000 --> 00:00:01.000 size:x
+invalid8
+
+00:00:00.000 --> 00:00:01.000 size:%
+invalid9
+
+00:00:00.000 --> 00:00:01.000 size:%%
+invalid10
+
+00:00:00.000 --> 00:00:01.000 size:1%%
+invalid11
+
+00:00:00EBVTT	.000 --> 00:00:01.000 size:1%x
+invalid12
+
+00:00:00.000 --> 00:00:01.000 size:101%
+invalid13
+
+00:00:00.000 --> 00:00:01.000 size:-3%
+invalid14
+
+00:00:00.000 --> 00:00:01.000 size:200%
+invalid15
+d
+{"width"ttttttttttttttttttttttttttttttttttt:67}
+
+00:00:07.000 --> 00:00:08.100 region:
+"no region"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_bygion"
+
+00:00:00.000 --> 00:00:02.500 size:10% re2.500 vertical:lr region:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_without_settings
+{}
+
+00:00:04.000 --> 00:00:05.000 region:region_with_all_settings
+{"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":20,"viewportAnchorX":31,"viewportAnchor
+Y":84,"scroll":"up"}_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":20,"viewportAnchorX":30,"viewportAnchorY":80,"scroll":"up"}
+rX":41.125,"regionAnchorY":20.25,"viewportAnchorX":32.75,"viewportAnchorY":32.5}
+
+00:00:06.000 --> 00:00:07.000 region:not_unique_id
+{"width":67}
+
+00:00:07.000 --> 00:00:08.000 region:
+"no region"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":20,"viewportAnchorX":30,"viewportAnchorY":80,"scroll":"up"}

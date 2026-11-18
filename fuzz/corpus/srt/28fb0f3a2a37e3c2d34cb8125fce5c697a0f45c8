@@ -1,0 +1,19 @@
+7
+00:00:10,5 --> 00:00:11,50
+shortA millisecondsseconds
+
+9
+0:0:12.7 --> 00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:s nliseconds
+
+00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:s no blank line before it
+00:00:18,000 --> 00:00:19,000
+bare timing line, no in> 00:00:26,000
+ov
+
+9
+0:0:12.7 --> 0:0:13.1234
+dot separator, four-digit milliseconds
+
+00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:s nliseconds
+
+00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:s no blan

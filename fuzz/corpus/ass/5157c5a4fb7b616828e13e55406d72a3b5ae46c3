@@ -1,0 +1,6 @@
+[sc another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Default,,0,0,0,,not text either
+Dialogue:gue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p00006.001}italic{ts

@@ -410,6 +410,8 @@ fn action_bin(name: &str) -> PathBuf {
             "inacircle-text",
             "-p",
             "inacircle-pages",
+            "-p",
+            "inacircle-subtitles",
         ]);
         if dir.file_name() == Some(std::ffi::OsStr::new("release")) {
             c.arg("--release");
@@ -785,6 +787,50 @@ fn wheel_offers_and_runs_cp1250() {
     assert_eq!(out, want.as_bytes());
     assert_eq!(fs::read(&src).unwrap(), cp1250, "the source changed");
     assert_one_group_and_undo(&root, "Film.hu", "Film.hu.srt");
+}
+
+/// Real `inacircle-subtitles` on the wheel. A dropped `.srt` lights
+/// Subtitles (south); its north slice, VTT, is clicked and the WebVTT is
+/// written next to the source in its wrapper folder, as one history group
+/// that Undo trashes. A dropped `.ass` lights SRT (south) and VTT (north);
+/// SRT is clicked and written. The drawn wheels (for the `.srt`: south lit,
+/// then VTT north lit and SRT dim; for the `.ass`: SRT south and VTT north
+/// lit) are pinned by `subtitle_menus_light_the_drawn_slices` in the
+/// binary's unit tests: the click below lands on the drawn slice.
+#[test]
+fn wheel_offers_and_runs_subtitles() {
+    let srt: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n";
+    let root = Root::new("subtitles");
+    root.real_action_cached("inacircle-subtitles", ("primer.srt", srt), "vtt-srt");
+    let src = root.0.join("f/Film.srt");
+    fs::write(&src, srt).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // Subtitles is south of the center, VTT is its north slice.
+    let code = choose_on_the_wheel(&root, &list, (960, 690), (960, 390));
+    assert_eq!(code, Some(0));
+    let vtt = fs::read(root.0.join("f/Film/Film.vtt")).expect("no VTT written");
+    assert_eq!(vtt, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n\n");
+    assert_eq!(fs::read(&src).unwrap(), srt, "the source changed");
+    assert_one_group_and_undo(&root, "Film", "Film.vtt");
+
+    let ass: &[u8] = b"[Script Info]\nScriptType: v4.00+\n\n[Events]\n\
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+        Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hello\n";
+    let root = Root::new("ass2srt");
+    root.real_action_cached("inacircle-subtitles", ("primer.ass", ass), "srt-ass");
+    let src = root.0.join("f/Film.ass");
+    fs::write(&src, ass).unwrap();
+    let list = format!("file://{}\r\n", src.display()).into_bytes();
+    // SRT is the south slice of the ASS's second level, as Subtitles is south.
+    let code = choose_on_the_wheel(&root, &list, (960, 690), (960, 690));
+    assert_eq!(code, Some(0));
+    let srt_out = fs::read(root.0.join("f/Film/Film.srt")).expect("no SRT written");
+    assert_eq!(
+        srt_out,
+        "\u{feff}1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n".as_bytes()
+    );
+    assert_eq!(fs::read(&src).unwrap(), ass, "the source changed");
+    assert_one_group_and_undo(&root, "Film", "Film.srt");
 }
 
 /// Real `inacircle-text` on the wheel: a dropped `.epub` lights Document

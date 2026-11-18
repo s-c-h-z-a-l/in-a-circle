@@ -1,0 +1,11 @@
+[Script InkColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacin0:03000FFfo]
+WrapackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacin0:03000FF,&H0000100,100,0,0,1,2,0,8,10,10,10,1
+
+[Fonts]
+fontname: e: 0,0:00:01.00,0:tion
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarLnV, Ef,ect, Text
+Pict1.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,ű,0,0,0,4hard\Nbreak, soft\nbreak and hard,\halogue: 0,0:00:,&H0000100,01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,4hard\Nbreak, soft\nbreak and hard,\halogue: 0,0:00:01.00,0:

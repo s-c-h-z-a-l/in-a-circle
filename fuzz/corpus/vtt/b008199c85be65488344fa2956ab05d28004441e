@@ -1,0 +1,27 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:0:00.000 --> 00:00:01.000 region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invaln:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invalid6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00:00:00.000 --> 00:00:01.000 region :foo
+invalid8

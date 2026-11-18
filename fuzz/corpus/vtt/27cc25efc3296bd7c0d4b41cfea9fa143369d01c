@@ -1,0 +1,36 @@
+WEBVTT
+
+sparegio0%,100%
+
+NOTE invalid
+
+REGION
+id:6
+r100%
+
+REGION
+id:5
+regionanchor:100%,100%
+
+Negionanchor:0,0
+
+REGIONces
+   00:00:00.000    -->  00:00:01.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+tex:6
+regionanchor:0,0
+
+REGIONces
+   00:00:00.000    -->  00:00:01.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+text1
+
+form feed
+00:00:00000
+invalid

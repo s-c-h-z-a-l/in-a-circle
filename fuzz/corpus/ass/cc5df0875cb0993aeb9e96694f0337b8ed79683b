@@ -1,0 +1,24 @@
+[S,100,0,0,1,2,0,8,10,10,10,1
+Style: Slanted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:&0:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} ot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{{\i1}italis{\i0}Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} ot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bol,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:btitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} ot a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default<,0,0,0, 0,0:00:09.00,0:00:10.00,Defau00,0:00:04.00,Top,,0,0,0,,Topd
+Dialogue: 0,0:00:04.20,0:00:05.00,Defaunt,,0,0,0,,{\i1}italic{\i0} andommas

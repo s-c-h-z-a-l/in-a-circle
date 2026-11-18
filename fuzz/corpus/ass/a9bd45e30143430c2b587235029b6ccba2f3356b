@@ -1,0 +1,7 @@
+[Sc Styles]
+Format: Name, Fontname, Fontsize, Primary-olour, SecondaryColour, Outle: Default,Arial,32,&H00FF
+[Events]
+Formaarg                                                      inV, Effect, Text
+Picture:arginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:,0,5,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,h&rd\Nbreak, soft\nbreak anOn

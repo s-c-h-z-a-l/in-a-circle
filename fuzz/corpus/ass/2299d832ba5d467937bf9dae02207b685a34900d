@@ -1,0 +1,24 @@
+[Script Info] is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+Pla
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Boe: Slanted,Arial,20,&H04FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\a0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialocue: 0,0:00:05.00,0:00:06.00,Default,,0,0,le, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\a0} and {\b1}bold{\b0} and {\u1}under3.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\a0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialocue: 0,0:00:05.00,0:00:06.00,Default,,0,0,le, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\a0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialocue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,00,Default,,0,0,0,,Comma, and more, coinas

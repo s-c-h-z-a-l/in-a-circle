@@ -1,0 +1,9 @@
+[Script In
+0]
+WrapStyle: 0
+
+[V1
+
+[Events]
+ Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,0,0,,Top stle, Name, MarginL, MarginR, MarginV, EfBackColour, old, IFtorma

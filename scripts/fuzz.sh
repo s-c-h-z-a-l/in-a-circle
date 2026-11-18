@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 NIGHTLY=nightly-2026-09-01
 FUZZ_VERSION=0.13.2
 
-ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md codepage"
+ALL_TARGETS="manifest markdown dbus_message uri_list catalog_cache history wire_events inflate zip_reader image_probe xml epub_reader epub_md codepage srt vtt ass"
 
 # Wall-clock budget per target, per mode (the three-tier frame):
 #   smoke    30 s  CI, every push: only catches an obvious regression.
@@ -197,6 +197,17 @@ limits() {
         # input plus 3 B of output twice; anything near 16 MB is a bug;
         # 1024 MB RSS ceiling.
         codepage) echo "131072 1 16 1024" ;;
+        # The subtitle readers take the whole file (the shipped limit is
+        # INPUT_BYTES, 8 MiB). 1 MiB: an 8 MiB input is too slow to fuzz
+        # under ASan; the linear behaviour at the full size is covered by
+        # the 8 MiB tests in crates/subtitles/tests. 2 s: the readers are
+        # linear, and each input also runs both writers and both readers on
+        # its cues, so the budget is about 4x one pass, measured by the smoke
+        # run. 512 MB malloc limit: about 500x max_len, above one reader's
+        # largest allocation (the cue storage, up to ITEM_BUDGET items of
+        # about 40 B each, 80 MB at the budget); a larger allocation is a
+        # bug. 1024 MB RSS ceiling.
+        srt|vtt|ass) echo "1048576 2 512 1024" ;;
         *) echo "unknown fuzz target: $1" >&2; return 1 ;;
     esac
 }

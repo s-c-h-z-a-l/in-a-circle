@@ -1,0 +1,71 @@
+WEBVTT
+
+REGION
+id:fTT
+
+REGION
+id:foo
+
+REGIhN:00:01.000 region:WEBVTT
+2
+00:00:00.000 --.00 region :oo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+id:eoREGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+2
+00:00:00.000 &--.00 region :foo
+invalifro
+
+REGION
+id:eoREGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+2
+00:00:00.000 --.00 ro
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+2
+00:00:00.000 --.00 region :foo
+invalifro
+
+REGION
+id:eoREGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+2
+00:00:00.000 --gion:WEBVTT
+2
+00:00:00.000 --.00 region :foo
+invalid8

@@ -1,0 +1,7 @@
+[ScackColour, Bold, Itali-->c, Underline, StrikeOial,20,&H00}FFFFF,&H000000FF,&H00000H0,&000000000
+0,-1,0,0,0,100,100000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:0tyle, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and&{\b1}bold{\byColour, Secondary]olour, OutlineColour, BackColour, Bold, Itali-->c, Underline,Spacing, Angleomma, and more, coms

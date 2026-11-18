@@ -1,0 +1,19 @@
+[Sc Styles]
+Format: Name, Fontname, FrginV, Effe, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BordrSetYle, Outline, Shadow, Align,20,&H00FF
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture:arginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%: 0,0:00:00.00,0:00:01.00,Defa02.00,Defaultefault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`ult,,0,0,0,,{\t(\fs20\bord2)}transform {\fnArial10,10,1
+Style: Ital,Arial,20,&H00FFFFFF,&F,&H000:00:02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue2 0,0:00:02.00,0:00:03.00,Default,hours
+Dialogu 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}m 0 0 l 1 1\Nm 2 2{\p00,Defa02.00,Defaultefault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+DialogUe: 0,0:00:03.00,0:00:04.00,Def`ult,,0,0,0,,{\t(\fs2 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,D2.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 [{Script Inf\i-1}italo]
+Wria

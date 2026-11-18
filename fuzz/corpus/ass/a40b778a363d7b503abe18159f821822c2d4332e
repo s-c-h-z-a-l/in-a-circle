@@ -1,0 +1,22 @@
+[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the same way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Format: Name, Fontna,ame, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, SFF,&H0000, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H0000000FF,&H00000000,&H00000000,-1,0,0,0,1000,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, Marg#nR, Margf EVnfi,ect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold, {\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Sault,,0,0,0,,{\k20}Ka{\k30}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,,Comma, and more, commas

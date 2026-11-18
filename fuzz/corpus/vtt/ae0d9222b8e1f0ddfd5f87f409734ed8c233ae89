@@ -1,0 +1,264 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:10%
+
+00NOTE	:00:00.000 --> 00:00:01.000 regiol:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 region:bar
+text1
+
+00:00:00.000 --> 00:00:01.000 region:fo
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.00 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 region:bar
+text1
+
+00:00:00.000 --> 00:00:01.000 region:foo region:bar
+text2
+
+00:00:00.000 --> 00:00:01.000 region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invalid6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00000 region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+0WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 vertical:lr
+text1
+
+00:00:00.000 --> 00:00:01.000 vertical:rl
+text2
+
+
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGIONWEBVTT
+
+ leading space
+00:00:00.000 --> 00:00:01.000
+text0
+
+trailing space 
+00:00:00.000 --> 00:00:01.000
+text1
+
+-- >
+00:00:00.000 --> 00:00:01.000
+text2
+
+->
+00:00:00.000 --> 00:00:01.000
+text3
+
+ 
+00:00:00.000 --> 00:00:01.000
+text4
+alid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invalid6
+
+00:00o region:bar
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:bar
+
+REGION
+id:foo
+
+RMGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 regiol:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 region:bar
+text1
+
+00:00:00.000 --> 00:00:01.000 region:fo
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 regext2
+
+
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGIONWEBVTT
+
+ leading space
+00:00:00.000 --> 00:00:01.000
+text0
+
+trailing space 
+00:00:00.000 --> 00:00:01.000
+text1
+
+-- >
+00:00:00.000 --> 00:00:01.000
+text2
+
+->
+00:00:00.000 --> 00:00:01.000
+text3
+
+ 
+00:00:00.000 --> 00:00:01.000
+text4
+alid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:inva region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.on:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+
+00:00:00.000 --> 00:00:01.000 region: 
+invalid6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00000 region:invaltext2
+
+00:00:00.000 --> 00:00:01.ON
+width:10%
+
+00:00:00.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.000 --> 00:00::00.000 --> 00:00:01.000 region:fo
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 regext2
+
+
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGIONWEBVTT
+
+ leading space
+00:00:00.000 --> 00:00:01.000
+text0
+
+trailing space 
+00:00:00.000 --> 00:00:01.000
+text1
+
+-- >
+00:00:00.000 --> 00:00:01.000
+text2
+
+->
+00:00:00.000 --> 0> 00:00:01.000 region: foo
+invalid7
+
+00000 region:invaltext2
+
+00:00:00.000 --> 00:00:01.ON
+width:10%
+
+00:00:00.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 region:bar
+text1
+
+00:00:00.000 id
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text--> 00:00:4
+01

@@ -1,0 +1,6 @@
+[Script Info]
+Sc,rt10ip10,10,1
+
+[Events]
+Fortart, Endt, Text
+Dialogue: 0,0:00:01.00,0:?0:02.00,Top,,0,0,0,,To,0,0,0,,Italic bottom

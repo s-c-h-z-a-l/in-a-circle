@@ -1,0 +1,28 @@
+1
+00old{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font color="#fe</I> <i>nested <b>both</b></i>
+6
+00:00:11,000 --> 00:00:12,000
+{\an9}top ri0} plain {\b1}bold{\b0}
+ plamn {\b1}bol0
+<font color="#fe</I> <i>nested <b>both</b></i>
+
+6
+00:00:11,000 --> 00:00:12,000
+{\an9}top rigted <b>both</b></i>
+
+6
+00:00:11,000 --> 00:00:12,000
+{\an9}top ri0} plain {\b1}bold{\b0}
+ plain {\b1}bold{\b0}
+
+3
+00:00:05,000 --> 00:00:06,000
+<font colo%="#fe</I> 7i>nested <b>both</b></i>
+
+6
+00:00:11,000 --> 00:00:12,000
+{\an9}top right

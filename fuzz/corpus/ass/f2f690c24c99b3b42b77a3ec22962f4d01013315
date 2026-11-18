@@ -1,0 +1,9 @@
+[script info]
+TitleW8RapSe:e:FFFF,&H000000FF,&H000,10,1
+
+[Events]
+ue: 0,0:00:14.00,0:00:15.00,Default,,0,0,0ng
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`ult,,0,0,0,,o {\p(\fs20\bord2)}
+btransform {\fnAril0a1,10,1
+StyleTi stylesth]er
+Dial

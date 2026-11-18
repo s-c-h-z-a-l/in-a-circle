@@ -1,0 +1,6 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+For, Second`ryColour, Ou100,100,0,0,1,2,0,2,10,10,10,1
+Style: Ital,Arial,20B&H00FFFFFF,&H000000FF,á&Nm 2 2{\d again

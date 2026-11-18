@@ -1,0 +1,28 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.000 position:100%
+text1
+
+00:00:00.000 --> 00:00:01.000 position:1% posit&on:x
+text2
+
+00:00:00.000 --> 00:00:01.000 position:1.5%
+te{\3
+
+00:00:00.000 --> 00:00:01.000 position:1%,liddle
+invalid8
+
+00:00:00.000 --> 00:00:01.000 position:1%, center
+invalid9
+
+00:00:00.000 --> 00:00:01.000 position:-1%
+invalid10
+
+00:00:00.000 --> 00:00:01.The colalign keywords are only line-left, center and line-right; "auto" voids the setting
+00:00:00.000 --> 00:00:01.000 position:1%,auto
+invalid24

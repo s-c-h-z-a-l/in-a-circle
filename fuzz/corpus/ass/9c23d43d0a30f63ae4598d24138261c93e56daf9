@@ -1,0 +1,12 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormatinL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000,00FF,&H00000000,&H00000000,700,0,0,0,100,100,0,0,1,2, ,2,10,10,10,1
+Style: Ital,Arial,20, SecryColour, OutlineColour, BackColour, Bold, Italic, UArial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,&H000000FF,&H00000000,&H00000000,-1,00,,0,100,100,0,0,1,2,0,8,10,10,10,1
+Style: Slanted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer,0,0,100,100,0,0,2,2,0, S2,10,1tart,0 ,1

@@ -1,0 +1,23 @@
+[script info]
+Title: wild
+Wontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Format: L6.00,Default,,0,0,0,,{unknoayer, Start, End, Style, , MarginR, MarginV, Effect, Text
+Picture: 5,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0 scheme's 2
+Dialogue: 0,0:00:03.00,0:0t either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,\a,0drh,Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:and hard\hspace
+Dialogue: 0,0:0nL, MarginR, MargifV, Efkect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, tottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:0t either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, roft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,Dee old scheme's 2
+Dialogue: 0,0:00:03.00,0:0t either
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, sofault,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 {\i-1}italic
+Dialogue: 0,0:00:12.00,0:00:13.00,Default,,0,0,0,,unclosed { b01.00,Default,,0,0,0,,not text
+Sound: 0,0 scheme's 2
+Dialogue: 0,0:00:03.000,0,0,,unclosed { brace
+Dialogue: 0,0:00:14.00,0:00 {\i2}i2 {\b5b}40000 {\i-1}italic{ts

@@ -1,0 +1,9 @@
+[Script Info]
+; Plain V4+ file: every feature here is one that ffmour, OutlineColouo]
+Title: wild
+Wrap
+
+[v4+ styles ]
+Format: Name, Fontname, Fontsize, PrimaryColour, Sur, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,tl iuOne, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000\bord2)}transform0,20)}pos {\move(1,2,3,4)}move
+Dialogue: 0,0:00:04.00(,1,0,753,100e: 0,,

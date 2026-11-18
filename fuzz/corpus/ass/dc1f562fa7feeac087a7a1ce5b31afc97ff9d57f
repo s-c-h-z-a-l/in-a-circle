@@ -1,0 +1,10 @@
+[Script Info]
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Normat: Name, r section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, Margind,fect, Text
+Picture: 0,0:00:002.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,DefaultNbreak, soft\n,,b15,,r0,,{e

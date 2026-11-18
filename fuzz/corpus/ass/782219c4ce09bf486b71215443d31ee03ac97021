@@ -1,0 +1,16 @@
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment,[Sc[Se, Fontname, FontsiPz[Script Info]
+WrapStyle,0,0
+
+[Events]
+Format: Layer, Start, End, Style,lic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline* Shadow, Alignment, Ma?rginL, MarginR, MarginV, E
+
+[Events]
+Format: Layer, Start, End, Style,lic, Underlin4.00
+WrapStyle: 0
+
+[V4 Style+]

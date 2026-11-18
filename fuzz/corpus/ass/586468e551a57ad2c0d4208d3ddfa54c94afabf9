@@ -1,0 +1,27 @@
+[Script Info]
+; Plain V4+ file: every features the same way.
+Tiple: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spaci.g, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+St-le: Default,Arial,40,&H00FFFFFF,&H000001FF,&H0000,20,&H00FFFFFF,&Hing
+Styl,8,10,.10,10,1
+Style: Sla?ted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,+,10,10,10,1
+
+[Events]ult,,0,0,0,,First line\NSecond FFFFF,&Hing
+Styl,8,1&,.10,10,1
+Style: Slanted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,+,1, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,40,&H00FF0,0,00:000,1,2,0,2,10,10,10,1
+Style: Top,Arial,20,&H00FFFFFF,&Hing
+Styl,8,10,.10,10,1
+Style: Sla?ted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,+,10,10,10,1
+
+[Events]ult,,0,0,0,,First line\NSecond FFFFF,&Hing
+Styl,8,10,.10,10,1
+Style: Slanted,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,2,0,+,10,10,10,1
+,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.commas

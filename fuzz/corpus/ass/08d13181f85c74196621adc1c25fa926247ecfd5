@@ -1,0 +1,12 @@
+[script inn</
+=Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+For000FF,&H00000000,&H00000000,700,0,0,0,100 in annther section
+
+[Events]
+Format: Layer, Start, End, inR, MarginV, Effect, Text
+Picture: 0,0 text either
+Dialogue: 0,0:00:01.00,0:0000.02:,Ded hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}aftp1}m 0 0 l 1 1\Nm 2 2{.00,00,0:00:11.00,Default,,0,0,0,,{\c&H00FF01&}green{,0:00:03.00,Default,,0,0,0,,{\pq}m 0 0 l 1 1\Nm 2 2{\0,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}aftp1}m 0 0 l 1 1\Nm 2 2{.00,00,0:00:11.00,Default,,0,0,0,,{0 0 l 1 1\Nm 2 2{\p0}\c&H00FF00&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0fault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}aftp1green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0fault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}aftp1}m 0 0 l 1 1\Nm 2 2{.00,00,0:00:11.00,Default,,0,0,0,,{\c&H00FF01&}green{,0:00:03.00,Def0,0,0,,{\p1}m 0 0 l{0 0 l 1 1\Nm 2 2{\p0}\c&H00FF00&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0fault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 tside any cue in Events

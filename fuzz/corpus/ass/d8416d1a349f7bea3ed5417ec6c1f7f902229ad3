@@ -1,0 +1,11 @@
+[Script Info]
+ScriptType: v4.00
+W2apStyle: 0
+
+[V4 Styles]
+tion
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,alogue: 0,0:00:09.00,0:ea00:10.00,Middlehard\Nb9,,0

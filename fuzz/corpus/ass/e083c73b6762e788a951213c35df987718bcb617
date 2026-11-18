@@ -1,0 +1,16 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+Format: Nasiubt telline, in another section
+
+[Events]
+Format: Layer, Start, End, S,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+D4333333 0,4:00:02.00,0:00:03.00,Default,hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000\ {i-1}italic
+Dialce
+Dialog﻿n-ASCII: árvíztűrő{\
+Dial00,,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 {\i-1}:00:04.00,Top5,,0,0,0,,top five italic
+Dialogue: 0,0:00:05.00,0:0 { br`ce
+Dialog﻿ 0 1\Nm 2 2{ts

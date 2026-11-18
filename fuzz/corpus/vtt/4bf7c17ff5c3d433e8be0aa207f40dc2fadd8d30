@@ -1,0 +1,14 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+i:"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floa*ing_poiegion"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchoX":31:<<<<<<,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:05.000 --> 00:00:06.000 region:region_floating_point_!nchor
+{"&regionAncd al<<<<<<<<ign:end <<<A<<a

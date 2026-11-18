@@ -371,6 +371,39 @@ until they end (see [architecture.md](architecture.md), Invocation)
 ([sandbox-hardening.md](benchmarks/sandbox-hardening.md)). That limits how
 long a runaway tree lives, not how much memory it takes meanwhile.
 
+## Subtitles
+
+The subtitle family (SRT, WebVTT, ASS) reads one file into cues and writes
+one file. Its size limits are the text family's, so one number bounds both
+families (`crates/subtitles`, `INPUT_BYTES`, `OUTPUT_BYTES`, `MAX_MS`):
+
+| Limit | Value | Why, and what happens past it |
+|---|---|---|
+| input | 8 MiB | the text family's input budget; checked before any parsing, so `subtitle file is larger than 8 MiB` and nothing is read |
+| output | 32 MiB | the text family's output budget, so a converted subtitle is never larger than a converted text file. The action counts the bytes as it writes them and refuses the write that would pass 32 MiB (`subtitle output would be larger than 32 MiB`); a write past the process's `RLIMIT_FSIZE` fails the same way, since SIGXFSZ is ignored. Either way the file is removed and nothing is left behind |
+| time | 99:59:59.999 | both formats write the hour as two digits, so a later cue has no time code to be written with; the reader skips that cue (with a warning) and converts the rest |
+| items | 2,000,000 (`ITEM_BUDGET`) | each cue, each line and each run is one item, charged before it is stored; the readers' memory is per item, not per byte (a 2-byte line is a line and a run; the densest refused shape peaks at about 113 B per item over the whole process). Past it the input fails with `too many lines and styled runs (more than 2,000,000)` and nothing is written: nothing is truncated. 2,000,000 items peak at about 216 MiB (216.5 MiB measured), a fifth of the 1 GiB `RLIMIT_DATA` floor. A real 8 MiB film subtitle is about 10,000 items (2,000 cues of two lines of two runs), 200 times under the budget; the densest real file, the smallest SRT cues (27 B each, about 310,000 cues of three items), is about 930,000 and still fits |
+| speaker name | shared, one copy | a WebVTT cue's speaker name is one `Rc<str>` shared by the lines of its cue, not a copy per line: one 1 MiB name over 400 lines held 406 MiB as copies, 12 MiB now |
+| cues | none of their own | the item budget bounds the count (a cue is one item) |
+| ASS style table | none of its own, not charged to the item budget | one entry per distinct `Style:` name, keyed by the name borrowed from the input (no copy); a repeated name replaces its entry. Bounded by the input: a style line is `Style:` and its name and a line feed, so the bound comes from three-character names at 10 B each (`Style:abc` and its line feed). There are 1,830,125 ASCII names of three characters, more than the input holds, so the input size is the limit. The cheaper names go first (one empty name at 7 B, 121 ASCII names of one character at 8 B, 16,559 names of two bytes at 9 B, 2-character ASCII names included), so 8 MiB holds at most 840,539 distinct names (the greedy count, with a `[V4+ Styles]` header set aside; 8 MiB / 10 B alone is 838,860). Each entry costs about 37 B of memory beyond the input. Measured (release build, `subtitles.ass-to-srt`, 5 runs each): 784,960 distinct style lines in a 7.5 MiB file peak at 41.6 MiB RSS (42,596 KiB) in 0.18 s, against 6.0 MiB for one style. At the 8 MiB input limit the table is about 30 MiB, extrapolated, so an ASS file that fills the input peaks at about 44 MiB, under the 216 MiB item peak below |
+| warnings | at most 8 lines | one per kind of loss (the seven kinds of the `Loss` enum) and one for the skipped items, far below the engine's cap of 16 per input |
+
+Measured peak RSS (`ru_maxrss` of the child, the test build, the development
+machine; the `dense_8_mib_input_stays_within_the_data_limit` test prints the
+same figures). The five densest 8 MiB shapes, before and after the item budget:
+
+| shape (8 MiB input) | before | after |
+|---|---|---|
+| SRT, about 310,000 cues of 27 B | 138.4 MiB, 1.57 s, kept | 129.0 MiB, 1.73 s, kept |
+| SRT, one cue of 2-byte lines (`x\n`) | 906.3 MiB, 2.58 s, kept | 216.5 MiB, 0.58 s, refused (`TooComplex`) |
+| WebVTT, about 310,000 cues of 27 B | 138.4 MiB, 1.49 s, kept | 129.0 MiB, 1.50 s, kept |
+| ASS, 186,410 cues of 45 B | 87.2 MiB, 1.04 s, kept | 81.6 MiB, 1.04 s, kept |
+| ASS, one cue of `x\N` lines (3 B each) | 607.8 MiB, 1.56 s, kept | 216.7 MiB, 0.77 s, refused (`TooComplex`) |
+
+The speaker-name probe (`vtt-to-srt`, one 1 MiB name in a cue of 400 lines):
+406.4 MiB before, 12.1 MiB after. Its output is past the 32 MiB ceiling, so it
+still fails, after parsing.
+
 ## The engine's own memory at the input limits
 
 The input limits (1024 paths, 1 MiB of paths) are also what the engine
@@ -422,7 +455,7 @@ the source; the reason column is why that number.
 | Text input (`txt` <-> `md`) | 8 MiB | A book-length text is 1-3 MiB; the longest real text measured was 0.65 MiB. Past it the input fails with its own message. |
 | Text structure nodes | 524,288 | Densest real text 15.9 B/node would hit 131,072 at about 2 MiB, contradicting the input limit; 2^19 holds 8 MiB at that density for about 100-200 MB peak, a fifth of the smallest `RLIMIT_DATA`. |
 | Text owned text, text output | 32 MiB each | Worst-case escape expansion is 5x (one space becomes `&#32;`, 1 -> 5 bytes, from the escaping rule in `crates/doc`). Markdown to text tables expand more and by shape, not by a constant factor: padding to 80 columns and the listed form's repeated headers. Either way a hostile 8 MiB input fails the output budget loudly, never truncated (the node budget usually stops a padded table first). |
-| Published text output | 32 MiB; an 8-bit text decoder's (`in=text/x-8bit`): 3 x its input + 3 B | Checked by the engine on every text output (`out=text/*`, and any `.txt`/`.md`) while it is copied, before anything is published. 32 MiB is the text output budget above. A decoder's output is bounded by its input instead: one byte of a single-byte code page is one character of the Basic Multilingual Plane, at most 3 UTF-8 bytes, plus the 3-byte byte order mark a `.srt` gets, so the input itself needs no limit. The input's size is taken when the action starts (on a two-step route, the intermediate file's). A decoder publishes one output per input; a second one fails the input, since the cap bounds one copy. Past the cap the input fails and nothing of it is published. |
+| Published text output | 32 MiB; an 8-bit text decoder's (`in=text/x-8bit`): 3 x its input + 3 B | Checked by the engine on every text output (`out=text/*` and `out=application/x-subrip`, and any `.txt`/`.md`) while it is copied, before anything is published. 32 MiB is the text output budget above. A decoder's output is bounded by its input instead: one byte of a single-byte code page is one character of the Basic Multilingual Plane, at most 3 UTF-8 bytes, plus the 3-byte byte order mark a `.srt` gets, so the input itself needs no limit. The input's size is taken when the action starts (on a two-step route, the intermediate file's). A decoder publishes one output per input; a second one fails the input, since the cap bounds one copy. Past the cap the input fails and nothing of it is published. |
 | XML element nesting | 256 elements open at once (`xml::MAX_DEPTH`) | The Markdown reader's nesting limit, so a document converts between the formats without one refusing a depth the other accepts; real XHTML chapters nest a few dozen levels. Past it the document is refused (`TooDeep`), never cut. The reader keeps its own stack (no recursion) and its work is linear in the input, so the depth bounds memory, not time. |
 | Catalog cache file | 256 KiB; 128 binaries, 1024 actions, 1152 records, 32 fields per record, 12,288 fields, 32 KiB per line | A realistic cache is about 160 KB at the maximum shape. Over a limit the cache is rejected loudly and rebuilt. |
 | Action folder scan | 512 entries per folder, 129 binaries held | `cache_bins` x 4 spare; past it the folder is refused whole, loudly, never trimmed. |

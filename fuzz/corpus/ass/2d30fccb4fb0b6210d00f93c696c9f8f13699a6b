@@ -1,0 +1,8 @@
+[Script Info]
+ScriptType: t,Arial,p7,,0,0,10,0,0
+
+[Events]
+Fo,bottom bold,:06.00,Top6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0,0,,top s-->n
+Dialogue: ,M$iedle9,,0,0,0,,middle nine is not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

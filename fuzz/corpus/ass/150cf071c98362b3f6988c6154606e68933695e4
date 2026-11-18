@@ -1,0 +1,6 @@
+[Script Info]eX, ScaleY, Spacing, Angle, 0,0,-1,1,0,100,100,0,0,1,2,0,8,10,10,10,1
+
+[Events]
+Format; Layer, Start, End, Style, N
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\rItal}start {\r}back to bold
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDef1 1\}named again

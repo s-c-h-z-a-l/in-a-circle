@@ -1,0 +1,103 @@
+WEBVTT
+
+spaces
+   00:00:00.000    -->  00:00:01.000 
+   textorX":40,"regionAnchorY":20,"viewportAnchorX":30,"viewportAegion_with_all_settings width:32%
+lines:5
+regionanchor:41%,20% viewportanWEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGION
+id:5
+lines:65536
+
+REGION
+id:6
+lines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lineL but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:somregion:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_withouchor:31%,84%
+scroll:up
+
+REGION
+i:"up"}
+
+00:00:05.000 --> 00:00:06.0--> 00:00:01.0
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+	
+00:reg --> 00:00:01.000 region:in
+
+00:00:00 region:in
+
+00:00:00.000 --> 00:00:01.000 region  region :foo
+invalid8
+.000 --> 00:00:05.000 region:region_with_all_settings
+{\"width":32,"lines":5,"regionAnchorX":41,"regionAnchorY":19,"viewportAnchorX":31,"viewportAnchorY":84,"scroll":"up"}
+
+00:00:01.000 --> 00:00:06.000 region:r
+text2
+
+vegion_floating_point_anchor
+{"&regionAnchorX":41.125,"regionAnchorY":20.25,"viewportAnchorX":0;0 --> t1
+
+00:00:00.000 --> 00:00:01.000 region:foo region:bar
+text2
+
+00:00:00.000 --> 00:00:01.000 region:invalid
+text3
+
+00:0000:00:.75,"viewportAnchorY":32.5}
+
+00:00:06.000 --> 00:00:07.000 region:not_unique_id
+{"width"tttttttttttttttttttttttttttttcal:
+invalid4
+
+00:00:00.000 -->:region_with_all_settings
+{certical tab
+hor
+Y":84,"scroll":"up"
+text3
+
+00:00:00.000 --> 00:00:01.000 vertical:
+invalid4
+
+00:%0:00.000 --> 00:000

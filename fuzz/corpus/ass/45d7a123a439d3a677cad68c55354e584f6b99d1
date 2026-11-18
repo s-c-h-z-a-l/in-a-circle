@@ -1,0 +1,13 @@
+[ction
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text
+Sound: 0,0:00:00.00,0:00:01.00,Default,,,0:00:01.00,0:00:02.00,Default,,0,0,0,,hard\Nbreak, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`ult,,0,0,0,,{\t,0:00:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1},0,,not text
+Sound 0:,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:00:01.00,0:00:ext
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,17.00,0:00:18.00,Default,,0,0,0,,{\r hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{ts

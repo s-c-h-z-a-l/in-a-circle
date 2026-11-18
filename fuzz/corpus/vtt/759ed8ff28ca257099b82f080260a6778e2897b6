@@ -1,0 +1,167 @@
+WEBVTT
+
+NOTE valid
+
+00:00:0lid23
+
+00:00:00.000 --> 00:00:01.000 line:1%%
+invalid24
+
+00:00:00--> 00:00:05.000 000 region: 20px;
+} /*
+NOTE hello
+00:00:00.000 -- > 00:00:01.000
+*/
+.foo {
+    width: 19px;
+}
+
+.bar {
+    width: 18px;
+}
+
+foo
+00:00:00.000 --> 00:00:01.000
+text
+WEBVTT
+
+REGION
+id:foo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 region:WEBVTT
+}	
+00:00:00.000 --.000 re
+STYLE
+::cue(::bar) gion:fro
+
+REGION
+id:eoo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 reg --> 00:00:01.000 region:in
+
+00.000
+invalid
+
+00:00:0.000 --> 00:00:01.000
+invalid
+
+00:00:00000 --> 00:00:01.000
+invalid
+
+00:00:00.00 --> 00:00:01.000
+invalid
+
+00:00:00.0 --> 00:00:01.000
+invalid
+
+00:00:00. --> 00:000:01.000WEBVTT
+
+REGION
+id:foo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --WEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION000 > 00:0000.000 --> 00:00:01.000 reg --> 00:00:01.000 region:in
+
+00:00:01.000
+i00:00:00.000 --> 00:00:01.000 region :foo
+invalid--> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:58
+ region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00ings
+{}
+
+00:00:04.000 --> 00:00:05.000 000 region:WEBVTT
+}	
+: 18px;
+}
+
+bar
+00:00:00.value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+
+00:00:03.000 --> 00:00:04.000 region:region_without_settings
+{}
+
+00:00:04.000 --> 00:00:05.000 000 region:WEBVTT
+}	
+00:00:00.000 --.000 re
+STYLE
+::cue(::bar) gion:fro
+
+REGION
+id:eoo
+
+REGION
+width:(0%
+
+00:00:00.000 --> 00:00:01.000 reg --> 00:00:01.000 region:in
+
+00.000
+invalid
+
+00:00:0.000 --> 00:00:01.000
+invalid
+
+00:00:00000 --> 00:00:01.000
+invalid
+
+00:00:00.00 --> 00:00:01.000
+invalid
+
+00:00:00.0 --> 00:00:01.000
+invalid
+
+00:00:00. --> 00:00:01.000WEBVTT
+
+REGION
+id:foo
+
+REGIhN
+id:bar
+
+REGION
+id:foo
+
+REGION
+width:(0%
+
+00:00:00.000 --WEBVT5000 reg700000000000 --> 0

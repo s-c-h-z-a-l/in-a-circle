@@ -1,0 +1,14 @@
+[Script Inf/]
+; Plain ult,Arial,10,&H000,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0*0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.0,Top,,0ont {\pos(10,20)}pos {\move(1,2,3,40}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Micossing,,0,0,0,,unknown sd{\b0} and {\u1}under{\u0}
+00:03.00,0:pos(10,20)}pos {\move(1,2,3,40}move
+Dialogue: 0,0:00:04.00,0:00:05.00,Missing,,0,0,0,,unknown sd{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond l: ine
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explici00:05.00,Missing,,0,0,0,,unknown sd{\b0} and {\u1}under{\u0NOTE	logue: 0,0:00:05.00,0:00:0:00{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00,0:00:0:00:12.00,0:00:13.00,Default,,0,0,0,,Comma, and more, commas

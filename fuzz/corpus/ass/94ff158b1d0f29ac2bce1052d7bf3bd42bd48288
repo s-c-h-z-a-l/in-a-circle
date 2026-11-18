@@ -1,0 +1,9 @@
+[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Sty
+[Events]
+Fo00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:02.00,0:00:04.00,Top5,,0,0,0,,top fiveop
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a.}ssa override top

@@ -1,0 +1,33 @@
+7
+00:00:10,5 --> 00:00:11,50
+short milliscdenos
+
+9
+0:0:12.7 --> 0:0:13.1234
+dot separatox then timing with no banlk line
+5
+00:00:22,000 --> 00:00:23,000
+text that holds an arrow: a --> b
+a space ends the cue:
+   there.
+
+2
+00:00:04,000 --> 00:00:06,000
+<i>Italic</i> and <b>bold</b>
+<u>under</u>
+
+3
+00:00:07,000 --> 00:00:08,250
+Tw,000
+over^ap B, ends the cue:
+   there.
+
+2
+00:00:04,000 --> 00:00:06,000
+<i>Italic</i> b>bold</b>
+<u>under</u>
+
+3
+00:00:07,000 --> 00:00:08,250
+Tw,000
+over^ap B, starts together with A

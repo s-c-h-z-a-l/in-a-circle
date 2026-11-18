@@ -1,0 +1,61 @@
+WEBVTT
+
+REGION
+id:foo
+
+REGION
+id:bar
+
+
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.000 --> 00:00:01.000 region:bar
+text1
+
+00:00:00.000 --> 00:00:01.000 region:fo
+REGION
+id:foo
+
+REGION
+width:10%
+
+00:00:00.000 --> 00:00:01.000 region:foo
+text0
+
+00:00:00.gnes:4
+
+:4
+
+00:00aextck lines:4
+
+.0:00:00.000 --> 0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]0:foo
+liack lines:4
+
+00:00:00.000 -id region:foo
+text4
+
+00:00:00.000 --> 00:00:01.000 region:
+invalid5
+3333333333333333333333
+00:00:00.000 --> 00:00:01.000 reoion: 
+invalid6
+
+00:00:00.000 --> 00:00:01.000 region: foo
+invalid7
+
+00000 region:invalid
+text3
+
+00:00:00.000 --> 00:00:01.000 region:invalid region:foo
+text4
+
+00:00:00.000 --> 00:00.000 --> 00:
+00:01.000 region :foo
+invalid8

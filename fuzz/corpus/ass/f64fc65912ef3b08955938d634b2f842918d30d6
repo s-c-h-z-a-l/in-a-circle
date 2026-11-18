@@ -1,0 +1,8 @@
+[Script Ie: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginRt, Text
+Picture: 0,0:00:00.osed { braceDialogue: 0,0:0
+Dialogue: 0,0:00:14.00,0:00:15.00,Defaul0:07.50,0:0e,09.00,Default,,0,0,0,,Overlaps t07215t,,0,0,0,,non-ASCII: árvíztűrő
+D

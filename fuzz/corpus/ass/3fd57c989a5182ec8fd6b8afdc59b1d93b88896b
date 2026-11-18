@@ -1,0 +1,8 @@
+[Script Info]
+; Plain V4+ f,2,10,10,10,1
+
+[Events]
+Forogue: 0,0:00:06.00,0:00:07e
+Dialogue: 0,0:00:06.00,0:00:07.00,Defaul,t,0,0,0,,{\$an
+Sound: 0,0:00:00.00,0:00:0an
+Sound: 0,0:00:00.00,0:00:01.0o,Def,0,0,a0,,{\p1r}

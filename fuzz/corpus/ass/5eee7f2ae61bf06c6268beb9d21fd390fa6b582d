@@ -1,0 +1,25 @@
+[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,255,0,0,-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5,Arial,20,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215,255,0,0,0,0,1,2,0,6,10,10,10,0,0
+St0,7,10,10,10,0,0
+Style: Midd255,0,0,0,0,1,2,0,7,10,10,10,0,0
+Style: Middle9,Aria,10,10,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bel, Enco, MarginL, MarginR, MarginV,0Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old sch{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{eme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five italic
+Dialogue: 0,0:00:05.00,0:00:06.00,Top6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,middle nine is not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\ap6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0.0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,middle nine is not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

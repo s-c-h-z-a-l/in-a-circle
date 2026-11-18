@@ -37,6 +37,18 @@ const HEAD: usize = 4096;
 /// which check the whole file themselves. No other preset takes it.
 pub const X8BIT_MIME: &str = "text/x-8bit";
 
+/// A UTF-8 SubRip subtitle: a `.srt` whose 4 KiB head has a `-->` cue
+/// timing arrow. The name alone would give a binary `.srt` a subtitle type.
+pub const SUBRIP_MIME: &str = "application/x-subrip";
+
+/// A WebVTT subtitle: a `.vtt` whose head opens with the `WEBVTT` signature
+/// (after an optional byte order mark).
+pub const WEBVTT_MIME: &str = "text/vtt";
+
+/// An ASS or SSA script: a `.ass` or `.ssa` whose head has a `[Script Info]`
+/// section (ASCII case-insensitive).
+pub const SSA_MIME: &str = "text/x-ssa";
+
 /// How far a text-named file with an all-ASCII head is read on, the head
 /// included: a whole film subtitle (a feature-length `.srt` is 50-150 KiB).
 /// Valid UTF-8 accents do not stop the read-on; it stops after the chunk
@@ -210,6 +222,10 @@ fn classify_open(mut file: File, path: &Path, reread: &mut Reread) -> io::Result
         }));
     }
 
+    if text && let Some(kind) = subtitle(ext.as_deref(), &head) {
+        return Ok(Classified::File(kind));
+    }
+
     let kind = if text {
         match ext.as_deref() {
             None | Some("txt" | "text" | "log" | "1st" | "me" | "readme" | "diz" | "nfo") => Kind {
@@ -235,6 +251,70 @@ fn classify_open(mut file: File, path: &Path, reread: &mut Reread) -> io::Result
         }
     };
     Ok(Classified::File(kind))
+}
+
+/// The subtitle type of a UTF-8 text file, from its extension and head.
+/// `None` leaves the file to the plain text rules, so a name alone never
+/// makes a subtitle.
+fn subtitle(ext: Option<&str>, head: &[u8]) -> Option<Kind> {
+    // A byte order mark may precede the WebVTT signature.
+    let unbom = head.strip_prefix(b"\xef\xbb\xbf").unwrap_or(head);
+    let (mime, label) = match ext? {
+        "srt" if in_head(head, b"-->") => (SUBRIP_MIME, "SRT subtitles"),
+        "vtt" if webvtt_signature(unbom) => (WEBVTT_MIME, "WebVTT subtitles"),
+        "ass" | "ssa" if in_head(head, b"[Script Info]") => (SSA_MIME, "ASS subtitles"),
+        _ => return None,
+    };
+    Some(Kind {
+        mime: Some(mime.into()),
+        label: label.into(),
+    })
+}
+
+/// Whether `head` opens with the WebVTT signature as a word of its own: a
+/// space, a tab, a line end, or the head's end must follow it (W3C WebVTT).
+/// `WEBVTTX` is not a signature, so a file that only starts with those
+/// letters is not a WebVTT subtitle.
+fn webvtt_signature(head: &[u8]) -> bool {
+    head.strip_prefix(b"WEBVTT").is_some_and(|rest| {
+        rest.first()
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    })
+}
+
+/// Bytes per block of the head search. A block without the needle's first
+/// byte is one vectorised pass (the fold below compiles to SSE2 compares),
+/// where a window per position was a compare per byte. 128 bytes is eight
+/// 16-byte vectors; a hit rescans only its own block, so a head full of the
+/// first byte stays linear. Larger blocks measured the same in the wheel's
+/// classifier (docs/benchmarks/subtitles.md).
+const HEAD_BLOCK: usize = 128;
+
+/// Whether `needle` occurs in `head`, ASCII case-insensitively. Both
+/// needles open with a byte that is not a letter, so matching that first
+/// byte exactly is the same as matching it case-insensitively.
+fn in_head(head: &[u8], needle: &[u8]) -> bool {
+    debug_assert!(needle.first().is_some_and(|b| !b.is_ascii_alphabetic()));
+    let Some(last) = head.len().checked_sub(needle.len()) else {
+        return false;
+    };
+    let (first, rest) = (needle[0], &needle[1..]);
+    let mut start = 0;
+    while start <= last {
+        // Starts in `start..end`; the match may run past `end` into the head.
+        let end = (start + HEAD_BLOCK).min(last + 1);
+        let block = &head[start..end];
+        if block.iter().fold(false, |hit, &b| hit | (b == first)) {
+            for (at, &b) in block.iter().enumerate() {
+                let p = start + at;
+                if b == first && head[p + 1..p + needle.len()].eq_ignore_ascii_case(rest) {
+                    return true;
+                }
+            }
+        }
+        start = end;
+    }
+    false
 }
 
 /// Whether the head is valid UTF-8, from its `scan` and `cut`. A
@@ -497,8 +577,11 @@ mod tests {
         // A UTF-8 accent read on past an all-ASCII head stays UTF-8.
         let mut b = late(300 * 1024, None, 0);
         b[200 * 1024..200 * 1024 + 2].copy_from_slice("ő".as_bytes());
+        // The late fixture's head has a cue arrow, so its `.srt` is a subtitle.
+        let srt = is(Some(SUBRIP_MIME), "SRT subtitles");
         for (n, want) in &cases {
             let p = d.file(n, &b);
+            let want = if *n == "d.srt" { &srt } else { want };
             assert_eq!(&kind(&p), want, "late {n}");
         }
         // A sequence cut by the head's end is completed by the read-on.
@@ -531,7 +614,7 @@ mod tests {
                     b[at..at + seq.len()].copy_from_slice(seq);
                     let p = d.file("ok.srt", &b);
                     let what = format!("{} B at {at} (edge {edge})", seq.len());
-                    assert_eq!(kind(&p), is(None, ".srt text"), "{what}");
+                    assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"), "{what}");
                     b[at + seq.len() - 1] = b'A';
                     let p = d.file("bad.srt", &b);
                     assert_eq!(kind(&p), x8bit(), "bad {what}");
@@ -546,14 +629,20 @@ mod tests {
         let len = 300 * 1024;
         let at = |n: &str, pos: usize| d.file(n, &late(len, Some(pos), ACCENT));
         assert_eq!(kind(&at("a.srt", 200 * 1024)), x8bit());
-        assert_eq!(kind(&at("b.srt", 260 * 1024)), is(None, ".srt text"));
+        assert_eq!(
+            kind(&at("b.srt", 260 * 1024)),
+            is(Some(SUBRIP_MIME), "SRT subtitles")
+        );
         assert_eq!(
             kind(&at("c.txt", 260 * 1024)),
             is(Some("text/plain"), "Plain text")
         );
         // The window's last byte and the first one past it.
         assert_eq!(kind(&at("d.srt", WINDOW - 1)), x8bit());
-        assert_eq!(kind(&at("e.srt", WINDOW)), is(None, ".srt text"));
+        assert_eq!(
+            kind(&at("e.srt", WINDOW)),
+            is(Some(SUBRIP_MIME), "SRT subtitles")
+        );
         // Right after the head, and the head's own last byte.
         assert_eq!(kind(&at("f.srt", HEAD)), x8bit());
         assert_eq!(kind(&at("g.srt", HEAD - 1)), x8bit());
@@ -584,11 +673,12 @@ mod tests {
         // Each candidate needs about 200 KiB read on: the first few fit,
         // the rest fall back to the head.
         assert!((1..=5).contains(&lit), "{lit}");
-        assert!(verdicts[lit..].iter().all(|v| *v == is(None, ".srt text")));
+        let srt = is(Some(SUBRIP_MIME), "SRT subtitles");
+        assert!(verdicts[lit..].iter().all(|v| *v == srt));
         assert_eq!(total, PER_DROP);
         assert_eq!(r.left, 0, "the budget is spent, never exceeded");
         // An exhausted budget leaves the head to decide.
-        assert_eq!(kind_with(&files[0], &mut r), is(None, ".srt text"));
+        assert_eq!(kind_with(&files[0], &mut r), srt);
         // A file within its head costs nothing.
         let mut r = Reread::per_drop();
         let p = d.file("small.srt", CP1250);
@@ -596,7 +686,7 @@ mod tests {
         assert_eq!(r.left, PER_DROP);
         // A read-on charges what it read: a 20 KiB file costs 16 KiB.
         let p = d.file("mid.srt", &late(20 * 1024, None, 0));
-        assert_eq!(kind_with(&p, &mut r), is(None, ".srt text"));
+        assert_eq!(kind_with(&p, &mut r), srt);
         assert_eq!(r.left, PER_DROP - (20 * 1024 - HEAD) as u64);
     }
 
@@ -651,17 +741,20 @@ mod tests {
         let mut b = late(64 * 1024, Some(40 * 1024), ACCENT);
         b[30 * 1024] = 0x1b;
         let p = d.file("late-esc.srt", &b);
-        assert_eq!(kind(&p), is(None, ".srt text"));
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
         let mut b = late(64 * 1024, Some(40 * 1024), ACCENT);
         b[50 * 1024] = 0;
         let p = d.file("late-nul.srt", &b);
-        assert_eq!(kind(&p), is(None, ".srt text"));
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
         // An all-ASCII head with a control byte is not read on.
         let mut b = late(64 * 1024, Some(40 * 1024), ACCENT);
         b[100] = 0x1b;
         let mut r = Reread::per_drop();
         let p = d.file("head-esc.srt", &b);
-        assert_eq!(kind_with(&p, &mut r), is(None, ".srt text"));
+        assert_eq!(
+            kind_with(&p, &mut r),
+            is(Some(SUBRIP_MIME), "SRT subtitles")
+        );
         assert_eq!(r.left, PER_DROP);
     }
 
@@ -692,11 +785,17 @@ mod tests {
         // At the end of a read-on chunk, the file going on.
         let mut b = late(100 * 1024, Some(90 * 1024), ACCENT);
         b[HEAD + CHUNK - 1] = 0x1a;
-        assert_eq!(kind(&d.file("chunk-end.srt", &b)), is(None, ".srt text"));
+        assert_eq!(
+            kind(&d.file("chunk-end.srt", &b)),
+            is(Some(SUBRIP_MIME), "SRT subtitles")
+        );
         // The head's last byte, the file going on.
         let mut b = late(100 * 1024, Some(50 * 1024), ACCENT);
         b[HEAD - 1] = 0x1a;
-        assert_eq!(kind(&d.file("head-end.srt", &b)), is(None, ".srt text"));
+        assert_eq!(
+            kind(&d.file("head-end.srt", &b)),
+            is(Some(SUBRIP_MIME), "SRT subtitles")
+        );
     }
 
     #[test]
@@ -780,7 +879,7 @@ mod tests {
                 label: "8-bit text".into()
             })
         );
-        assert_eq!(kind(&p), is(None, ".srt text"));
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
     }
 
     #[test]
@@ -850,6 +949,268 @@ mod tests {
             let p = d.file(n, b"# hi\n");
             assert_eq!(kind(&p), is(Some("text/markdown"), "Markdown"), "{n}");
         }
+    }
+
+    #[test]
+    fn srt_with_arrow_is_subrip() {
+        let d = Dir::new("srt");
+        let p = d.file("a.srt", b"1\r\n00:00:01,000 --> 00:00:02,000\r\nHi\r\n");
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
+        let p = d.file(
+            "b.SRT",
+            b"\xef\xbb\xbf1\n00:00:01,000 --> 00:00:02,000\nHi\n",
+        );
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
+        // The arrow counts anywhere in the 4 KiB head.
+        let mut b = "x\n".repeat(1000).into_bytes();
+        b.extend_from_slice(b"00:00:01,000 --> 00:00:02,000\n");
+        let p = d.file("c.srt", &b);
+        assert_eq!(kind(&p), is(Some(SUBRIP_MIME), "SRT subtitles"));
+    }
+
+    #[test]
+    fn srt_without_arrow_stays_unknown_text() {
+        let d = Dir::new("srt-no");
+        let p = d.file("a.srt", b"just some text\n");
+        assert_eq!(kind(&p), is(None, ".srt text"));
+        // An arrow only past the head does not count: the head decides.
+        let mut b = "x\n".repeat(3000).into_bytes();
+        b.extend_from_slice(b"00:00:01,000 --> 00:00:02,000\n");
+        let p = d.file("b.srt", &b);
+        assert_eq!(kind(&p), is(None, ".srt text"));
+    }
+
+    #[test]
+    fn vtt_with_signature_is_webvtt() {
+        let d = Dir::new("vtt");
+        let p = d.file("a.vtt", b"WEBVTT\n\n00:00.000 --> 00:01.000\nHi\n");
+        assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"));
+        let p = d.file(
+            "b.VTT",
+            b"\xef\xbb\xbfWEBVTT\n\n00:00.000 --> 00:01.000\nHi\n",
+        );
+        assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"));
+    }
+
+    #[test]
+    fn vtt_without_signature_stays_unknown_text() {
+        let d = Dir::new("vtt-no");
+        let p = d.file("a.vtt", b"00:00.000 --> 00:01.000\nHi\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        // The signature must open the file: a leading line or space defeats it.
+        let p = d.file("b.vtt", b"\nWEBVTT\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        let p = d.file("c.vtt", b" WEBVTT\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+    }
+
+    #[test]
+    fn webvtt_signature_must_end_at_a_separator() {
+        let d = Dir::new("vtt-sep");
+        // The signature is a word of its own: a letter or a dash after it is not.
+        let p = d.file("a.vtt", b"WEBVTTX\n\n00:00.000 --> 00:01.000\nHi\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        let p = d.file("b.vtt", b"WEBVTT-foo\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+        // A space, a tab, a line end, or the file's end after it: WebVTT.
+        let ok: [&[u8]; 6] = [
+            b"WEBVTT\n",
+            b"WEBVTT - title\n",
+            b"WEBVTT\tt\n",
+            b"WEBVTT\r\n",
+            b"WEBVTT",
+            b"\xef\xbb\xbfWEBVTT - title\n",
+        ];
+        for (i, body) in ok.iter().enumerate() {
+            let p = d.file(&format!("ok{i}.vtt"), body);
+            assert_eq!(kind(&p), is(Some(WEBVTT_MIME), "WebVTT subtitles"), "{i}");
+        }
+        // The BOM variant is judged the same way.
+        let p = d.file("bom.vtt", b"\xef\xbb\xbfWEBVTTX\n");
+        assert_eq!(kind(&p), is(None, ".vtt text"));
+    }
+
+    #[test]
+    fn ass_and_ssa_with_script_info_are_ssa() {
+        let d = Dir::new("ass");
+        for n in ["a.ass", "b.ASS", "c.ssa", "d.SSA"] {
+            let p = d.file(n, b"[Script Info]\nTitle: x\n\n[Events]\n");
+            assert_eq!(kind(&p), is(Some(SSA_MIME), "ASS subtitles"), "{n}");
+        }
+        let p = d.file("e.ass", b"[SCRIPT info]\r\n");
+        assert_eq!(kind(&p), is(Some(SSA_MIME), "ASS subtitles"));
+    }
+
+    #[test]
+    fn ass_without_script_info_stays_unknown_text() {
+        let d = Dir::new("ass-no");
+        let p = d.file("a.ass", b"[Events]\nDialogue: 0\n");
+        assert_eq!(kind(&p), is(None, ".ass text"));
+        let p = d.file("b.ssa", b"Script Info\n");
+        assert_eq!(kind(&p), is(None, ".ssa text"));
+    }
+
+    #[test]
+    fn non_utf8_subtitle_is_still_8bit() {
+        let d = Dir::new("sub8");
+        let mut srt = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+        srt.extend_from_slice(CP1250);
+        let p = d.file("a.srt", &srt);
+        assert_eq!(kind(&p), x8bit());
+        let mut vtt = b"WEBVTT\n\n".to_vec();
+        vtt.extend_from_slice(ISO);
+        let p = d.file("b.vtt", &vtt);
+        assert_eq!(kind(&p), x8bit());
+        let mut ass = b"[Script Info]\n".to_vec();
+        ass.extend_from_slice(CP1250);
+        let p = d.file("c.ass", &ass);
+        assert_eq!(kind(&p), x8bit());
+    }
+
+    #[test]
+    fn subtitle_names_on_binaries_are_not_subtitles() {
+        let d = Dir::new("sub-bin");
+        // A PNG keeps its type whatever its name and whatever bytes follow.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(b"00:00:01,000 --> 00:00:02,000 WEBVTT [Script Info]");
+        let p = d.file("a.srt", &png);
+        assert_eq!(kind(&p), is(Some("image/png"), "PNG"));
+        // A NUL makes the file not text, so no subtitle type either.
+        let p = d.file("b.vtt", b"WEBVTT\0binary");
+        assert_eq!(kind(&p), is(None, ".vtt file"));
+        let p = d.file("c.ass", b"[Script Info]\0binary");
+        assert_eq!(kind(&p), is(None, ".ass file"));
+    }
+
+    /// Differential test: `in_head` against the plain window scan it
+    /// replaced (kept here as the oracle) on heads of every length up to
+    /// the head size, needles planted at the start, the end and each block
+    /// edge, overlapping partial matches, mixed case and non-ASCII bytes.
+    /// Fixed seed, so a failure reproduces.
+    #[test]
+    fn in_head_matches_the_naive_scan() {
+        fn naive(head: &[u8], needle: &[u8]) -> bool {
+            head.windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle))
+        }
+        // xorshift64: a fixed seed and no dependency.
+        struct Rng(u64);
+        impl Rng {
+            fn below(&mut self, n: usize) -> usize {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                (x % n as u64) as usize
+            }
+        }
+        const NEEDLES: [&[u8]; 9] = [
+            b"-->",
+            b"--",
+            b"--->",
+            b"->",
+            b"[Script Info]",
+            b"[Script",
+            b"[Script Info",
+            b"[SCRIPT iNFO]",
+            b"[sCrIpT Info]",
+        ];
+        const TOKENS: [&[u8]; 16] = [
+            b"-",
+            b"--",
+            b">",
+            b"-->",
+            b"--->",
+            b"[",
+            b"]",
+            b"[Script",
+            b" Info",
+            b"[script info]",
+            b"[SCRIPT INFO]",
+            b"\n",
+            b"x",
+            "\u{2014}".as_bytes(),
+            b"\xff\xc3",
+            b"\x00",
+        ];
+        const ALPHABET: &[u8] = b"-->[]ScriptScript InfoSCRIPT INFO\n0123456789:,.";
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let random_ascii = |rng: &mut Rng, len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    if rng.below(4) == 0 {
+                        rng.below(128) as u8
+                    } else {
+                        ALPHABET[rng.below(ALPHABET.len())]
+                    }
+                })
+                .collect()
+        };
+        let check = |head: &[u8]| {
+            for needle in NEEDLES {
+                assert_eq!(
+                    in_head(head, needle),
+                    naive(head, needle),
+                    "needle {:?} in head {:?}",
+                    String::from_utf8_lossy(needle),
+                    head
+                );
+            }
+        };
+
+        // Every length up to the head size, with a random head each.
+        for len in 0..=HEAD {
+            check(&random_ascii(&mut rng, len));
+        }
+        // Each needle planted at the edges and inside the blocks of heads of
+        // a few lengths (the needle's own length included: one window only).
+        for needle in NEEDLES {
+            let n = needle.len();
+            for len in [n, n + 1, 127, 128, 129, 255, 256, 257, HEAD] {
+                if len < n {
+                    continue;
+                }
+                let last = len - n;
+                let mut at: Vec<usize> = vec![0, 1, last.saturating_sub(1), last];
+                for edge in (HEAD_BLOCK..=len).step_by(HEAD_BLOCK) {
+                    at.extend((0..=n).map(|off| (edge + off).saturating_sub(n)));
+                }
+                for p in at.into_iter().filter(|&p| p <= last) {
+                    let mut head = random_ascii(&mut rng, len);
+                    head[p..p + n].copy_from_slice(needle);
+                    check(&head);
+                }
+            }
+        }
+        // Heads built from overlapping partial matches and non-ASCII tokens.
+        for _ in 0..400 {
+            let mut head = Vec::new();
+            while head.len() < HEAD && rng.below(64) != 0 {
+                head.extend_from_slice(TOKENS[rng.below(TOKENS.len())]);
+            }
+            head.truncate(HEAD);
+            check(&head);
+        }
+        // Every byte value as a whole head, and with `-->` planted across the
+        // first block edge of one.
+        for b in 0..=u8::MAX {
+            check(&[b; 130]);
+            let mut head = vec![b; 130];
+            head[127..130].copy_from_slice(b"-->");
+            check(&head);
+        }
+    }
+
+    #[test]
+    fn txt_and_md_are_unchanged() {
+        let d = Dir::new("txt-sub");
+        let p = d.file("a.txt", b"00:00:01,000 --> 00:00:02,000\n");
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+        let p = d.file("b.txt", b"WEBVTT\n");
+        assert_eq!(kind(&p), is(Some("text/plain"), "Plain text"));
+        let p = d.file("c.md", b"[Script Info]\n");
+        assert_eq!(kind(&p), is(Some("text/markdown"), "Markdown"));
     }
 
     #[test]
@@ -1013,7 +1374,7 @@ mod tests {
         let mut r = Reread::per_drop();
         assert_eq!(
             kind_with(&d.file("x.srt", &b), &mut r),
-            is(None, ".srt text")
+            is(Some(SUBRIP_MIME), "SRT subtitles")
         );
         assert_eq!(r.left, PER_DROP - (WINDOW - HEAD) as u64);
     }

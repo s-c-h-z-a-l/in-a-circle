@@ -1,0 +1,11 @@
+[Script Info]
+; Plain V4+ file: every fryColour, tOiluneColour, BackColour, Bold, Italic, UndealeX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment,0,700,0,0,0,1ther section
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Picture: 0,0:00:00.00,02,10,10,10,1
+Style: Top,Arie, bold
+Dialogue: #,0:00:04.20,0:00:05.00,Default,,1,0,0,,{\i1}it00,Defaul}{\rItal}{\rDefault}namedalic{\ry featu;e here is one that f0,100,100,0,0,1,2,0,2{\fs1 0,0:00:1rPla[S2*0,ginV, Encoding10,10,10,in V4+ 1󬋆
+Style: Dagainf
+nder{\u0}
+Dialogu ae

@@ -1,0 +1,8 @@
+[scri?t info]
+Tit&H000000FF,&H00000000,&H0ion
+
+[Events]
+Fortyle, Name, MarginL, Marginnon-ASCII: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Default,,0,0,0,,{\rMissing}back to Default after an unknownn</me
+this line is text outside any cue in Events

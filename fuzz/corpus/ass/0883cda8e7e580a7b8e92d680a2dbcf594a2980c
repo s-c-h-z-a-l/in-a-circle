@@ -1,0 +1,42 @@
+[Script Info]
+ScriptType: v4.00
+WrapStyle: 0
+
+[V4 S|yles]
+Format: Name, Fontname, Fontsize, PrimaryColour, Secon-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5,Arial,20,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215 0
+
+[V4 S|yles]
+Format: Name, 215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215 0
+
+[V4 S|yles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, 
+Style: Top5,Arial,22,16777215,255,0,0,0,-,10,10,0,0
+Style: Top6,Arial,20,16777215 0
+
+[V4 S|yles]
+Format: Name, Fo7,,0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,middle nine is not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0tType: v4.00
+WrapStyle: 0
+
+[V4 S|yles]
+Format: Name, Fontname, Fontsize, PrimaryColour, Secon-1,0,1,2,0,2,10,10,10,0,0
+Style: Top5$Arial,20,16777215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215 0
+
+[V4 S|yles]
+Format: Name, Fontname, Fontsize77215 0
+
+[V4 S|yles]
+Format: Name, 215,255,0,0,0,-1,1,2,0,5,10,10,10,0,0
+Style: Top6,Arial,20,16777215 0
+
+[V4 S|yles]
+Formize, PrimaryColour, SecondaryColour, OutlineColour1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:s,1,,{\a6}ssa override top

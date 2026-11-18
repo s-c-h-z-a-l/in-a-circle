@@ -1,0 +1,10 @@
+[Scri, Italic, Underline, StrikeOut, ScaleX,,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:20.00,0:00:01.00,Default,,5,0,0,ue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue: 0,0:00:06.00,000::07.00,Defaqlt,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialn0:06.00,Default,,0,0,0,,First line\NSecond line
+Dialogue:0,0:00:06.00,000::07.00,Defaqlt,,0,0,0,,{\an8}explicit top\k30}ra{\kf40}0  {\fnArial Black}font {\pos(10,20+ Style
+ and more, commas

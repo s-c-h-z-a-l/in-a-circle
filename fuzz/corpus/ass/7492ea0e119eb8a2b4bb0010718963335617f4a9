@@ -1,0 +1,17 @@
+ MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,0,,b,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:0an00,Default,,0,0,^,,bottom bolddlthe old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,--> five italic
+Dialogue: 0,0:00:05.00,0:00:06.00,Top6,,0,0,ottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:00:04.00,Top5,,0,0,0,,top five italic
+Dialogue: 0,0:00:05.00,0:00:06.00,Top6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,To5,,0,0,0,,--> five italic
+Dialogue: 0,0:00:05.00,0:00:06.00,Top6,,0,0,0,,top six
+Dialogue: 0,0:00:07.00,0:00:08.00,Top7,,0,0,0,,top seven
+Dialogue: 0,0:00:09.00,0:00:10.00,Middle9,,0,0,0,,meddle nine is# not top
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top
+:

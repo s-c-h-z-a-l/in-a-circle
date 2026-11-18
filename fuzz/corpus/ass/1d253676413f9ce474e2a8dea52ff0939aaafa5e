@@ -1,0 +1,7 @@
+[ScrPlain V4+ file00,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Deyle, bold
+Dialogue: 0,999999999999999999990:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1yitalic{\i5} and {\b1}bold{\b0} ko5}ke
+Dialogue: 0,0,0,,Comma, and more, commas

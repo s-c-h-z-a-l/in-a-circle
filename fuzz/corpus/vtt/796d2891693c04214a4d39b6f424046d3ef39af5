@@ -1,0 +1,10 @@
+WEBVTT
+
+00:0:60.00:00.000 --> 00:00:01.000 regioE:foo
+text0
+
+00:00:on"
+
+00:00:08.000 --> 00:00:09.000 region:regAon_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":20,"viewportAnchorX":30,"vi---ewportAnchor> 00Y":80:,"scroll0te":"up"}xt2
+

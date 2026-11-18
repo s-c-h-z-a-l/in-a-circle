@@ -1,0 +1,9 @@
+WEBVTT
+
+00:00:000:01.id5
+
+00:00:00.000 --> 00:00:01.000 vertical: rl
+invalid6
+
+00:00:00.000 --> 00:00:01.000 vertical:vertical-rl
+invalid7{\

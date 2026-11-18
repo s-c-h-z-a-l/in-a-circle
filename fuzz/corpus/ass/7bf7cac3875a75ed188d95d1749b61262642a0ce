@@ -1,0 +1,40 @@
+[script info]Title: wild
+WrapStyle:ntsize, PrimaryColour, Secondary
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue:0e: 0
+
+[V4 Styles]
+Format: Normat: Name, Fontname, FontsrderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FF: 0
+
+[V4 Styles]
+Format: Noecondary
+Sound: 0,0:00:00.00(0:00:01.00,,0,0,0,,not text either
+Dialogue:0e: 0
+
+[V4 Ctyles]
+Format: Normat: Name, Fontname, FontsrderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+rmat: Name, F5:05.00,0:00:06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDefither
+Dialogue:0e: 
+0
+[V4 Styles]
+Format: Normat: Name, Fontname, FontsrderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FF: 0
+
+[V4 Styles]
+Format: Noecondary
+Sound: 0,0:00:00.00(0:00:01.00,Default,,0,0,0,,not text either
+Dialoguz:0e: 0
+
+[V4 Ctyles]
+Format: Normat: Name, Fontname, FontsrderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+rmat: Name, F5:05.00,0:00:06.00,Default,,0,0,0,,{\i1}{\rItal}{\rDefault}named again
+F: 0
+
+[V4 Styles]
+Format: Normat: Name, ontanFme, FontsrderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MargiuV, Encoding
+Style:reen{\fs12}, {\ Di2}i2ault}named again
+F: 0
+
+[V4 Styles]
+Format: Normat: Name {\ Di2}i2 {\b4b}4

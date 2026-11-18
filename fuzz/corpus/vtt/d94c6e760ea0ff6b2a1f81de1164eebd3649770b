@@ -1,0 +1,32 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.000 position:100%
+ted=foo width=4{\ lines=3 regionanchor=0%,100% viewportanchor=10%,90% scroll=up
+Region: id=bar width=40% lines=3 regionanchor=100%,100% viewportanchor=90%xt1
+
+00:00:00.000 --> 00:00:01.000 position:1% position:x
+text2
+
+00:00:00.000 --> 00:00:01.00EBVTT
+
+NOTE valid
+
+00:00:00.000 --> 00:00:01.000 position:1%
+text0
+
+00:00:00.000 --> 00:00:01.000 position:100%
+ted=foo width=40% lines=3 regionanchor=0%,100% viewportanchor=1WEBVTT
+
+00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:01.000
+text1
+
+00:00.000 --WEBVTT
+Region: id=foo width=40% lines=3 regionanchor=0%,11.51%

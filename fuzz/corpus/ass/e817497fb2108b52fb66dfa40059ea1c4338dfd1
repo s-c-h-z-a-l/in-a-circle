@@ -1,0 +1,6 @@
+mat: Alignment,e: 0,0:00:07.010,10,10,1
+0,Arial,20,&HFFFFFF,&00,100,0,0,1,2,0,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, StyleN,ame, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Top,,0,,10,10,10,1󬋆

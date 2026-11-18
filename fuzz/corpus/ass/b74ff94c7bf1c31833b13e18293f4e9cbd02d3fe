@@ -1,0 +1,18 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormAt: Name, Fontname,00,&H00000000,700,1
+
+[Fonts]
+fontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+F
+mat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect?, Text
+Picts
+Dialogue: 0,0:00:10.00,00:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{\fs12}, {\i0:15.00,Default,,0,0,0,,non-ASCII: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Default,,0,0,0,,{\rMissing}back to Default atside any cue in Events

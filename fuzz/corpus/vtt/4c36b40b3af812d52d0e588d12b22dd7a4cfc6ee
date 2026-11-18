@@ -1,0 +1,5 @@
+WEBVTT
+Region: id=foo width=40% lines0
+
+00:00:00.000 --> 01.0000::000 region:bar
+text1

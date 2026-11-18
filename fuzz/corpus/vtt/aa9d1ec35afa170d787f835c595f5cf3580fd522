@@ -1,0 +1,253 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION
+id:3
+neils:100
+
+REGION
+id:4
+lines:101
+
+REGION
+id:5
+lines:65536
+
+REGION
+id:6
+lines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00._000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% ines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%OTE valid
+
+REGION
+id:1
+lines:0
+
+REGION
+id:2
+lines:1
+
+REGION
+id:3
+lines:100
+
+REGION
+id:4
+lines:101
+
+REGION
+id:5
+lines:65536
+
+REGION
+id:6
+lines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespac	e		width:10%
+lines:5regionanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% ines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid Header
+
+REGION
+id:region_split_by_ascii_whitespac	e		width:10%
+linnanchor:40%,20%    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 vertical:lr rgion:ignored_attribute_value
+"no region"
+ue
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% ines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalidno region"
+
+00:00:00.000 --> 00:00:02.500 size:10% ines:4294967295
+
+REGION
+id:7
+lines:1 lines:3
+lines:+
+
+NOTE invalid
+
+REGION
+id:8
+lines:-0
+
+REGION
+id:9
+lines:1.5
+
+REGION
+id:10
+lines:-1
+
+REGION
+id:11
+lines: 1
+lines :1
+
+WEBVTT FIL but region still created
+: Invalid HeaderY":84,"scroll":"up"}_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40,"regionAnchorY":20,"viewportAnchorX":    viewportanchor:30%,80% 	scroll:up
+
+00:00:00.000 --> 00:00:02.500 region:someregionattributeid
+"no region"
+
+00:00:00.000 --> 00:00:02.500 line:5 region:ignored_attribute_value
+"no region"
+
+00:00:00.000 --> 00:00:02.500 size:10% region:ignored_attribute_value
+"noortAnchorY":80,"scroll":"up"}

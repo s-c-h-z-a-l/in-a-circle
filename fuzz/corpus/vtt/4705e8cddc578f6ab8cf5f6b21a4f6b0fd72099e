@@ -1,0 +1,37 @@
+WEBVTT
+
+NOTE valid
+
+REGION
+id:0
+
+Ranchor:100%/ 100%
+regionanchor:100 %,100%
+regionanchor:100%,100 %
+
+00:00:00.000 --> 00:00:01.000 region:0
+text
+
+00:00:00.008 --> 00:00:01.000 region:1
+text
+
+00:00:00.000 --> 00:00:01.000 region:2
+text
+
+00:00:00.000 --> 00:00:01.000 region:3
+text
+
+00:00:00.000 --> 00:00:01.000 region:4
+text
+0%
+regionanchor :100%,100%
+regionanchor:101% ,100%
+regionanchor:100%, 100%
+regionanchor:100 %},100%
+regionanchor:100%,100 %
+
+00:00:00.000 --> 00:00:0chor:4294967296%,42948
+text
+
+00:00:00.000 --> 00:00:01.000 region:19
+text

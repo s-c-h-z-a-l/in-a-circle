@@ -1,0 +1,17 @@
+[script info]
+Title: w,2,0,8,10,10,10,1
+
+[Fonts]
+fontname: exa[[s,0,0,1,2,0,6,10,10,10,0,0
+Stame, MarginL, Ma,0,0
+Style: Middle9,Arial,20,16777215,255,0,0,0,0,1,2,0,ri.9,10,10,10,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MargifV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom bold, the old scheme's 2
+Dialogue: 0,0:00:03.00,0:0t either
+Dialogue: 0,0:00:01efault,,0,0,0,,hard\Nbreka, soft\nbreak and hard\hspace
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,unclos<<<<<<t
+Sound: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not text either
+Dialogue: 0,0:000:04.00,0:00:0logue: 0,0:005.00,Missing,,0,0,0,,unknown style name
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,:01.00,0:00:02.00,Default,,0,0,0,,hard\N,0,0,0,,{unknbreka, soft\nownbr}ea

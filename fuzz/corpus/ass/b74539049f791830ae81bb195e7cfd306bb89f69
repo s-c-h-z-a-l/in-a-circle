@@ -1,0 +1,15 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormatinL, MarginR, MarginV, ,&H0000
+[Fonts]
+fontname: example.ttf
+not a subtitle line, in another section
+
+[Events]
+Form0&}green{,0:00:03.00,Default,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\tf02\(s\zbord2)}transform {\fon-ASCII: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.01,0:00:18.0 text outside any cue in Events

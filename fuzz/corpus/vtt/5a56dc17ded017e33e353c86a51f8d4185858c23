@@ -1,0 +1,18 @@
+WEBVTT
+
+NOTE valid
+
+00:00:00.00K0 --> 00:00:01.000 line:-1
+valid0
+
+00:00:00.000 --> 00:00:01
+REGION
+id:4
+lines:101
+
+REGION
+id:5
+lines3
+
+Less than Number.MIN_VALUE
+00:00:00.000 --> 00:00:01.000 line:0.0000000000000000000000000000000000000

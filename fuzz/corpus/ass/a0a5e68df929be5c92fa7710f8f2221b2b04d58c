@@ -1,0 +1,19 @@
+[Script Info]
+WrapStyle0
+
+: [V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, B[scriptyle: 0
+
+[v4+ styles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MaRnrig ,MarginV, Effect, Text
+Co 0,0:00:06.00,0:00:07.00,Default,,0,0F0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,e: 5,0:00:01.00,0:00:02.00,Def,100,0,0,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arial,10,&H00FFFFFF,&H000000FF,&H00,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arial,20,&H00FFFFFF,&H000000FF,&H000Default,,0,0,0,,Overlaps t0&}green{\fs12}, {\i2}i2]d {\b1}bold{\b0} and {\u1}{\der{\u0}
+Dialogue: 0A,0:00:05.00,0:00:06.00,Default,,0,0,0,,First line\NSecond line
+
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit top
+Dialogue: 0,0:00:07.00,0:00:08.00,Slanted,e: 5,0:00:01.00,0:00:02.00,Def,100,0,0,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arial,10,&H00FFFFFF,&H000000FF,&H00,1,2,0,10,10,10,1󬋆le: 2,Bottom,-1,0,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,100,100,0,0,1,2,0,10,10,10,1
+
+[Eventsent, Name, Italic, Bold, FonrginV, Encoline, Strik1,0,10BBBBBBBBBBB:00:)

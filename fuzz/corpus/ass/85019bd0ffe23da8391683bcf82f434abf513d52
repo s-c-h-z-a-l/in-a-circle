@@ -1,0 +1,39 @@
+[scogue: 0,0:00:0-1,, in another sectionion
+
+[Events]
+Format: Layer,Dialogue,Defaulu, subtitle line, in another section
+
+Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00,DefaulhsEvents]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00:0200á,0:00:03.00,Defaulu, subtitle line, in another section
+
+[Events]
+Format: Layer,Dialogue: 0,0:00:02.00á
+Dialog,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{ts line, in ano: 0,0:00:0-1,, in another sectionion
+
+[Events]
+Format: Layer,Dialogue,Defaulu, subtitle line, in another section
+
+Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00,DefaulhsEvents]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00:0200á,0:00:03.00,Defaulu, subtitle line, in another section
+
+[Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:ed 00,Defaulhspace
+Dialog,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{ts line, in another section
+
+Ents]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00,DefaulhsEvents]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00:0200á,0:00:03.00,Defaulu, subtitle line, in another section
+
+[Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:ed 00,Defaulhspace
+Dialog,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{tther section
+
+Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00,DefaulhsEvents]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:03.00:0200á,0:00:03.00,Defaulu, subtitle line, in another section
+
+[Events]
+Format: Layer,Dialogue: 0,0:00:02.00á,0:00:ed 00,Defaulhspace
+Dialog,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{ts

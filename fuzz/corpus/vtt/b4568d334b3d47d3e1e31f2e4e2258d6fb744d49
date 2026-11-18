@@ -1,0 +1,293 @@
+WEBVTT FILE
+
+REGION
+id:region_without_settings
+
+REGION
+id:region_with_all_settings width:32%
+lines:5
+regionanchor:41%,20% viewportanchor:31%,84%
+scroll:up
+
+REGION
+id:region_floating_poin00:01.000 vertical:rl vertical:lr
+text3
+
+00:00:00.000 --> 00:00:01.000 vertical:
+invalid4
+
+00:0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+00:00:00.000 --> 00:00:y01
+texWEBVTT
+
+istart line:1% vertical:lr size:50% positiogn:center:20.25,"viewportAnchorX":32.75,"viewportAnchorY":32.5}
+
+00:00:06
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 vertical:lr
+text0
+
+00:00:00.000 --> 00:00:01i.000 vertical:rl
+text2
+
+00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+:00:00.000 -->region_without_sett4%
+scroll:up
+
+REGION
+id:regiertical:rl
+text2
+
+00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+:00:00.000 -->region_without_sett4%.000 vertical:
+invalid4
+
+00:0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+00:00:00.000 --> 00:00:y01
+texWEBVTT
+
+istart line:1% vertical:lr size:50% positiogn:center:20.25,"viewportAnchorX":32.75,"viewportAnchorY":32.5}
+
+00:00:06
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 vertical:lr
+text0
+
+00:00:00.000 --> 00:00:01i.000 vertical:rl
+text2
+
+00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+:00:00.000 -->region_without_settings
+
+REGION
+id:region_with_all_settings width:32%
+lines:5
+regionanchor:41%,20% viewportanchor:62%,84%
+scroll:up
+
+REGION
+id:region_floating_poin0l:lr
+text3
+
+00:00:00.000 --> 00:00:01.000 vertical:
+invalid4
+
+00:0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+00:00:00.000 --> 00:00:y01
+texWEBVTT
+
+istart line:1% vertical:lr size:50% positiogn:center:20.25,"viewportAnchorX":32.75,"viewportAnchorY":32.5}
+
+00:00:06
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+text0
+
+00:00:00.000 --> 00:00:01.000 vertical:lr
+text1
+
+00:15:00.000 --> 00:00:01i.000 vertical:rl
+text2
+
+chorX":30,"viewportAnchorY":80,"TE valid
+
+REGION
+id:foo li;nes:2
+
+-
+
+REGION
+id:foo lnes:3
+
+REGION
+--->
+id:jill lines:4
+
+REGION
+scroll":"up"}

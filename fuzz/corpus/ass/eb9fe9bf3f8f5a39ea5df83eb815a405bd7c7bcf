@@ -1,0 +1,6 @@
+0,0
+
+[Events]
+Form&t: Layer, Starm﻿le nine is not top
+Dialogue: 0,:000:11.00,0:00:12.00,Default,,0,0,0,,{\a6}e nine is not top
+Dialogue: 0,:000:11.00,0:00:12.00,Default,,0,0,0,,{\a6}ssa override top

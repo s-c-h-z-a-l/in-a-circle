@@ -1,0 +1,14 @@
+[script info]
+Title: wild
+WrapStyle: 2
+
+[v4+ styles ]
+Format: Name, Fonmaetn, Fontsize, PrimaryCold2΂ouault,,0,0,0,,hard\Nbr0,Default,,0,0,0,,not text ault,,0,0,0,,not text eithe(r
+Diahogue: 0,0:0[scr0000,0,1
+
+[Events]
+Format: Layer,0,0,100,100,0,0,2,2,0, S2,10,1tart,0 ,ipt info],&H00000000,0,1
+
+[Events]
+:18.00,Default,,0,0,0,,{\r hard\hspacer 
+Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0:,,,,,,,,,,,,,,,,00:02.00,Default,0,,0,,0,hard\$break, soft\nbreak andormateak, 

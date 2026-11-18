@@ -1,0 +1,12 @@
+[Script Info]
+; Plain V4+ file: every featu8,10FF,&H000000FV,&H00000000,&H00000000,0,-1,0,0,100,100.0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,not a subtitle
+Dialogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Sty{f italic
+Dialogue: 0,0:00:07.50,00:0:09.00,Default,,0,0,0,,Overlaps the line before
+Dialogue: 0,0:00:09.00,99999999999999999999999999999999999999999999999999990:00:10.00,Default,,0,0,0,,{\k20}Ka{\klt,,0,0,0,,Plain line
+Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04ryC09.00,0:00:10.00,Default,,0,0,0,,{\k20}Ka{\k30}ra{\kf40}o{\ko5}ke
+Dialogue: 0,0:00:12.00,0:00:13D.00e,fault,,0,=,0,,Comma, and more, commas

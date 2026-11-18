@@ -1,0 +1,11 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ sty Urderline, StrikeGut, ScaleX, ScaleY, Spacing, Angle, Bonother section
+
+[Events]
+known style name
+Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{unknown} block and {hello\i1}i and } stray brace { o{\n
+Dialname, t,,0,0,0,,ends befOutline, ore it starts
+D

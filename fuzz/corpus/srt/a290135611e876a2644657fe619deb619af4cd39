@@ -1,0 +1,34 @@
+7
+00:00:10,5 --> 00:00:11,50
+short milliseconds
+
+9
+0:0:12.7 --> 0:0:13.1234
+dot separator, four-digit milliseconds
+
+00:00:14,000 --> 00:00:15,000 X1:100 X2:200 Y1:0 Y2:50
+coordinates are dropped
+
+00:00:16,000 --> 00:00:17,000
+wrong index, and the next cue has no blank line before it
+00:00:18,000 --> 00:00:19,000
+bare timing line, no index
+
+4
+00:00:20,000 --> 00:00:21,000
+index then timing with no blank line
+5
+00:00:22,000 --> 00:00:23,000
+text that holds an arrow: a --> b
+a spaces-only line ends the cue:
+   
+00:00:24,000-->00:00:25,000
+no spaces around the arrow
+
+6
+00:00:25,500 --> 00:00:26,500
+overlap A
+
+6
+00:00:25,500 --> 00:00:26,000
+overlap B, starts together with A

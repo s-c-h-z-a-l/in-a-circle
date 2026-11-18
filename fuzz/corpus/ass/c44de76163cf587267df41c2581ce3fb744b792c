@@ -1,0 +1,23 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryC
+Sound: 0,0:000:01.00,Default,,0,0,0,,n,0:00:1[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, Scaleur, Underline, StrikeOut[Script Info]
+ScriptType: v4.00+
+Wra9pStyle: 0
+
+[V4+ Styles]
+Format: Alignment, Name, Italic, Bold, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, X, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, MarginL, MarginR, MarginV, Encoding
+Style: 8,Top,0,-1,Arial,20,&H00FFFFFF,&H000000FF,&H00000

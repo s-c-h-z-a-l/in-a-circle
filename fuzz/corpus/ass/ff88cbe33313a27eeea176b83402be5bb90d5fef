@@ -1,0 +1,19 @@
+[Script Info]
+; Plain V4+ file: every feature here is one that ffmpeg reads the sam_e way.
+Title: ordinary
+ScriptType: v4.00+
+WrapStyle: 0
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFFFFFFFF,&H000000FF,&H00000000,&H0000000',-1,0,0,0,100,100,000,Top,,0,0,0,,Top style, bold
+Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,{\i1}italic{\i0} and {\b1}bold{\b0} and {\u1}under{\u0}
+Dialogue: 0,0:00:05.00lignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+Style: Top,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H0000000',-1,0,0,0,100,100,000,Top,,0,0,0,,Top style, bold,&H551615FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+Style: Top,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H0000000',-1,0,0,0,100,100,000,Top,,0,0,0,,Top style, bold
+Dialogue: 0,
+Style: Top,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H0000000',-1,0,0,0,100,100,000,Top,,0,0,0,,Top style02.00,Top,,0,0,0,,Top style, bold
+Dia,0:00:13.00,Default,,0,0,0,,Comma, and more, commas

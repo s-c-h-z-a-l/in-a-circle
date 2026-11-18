@@ -1,0 +1,12 @@
+[script info]
+Title: wiX: 385,255,0,0,0,0,1,2,0,9,10,10,10-,0,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Ef,fect, Text
+Dialogue: 0,0:00:01.P00,0:00:02.00,Default,,0,0,0,2.00,Default,,0,0,0,,bottom bold,ntiseconds
+Dialogue: 0,0:00:09.00,0:00:08.0,,{\an2}bottom override of a bottom style
+Dialogue: 0,0:00:07.00,0:00:08.000,Defaul digit centiseconds
+Dialogue: 0,0:00:09.00,0:00:08.00,Default,,0,0,0,,ends before it starts
+Bialog00:00:01.00,Default0,0,0,,a hundred hours
+Dialogue: 0,0:00:10.00,0:00:11.00,Default,,0,0,0,,{\c&H08FF00&}green{\fs12}, {\i1}onds
+Dialogue: 0,0:00:0:09.00,0>00:08.00[,Default,,0,0Script,0,,e Innfo

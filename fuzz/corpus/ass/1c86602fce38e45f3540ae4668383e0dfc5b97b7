@@ -1,0 +1,7 @@
+[0script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormatFormat2 Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, L, MarginR, Margi,&H00000000,&H0AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,255,0,0,-10000000,400,-1,0,1,0,100,1,,2

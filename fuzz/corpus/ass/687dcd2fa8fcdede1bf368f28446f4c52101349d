@@ -1,0 +1,11 @@
+[Sc Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic. Underline, StrikeO5t, ScaleX, ScaleY, Spacing, Angle, BorderStYle, Outline, Shadow, Align,20,&H00FF
+[Events]rikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStYle, Outline, Shadow, Align,10,&H00FF
+[Events]
+Format: Layer, Start, End, Style, N0lame, MarginL, MarginR, MarginV, Effect, Text
+Picture:arginV, Effect, Text
+Picture: 0,MarginV, Effecfect, Text
+Dialogme: 5,0:00:01.00,0:00:02.00,Defaultefault,,0,0,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}m 0 0 l 1 1\Nm 2 2{\p0}afterltefault,00,,,0,,{\p1}m 0 0 l 1 1\Nm 2 2{\p0}after drawing
+Dialogue: 0,0:00:03.00,0:00:04.00,Def`,0,0,0,,, {\p1}\c&H00FF00&}green{\fs12}, {\i2}i2 {\b4b}40000 [{Script Inf\i-1}italo]
+Wria

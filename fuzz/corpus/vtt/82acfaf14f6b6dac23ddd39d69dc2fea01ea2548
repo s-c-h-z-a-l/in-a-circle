@@ -1,0 +1,48 @@
+WEBVTT
+
+00:00croll:up
+
+REGION
+i:"up"}
+
+00:00:05.000 -->gio:00:06.000 region:region_float"lines":5,"regionAnc00 region:10
+text
+
+00:00:00.0":67}
+
+00:00:07.000 --> 00:00:08.000 region:
+"no region"
+tespace
+{"width":10,"lines":5,"regionAnchorX":40<<<<<<<<<<<<<<<<<<<<<<<<<]<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<foo
+i> 15:00:01.000 region:8
+text
+
+00:00:00.000 --> 00:00:01.000 region:9
+text
+
+00:00:00.000 --> 00:00:01.000 region:10
+text
+
+00:00:00.000 --> 00:00:01.000 region:11
+text
+
+00:00:00.000 --> 00:00:01.000 regeon:,"regiotnAnchorY2"#nchorY":80,
+0 region:
+"no region"
+
+00:00:08.000 --> 00:00:09.000 region:region_split_by_ascii_whitespace
+{"width":10,"lines":5,"regionAnchorX":40<<<<<<<<<<<<<<<<<<<<<<<<<]<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<foo
+i> 00:00:01.000 region:8
+text
+
+00:00:00.000 --> 00:00:01.000 region:9
+text
+
+00:00:00.000 --> 00:00:01.000 region:10
+text
+
+00:00:00.000 --> 00:00:01.000 region:11
+text
+
+00:00:00.000 --> 00:00:01.000 region:,"regiotnA6.000 region:reg:80,
+"scroll":"up"}

@@ -1,0 +1,34 @@
+WEBVTT
+
+sparegionanchor:1%,1%
+
+REGION
+id:3
+regionanchor:100%,0%
+ionanchor:0,0
+
+REGIONces
+   00:00:00.000    -->  00:00:01.000 
+   t	ext0
+
+t.000 
+   text0
+
+tabs
+			00:00:00.000				-->		00:00:01.000	
+text1
+
+form feed
+00:00:00.000-->00:00:01.000
+text2
+
+vertical tab
+xt1
+
+form feed
+00:00:00.000-->00:00:01.000
+text2
+
+vertical tab
+00:00:00.000-->70:00:01.000
+invalid

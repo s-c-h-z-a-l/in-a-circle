@@ -99,6 +99,11 @@ are in `CLAUDE.md`.
   inside its entropy data is not detected and shows as a grey or partial page in
   the reader.
 
+- **`subtitles`** (`inacircle-subtitles`): SRT, WebVTT and ASS/SSA to SRT or
+  WebVTT. Four one-to-one actions, `batch=yes`, `lossy=yes`; the readers and
+  writers are the `crates/subtitles` library (standard library only). The rules
+  are under Manifest, after the text family's.
+
 ## Manifest
 
 - Each family binary describes itself: `<family> --manifest`. The engine
@@ -655,6 +660,110 @@ are in `CLAUDE.md`.
   and inlines, including link reference definitions), 32 MiB of owned
   text (link reference expansion included), 32 MiB of output. Past one,
   the input fails with the budget's own message and the batch goes on.
+- The subtitle family (`inacircle-subtitles`, `family=subtitles`,
+  `group=subtitles`) has four actions, each reading one format and writing one:
+  `subtitles.srt-to-vtt`, `subtitles.vtt-to-srt`, `subtitles.ass-to-srt` and
+  `subtitles.ass-to-vtt`. Their MIME types are `application/x-subrip` (SRT),
+  `text/vtt` (WebVTT) and `text/x-ssa` (ASS and SSA). All are `cost=10`,
+  `lossy=yes` (a drawing is dropped and a speaker's name becomes text) and
+  `batch=yes`. The input is read whole and refused past 8 MiB (`subtitle file
+  is larger than 8 MiB`) before any parsing. The readers store at most
+  2,000,000 items (each cue, line and run is one), each charged before it is
+  stored; past it the input fails with `too many lines and styled runs (more
+  than 2,000,000)` and nothing is written. A WebVTT speaker's name is shared by
+  the lines of its cue. A file that is not UTF-8 fails
+  with `not UTF-8 text (byte at N): convert it with Encoding first`, and one
+  with no usable cue fails with `no subtitles found`. The output is counted as
+  it is written: past 32 MiB the input fails with `subtitle output would be
+  larger than 32 MiB`. SIGXFSZ is ignored, so a write past the process's
+  `RLIMIT_FSIZE` fails the same way and not the batch. A failed input leaves
+  no output file, and an existing output is never overwritten (the file is
+  created new). Cues are written in start order; cues that start together keep
+  the file's order.
+- The readers keep what a player shows and say what they drop.
+  - **SRT** follows the players (a differential test pins it to ffmpeg): LF,
+    CRLF or CR line ends; the cue number is ignored; `H+:MM:SS,mmm` (a `.` is
+    accepted, and milliseconds are read as an integer); the coordinates after
+    the end time are dropped, which is `Position` (once per cue). `<i> <b> <u>` and their
+    `{\i1}`-style forms are kept (a bare `{\i}`, `{\b}` or `{\u}` switches off);
+    `{\an7}` to `{\an9}` and `{\a5}` to `{\a7}` (the SSA top row) make a top
+    cue. `<font>` keeps its text and is `Styling`; `<br>` (any case, `</br>`
+    too, a `/` or a space allowed) is a line break, a normal line for the
+    budget; other tags are dropped with their text kept. A `<` opens a tag only
+    when its name (up to a space or `>`) holds letters, digits, `_` or `/` and
+    starts with a letter, and no `<` comes before the `>`; any other `<` is
+    text, so a URL or an address stays. `{\pos}` and `{\move}` are `Position`,
+    `{\k}` and `{\K}` are `Karaoke`, a non-zero `{\p}` is `Drawing` (its text is
+    dropped), and any other `{\...}` block is `Styling`.
+  - **WebVTT** follows the W3C file parsing algorithm: the `WEBVTT` signature
+    (a byte order mark is allowed) and the header are read, and `NOTE` blocks
+    are not reported. A `STYLE` or `REGION` block makes every later cue
+    `Settings`. A valid timing line inside a `NOTE`, `STYLE` or `REGION` block,
+    or in a block already reported, starts a cue, as the standard does: a
+    `-->` line ends such a block and is read again as the next block's first
+    line. The one difference is a `-->` that is no timing line: the standard
+    ends the block at it too, we keep it in the block (neither starts a cue).
+    A `line:` setting in the top third makes a top cue; any other
+    placement is `Position`. `<c.class>` and `<v.class>` are `Styling`, a
+    timestamp tag is `Karaoke` (its text stays), `<v Name>` is the speaker (its
+    classes are not part of the name; the name is decoded, then trimmed of
+    ASCII white space only, so a no-break space stays), and other tags are dropped with their
+    text kept. The
+    entities `&amp; &lt; &gt; &quot; &apos; &nbsp; &lrm; &rlm;` and numeric
+    references (`&#N;`, `&#xH;`) to any valid character but NUL and the line
+    breaks are decoded; any other `&name;` stays as written.
+  - **ASS and SSA** follow libass: each section's `Format:` line gives the
+    columns, `Dialogue:` lines are cues and `Comment:` lines are dropped
+    silently. The style's bold, italic and underline and its alignment (7 to 9
+    in V4+, 5 to 7 in V4 styles, a top row) set the cue's base; the inline
+    `\i`, `\b`, `\u`, `\an`, `\a` and `\r` change it. A bare `\i`, `\b` or
+    `\u` returns that flag to the style of the last `\r`, as libass does, and
+    so does any other value, except that a bold weight of 100 or more is a
+    font weight (`\b400` is off, `\b700` on). `\N` breaks a line; `\n`
+    breaks it only under `WrapStyle: 2` and is a space otherwise; `\h` is a
+    no-break space. `\k` is `Karaoke`; `\p1` to `\p0` is `Drawing` and its
+    text is dropped; `\pos`, `\move` and `\org` are `Position`; other tags are
+    `Styling`.
+  - A cue that cannot be used (a bad timestamp, an end before its start, 100
+    hours or more) is skipped and the rest converts. Text outside any cue is
+    one skipped block per run of lines, counted and never shown. A cue with no
+    text left is not kept (a line of only white space is no text); a drawing
+    removed from it is still `Drawing`, but styling, position and karaoke
+    removed no text, so they are not counted.
+- The writers. SRT is UTF-8 with a byte order mark and CRLF, numbered from 1;
+  a speaker is a `Name: ` prefix (`VoiceNames`), `{\an8}` opens a top cue, and
+  `<i> <b> <u>` are kept. The SRT reader has no escapes, so a `<` the reader
+  would take as a tag (`<` or `</`, a letter, then letters, digits, `_` or `/`
+  up to a space or `>`, and a `>` before any other `<`; the same test the
+  reader uses) is written as U+FF1C, and a `{\` the reader would take as an
+  override block (with a `}` after it) as U+FF5B, both look-alikes, counted
+  once per cue as `Brackets`. A rewritten `<` no longer stops the reader's
+  search for `>`, so the choice runs from the end of the line back; `<` with
+  no `>` after it, `{\` with no `}`, stay text. The choice is made on the
+  plain text, without the writer's own `<i>` and `</i>`, so at a style
+  boundary a `<` or `{\` the reader would keep as text can be rewritten
+  too: a counted look-alike, accepted. The guarantee is that the writer never
+  leaves unrewritten anything its reader would take as markup. The `{\an8}`
+  the writer puts before a top cue is not text and is kept. A text line that
+  the reader would take for a timing line (`-->` with a start that parses as a time, the
+  reader's own test on the line as written, marker and tags included) would
+  start a cue on read back, so the `>` of each of its `-->` is written as
+  U+FF1E, also counted as `Brackets`; the writer's own timing lines are not
+  touched. WebVTT has no byte
+  order mark, LF only, ` line:0` on a top cue, `<v Name>` for a speaker, and
+  `<i> <b> <u>`; in its text `&`, `<` and `>` are escaped, and a speaker name's
+  trailing dashes are written as `&#45;` (the `>` of its tag would make a `-->`).
+  In both, a line
+  break inside a cue becomes a space, a NUL becomes U+FFFD, a line of only
+  white space and a cue with no text are dropped, and a blank line ends a cue.
+- The subtitle `warn` lines, at most eight per input: first the skipped cues
+  (`N items skipped (first at line L: <reason>)`, `L` 1-based, the count
+  including text outside any cue), then one line per kind of loss in the order
+  of `Loss` (colours, fonts and sizes; exact positions; karaoke effects;
+  drawings; style and region blocks; speaker names written as prefixes;
+  characters that look like markup written as look-alikes), each counted in
+  cues as `(N cues)`. The reader's and the writer's counts of one kind are
+  added together. That is far under the engine's 16 `warn` per input.
 - A plugin may add text types by extension (`type text/x-typst ext=typ`).
 - Format: line-based, tab-separated, versioned header. A small parser of
   our own, no JSON dependency.
@@ -675,6 +784,10 @@ action	text.iso88592-to-utf8	family=text	in=text/x-8bit	out=text/plain	ext=same	
 action	pages.cbz-to-pdf	family=pages	in=application/vnd.comicbook+zip	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes
 action	pages.images-to-pdf	family=pages	in=image/jpeg,image/png	out=application/pdf	ext=pdf	label=PDF	group=book	cost=10	lossy=yes	batch=yes	join=yes	min=1
 action	pages.images-to-cbz	family=pages	in=image/jpeg,image/png	out=application/vnd.comicbook+zip	ext=cbz	label=CBZ	group=book	cost=10	lossy=no	batch=yes	join=yes	min=1
+action	subtitles.srt-to-vtt	family=subtitles	in=application/x-subrip	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.vtt-to-srt	family=subtitles	in=text/vtt	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ass-to-srt	family=subtitles	in=text/x-ssa	out=application/x-subrip	ext=srt	label=SRT	group=subtitles	cost=10	lossy=yes	batch=yes
+action	subtitles.ass-to-vtt	family=subtitles	in=text/x-ssa	out=text/vtt	ext=vtt	label=VTT	group=subtitles	cost=10	lossy=yes	batch=yes
 ```
 
 ## Invocation
@@ -888,8 +1001,17 @@ Every action runs sandboxed, set up in the child between `fork` and
   gzip) give a label but no type, so no action is offered for them.
 - Text: no magic and valid UTF-8 without NUL bytes means text; the exact
   kind (Markdown, reStructuredText, Org, …) comes from the extension, since
-  content cannot tell them apart. Today that is plain text and Markdown;
-  recognising HTML and JSON by content is planned.
+  content cannot tell them apart. Today that is plain text, Markdown and
+  the subtitle types below; recognising HTML and JSON by content is planned.
+- **Subtitles:** a UTF-8 `.srt` whose 4 KiB head has a `-->` cue arrow is
+  `application/x-subrip`, label `SRT subtitles`; a `.vtt` whose head (after
+  an optional byte order mark) opens with `WEBVTT` followed by a space, a
+  tab, a line end or the head's end (`WEBVTTX` is not a signature) is
+  `text/vtt`, label `WebVTT subtitles`; a `.ass` or `.ssa` whose head has `[Script Info]` (any
+  case) is `text/x-ssa`, label `ASS subtitles`. The name alone never makes a
+  subtitle: without the head check the file keeps its text label (`.srt
+  text`). A subtitle that is not valid UTF-8 is `text/x-8bit`, decided first
+  as before, and goes to the code page actions.
 - **8-bit text:** `text/x-8bit`, label `8-bit text`, is a candidate for
   the code page actions and taken by no other preset. A file is one when
   its extension is on the classifier's text list (`txt`, `text`, `md`,
@@ -905,7 +1027,7 @@ Every action runs sandboxed, set up in the child between `fork` and
   for all its files together, after which the head alone decides
   (`text/plain` for an ASCII head). A head that is valid UTF-8 with any
   non-ASCII byte, or a file without an extension, is decided by the head.
-  Every valid UTF-8 file keeps the plain text and Markdown rule above.
+  Every valid UTF-8 file keeps the plain text, Markdown and subtitle rules above.
   The classifier only proposes: the action checks the whole file. A file
   the head decides as plain text or Markdown (a listed text or Markdown
   extension, or none) whose first byte that is not valid UTF-8 lies past
@@ -913,8 +1035,9 @@ Every action runs sandboxed, set up in the child between `fork` and
   one reads all of it and skips it, naming that byte and its offset from
   0 (`not UTF-8: byte 0xE9 at 266240`); nothing is published. Valid UTF-8
   with a NUL byte is still skipped as `unsupported` by the plain-text
-  reader. Any other listed extension (`.srt`, `.csv`...) has no type
-  with such a head, so no shipped action takes it.
+  reader. Any other listed extension (`.csv`...), and a `.srt`, `.vtt`,
+  `.ass` or `.ssa` without its subtitle mark, has no type with such a head,
+  so no shipped action takes it.
 - Unknown types get an explicit "no action for .bin" instead of an empty or
   meaningless wheel.
 - With many files, the first few decide what is offered; the rest are
@@ -1126,8 +1249,9 @@ In the engine, in one place:
    ancestor was renamed meanwhile (`AncestorChanged`) or the folder's files
    changed since the baseline (`BaselineChanged`, "files changed while
    saved"). Other inputs' published results are never taken back.
-   Text outputs: an action whose `out=` is `text/*` has every output
-   named with its extension checked as UTF-8 on the whole stream,
+   Text outputs: an action whose `out=` is `text/*` or `application/x-subrip`
+   (the subtitle format, the one `application/*` type that is text) has every
+   output named with its extension checked as UTF-8 on the whole stream,
    whatever that extension is (`.srt`, `.html`, none with `ext=same`),
    and so its single output always; its other outputs (a Markdown
    file's images) stay bytes. An output named `.txt` or `.md` is checked
@@ -1296,9 +1420,9 @@ compositor.
 
 - Two levels. Level 1 shows **categories** (a preset's `group`, mapped by the
   `GROUPS` table in `engine::menu`: today `document` = north, labelled
-  `Document`, `book` = east, labelled `Book`, and `encoding` = west,
-  labelled `Encoding`; an unknown `group` is not
-  shown, one stderr line per run). A category is **lit** when any dragged
+  `Document`, `book` = east, labelled `Book`, `encoding` = west, labelled
+  `Encoding`, and `subtitles` = south, labelled `Subtitles`; an unknown
+  `group` is not shown, one stderr line per run). A category is **lit** when any dragged
   file has a target in it, dim when it exists but nothing fits, and a direction
   without a category is empty. The hub shows the source (name or count).
   Level 2 shows the category's presets in their own directions (`markdown`
@@ -1308,7 +1432,11 @@ compositor.
   and nothing in Book; a file that is not valid UTF-8 text (`text/x-8bit`)
   lights only Encoding, whose wheel has `cp1250` (Windows-1250) west and
   `iso88592` (ISO-8859-2) east, each naming its action, and a UTF-8 text
-  leaves Encoding dim; `pdf` north and `cbz` south in Book; `cbz` has no
+  leaves Encoding dim; a subtitle lights only Subtitles (south): `vtt-srt`
+  (VTT from SRT) and `vtt-ass` (VTT from ASS) share its north slot, `srt-vtt`
+  (SRT from VTT) and `srt-ass` (SRT from ASS) its south slot, so an SRT
+  offers VTT north only, a VTT SRT south only, and an ASS both; `pdf` north
+  and `cbz` south in Book; `cbz` has no
   one-to-one form, it only joins images into one comic book; `html`
   and `html-txt` share Document's east slot, `epub` and `epub-txt` Book's:
   a direction is unique per group and input type, and when the dropped

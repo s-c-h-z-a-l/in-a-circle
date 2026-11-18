@@ -1,0 +1,17 @@
+[script info]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+FormatinL, MarginR, MarginV, Encoding
+Style: Default,Ari10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:0/:01.00,Defau0
+Style: Top6,Arial,20,167772red hours
+Dialogue: 0,0:00310.00,0:00:11.00,Default,,0,0,0,,{\c&H00FF00&}green{\fs12}, {\i2}i2 {\b400}b400 {\losed { brace
+Dialogue: 0,0:00:14.00,0:00>15.00,Default,,0,0,0,,non-ASCII: árvíztűrő
+Dialogue: 0,0:00:16.00
+Dialogue: 0,0:00:17.00,0:00:18.00,Default,,0,0,0,,{\rMissing}back to Default after an 'nknown name
+this line is text outside any cue in Events

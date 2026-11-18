@@ -1,0 +1,9 @@
+[Script Info]
+ScriptType: v4.00
+WraerStyle, Outline, Shadow, Alignment, 0,1sp
+
+[Events]
+Format0:00.00,0:00:01.00,Default,,0,0,0,,not ondaryColour, Tertiaa subtitle
+Dialogue: 0,0:00:01.30,0:00:02.50,Default,,0,0,0,,Plain line
+Dialo
+egue 0,0:00:03.00,0:00:04.00,pT,,o,00,0,,Top style, b}}k

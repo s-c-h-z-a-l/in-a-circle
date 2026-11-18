@@ -1,0 +1,22 @@
+[Script Info]
+S6cr End, Style, Name,tyles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MaRnrig ,Margi[Script Infn]
+WrapStyle0
+
+: [V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, B[script Linfo]
+Title: wild
+WrapStyle: 0
+
+[v4+ styles ]
+F,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MaRnrig ,MarginV, Effect, Text
+Comment: 0,0:alogue: 0,0:00:01.00,0:00:02.50,Defau0,0:00:08.00,Slanted,,0,0,0,,Style italic
+Dialogue: 0,0:00:07.50,e
+Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,{\an8}explicit to.p00,Slanted,e: 5,0:00:01.00,0:00:02.00,Def,100,0,0
+,1,2,0,10,10,10,1󬋆

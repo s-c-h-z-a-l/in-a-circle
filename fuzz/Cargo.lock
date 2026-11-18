@@ -101,6 +101,7 @@ dependencies = [
  "libfuzzer-sys",
  "manifest",
  "probe",
+ "subtitles",
  "wire",
  "xml",
  "zip",
@@ -154,6 +155,10 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "subtitles"
+version = "0.0.0"
 
 [[package]]
 name = "wire"
